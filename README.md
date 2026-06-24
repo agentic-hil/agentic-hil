@@ -20,16 +20,23 @@ AI agent
 
 ## Quick Start For AI Agents
 
-From a fresh clone:
+Install AI-HIL once on the local machine:
 
 ```bash
 python -m pip install -e .
+```
+
+Then bootstrap each firmware project separately:
+
+```bash
 aihil init
 aihil doctor
 aihil serve --config .aihil/config.yaml
 ```
 
-AI-HIL includes project-level MCP discovery config in `.mcp.json`:
+The installed `aihil` command provides the MCP server. The project-local `.aihil/` directory contains that project's hardware configuration, policy, reports, logs, and artifact roots.
+
+Each project can include MCP discovery config in `.mcp.json`:
 
 ```json
 {
@@ -188,7 +195,7 @@ return a structured report
 
 ## Example `.aihil/config.yaml`
 
-`.aihil/config.yaml` describes the local hardware setup and what the AI is allowed to do. Create a starter file with `aihil init`.
+`.aihil/config.yaml` belongs to the firmware project that owns the hardware setup. It describes the local target, debugger, allowed artifact roots, and what the AI is allowed to do. Create a starter file in each project with `aihil init`.
 
 ```yaml
 server:
@@ -227,7 +234,7 @@ logs:
   directory: ".aihil/logs"
 ```
 
-The configuration file is not just convenience. It is the contract between the human developer, the local hardware setup, and the AI agent.
+The configuration file is not just convenience. It is the per-project contract between the human developer, the local hardware setup, and the AI agent.
 
 ## Intended MCP tools
 
@@ -397,6 +404,8 @@ No implementation language is fixed in this README. AI-HIL is a host-side bridge
 ## Local usage shape
 
 The main interface for AI agents is MCP over local HTTP.
+
+The server implementation is installed once as the `aihil` command. Run that command from the firmware project that contains `.aihil/config.yaml`.
 
 Run AI-HIL with the configured local listen address:
 

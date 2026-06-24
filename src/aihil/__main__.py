@@ -64,12 +64,15 @@ logs:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aihil")
+    parser = argparse.ArgumentParser(
+        prog="aihil",
+        description="AI-HIL MCP server command. Install once per machine, then run per project with .aihil/config.yaml.",
+    )
 
     command_parsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = command_parsers.add_parser("init", help="Create a starter .aihil/config.yaml")
-    init_parser.add_argument("--config", default=None, help="Path to write, defaults to .aihil/config.yaml")
+    init_parser = command_parsers.add_parser("init", help="Create a project-local .aihil/config.yaml")
+    init_parser.add_argument("--config", default=None, help="Project config path to write, defaults to .aihil/config.yaml")
     init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config file")
 
     doctor_parser = command_parsers.add_parser("doctor", help="Validate local AI-HIL setup")
@@ -123,6 +126,7 @@ def init_config(config_path: str | None = None, force: bool = False) -> dict[str
         "summary": "AI-HIL starter configuration written.",
         "path": str(path),
         "next_steps": [
+            "Keep this .aihil/config.yaml with the firmware project; install aihil only once per machine.",
             "Edit target.name and target.controller for your board.",
             "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
             "Run: aihil doctor",

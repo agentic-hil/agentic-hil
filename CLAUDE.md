@@ -6,10 +6,21 @@ This file provides guidance to Claude Code when working in this repository.
 
 AI-HIL is a Python/FastAPI MCP-over-HTTP server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, and reading structured reports from a configured local target.
 
-## First Steps
+## Installation Model
+
+Install the `aihil` command and MCP server once on the local machine:
 
 ```bash
 python -m pip install -e .
+```
+
+Each firmware project should contain its own `.aihil/` directory with `.aihil/config.yaml` for that project's target, debugger, permissions, reports, logs, and artifact roots.
+
+## First Steps Per Project
+
+From the firmware project directory:
+
+```bash
 aihil init
 aihil doctor
 aihil serve --config .aihil/config.yaml
@@ -21,7 +32,7 @@ MCP endpoint:
 http://127.0.0.1:8732/mcp
 ```
 
-Project MCP config:
+Project MCP discovery config:
 
 ```text
 .mcp.json

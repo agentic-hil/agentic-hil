@@ -1,20 +1,26 @@
 # AI Agent Quickstart
 
-Use this repository as the AI-HIL MCP server for embedded hardware actions.
+Use AI-HIL as the local MCP server for embedded hardware actions.
 
-## Install From A Clone
+## Install Once
+
+Install the `aihil` command once on the local machine:
 
 ```bash
 python -m pip install -e .
 ```
 
-## Create Local Config
+## Configure Each Project
+
+In every firmware project that should use AI-HIL, create a project-local `.aihil/config.yaml`:
 
 ```bash
 aihil init
 ```
 
 Edit `.aihil/config.yaml` for the local board, OpenOCD interface, target config, and allowed firmware artifact roots.
+
+Keep `.aihil/` with the project because it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall the MCP server inside every project.
 
 ## Check Setup
 
@@ -34,7 +40,7 @@ Endpoint:
 http://127.0.0.1:8732/mcp
 ```
 
-MCP client config is available in:
+Project-level MCP client discovery config belongs in:
 
 ```text
 .mcp.json

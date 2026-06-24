@@ -4,12 +4,21 @@ AI-HIL is a local MCP-over-HTTP server that gives AI agents safe, structured acc
 
 Use the MCP server from this repository for hardware actions. Do not use raw OpenOCD commands or arbitrary shell commands for flashing, probing, or resetting hardware when an AI-HIL MCP tool is available.
 
-## Bootstrap
+## Installation Model
 
-From a fresh clone, install and inspect the project with:
+Install the `aihil` command and MCP server once on the local machine:
 
 ```bash
 python -m pip install -e .
+```
+
+Each firmware project should have its own `.aihil/` directory with `.aihil/config.yaml` for that project's target, debugger, permissions, reports, logs, and artifact roots.
+
+## Project Bootstrap
+
+From the firmware project directory, create and inspect the project-local setup with:
+
+```bash
 aihil init
 aihil doctor
 aihil serve --config .aihil/config.yaml
@@ -21,7 +30,7 @@ The local MCP endpoint is:
 http://127.0.0.1:8732/mcp
 ```
 
-This repository includes `.mcp.json` for MCP clients that discover project-level MCP configuration.
+Each project can include `.mcp.json` for MCP clients that discover project-level MCP configuration.
 
 ## Required Workflow
 
