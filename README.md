@@ -18,6 +18,32 @@ real embedded target
 AI agent
 ```
 
+## Quick Start For AI Agents
+
+From a fresh clone:
+
+```bash
+python -m pip install -e .
+aihil init
+aihil doctor
+aihil serve --config .aihil/config.yaml
+```
+
+AI-HIL includes project-level MCP discovery config in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "type": "http",
+      "url": "http://127.0.0.1:8732/mcp"
+    }
+  }
+}
+```
+
+Agents should use MCP `tools/list` and `tools/call` against `http://127.0.0.1:8732/mcp`. Do not use raw OpenOCD commands for hardware actions.
+
 ## Why this exists
 
 AI-assisted software development works best when the agent can run code and see the result. Embedded development is different: the meaningful result often only exists on real hardware.
@@ -98,7 +124,7 @@ The agent does not receive unrestricted command execution. It receives explicit 
 Examples:
 
 ```text
-aihil_openocd_version
+aihil_debugger_info
 aihil_probe_target
 aihil_flash_firmware
 aihil_reset_target
@@ -160,54 +186,54 @@ reset the configured target
 return a structured report
 ```
 
-## Example `aihil.yaml`
+## Example `.aihil/config.yaml`
 
-`aihil.yaml` describes the local hardware setup and what the AI is allowed to do.
+`.aihil/config.yaml` describes the local hardware setup and what the AI is allowed to do. Create a starter file with `aihil init`.
 
 ```yaml
-dut:
+server:
+  listen: "127.0.0.1:8732"
+
+target:
   name: fan-controller-v1
+  controller: stm32f4
 
-firmware:
-  image: "build/firmware.elf"
-  allowed_image_roots:
-    - "build"
-
-openocd:
-  executable: "openocd"
+debugger:
+  type: openocd
+  executable: openocd
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
-  search_paths:
-    - "."
-    - "/usr/share/openocd/scripts"
   timeout_s: 60
 
-agent_permissions:
+artifacts:
+  allowed_roots:
+    - "build"
+  allowed_extensions:
+    - ".elf"
+    - ".hex"
+    - ".bin"
+
+permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
-  allow_raw_openocd_commands: false
+  allow_raw_debugger_commands: false
   allow_mass_erase: false
-
-flash:
-  verify: true
-  reset_after_flash: true
 
 reports:
   directory: ".aihil/reports"
 
 logs:
   directory: ".aihil/logs"
-  keep_last: 50
 ```
 
 The configuration file is not just convenience. It is the contract between the human developer, the local hardware setup, and the AI agent.
 
 ## Intended MCP tools
 
-### `aihil_openocd_version`
+### `aihil_debugger_info`
 
-Returns the detected OpenOCD version.
+Returns information about the configured debugger backend, including the detected OpenOCD version when available.
 
 ### `aihil_probe_target`
 
@@ -227,9 +253,9 @@ Example result:
 
 ### `aihil_flash_firmware`
 
-Flashes the configured firmware image.
+Flashes a validated firmware image.
 
-The image path must be allowed by `aihil.yaml`. Raw OpenOCD commands are not exposed to the AI agent.
+The image path must be under a configured allowed artifact root. Raw OpenOCD commands are not exposed to the AI agent.
 
 Example result:
 
@@ -237,13 +263,17 @@ Example result:
 {
   "ok": true,
   "tool": "aihil_flash_firmware",
-  "image": "build/firmware.elf",
+  "artifact": {
+    "source": "path",
+    "path": "build/firmware.elf",
+    "sha256": "..."
+  },
   "verify": true,
   "reset_after_flash": true,
   "elapsed_ms": 4217,
   "summary": "Firmware flashed, verified, and target reset.",
-  "report_path": ".aihil/reports/last-openocd-report.json",
-  "log_path": ".aihil/logs/openocd-2026-06-23T13-10-00.log"
+  "report_path": ".aihil/reports/last-report.json",
+  "log_path": ".aihil/logs/openocd-20260624T164357926542Z-aihil_flash_firmware.log"
 }
 ```
 
@@ -299,14 +329,14 @@ exposed:     aihil_reset_target
 
 ### Configuration is the permission boundary
 
-The `aihil.yaml` file defines what the agent is allowed to do.
+The `.aihil/config.yaml` file defines what the agent is allowed to do.
 
 ```yaml
-agent_permissions:
+permissions:
   allow_flash: true
   allow_reset: true
   allow_mass_erase: false
-  allow_raw_openocd_commands: false
+  allow_raw_debugger_commands: false
 ```
 
 ### Firmware paths are restricted
@@ -314,8 +344,8 @@ agent_permissions:
 The agent should only flash firmware images from explicitly allowed directories.
 
 ```yaml
-firmware:
-  allowed_image_roots:
+artifacts:
+  allowed_roots:
     - "build"
 ```
 
@@ -346,57 +376,53 @@ A later implementation can add a persistent OpenOCD session through the Tcl inte
 
 No implementation language is fixed in this README. AI-HIL is a host-side bridge, not firmware running on the target. The implementation language should be chosen for reliable local tooling, MCP support, process handling, configuration parsing, and packaging.
 
-## Suggested repository layout
+## Repository layout
 
 ```text
 .
+├── .mcp.json
+├── AGENTS.md
+├── AI_AGENT_QUICKSTART.md
+├── CLAUDE.md
 ├── README.md
 ├── LICENSE
-├── docs/
-│   ├── architecture.md
-│   ├── safety.md
-│   ├── mcp-tools.md
-│   └── aihil-yaml.md
-├── examples/
-│   └── stm32-stlink/
-│       ├── aihil.yaml
-│       └── README.md
-├── schemas/
-│   └── aihil.schema.json
-├── skills/
-│   └── aihil-embedded/
-│       └── SKILL.md
+├── scripts/
+│   ├── start-aihil-mcp.ps1
+│   └── start-aihil-mcp.sh
 ├── src/
-│   └── README.md
+│   └── aihil/
 └── tests/
-    └── README.md
 ```
-
-The exact source layout can be decided once the implementation language is chosen.
 
 ## Local usage shape
 
-The main interface for AI agents is MCP.
+The main interface for AI agents is MCP over local HTTP.
 
-Example shape for running AI-HIL as a local MCP stdio server:
-
-```bash
-aihil --config examples/stm32-stlink/aihil.yaml
-```
-
-For local debugging, the same tool may also expose direct commands:
+Run AI-HIL with the configured local listen address:
 
 ```bash
-aihil --config aihil.yaml --probe
-aihil --config aihil.yaml --flash
-aihil --config aihil.yaml --reset
+aihil serve --config .aihil/config.yaml
 ```
 
-The direct commands are for humans debugging the bridge. The main interface for AI agents is MCP.
+By default, the server listens on:
+
+```text
+127.0.0.1:8732
+```
+
+The MCP endpoint is:
+
+```text
+POST http://127.0.0.1:8732/mcp
+```
+
+Tool execution is exposed through MCP at `/mcp`. `/health` is available for readiness checks.
+
+Keep `server.listen` bound to `127.0.0.1` unless the deployment has explicit authentication, transport security, and operator approval controls.
 
 ## MCP client configuration
 
-A local MCP client can start AI-HIL as a stdio server.
+A local MCP client can connect to AI-HIL as an HTTP MCP server.
 
 Example shape:
 
@@ -404,8 +430,8 @@ Example shape:
 {
   "mcpServers": {
     "aihil": {
-      "command": "/absolute/path/to/aihil",
-      "args": ["--config", "/absolute/path/to/aihil.yaml"]
+      "type": "http",
+      "url": "http://127.0.0.1:8732/mcp"
     }
   }
 }
@@ -500,6 +526,6 @@ human-readable logs
 
 ## License
 
-Add a `LICENSE` file before publishing this repository publicly.
+Copyright 2026 Hannes Pauli.
 
-For a free and widely usable project, consider a permissive license such as MIT or Apache-2.0.
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

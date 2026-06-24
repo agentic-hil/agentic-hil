@@ -1,0 +1,52 @@
+# AI-HIL
+
+AI-HIL is a local MCP-over-HTTP server for AI agents working with embedded hardware.
+
+Install from a clone:
+
+```bash
+python -m pip install -e .
+```
+
+Bootstrap:
+
+```bash
+aihil init
+aihil doctor
+aihil serve --config .aihil/config.yaml
+```
+
+MCP endpoint:
+
+```text
+http://127.0.0.1:8732/mcp
+```
+
+Project MCP config:
+
+```text
+.mcp.json
+```
+
+Use MCP tools for hardware actions:
+
+```text
+aihil_debugger_info
+aihil_probe_target
+aihil_flash_firmware
+aihil_reset_target
+aihil_get_last_report
+aihil_classify_last_error
+```
+
+Required workflow:
+
+1. Build firmware.
+2. Probe before flashing.
+3. Flash only validated artifacts from allowed roots.
+4. Read the structured result and last report.
+5. Classify failures before changing code again.
+
+Safety:
+
+Do not request raw OpenOCD commands. Do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative.

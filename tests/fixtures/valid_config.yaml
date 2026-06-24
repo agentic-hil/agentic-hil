@@ -1,0 +1,44 @@
+server:
+  listen: "127.0.0.1:8732"
+
+target:
+  name: "example-target"
+  controller: "stm32f4"
+
+debugger:
+  type: "openocd"
+  executable: "tests/fixtures/fake_openocd.py"
+  interface_cfg: "interface/stlink.cfg"
+  target_cfg: "target/stm32f4x.cfg"
+  timeout_s: 5
+
+artifacts:
+  allowed_roots:
+    - "build"
+  upload_directory: ".aihil/artifacts"
+  allowed_extensions:
+    - ".elf"
+    - ".hex"
+    - ".bin"
+  max_upload_size_mb: 64
+  allow_upload: true
+
+validation:
+  require_existing_file: true
+  require_allowed_root: true
+  require_allowed_extension: true
+  compute_sha256: true
+  inspect_known_formats: true
+
+permissions:
+  allow_probe: true
+  allow_flash: true
+  allow_reset: true
+  allow_raw_debugger_commands: false
+  allow_mass_erase: false
+
+reports:
+  directory: ".aihil/reports"
+
+logs:
+  directory: ".aihil/logs"
