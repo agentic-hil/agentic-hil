@@ -11,7 +11,7 @@ AI agent
   ↓ MCP
 AI-HIL
   ↓ configuration + policy
-OpenOCD / debug probe / programmer / logs / tests
+OpenOCD / debug probe / programmer / COM ports / logs / tests
   ↓
 real embedded target
   ↓ structured feedback
@@ -33,10 +33,12 @@ Then bootstrap each firmware project separately:
 ```bash
 aihil init
 aihil doctor
-aihil serve --config .aihil/config.yaml
+aihil mcp-config > .mcp.json
 ```
 
-The installed `aihil` command provides the MCP server. The project-local `.aihil/` directory contains that project's hardware configuration, policy, reports, logs, and artifact roots.
+The installed `aihil` command provides the MCP stdio server. The project-local `.aihil/` directory contains that project's hardware configuration, policy, reports, logs, and artifact roots.
+
+`aihil init` includes detected host serial/COM ports in its JSON output to help fill `com_ports`. Re-run `aihil com-ports` after connecting USB serial hardware if needed.
 
 Each project can include MCP discovery config in `.mcp.json`:
 
@@ -50,14 +52,18 @@ Example `.mcp.json`:
 {
   "mcpServers": {
     "aihil": {
-      "type": "http",
-      "url": "http://127.0.0.1:8732/mcp"
+      "command": "aihil",
+      "args": [
+        "mcp-stdio",
+        "--config",
+        ".aihil/config.yaml"
+      ]
     }
   }
 }
 ```
 
-Agents should use MCP `tools/list` and `tools/call` against `http://127.0.0.1:8732/mcp`. Do not use raw OpenOCD commands for hardware actions.
+Agents should use MCP `tools/list` and `tools/call` through the configured stdio server. Do not use raw OpenOCD commands for hardware actions.
 
 ## Why this exists
 
@@ -129,7 +135,7 @@ AI-HIL MCP interface
   ↓
 AI-HIL configuration + policy layer
   ↓
-OpenOCD / build tools / UART logs / hardware actions
+OpenOCD / build tools / UART logs / COM stimuli / hardware actions
   ↓
 real target board
 ```
@@ -145,6 +151,11 @@ aihil_flash_firmware
 aihil_reset_target
 aihil_get_last_report
 aihil_classify_last_error
+aihil_com_ports_list
+aihil_com_session_start
+aihil_com_write
+aihil_com_read
+aihil_com_session_stop
 ```
 
 ## MCP and skills
@@ -208,9 +219,6 @@ return a structured report
 If an editor or external tool needs a schema file, export the bundled schema with `aihil schema --output config.schema.json`. Runtime validation always uses the schema from the installed package, not a project-local copy.
 
 ```yaml
-server:
-  listen: "127.0.0.1:8732"
-
 target:
   name: fan-controller-v1
   controller: stm32f4
@@ -230,10 +238,22 @@ artifacts:
     - ".hex"
     - ".bin"
 
+com_ports:
+  dut_uart:
+    device: "COM5"
+    baudrate: 115200
+    timeout_s: 0.1
+    write_timeout_s: 1.0
+    encoding: "utf-8"
+    max_buffer_bytes: 65536
+    max_write_bytes: 4096
+
 permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
+  allow_com_read: true
+  allow_com_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 
@@ -329,6 +349,44 @@ permission_denied
 unknown_openocd_error
 ```
 
+### `aihil_com_ports_list`
+
+Lists configured named COM ports and their active streaming session status.
+
+### `aihil_com_session_start`
+
+Opens a configured COM port and starts a background reader that continuously buffers feedback.
+
+### `aihil_com_write`
+
+Writes a text or hexadecimal stimulus to an active COM port session. The tool accepts only configured `port_id` values, not arbitrary host devices.
+
+### `aihil_com_read`
+
+Reads buffered feedback from an active COM port session. Results include both `hex` and decoded `text` using the configured encoding.
+
+### `aihil_com_session_stop`
+
+Stops the background reader and closes the configured COM port.
+
+## Plain COM Text Stdio
+
+For LLMs or local tools that need a socket-like text channel instead of MCP tool calls, AI-HIL provides a separate COM stdio mode:
+
+```bash
+aihil com-stdio --config .aihil/config.yaml --port dut_uart
+```
+
+This mode is not MCP. It is a plain text data plane:
+
+```text
+stdin text  -> configured COM port
+COM bytes   -> decoded text on stdout
+errors      -> stderr
+```
+
+`com-stdio` still uses the AI-HIL configuration and permissions. The `--port` value must be a named `com_ports` entry, and the configured `encoding` controls how COM bytes become text. Use `mcp-stdio` for hardware actions and structured reports; use `com-stdio` only when you explicitly want a continuous text conversation with one configured serial port.
+
 ## Safety principles
 
 AI-HIL is meant to give AI agents access to real hardware, so the defaults must be conservative.
@@ -352,6 +410,8 @@ The `.aihil/config.yaml` file defines what the agent is allowed to do.
 permissions:
   allow_flash: true
   allow_reset: true
+  allow_com_read: true
+  allow_com_write: true
   allow_mass_erase: false
   allow_raw_debugger_commands: false
 ```
@@ -366,13 +426,28 @@ artifacts:
     - "build"
 ```
 
+### COM ports are restricted
+
+The agent can open only named COM ports from `.aihil/config.yaml`. It cannot pass arbitrary `COMx`, `/dev/ttyUSBx`, or pyserial URLs at tool-call time.
+
+```yaml
+com_ports:
+  dut_uart:
+    device: "COM5"
+    baudrate: 115200
+
+permissions:
+  allow_com_read: true
+  allow_com_write: true
+```
+
 ### Every hardware action returns a report
 
 Every probe, flash, reset, or failure should create a structured report that the agent can reason about.
 
 ### Raw logs remain available
 
-Structured reports are for AI agents. Raw OpenOCD logs are for humans.
+Structured reports are for AI agents. Raw OpenOCD and COM port logs are for humans.
 
 ## Implementation direction
 
@@ -403,9 +478,6 @@ No implementation language is fixed in this README. AI-HIL is a host-side bridge
 ├── CLAUDE.md
 ├── README.md
 ├── LICENSE
-├── scripts/
-│   ├── start-aihil-mcp.ps1
-│   └── start-aihil-mcp.sh
 ├── src/
 │   └── aihil/
 └── tests/
@@ -413,35 +485,15 @@ No implementation language is fixed in this README. AI-HIL is a host-side bridge
 
 ## Local usage shape
 
-The main interface for AI agents is MCP over local HTTP.
+The main interface for AI agents is MCP over stdio.
 
-The server implementation is installed once as the `aihil` command. Run that command from the firmware project that contains `.aihil/config.yaml`.
+The server implementation is installed once as the `aihil` command. The MCP client starts `aihil mcp-stdio` from the firmware project that contains `.aihil/config.yaml`.
 
-Run AI-HIL with the configured local listen address:
-
-```bash
-aihil serve --config .aihil/config.yaml
-```
-
-By default, the server listens on:
-
-```text
-127.0.0.1:8732
-```
-
-The MCP endpoint is:
-
-```text
-POST http://127.0.0.1:8732/mcp
-```
-
-Tool execution is exposed through MCP at `/mcp`. `/health` is available for readiness checks.
-
-Keep `server.listen` bound to `127.0.0.1` unless the deployment has explicit authentication, transport security, and operator approval controls.
+`mcp-stdio` is project-scoped and does not take a COM `--port`; individual MCP COM tool calls carry the configured `port_id`. The separate `com-stdio` data plane is port-scoped and therefore requires `--port`.
 
 ## MCP client configuration
 
-A local MCP client can connect to AI-HIL as an HTTP MCP server.
+A local MCP client can connect to AI-HIL as a stdio MCP server.
 
 Example shape:
 
@@ -449,14 +501,20 @@ Example shape:
 {
   "mcpServers": {
     "aihil": {
-      "type": "http",
-      "url": "http://127.0.0.1:8732/mcp"
+      "command": "aihil",
+      "args": [
+        "mcp-stdio",
+        "--config",
+        ".aihil/config.yaml"
+      ]
     }
   }
 }
 ```
 
 Exact configuration depends on the MCP client.
+
+Do not mix COM text into the MCP stdio process. MCP stdout is JSON-RPC only. If a plain serial text stream is needed, start a separate `aihil com-stdio --config .aihil/config.yaml --port <port_id>` process. Only `com-stdio` needs `--port`; `mcp-stdio` stays project-scoped.
 
 ## Example agent loop
 
@@ -470,8 +528,9 @@ AI agent:
 4. Calls aihil_probe_target.
 5. Calls aihil_flash_firmware.
 6. Calls aihil_reset_target.
-7. Reads the AI-HIL report.
-8. Uses the hardware result to continue debugging.
+7. Optionally starts a COM port session and exchanges stimuli/feedback with aihil_com_write and aihil_com_read.
+8. Reads the AI-HIL report.
+9. Uses the hardware result to continue debugging.
 ```
 
 This is the basic loop AI-HIL tries to enable:
@@ -521,16 +580,14 @@ The value of AI-HIL is controlled hardware access, not arbitrary command executi
 
 ## Possible next bridges
 
-OpenOCD is only the first bridge.
+OpenOCD and configured COM ports are the first bridges.
 
 Other useful bridges could be:
 
 ```text
-UART log bridge
 build-system bridge
 hardware smoke-test bridge
 measurement bridge
-stimulus bridge
 power-control bridge
 ```
 

@@ -15,7 +15,6 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 
 DEFAULT_CONFIG_PATH = Path(".aihil/config.yaml")
-DEFAULT_LISTEN = "127.0.0.1:8732"
 
 
 class ConfigError(Exception):
@@ -33,13 +32,6 @@ class ConfigError(Exception):
         }
         result.update(self.details)
         return result
-
-
-@dataclass(frozen=True)
-class ServerConfig:
-    listen: str = DEFAULT_LISTEN
-    host: str = field(default="127.0.0.1", metadata={"schema_exclude": True})
-    port: int = field(default=8732, metadata={"schema_exclude": True})
 
 
 @dataclass(frozen=True)
@@ -67,6 +59,17 @@ class ArtifactsConfig:
 
 
 @dataclass(frozen=True)
+class ComPortConfig:
+    device: str
+    baudrate: int = 115200
+    timeout_s: float = 0.1
+    write_timeout_s: float = 1.0
+    encoding: str = "utf-8"
+    max_buffer_bytes: int = 65536
+    max_write_bytes: int = 4096
+
+
+@dataclass(frozen=True)
 class ValidationConfig:
     require_existing_file: bool = True
     require_allowed_root: bool = True
@@ -80,6 +83,8 @@ class PermissionsConfig:
     allow_probe: bool = True
     allow_flash: bool = True
     allow_reset: bool = True
+    allow_com_read: bool = True
+    allow_com_write: bool = True
     allow_raw_debugger_commands: bool = False
     allow_mass_erase: bool = False
 
@@ -98,10 +103,10 @@ class LogsConfig:
 class AIHILConfig:
     config_path: Path
     work_dir: Path
-    server: ServerConfig = field(default_factory=ServerConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
     debugger: DebuggerConfig = field(default_factory=DebuggerConfig)
     artifacts: ArtifactsConfig = field(default_factory=ArtifactsConfig)
+    com_ports: dict[str, ComPortConfig] = field(default_factory=dict)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     reports: ReportsConfig = field(default_factory=ReportsConfig)
@@ -139,42 +144,6 @@ def validate_config_schema(raw: dict[str, Any], path: str | Path | None = None) 
 
 def resolve_config_path(config_path: str | Path | None = None) -> Path:
     return Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
-
-
-def parse_listen(value: str | None) -> tuple[str, int, str]:
-    listen = value or DEFAULT_LISTEN
-    if ":" not in listen:
-        raise ConfigError(
-            "config_invalid",
-            "server.listen must use host:port format.",
-            field="server.listen",
-            value=listen,
-        )
-    host, port_text = listen.rsplit(":", 1)
-    if not host:
-        raise ConfigError(
-            "config_invalid",
-            "server.listen must include a host.",
-            field="server.listen",
-            value=listen,
-        )
-    try:
-        port = int(port_text)
-    except ValueError as exc:
-        raise ConfigError(
-            "config_invalid",
-            "server.listen port must be an integer.",
-            field="server.listen",
-            value=listen,
-        ) from exc
-    if port < 1 or port > 65535:
-        raise ConfigError(
-            "config_invalid",
-            "server.listen port must be between 1 and 65535.",
-            field="server.listen",
-            value=listen,
-        )
-    return host, port, listen
 
 
 def _raise_config_validation_error(error: ValidationError, path: str | Path | None) -> None:
@@ -262,9 +231,6 @@ def load_config(config_path: str | Path | None = None, work_dir: str | Path | No
         )
     validate_config_schema(raw, path)
 
-    server_raw = _mapping(raw.get("server"), "server")
-    host, port, listen = parse_listen(server_raw.get("listen", DEFAULT_LISTEN))
-
     target_raw = _mapping(raw.get("target"), "target")
     debugger_raw = _mapping(raw.get("debugger"), "debugger")
     debugger_type = str(debugger_raw.get("type", "openocd"))
@@ -277,6 +243,7 @@ def load_config(config_path: str | Path | None = None, work_dir: str | Path | No
             allowed_values=["openocd"],
         )
     artifacts_raw = _mapping(raw.get("artifacts"), "artifacts")
+    com_ports_raw = _mapping(raw.get("com_ports"), "com_ports")
     validation_raw = _mapping(raw.get("validation"), "validation")
     permissions_raw = _mapping(raw.get("permissions"), "permissions")
     reports_raw = _mapping(raw.get("reports"), "reports")
@@ -285,7 +252,6 @@ def load_config(config_path: str | Path | None = None, work_dir: str | Path | No
     return AIHILConfig(
         config_path=path,
         work_dir=base,
-        server=ServerConfig(listen=listen, host=host, port=port),
         target=TargetConfig(
             name=str(target_raw.get("name", "unknown-target")),
             controller=str(target_raw.get("controller", "unknown-controller")),
@@ -306,6 +272,7 @@ def load_config(config_path: str | Path | None = None, work_dir: str | Path | No
             max_upload_size_mb=int(artifacts_raw.get("max_upload_size_mb", 64)),
             allow_upload=bool(artifacts_raw.get("allow_upload", True)),
         ),
+        com_ports={name: _com_port_config(name, value) for name, value in com_ports_raw.items()},
         validation=ValidationConfig(
             require_existing_file=bool(validation_raw.get("require_existing_file", True)),
             require_allowed_root=bool(validation_raw.get("require_allowed_root", True)),
@@ -317,6 +284,8 @@ def load_config(config_path: str | Path | None = None, work_dir: str | Path | No
             allow_probe=bool(permissions_raw.get("allow_probe", True)),
             allow_flash=bool(permissions_raw.get("allow_flash", True)),
             allow_reset=bool(permissions_raw.get("allow_reset", True)),
+            allow_com_read=bool(permissions_raw.get("allow_com_read", True)),
+            allow_com_write=bool(permissions_raw.get("allow_com_write", True)),
             allow_raw_debugger_commands=bool(permissions_raw.get("allow_raw_debugger_commands", False)),
             allow_mass_erase=bool(permissions_raw.get("allow_mass_erase", False)),
         ),
@@ -359,6 +328,19 @@ def _optional_string(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _com_port_config(name: str, value: Any) -> ComPortConfig:
+    raw = _mapping(value, f"com_ports.{name}")
+    return ComPortConfig(
+        device=str(raw["device"]),
+        baudrate=int(raw.get("baudrate", 115200)),
+        timeout_s=float(raw.get("timeout_s", 0.1)),
+        write_timeout_s=float(raw.get("write_timeout_s", 1.0)),
+        encoding=str(raw.get("encoding", "utf-8")),
+        max_buffer_bytes=int(raw.get("max_buffer_bytes", 65536)),
+        max_write_bytes=int(raw.get("max_write_bytes", 4096)),
+    )
 
 
 def _string_list(value: Any, default: list[str]) -> list[str]:

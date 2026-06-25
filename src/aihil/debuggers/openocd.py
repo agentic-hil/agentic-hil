@@ -38,6 +38,18 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "config_file_not_found": "debugger_config_not_found",
 }
 
+OPENOCD_DISABLE_TCP_SERVER_COMMANDS = [
+    "gdb_port disabled",
+    "tcl_port disabled",
+    "telnet_port disabled",
+]
+
+OPENOCD_SUCCESS_MARKERS = {
+    "aihil_probe_target": "AIHIL_RESULT:probe_target:ok",
+    "aihil_flash_firmware": "AIHIL_RESULT:flash_firmware:ok",
+    "aihil_reset_target": "AIHIL_RESULT:reset_target:ok",
+}
+
 
 class OpenOCDBackend(DebuggerBackend):
     backend_name = "openocd"
@@ -101,7 +113,12 @@ class OpenOCDBackend(DebuggerBackend):
     def probe_target(self) -> dict[str, Any]:
         if not self.config.permissions.allow_probe:
             return self._permission_denied("aihil_probe_target", "Probing is disabled by .aihil/config.yaml.")
-        result = self._run_openocd("aihil_probe_target", "init; targets; shutdown")
+        marker = OPENOCD_SUCCESS_MARKERS["aihil_probe_target"]
+        result = self._run_openocd(
+            "aihil_probe_target",
+            f'init; targets; echo "{marker}"; shutdown',
+            success_marker=marker,
+        )
         if result["ok"]:
             result["target_detected"] = True
             result["summary"] = "Target detected through OpenOCD."
@@ -123,9 +140,11 @@ class OpenOCDBackend(DebuggerBackend):
 
         path = str(artifact["resolved_path"])
         command_path = path.replace("\\", "/").replace('"', '\\"')
+        marker = OPENOCD_SUCCESS_MARKERS["aihil_flash_firmware"]
         result = self._run_openocd(
             "aihil_flash_firmware",
-            f'program "{command_path}" verify reset exit',
+            f'program "{command_path}" verify reset; echo "{marker}"; shutdown',
+            success_marker=marker,
         )
         result["artifact"] = {
             "source": artifact.get("source", "path"),
@@ -150,7 +169,12 @@ class OpenOCDBackend(DebuggerBackend):
             }
         if not self.config.permissions.allow_reset:
             return self._permission_denied("aihil_reset_target", "Reset is disabled by .aihil/config.yaml.")
-        result = self._run_openocd("aihil_reset_target", f"init; reset {mode}; shutdown")
+        marker = OPENOCD_SUCCESS_MARKERS["aihil_reset_target"]
+        result = self._run_openocd(
+            "aihil_reset_target",
+            f'init; reset {mode}; echo "{marker}"; shutdown',
+            success_marker=marker,
+        )
         result["mode"] = mode
         if result["ok"]:
             result["summary"] = f"Target reset with mode '{mode}'."
@@ -206,7 +230,7 @@ class OpenOCDBackend(DebuggerBackend):
             return dict(OPENOCD_NOT_FOUND)
         return {"ok": True, "executable": found, "executable_path": found}
 
-    def _run_openocd(self, tool: str, openocd_command: str) -> dict[str, Any]:
+    def _run_openocd(self, tool: str, openocd_command: str, success_marker: str | None = None) -> dict[str, Any]:
         started_at = utc_now_iso()
         start = time.perf_counter()
         resolved = self._resolve_executable()
@@ -223,6 +247,9 @@ class OpenOCDBackend(DebuggerBackend):
                 self.config.debugger.interface_cfg,
                 "-f",
                 self.config.debugger.target_cfg,
+            ]
+            + [arg for command in OPENOCD_DISABLE_TCP_SERVER_COMMANDS for arg in ("-c", command)]
+            + [
                 "-c",
                 openocd_command,
             ]
@@ -274,7 +301,13 @@ class OpenOCDBackend(DebuggerBackend):
 
         output = stdout + stderr
         if returncode == 0:
-            return {
+            backend_error_type = self._backend_error_from_output(output, tool)
+            if backend_error_type is not None:
+                return self._openocd_failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+            if success_marker is not None and success_marker not in output:
+                backend_error_type = self._unconfirmed_backend_error_type(tool)
+                return self._openocd_failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+            result = {
                 "ok": True,
                 "tool": tool,
                 "backend": self.backend_name,
@@ -284,8 +317,22 @@ class OpenOCDBackend(DebuggerBackend):
                 "summary": "OpenOCD command completed successfully.",
                 "log_path": display_path(self.config, log_path),
             }
+            if success_marker is not None:
+                result["success_confirmed"] = True
+            return result
 
         backend_error_type = self._classify_output(output, tool=tool)
+        return self._openocd_failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+
+    def _openocd_failure_result(
+        self,
+        tool: str,
+        started_at: str,
+        finished_at: str,
+        elapsed_ms: int,
+        backend_error_type: str,
+        log_path: Path,
+    ) -> dict[str, Any]:
         error_type = self._public_error_type(backend_error_type)
         return {
             "ok": False,
@@ -300,6 +347,21 @@ class OpenOCDBackend(DebuggerBackend):
             "likely_causes": self._likely_causes(error_type),
             "log_path": display_path(self.config, log_path),
         }
+
+    def _backend_error_from_output(self, output: str, tool: str) -> str | None:
+        backend_error_type = self._classify_output(output, tool=tool)
+        if backend_error_type != "unknown_debugger_error":
+            return backend_error_type
+        if _contains_failure_text(output):
+            return backend_error_type
+        return None
+
+    def _unconfirmed_backend_error_type(self, tool: str) -> str:
+        return {
+            "aihil_probe_target": "target_not_detected",
+            "aihil_flash_firmware": "flash_failed",
+            "aihil_reset_target": "reset_failed",
+        }.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: dict[str, Any]) -> dict[str, Any]:
         return write_report(self.config, result)
@@ -441,6 +503,11 @@ def _decode_timeout_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value
+
+
+def _contains_failure_text(output: str) -> bool:
+    lower = output.lower()
+    return any(text in lower for text in ("error:", "failed", "failure", "mismatch"))
 
 
 def _command_for_log(args: list[str]) -> str:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from aihil.config import DEFAULT_CONFIG_PATH, ConfigError, config_schema, load_config, parse_listen, resolve_config_path
+from aihil.config import DEFAULT_CONFIG_PATH, ConfigError, config_schema, load_config, resolve_config_path
 from aihil.debugger import create_debugger_backend
 from aihil.debuggers.openocd import OpenOCDBackend
 
@@ -42,7 +42,7 @@ def test_config_schema_exposes_config_yaml_shape() -> None:
     schema = config_schema()
 
     assert schema["properties"]["debugger"]["properties"]["type"]["enum"] == ["openocd"]
-    assert "host" not in schema["properties"]["server"]["properties"]
+    assert "server" not in schema["properties"]
     assert schema["properties"]["permissions"]["properties"]["allow_flash"]["type"] == "boolean"
 
 
@@ -59,18 +59,6 @@ def test_config_root_must_be_mapping(tmp_path: Path) -> None:
         load_config(config_path, work_dir=tmp_path)
 
     assert exc.value.error_type == "config_invalid"
-
-
-def test_server_listen_is_parsed() -> None:
-    assert parse_listen("0.0.0.0:9999") == ("0.0.0.0", 9999, "0.0.0.0:9999")
-
-
-def test_default_server_listen(tmp_path: Path) -> None:
-    config_path = write_config(tmp_path / ".aihil" / "config.yaml", base_config())
-    config = load_config(config_path, work_dir=tmp_path)
-    assert config.server.host == "127.0.0.1"
-    assert config.server.port == 8732
-    assert config.server.listen == "127.0.0.1:8732"
 
 
 def test_debugger_executable_from_config_is_used(tmp_path: Path) -> None:

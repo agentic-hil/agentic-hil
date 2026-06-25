@@ -10,6 +10,8 @@ The normal test suite should validate:
 - permission checks
 - OpenOCD command construction
 - OpenOCD error classification
+- configured COM port session read/write behavior
+- plain text COM stdio bridge behavior
 - structured report generation
 - MCP tool result shapes
 

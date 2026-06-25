@@ -16,17 +16,14 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-  "fastapi",
   "jsonschema",
-  "uvicorn",
-  "pydantic",
   "PyYAML",
+  "pyserial",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
-  "httpx2",
 ]
 
 [project.scripts]

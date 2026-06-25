@@ -86,6 +86,99 @@ MCP_TOOLS: list[dict[str, Any]] = [
         "description": "Classify the most recent AI-HIL/debugger failure.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    {
+        "name": "aihil_com_ports_list",
+        "description": "List configured named COM ports, streaming session status, and detected host serial/COM ports.",
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
+    {
+        "name": "aihil_com_session_start",
+        "description": "Open a configured COM port and start a background streaming feedback session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_id": {
+                    "type": "string",
+                    "description": "Configured COM port id from .aihil/config.yaml, for example dut_uart.",
+                },
+                "clear_buffer": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Clear any existing session buffer when the session is already active.",
+                },
+            },
+            "required": ["port_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "aihil_com_session_stop",
+        "description": "Stop a configured COM port streaming feedback session and close the port.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_id": {
+                    "type": "string",
+                    "description": "Configured COM port id from .aihil/config.yaml, for example dut_uart.",
+                },
+            },
+            "required": ["port_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "aihil_com_write",
+        "description": "Write a text or hexadecimal stimulus to an active configured COM port session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_id": {
+                    "type": "string",
+                    "description": "Configured COM port id from .aihil/config.yaml, for example dut_uart.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text stimulus encoded with the configured port encoding.",
+                },
+                "hex": {
+                    "type": "string",
+                    "description": "Hexadecimal bytes stimulus, spaces allowed, for binary protocols.",
+                },
+            },
+            "required": ["port_id"],
+            "oneOf": [
+                {"required": ["text"]},
+                {"required": ["hex"]},
+            ],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "aihil_com_read",
+        "description": "Read buffered feedback from an active configured COM port streaming session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_id": {
+                    "type": "string",
+                    "description": "Configured COM port id from .aihil/config.yaml, for example dut_uart.",
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum buffered bytes to consume from the feedback session.",
+                },
+                "wait_timeout_s": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Optional wait time for feedback if the buffer is initially empty.",
+                },
+            },
+            "required": ["port_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 AIHIL_WORKFLOW_PROMPT = """Use AI-HIL as the safe gate to the configured embedded hardware.
@@ -96,7 +189,8 @@ Workflow:
 3. Flash only validated artifacts from configured allowed roots.
 4. Read the structured result after every hardware action.
 5. Reset only when needed or when the task explicitly requires it.
-6. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
+6. For serial stimuli and feedback, use only configured COM port ids, start a session before writing or reading, and stop the session when done.
+7. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
@@ -111,10 +205,6 @@ MCP_PROMPTS: list[dict[str, Any]] = [
         "description": "Safe workflow for using AI-HIL hardware tools from an AI agent.",
     }
 ]
-
-
-def mcp_headers() -> dict[str, str]:
-    return {"MCP-Protocol-Version": MCP_PROTOCOL_VERSION}
 
 
 def parse_error_response() -> dict[str, Any]:

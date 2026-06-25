@@ -40,13 +40,24 @@ def main() -> int:
     if scenario == "verify_failed":
         print("Error: checksum mismatch - verify failed", file=sys.stderr)
         return 1
+    if scenario == "verify_failed_return_zero":
+        print("Error: checksum mismatch - verify failed", file=sys.stderr)
+        return 0
+    if scenario == "missing_success_marker":
+        print("OpenOCD fake command succeeded")
+        return 0
     print("OpenOCD fake command succeeded")
-    if "-c" in args:
-        command = args[args.index("-c") + 1]
-        if "targets" in command:
+    commands = [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-c"]
+    if commands:
+        if any("targets" in command for command in commands):
             print("target 0: fake.cpu")
-        if "program" in command:
+        if any("program" in command for command in commands):
             print("verified")
+        for command in commands:
+            for part in command.split(";"):
+                part = part.strip()
+                if part.startswith("echo "):
+                    print(part[5:].strip().strip('"'))
     return 0
 
 

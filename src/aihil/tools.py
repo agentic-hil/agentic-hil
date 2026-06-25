@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from .artifacts import ArtifactManager
+from .comports import ComPortService
 from .config import AIHILConfig
 from .debugger import DebuggerBackend, create_debugger_backend
 from .report import read_last_report
@@ -17,10 +18,12 @@ class AIHILToolService:
         config: AIHILConfig,
         backend: DebuggerBackend | None = None,
         artifacts: ArtifactManager | None = None,
+        com_ports: ComPortService | None = None,
     ) -> None:
         self.config = config
         self.backend = backend or create_debugger_backend(config)
         self.artifacts = artifacts or ArtifactManager(config)
+        self.com_ports = com_ports or ComPortService(config)
 
     def debugger_info(self) -> dict[str, Any]:
         return self.backend.info()
@@ -63,6 +66,34 @@ class AIHILToolService:
     def classify_last_error(self) -> dict[str, Any]:
         return self.backend.classify_last_error()
 
+    def com_ports_list(self) -> dict[str, Any]:
+        return self.com_ports.list_ports()
+
+    def com_session_start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        return self.com_ports.session_start(str(payload.get("port_id", "")), bool(payload.get("clear_buffer", True)))
+
+    def com_session_stop(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        return self.com_ports.session_stop(str(payload.get("port_id", "")))
+
+    def com_write(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        port_id = str(payload.get("port_id", ""))
+        write_payload = {key: payload[key] for key in ("text", "hex") if key in payload}
+        return self.com_ports.write(port_id, write_payload)
+
+    def com_read(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        return self.com_ports.read(
+            str(payload.get("port_id", "")),
+            payload.get("max_bytes"),
+            payload.get("wait_timeout_s", 0.0),
+        )
+
+    def close(self) -> None:
+        self.com_ports.close()
+
     def call(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         arguments = arguments or {}
         if name == "aihil_debugger_info":
@@ -77,6 +108,16 @@ class AIHILToolService:
             return self.get_last_report()
         if name == "aihil_classify_last_error":
             return self.classify_last_error()
+        if name == "aihil_com_ports_list":
+            return self.com_ports_list()
+        if name == "aihil_com_session_start":
+            return self.com_session_start(arguments)
+        if name == "aihil_com_session_stop":
+            return self.com_session_stop(arguments)
+        if name == "aihil_com_write":
+            return self.com_write(arguments)
+        if name == "aihil_com_read":
+            return self.com_read(arguments)
         return {
             "ok": False,
             "tool": name,

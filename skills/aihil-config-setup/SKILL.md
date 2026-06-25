@@ -20,7 +20,8 @@ The schema bundled with the installed `aihil` Python package is authoritative. A
 - Never use raw OpenOCD or debugger commands for hardware actions.
 - Never enable `permissions.allow_raw_debugger_commands`.
 - Never enable `permissions.allow_mass_erase`.
-- Keep `server.listen` on `127.0.0.1:8732` unless the user explicitly approves authenticated and secured remote access.
+- Never add arbitrary COM devices for convenience; COM access must use named `com_ports` entries approved for this project.
+- AI-HIL uses MCP over stdio; do not add listener configuration.
 - Do not flash, reset, probe, or otherwise touch hardware while only setting up config unless the user asks for the hardware workflow.
 - Stop if `aihil doctor` or an MCP tool reports `permission_denied`; the local config is authoritative.
 
@@ -46,6 +47,9 @@ Only change these fields unless the user explicitly asks for a broader policy ch
 - `debugger.target_cfg`: OpenOCD target config, for example `target/stm32f4x.cfg`.
 - `artifacts.allowed_roots`: firmware build output directories, usually `build`.
 - `artifacts.allowed_extensions`: only add firmware artifact extensions that the project actually emits.
+- `com_ports.<port_id>.device`: approved serial device or pyserial URL for this project, for example `COM5` or `/dev/ttyUSB0`.
+- `com_ports.<port_id>.baudrate`: serial baud rate for the target or fixture.
+- `com_ports.<port_id>.encoding`: text encoding for decoded feedback, usually `utf-8`.
 
 If the board, MCU family, debugger interface, or target config cannot be inferred from project files, ask one concise question instead of guessing.
 

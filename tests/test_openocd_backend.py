@@ -57,8 +57,23 @@ def test_probe_target_calls_fake_openocd(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is True
     assert result["target_detected"] is True
     calls = json.loads(record.read_text(encoding="utf-8"))
-    assert "init; targets; shutdown" in calls[0]
+    assert any("init; targets" in item for item in calls[0])
     assert (tmp_path / ".aihil" / "reports" / "last-report.json").exists()
+
+
+def test_openocd_actions_disable_tcp_server_ports(tmp_path: Path, monkeypatch) -> None:
+    record = tmp_path / "calls.json"
+    monkeypatch.setenv("AIHIL_FAKE_OPENOCD_RECORD", str(record))
+    backend = OpenOCDBackend(load_config(write_config(tmp_path), work_dir=tmp_path))
+
+    result = backend.probe_target()
+
+    assert result["ok"] is True
+    args = json.loads(record.read_text(encoding="utf-8"))[0]
+    action_command_index = next(index for index, arg in enumerate(args) if "init; targets" in arg)
+    for command in ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]:
+        assert command in args
+        assert args.index(command) < action_command_index
 
 
 def test_flash_firmware_accepts_image_path_and_computes_sha256(tmp_path: Path, monkeypatch) -> None:
@@ -103,6 +118,32 @@ def test_verify_failure_is_classified(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is False
     assert result["error_type"] == "verify_failed"
     assert result["backend_error_type"] == "verify_failed"
+
+
+def test_returncode_zero_verify_error_is_classified(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AIHIL_FAKE_OPENOCD_SCENARIO", "verify_failed_return_zero")
+    config = load_config(write_config(tmp_path), work_dir=tmp_path)
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFfake")
+    artifact = ArtifactManager(config).validate_local_path("build/firmware.elf")["artifact"]
+
+    result = OpenOCDBackend(config).flash_firmware(artifact)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "verify_failed"
+    assert result["backend_error_type"] == "verify_failed"
+
+
+def test_missing_success_marker_is_not_success(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AIHIL_FAKE_OPENOCD_SCENARIO", "missing_success_marker")
+    backend = OpenOCDBackend(load_config(write_config(tmp_path), work_dir=tmp_path))
+
+    result = backend.probe_target()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "target_not_detected"
+    assert result["backend_error_type"] == "target_not_detected"
 
 
 def test_backend_config_error_is_mapped_to_generic_error(tmp_path: Path, monkeypatch) -> None:

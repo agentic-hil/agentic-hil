@@ -11,6 +11,8 @@ The source code should eventually provide:
 - configuration loading
 - policy checks
 - OpenOCD process execution
+- configured COM port streaming sessions
+- separate plain text COM stdio bridge
 - structured reports
 - raw log storage
 

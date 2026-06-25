@@ -1,12 +1,12 @@
 # AI-HIL Agent Instructions
 
-AI-HIL is a local MCP-over-HTTP server that gives AI agents safe, structured access to an embedded hardware-in-the-loop setup.
+AI-HIL is a local MCP stdio server that gives AI agents safe, structured access to an embedded hardware-in-the-loop setup.
 
 Use the MCP server from this repository for hardware actions. Do not use raw OpenOCD commands or arbitrary shell commands for flashing, probing, or resetting hardware when an AI-HIL MCP tool is available.
 
 ## Installation Model
 
-Install the `aihil` command and MCP server once on the local machine:
+Install the `aihil` command once on the local machine:
 
 ```bash
 python -m pip install -e .
@@ -25,14 +25,26 @@ From the firmware project directory, create and inspect the project-local setup 
 ```bash
 aihil init
 aihil doctor
-aihil serve --config .aihil/config.yaml
+aihil mcp-config > .mcp.json
 ```
 
-The local MCP endpoint is:
+The MCP client starts AI-HIL with stdio using:
 
 ```text
-http://127.0.0.1:8732/mcp
+aihil mcp-stdio --config .aihil/config.yaml
 ```
+
+`mcp-stdio` is project-scoped. Do not add `--port` to it; MCP COM tool calls provide `port_id` arguments when needed.
+
+For a separate plain-text serial data plane, use:
+
+```text
+aihil com-stdio --config .aihil/config.yaml --port <configured_port_id>
+```
+
+`com-stdio` is port-scoped and always requires `--port`.
+
+Do not mix these streams. `mcp-stdio` stdout is JSON-RPC only; `com-stdio` stdout is decoded COM text only.
 
 Each project can include `.mcp.json` for MCP clients that discover project-level MCP configuration.
 
@@ -49,9 +61,10 @@ aihil mcp-config > .mcp.json
 3. Probe the target with `aihil_probe_target` before flashing.
 4. Flash only validated artifacts with `aihil_flash_firmware`.
 5. Use `aihil_reset_target` only with mode `run`, `halt`, or `init`.
-6. Read `aihil_get_last_report` after hardware actions.
-7. Use `aihil_classify_last_error` after failures.
-8. Stop on `permission_denied`; the local AI-HIL configuration is authoritative.
+6. Use configured COM port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop` for serial stimuli and feedback.
+7. Read `aihil_get_last_report` after hardware actions.
+8. Use `aihil_classify_last_error` after failures.
+9. Stop on `permission_denied`; the local AI-HIL configuration is authoritative.
 
 ## Available MCP Tools
 
@@ -62,17 +75,26 @@ aihil_flash_firmware
 aihil_reset_target
 aihil_get_last_report
 aihil_classify_last_error
+aihil_com_ports_list
+aihil_com_session_start
+aihil_com_write
+aihil_com_read
+aihil_com_session_stop
 ```
 
 ## Safety Rules
 
 Never request or run raw OpenOCD/debugger commands for hardware actions.
 
+Never use arbitrary shell COM-port tools when an AI-HIL COM-port MCP tool is available.
+
+Do not open host COM devices directly. Use AI-HIL's configured COM MCP tools with named `port_id` values.
+
+Use `aihil com-stdio` only when the user explicitly wants a continuous text serial channel. The `--port` value must be a configured `com_ports` id.
+
 Never flash files outside configured artifact roots.
 
 Never mass erase.
-
-Keep the server bound to `127.0.0.1` unless explicit authentication, transport security, and operator approval are in place.
 
 Treat structured JSON results as the source of truth. Always inspect `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` before deciding what to do next.
 
@@ -84,5 +106,6 @@ python -m pip install -e .
 aihil init --force
 aihil doctor
 aihil mcp-config
-aihil serve --config .aihil/config.yaml
+aihil mcp-stdio --config .aihil/config.yaml
+aihil com-stdio --config .aihil/config.yaml --port dut_uart
 ```

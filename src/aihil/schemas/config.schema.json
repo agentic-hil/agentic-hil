@@ -6,16 +6,6 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "server": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "listen": {
-          "type": "string",
-          "default": "127.0.0.1:8732"
-        }
-      }
-    },
     "target": {
       "type": "object",
       "additionalProperties": false,
@@ -100,6 +90,56 @@
         }
       }
     },
+    "com_ports": {
+      "type": "object",
+      "description": "Named serial/COM ports that AI-HIL may open for stimuli and feedback.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "device"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "Host serial device or pyserial URL, for example COM5, /dev/ttyUSB0, or loop://."
+          },
+          "baudrate": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 115200
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.1
+          },
+          "write_timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0
+          },
+          "encoding": {
+            "type": "string",
+            "default": "utf-8"
+          },
+          "max_buffer_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 65536
+          },
+          "max_write_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 4096
+          }
+        }
+      },
+      "default": {}
+    },
     "validation": {
       "type": "object",
       "additionalProperties": false,
@@ -139,6 +179,14 @@
           "default": true
         },
         "allow_reset": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_com_read": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_com_write": {
           "type": "boolean",
           "default": true
         },

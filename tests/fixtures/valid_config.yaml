@@ -1,6 +1,3 @@
-server:
-  listen: "127.0.0.1:8732"
-
 target:
   name: "example-target"
   controller: "stm32f4"
@@ -23,6 +20,16 @@ artifacts:
   max_upload_size_mb: 64
   allow_upload: true
 
+com_ports:
+  dut_uart:
+    device: "loop://"
+    baudrate: 115200
+    timeout_s: 0.1
+    write_timeout_s: 1.0
+    encoding: "utf-8"
+    max_buffer_bytes: 65536
+    max_write_bytes: 4096
+
 validation:
   require_existing_file: true
   require_allowed_root: true
@@ -34,6 +41,8 @@ permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
+  allow_com_read: true
+  allow_com_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 

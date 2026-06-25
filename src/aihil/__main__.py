@@ -5,21 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+import sys
 from typing import Any
 
-import uvicorn
-
-from .config import DEFAULT_CONFIG_PATH, ConfigError, config_schema_text, load_config
+from .comports import list_available_com_ports
+from .comstdio import run_com_stdio
+from .config import DEFAULT_CONFIG_PATH, ConfigError, config_schema_text, display_path, load_config
 from .debugger import create_debugger_backend
-from .server import create_app
+from .stdio import run_stdio_server
 
 
-DEFAULT_CONFIG_TEMPLATE = """server:
-  listen: "127.0.0.1:8732"
-
-target:
+DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
   controller: "unknown-controller"
 
@@ -41,6 +38,8 @@ artifacts:
   max_upload_size_mb: 64
   allow_upload: true
 
+com_ports: {}
+
 validation:
   require_existing_file: true
   require_allowed_root: true
@@ -52,6 +51,8 @@ permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
+  allow_com_read: true
+  allow_com_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 
@@ -66,7 +67,7 @@ logs:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aihil",
-        description="AI-HIL MCP server command. Install once per machine, then run per project with .aihil/config.yaml.",
+        description="AI-HIL MCP stdio server command. Install once per machine, then run per project with .aihil/config.yaml.",
     )
 
     command_parsers = parser.add_subparsers(dest="command", required=True)
@@ -82,13 +83,26 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = command_parsers.add_parser("doctor", help="Validate local AI-HIL setup")
     doctor_parser.add_argument("--config", default=None, help="Path to .aihil/config.yaml")
 
+    command_parsers.add_parser("com-ports", help="List host serial/COM ports available for config setup")
+
     mcp_config_parser = command_parsers.add_parser("mcp-config", help="Print MCP client configuration JSON")
     mcp_config_parser.add_argument("--config", default=None, help="Path to .aihil/config.yaml")
 
-    serve_parser = command_parsers.add_parser("serve", help="Run the local HTTP MCP server")
-    serve_parser.add_argument("--config", default=None, help="Path to .aihil/config.yaml")
-    serve_parser.add_argument("--host", default=None, help="Override configured server host")
-    serve_parser.add_argument("--port", type=int, default=None, help="Override configured server port")
+    stdio_parser = command_parsers.add_parser("mcp-stdio", help="Run the project-scoped MCP stdio server")
+    stdio_parser.add_argument("--config", default=None, help="Path to .aihil/config.yaml")
+
+    com_stdio_parser = command_parsers.add_parser("com-stdio", help="Bridge one configured COM port as a plain text stdio stream")
+    com_stdio_parser.add_argument("--config", default=None, help="Path to .aihil/config.yaml")
+    com_stdio_parser.add_argument("--port", required=True, help="Configured com_ports id, for example dut_uart")
+    com_stdio_parser.add_argument("--max-read-bytes", type=int, default=None, help="Maximum COM bytes to read per stdout write")
+    com_stdio_parser.add_argument("--read-wait-timeout-s", type=float, default=0.05, help="Seconds each COM read waits for data")
+    com_stdio_parser.add_argument(
+        "--eof-idle-timeout-s",
+        type=float,
+        default=0.5,
+        help="After stdin closes, exit after this many idle seconds without COM data",
+    )
+
     return parser
 
 
@@ -115,11 +129,28 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["ok"] else 1
 
+    if command == "com-ports":
+        result = list_available_com_ports()
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 1
+
     if command == "mcp-config":
         print(json.dumps(mcp_config(args.config), indent=2, sort_keys=True))
         return 0
 
-    return serve(args)
+    if command == "mcp-stdio":
+        return mcp_stdio(args.config)
+
+    if command == "com-stdio":
+        return com_stdio(
+            args.config,
+            args.port,
+            args.max_read_bytes,
+            args.read_wait_timeout_s,
+            args.eof_idle_timeout_s,
+        )
+
+    parser.error(f"unknown command: {command}")
 
 
 def init_config(config_path: str | None = None, force: bool = False) -> dict[str, Any]:
@@ -140,18 +171,41 @@ def init_config(config_path: str | None = None, force: bool = False) -> dict[str
         result["summary"] = "AI-HIL starter configuration was written but failed validation."
         result["path"] = str(path)
         return result
+    available_com_ports = list_available_com_ports()
     return {
         "ok": True,
         "summary": "AI-HIL starter configuration written.",
         "path": str(path),
-        "next_steps": [
-            "Keep this .aihil/config.yaml with the firmware project; install aihil only once per machine.",
-            "Edit target.name and target.controller for your board.",
-            "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
-            "Run: aihil doctor",
-            "Run: aihil serve --config .aihil/config.yaml",
-        ],
+        "available_com_ports": available_com_ports,
+        "next_steps": _init_next_steps(available_com_ports),
     }
+
+
+def _init_next_steps(available_com_ports: dict[str, Any]) -> list[str]:
+    next_steps = [
+        "Keep this .aihil/config.yaml with the firmware project; install aihil only once per machine.",
+        "Edit target.name and target.controller for your board.",
+        "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
+    ]
+    if available_com_ports.get("ok"):
+        ports = available_com_ports.get("ports", [])
+        if ports:
+            devices = ", ".join(str(port.get("device", "")) for port in ports[:5])
+            suffix = "" if len(ports) <= 5 else f", and {len(ports) - 5} more"
+            next_steps.append(
+                f"Detected COM ports: {devices}{suffix}. Add the DUT UART under com_ports if serial feedback is needed."
+            )
+        else:
+            next_steps.append("No host COM ports detected. Connect USB serial hardware and run: aihil com-ports")
+    else:
+        next_steps.append("COM port discovery failed. Run: aihil com-ports after checking the pyserial installation.")
+    next_steps.extend(
+        [
+            "Run: aihil doctor",
+            "Run: aihil mcp-config > .mcp.json",
+        ]
+    )
+    return next_steps
 
 
 def schema(output: str | None = None, force: bool = False) -> dict[str, Any]:
@@ -189,6 +243,7 @@ def doctor(config_path: str | None = None) -> dict[str, Any]:
 
     backend = create_debugger_backend(config)
     debugger_info = backend.info()
+    config_display_path = display_path(config, config.config_path)
     return {
         "ok": debugger_info.get("ok") is True,
         "tool": "aihil_doctor",
@@ -196,56 +251,71 @@ def doctor(config_path: str | None = None) -> dict[str, Any]:
         if debugger_info.get("ok")
         else "AI-HIL configuration loaded, but debugger check failed.",
         "config_path": str(config.config_path),
-        "mcp_endpoint": f"http://{config.server.host}:{config.server.port}/mcp",
-        "server": {
-            "listen": config.server.listen,
-            "host": config.server.host,
-            "port": config.server.port,
+        "mcp": {
+            "transport": "stdio",
+            "command": "aihil",
+            "args": ["mcp-stdio", "--config", config_display_path],
         },
         "target": {
             "name": config.target.name,
             "controller": config.target.controller,
+        },
+        "com_ports": {
+            port_id: {
+                "device": port.device,
+                "baudrate": port.baudrate,
+                "encoding": port.encoding,
+            }
+            for port_id, port in config.com_ports.items()
         },
         "debugger": debugger_info,
     }
 
 
 def mcp_config(config_path: str | None = None) -> dict[str, Any]:
-    host = "127.0.0.1"
-    port = 8732
-    try:
-        config = load_config(config_path)
-        host = config.server.host
-        port = config.server.port
-    except ConfigError:
-        pass
+    config_arg = str(Path(config_path)) if config_path else DEFAULT_CONFIG_PATH.as_posix()
     return {
         "mcpServers": {
             "aihil": {
-                "type": "http",
-                "url": f"http://{host}:{port}/mcp",
+                "command": "aihil",
+                "args": ["mcp-stdio", "--config", config_arg],
             }
         }
     }
 
 
-def serve(args: argparse.Namespace) -> int:
+def mcp_stdio(config_path: str | None = None) -> int:
     try:
-        config = load_config(args.config)
-        app = create_app(config)
+        config = load_config(config_path)
     except ConfigError as exc:
         print(json.dumps(exc.to_dict(), indent=2, sort_keys=True), file=sys.stderr)
         return 2
-    host = getattr(args, "host", None) or config.server.host
-    port = getattr(args, "port", None) or config.server.port
-    if host == "0.0.0.0":
-        print(
-            "Warning: AI-HIL server is listening on 0.0.0.0 and may be reachable from the network.",
-            file=sys.stderr,
-        )
-    uvicorn.run(app, host=host, port=port)
-    return 0
+    return run_stdio_server(config, sys.stdin, sys.stdout)
 
 
-if __name__ == "__main__":
+def com_stdio(
+    config_path: str | None,
+    port_id: str,
+    max_read_bytes: int | None,
+    read_wait_timeout_s: float,
+    eof_idle_timeout_s: float,
+) -> int:
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(json.dumps(exc.to_dict(), indent=2, sort_keys=True), file=sys.stderr)
+        return 2
+    return run_com_stdio(
+        config,
+        port_id,
+        sys.stdin,
+        sys.stdout,
+        sys.stderr,
+        max_read_bytes=max_read_bytes,
+        read_wait_timeout_s=read_wait_timeout_s,
+        eof_idle_timeout_s=eof_idle_timeout_s,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

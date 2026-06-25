@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "aihil": {
-      "type": "http",
-      "url": "http://127.0.0.1:8732/mcp"
+      "command": "aihil",
+      "args": [
+        "mcp-stdio",
+        "--config",
+        ".aihil/config.yaml"
+      ]
     }
   }
 }
