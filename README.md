@@ -11,7 +11,7 @@ AI-HIL is a local bridge between an AI agent and an embedded development setup. 
 To try this repository with Claude Code, opencode, Codex, or another coding agent, open the firmware project you want to use with AI-HIL and tell the agent:
 
 ```text
-Install this AI-HIL repository and use it for this firmware project.
+Install https://github.com/hp-8472/aihil and use it for this firmware project.
 ```
 
 The agent should install the `aihil` command from this repository, create the project-local `.aihil/` setup in the firmware project, and use the AI-HIL MCP tools for hardware actions.
