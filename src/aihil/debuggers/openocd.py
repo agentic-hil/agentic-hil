@@ -61,6 +61,7 @@ class OpenOCDBackend(DebuggerBackend):
                 timeout=min(self.config.debugger.timeout_s, 10),
                 cwd=self.config.work_dir,
                 check=False,
+                **_hidden_subprocess_kwargs(),
             )
         except (FileNotFoundError, OSError):
             return {"tool": "aihil_debugger_info", **OPENOCD_NOT_FOUND}
@@ -239,6 +240,7 @@ class OpenOCDBackend(DebuggerBackend):
                 timeout=self.config.debugger.timeout_s,
                 cwd=self.config.work_dir,
                 check=False,
+                **_hidden_subprocess_kwargs(),
             )
             stdout = completed.stdout
             stderr = completed.stderr
@@ -341,7 +343,17 @@ class OpenOCDBackend(DebuggerBackend):
             return "interface_config_not_found"
         if target in lower and any(text in lower for text in ("not found", "can't find", "couldn't find", "couldn't open")):
             return "target_config_not_found"
-        if any(text in lower for text in ("adapter not found", "no adapter", "no device found", "unable to open", "libusb_open")):
+        if any(
+            text in lower
+            for text in (
+                "adapter not found",
+                "no adapter",
+                "no device found",
+                "unable to open",
+                "open failed",
+                "libusb_open",
+            )
+        ):
             return "adapter_not_found"
         if any(text in lower for text in ("target not examined", "target not detected", "unable to connect", "failed to read")):
             return "target_not_detected"
@@ -387,6 +399,7 @@ class OpenOCDBackend(DebuggerBackend):
                 "debug probe is not connected",
                 "debug probe driver is missing",
                 "debug probe is already in use",
+                "Windows USB driver is not bound to the ST-Link adapter",
             ],
             "verify_failed": [
                 "flash write did not persist correctly",
@@ -434,3 +447,9 @@ def _command_for_log(args: list[str]) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline(args)
     return " ".join(shlex.quote(arg) for arg in args)
+
+
+def _hidden_subprocess_kwargs() -> dict[str, int]:
+    if os.name != "nt":
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}

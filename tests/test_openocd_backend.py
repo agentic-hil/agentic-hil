@@ -116,6 +116,17 @@ def test_backend_config_error_is_mapped_to_generic_error(tmp_path: Path, monkeyp
     assert result["backend_error_type"] == "interface_config_not_found"
 
 
+def test_adapter_open_failure_is_classified(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AIHIL_FAKE_OPENOCD_SCENARIO", "adapter_open_failed")
+    backend = OpenOCDBackend(load_config(write_config(tmp_path), work_dir=tmp_path))
+
+    result = backend.probe_target()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["backend_error_type"] == "adapter_not_found"
+
+
 def test_timeout_is_classified(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AIHIL_FAKE_OPENOCD_SCENARIO", "timeout")
     backend = OpenOCDBackend(load_config(write_config(tmp_path, timeout_s=0.1), work_dir=tmp_path))

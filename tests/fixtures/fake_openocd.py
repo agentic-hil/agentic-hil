@@ -34,6 +34,9 @@ def main() -> int:
     if scenario == "interface_config_not_found":
         print("Error: can't find interface/stlink.cfg", file=sys.stderr)
         return 1
+    if scenario == "adapter_open_failed":
+        print("Error: open failed", file=sys.stderr)
+        return 1
     if scenario == "verify_failed":
         print("Error: checksum mismatch - verify failed", file=sys.stderr)
         return 1
