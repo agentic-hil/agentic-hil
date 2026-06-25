@@ -185,18 +185,25 @@ def test_com_port_session_roundtrip_uses_background_reader(tmp_path: Path, monke
 
     start = service.session_start("dut_uart")
     write = service.write("dut_uart", {"text": "ping\n"})
-    read = service.read("dut_uart", wait_timeout_s=1.0)
+    chunks: list[dict] = []
+    deadline = time.monotonic() + 1.0
+    while _joined_text(chunks) != "ping\n" and time.monotonic() < deadline:
+        chunks.append(service.read("dut_uart", wait_timeout_s=0.1))
     stop = service.session_stop("dut_uart")
 
     assert start["ok"] is True
     assert write["ok"] is True
     assert write["bytes_written"] == 5
-    assert read["ok"] is True
-    assert read["data"]["text"] == "ping\n"
-    assert read["data"]["hex"] == "70696e670a"
+    assert all(read["ok"] for read in chunks)
+    assert _joined_text(chunks) == "ping\n"
+    assert "".join(read["data"]["hex"] for read in chunks) == "70696e670a"
     assert stop["ok"] is True
     assert (tmp_path / ".aihil" / "reports" / "last-report.json").exists()
-    assert (tmp_path / read["log_path"]).exists()
+    assert (tmp_path / chunks[-1]["log_path"]).exists()
+
+
+def _joined_text(reads: list[dict]) -> str:
+    return "".join(read["data"]["text"] for read in reads)
 
 
 def test_com_write_requires_configured_write_permission(tmp_path: Path) -> None:
