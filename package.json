@@ -3,7 +3,13 @@
   "version": "0.1.1",
   "description": "Generic hardware-in-the-loop debugger interface for AI agents",
   "license": "Apache-2.0",
+  "author": {
+    "name": "Hannes Pauli",
+    "email": "mail@hannes-pauli.de"
+  },
   "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hp-8472/aihil.git"
