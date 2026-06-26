@@ -17,9 +17,17 @@ npm test
 
 - Keep changes focused and describe the user-facing behavior they affect.
 - Run `npm test` before opening a pull request.
+- Run `npm run pack:check` when package contents, docs included in npm, or release files change.
 - Add or update tests when changing behavior.
 - Do not bypass AI-HIL safety boundaries with raw debugger, flashing, reset, or COM-port access.
 - Keep generated artifacts out of commits unless they are intentionally published source artifacts.
+- If README onboarding, demo behavior, or screenshots change, update the demo checklist or proof assets in the same pull request.
+- If a change affects Windows setup, confirm the docs still work for explicit OpenOCD paths and COM ports.
+- If a change affects platform-specific behavior, describe which hosts were tested and which remain untested.
+
+## Good First Issues
+
+Good first contributions are usually docs, examples, setup diagnostics, error-message clarity, or tests that do not widen hardware permissions. Label beginner-friendly work with `good first issue` once the expected behavior and validation steps are clear.
 
 ## Bug Reports
 
@@ -45,4 +53,11 @@ AI-HIL is designed to let agents perform hardware actions through configured, na
 
 ## Releases
 
-GitHub Releases are created by the release workflow when a strict SemVer tag matching the `package.json` version is pushed. The workflow runs `npm test`, checks the package contents with `npm pack --dry-run`, and then creates a release with generated release notes.
+GitHub Releases are created by the release workflow when a strict SemVer tag matching the `package.json` version is pushed. The workflow runs `npm test`, checks the package contents with `npm run pack:check`, packs the npm tarball, and creates a release with generated release notes plus the tarball asset.
+
+Before tagging a release:
+
+- Update `CHANGELOG.md`.
+- Update `package.json` and `package-lock.json` to the same version.
+- Run `npm test` and `npm run pack:check`.
+- Confirm the npm publish workflow still uses trusted publishing with provenance.

@@ -4,6 +4,14 @@ This page covers the most common AI-HIL setup and hardware-loop failures. Start 
 
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
+## Windows Quick Notes
+
+- If OpenOCD is installed but not on `PATH`, set `debugger.executable` explicitly, for example `C:/Program Files/OpenOCD/bin/openocd.exe`.
+- Use forward slashes in YAML paths to avoid accidental escape sequences.
+- Run `aihil com-ports` after reconnecting USB serial hardware.
+- Configure Windows COM devices such as `COM5` under named `com_ports` ids, then use those ids from MCP COM tools.
+- Do not bypass AI-HIL with raw OpenOCD commands or arbitrary serial tools in agent workflows.
+
 ## 1. `aihil` Command Not Found
 
 Symptom: the shell or MCP client cannot start `aihil`.
@@ -38,6 +46,16 @@ Symptom: `aihil doctor` returns `ok: false`, `error_type: "debugger_not_found"`,
 Likely cause: OpenOCD is not installed, not on `PATH`, or `debugger.executable` points to a missing file.
 
 Fix: install OpenOCD, restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual OpenOCD executable path.
+
+Windows example:
+
+```yaml
+debugger:
+  type: "openocd"
+  executable: "C:/Program Files/OpenOCD/bin/openocd.exe"
+  interface_cfg: "interface/stlink.cfg"
+  target_cfg: "target/stm32f4x.cfg"
+```
 
 ## 4. `debugger_config_not_found`
 
@@ -109,4 +127,4 @@ Symptom: COM tools cannot start a session, return permission errors, or read no 
 
 Likely cause: the port is not configured under `com_ports`, the wrong device name is used, the baud rate is wrong, another program owns the port, or serial access permissions are missing.
 
-Fix: run `aihil com-ports`, add only the approved project port to `.aihil/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id` instead of opening host COM devices directly.
+Fix: run `aihil com-ports`, add only the approved project port to `.aihil/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id` instead of opening host COM devices directly. On Windows, the configured device can be a value such as `COM5`; the MCP calls should still use the AI-HIL id such as `dut_uart`.

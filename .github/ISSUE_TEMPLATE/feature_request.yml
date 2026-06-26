@@ -51,6 +51,11 @@ body:
     validations:
       required: true
   - type: textarea
+    id: first_path
+    attributes:
+      label: Supported first path impact
+      description: Does this affect STM32 Nucleo-F446RE, ST-Link, OpenOCD, or the documented demo flow?
+  - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered

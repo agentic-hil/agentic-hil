@@ -4,9 +4,27 @@
 
 **AI-HIL accelerates embedded development by putting your real hardware in the coding-agent loop and making hardware tests reproducible.**
 
+> For embedded engineers who want Claude Code, Codex, opencode, or another MCP-capable agent to probe, flash, reset, and read serial feedback from real boards.
+
+> Safety model: AI-HIL exposes only configured, high-level hardware actions. Raw debugger commands, direct host COM access outside configured ports, and mass erase stay disabled by default.
+
 It turns firmware work into a hardware-in-the-loop cycle: edit, build, probe, flash, reset, read logs, diagnose, improve, repeat. AI-HIL is the safe MCP stdio control layer that lets agents run and repeat that loop on real boards through configured tools instead of raw debugger or COM-port access.
 
 ## Quick Start
+
+### Install from npm for a firmware project
+
+```bash
+npm i -g aihil
+cd /path/to/your/firmware-project
+aihil init
+aihil doctor
+aihil mcp-config > .mcp.json
+```
+
+Use this path when adding AI-HIL to an existing firmware project. Each project gets its own `.aihil/config.yaml` for target, debugger, artifact roots, permissions, reports, logs, and optional COM ports. If setup fails, start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+### Run the supported Nucleo demo
 
 ```bash
 npm i -g aihil
@@ -14,11 +32,36 @@ git clone https://github.com/hp-8472/aihil.git
 cd aihil/examples/nucleo-f446re_demo
 aihil init
 aihil doctor
+aihil mcp-config > .mcp.json
 ```
 
 From a local checkout of this repository, use `npm install --global .` instead of `npm i -g aihil`.
 
 The demo includes a prebuilt first-run ELF at `build/Debug/nucleo-f446re_demo.elf`, so you can validate the hardware loop before installing an ARM toolchain. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
+
+## Windows First Run
+
+Windows is supported, but OpenOCD and COM device names often need explicit local configuration.
+
+If `aihil doctor` reports `debugger_not_found` or `openocd_not_found`, set `debugger.executable` in `.aihil/config.yaml` to the installed OpenOCD executable:
+
+```yaml
+debugger:
+  type: "openocd"
+  executable: "C:/Program Files/OpenOCD/bin/openocd.exe"
+  interface_cfg: "interface/stlink.cfg"
+  target_cfg: "target/stm32f4x.cfg"
+```
+
+For serial feedback, discover host ports with:
+
+```bash
+aihil com-ports
+```
+
+Then add only the intended device under `com_ports` and use its configured `port_id` from the MCP COM tools. For example, the Windows device might be `COM5`, while the AI-HIL port id is `dut_uart`. Do not bypass AI-HIL with direct serial tools in agent workflows.
+
+For setup failures, see [Windows quick notes](TROUBLESHOOTING.md#windows-quick-notes), [`openocd_not_found`](TROUBLESHOOTING.md#3-debugger_not_found--openocd_not_found), and [COM port troubleshooting](TROUBLESHOOTING.md#10-com-port-does-not-work).
 
 ## 60-Second Nucleo Loop
 
@@ -51,6 +94,20 @@ aihil_get_last_report and optional COM read
 use real hardware feedback for the next firmware patch
 repeat
 ```
+
+If the probe result has `ok: true` and `target_detected: true`, AI-HIL can see the board. If the flash result has `ok: true`, `verify: true`, and `reset_after_flash: true`, the first hardware-in-the-loop cycle worked.
+
+## Demo Asset
+
+A real demo GIF or video should show an actual NUCLEO-F446RE session, not mocked command output. Use the recording checklist in [`docs/demo/README.md`](docs/demo/README.md), then add the captured assets as:
+
+```text
+docs/demo/aihil-nucleo-loop.gif
+docs/demo/aihil-nucleo-loop.mp4
+docs/demo/thumbnail.png
+```
+
+Once recorded, embed the GIF under the README header so first-time visitors immediately see the probe, flash, reset, report, and optional COM-read loop on real hardware.
 
 ## Reproducible Hardware Tests
 

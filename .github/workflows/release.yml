@@ -36,7 +36,15 @@ jobs:
       - name: Check package contents
         run: npm run pack:check
 
+      - name: Pack npm artifact
+        run: npm pack
+
       - name: Create release with notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+
+      - name: Upload npm tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" ./*.tgz --repo "$GITHUB_REPOSITORY" --clobber

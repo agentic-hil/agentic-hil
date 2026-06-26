@@ -1,6 +1,6 @@
 {
   "name": "aihil",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generic hardware-in-the-loop debugger interface for AI agents",
   "license": "Apache-2.0",
   "type": "module",
@@ -37,7 +37,8 @@
     "test": "npm run build && node tests-ts/run-tests.mjs"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "engines": {
     "node": ">=16.16"
@@ -45,7 +46,9 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "TROUBLESHOOTING.md",
+    "docs/demo/README.md",
     "AGENTS.md",
     "AI_AGENT_QUICKSTART.md",
     "skills/aihil-config-setup/SKILL.md",
