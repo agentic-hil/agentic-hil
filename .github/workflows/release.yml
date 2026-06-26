@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Validate release tag
+        run: >-
+          node -e "const tag=process.env.GITHUB_REF_NAME; const pkg=require('./package.json'); const lock=require('./package-lock.json'); const strict=/^v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$/; if(!strict.test(tag)){throw new Error('Release tag must be strict SemVer prefixed with v, got '+tag)} if(tag !== 'v'+pkg.version){throw new Error('Release tag '+tag+' does not match package.json version '+pkg.version)} if(lock.version !== pkg.version || lock.packages?.['']?.version !== pkg.version){throw new Error('package-lock.json version does not match package.json version '+pkg.version)}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check package contents
+        run: npm run pack:check
+
+      - name: Create release with notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

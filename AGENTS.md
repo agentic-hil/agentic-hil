@@ -4,6 +4,23 @@ AI-HIL is a local MCP stdio server that gives AI agents safe, structured access 
 
 Use the MCP server from this repository for hardware actions. Do not use raw OpenOCD commands or arbitrary shell commands for flashing, probing, or resetting hardware when an AI-HIL MCP tool is available.
 
+This file is for AI agents. Humans should start with `README.md` and `TROUBLESHOOTING.md`; agents should use this file, `AI_AGENT_QUICKSTART.md`, and `skills/aihil-config-setup/SKILL.md`.
+
+## Supported First Path
+
+Use this as the reference setup unless project files or the user clearly specify another target:
+
+- Board: STM32 Nucleo-F446RE.
+- Debug probe: ST-Link, including the onboard Nucleo ST-Link.
+- Debug backend: OpenOCD.
+- Host runtime: Node.js LTS with npm.
+- OpenOCD interface config: `interface/stlink.cfg`.
+- OpenOCD target config: `target/stm32f4x.cfg`.
+- Firmware artifact root: `build/`.
+- Firmware artifact formats: `.elf`, `.hex`, or `.bin`.
+
+Other boards may work, but do not guess target, debugger, COM port, or artifact paths. If they cannot be inferred from project files, ask one concise question.
+
 ## Installation Model
 
 Install the `aihil` command once on the local machine from npm with:
@@ -79,11 +96,14 @@ aihil mcp-config > .mcp.json
 8. Use `aihil_classify_last_error` after failures.
 9. Stop on `permission_denied`; the local AI-HIL configuration is authoritative.
 
+Expected healthy signals are `aihil doctor` with `ok: true`, `aihil_probe_target` with `ok: true` and `target_detected: true`, and `aihil_flash_firmware` with `ok: true`, `verify: true`, and `reset_after_flash: true`. The README contains full expected-output JSON examples.
+
 ## Available MCP Tools
 
 ```text
 aihil_debugger_info
 aihil_probe_target
+aihil_artifact_upload
 aihil_flash_firmware
 aihil_reset_target
 aihil_get_last_report

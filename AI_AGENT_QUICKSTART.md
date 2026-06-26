@@ -2,6 +2,22 @@
 
 Use AI-HIL as the local MCP server for embedded hardware actions.
 
+This file is for agents. Humans should start with `README.md` and use `TROUBLESHOOTING.md` for operator-facing diagnostics.
+
+## Reference Setup
+
+Prefer the supported first path unless the firmware project or user clearly says otherwise:
+
+- STM32 Nucleo-F446RE.
+- ST-Link.
+- OpenOCD.
+- Node.js LTS with npm.
+- `interface/stlink.cfg`.
+- `target/stm32f4x.cfg`.
+- Firmware artifacts under `build/`.
+
+If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
+
 ## Install Once
 
 Install the `aihil` command once on the local machine from npm with:
@@ -45,6 +61,8 @@ Keep `.aihil/` with the project because it defines that project's hardware polic
 aihil doctor
 ```
 
+Expected healthy result: `ok: true`, `tool: "aihil_doctor"`, `summary: "AI-HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
+
 ## Configure MCP
 
 AI-HIL uses MCP over stdio. The MCP client starts `aihil mcp-stdio` automatically from `.mcp.json`.
@@ -79,9 +97,11 @@ Use `tools/list` to discover available MCP tools, then follow this loop:
 
 1. Build firmware.
 2. Probe with `aihil_probe_target`.
-3. Flash with `aihil_flash_firmware` using `image_path`, usually `build/firmware.elf`.
+3. Flash with `aihil_flash_firmware` using `image_path`, usually `build/firmware.elf`, or first call `aihil_artifact_upload` with `image_path` and flash the returned `artifact_id`.
 4. For serial feedback, start `aihil_com_session_start`, send stimuli with `aihil_com_write`, read feedback with `aihil_com_read`, then stop with `aihil_com_session_stop`.
 5. Read the tool result and `aihil_get_last_report`.
 6. Diagnose failures with `aihil_classify_last_error`.
 
 Do not use raw OpenOCD commands or arbitrary COM port shell tools when an AI-HIL MCP tool is available.
+
+Healthy probe and flash signals are `target_detected: true`, `success_confirmed: true`, `verify: true`, `reset_after_flash: true`, plus `report_path` and `log_path` for auditability.

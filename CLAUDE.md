@@ -2,9 +2,13 @@
 
 This file provides guidance to Claude Code when working in this repository.
 
+Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. Human-facing setup and expected-output examples live in `README.md`.
+
 ## Project Overview
 
 AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, and reading structured reports from a configured local target.
+
+Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js LTS as the supported first path unless project files or the user clearly identify another setup.
 
 ## Installation Model
 
@@ -65,7 +69,7 @@ Follow this sequence for hardware validation:
 
 1. Build firmware.
 2. Call `aihil_probe_target`.
-3. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`.
+3. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`, or upload first with `aihil_artifact_upload` using `image_path` and flash the returned `artifact_id`.
 4. For serial stimuli or feedback, use only configured port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
 5. Read the returned JSON result.
 6. Call `aihil_get_last_report`.

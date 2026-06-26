@@ -37,6 +37,7 @@ Use MCP tools for hardware actions:
 ```text
 aihil_debugger_info
 aihil_probe_target
+aihil_artifact_upload
 aihil_flash_firmware
 aihil_reset_target
 aihil_get_last_report

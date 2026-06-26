@@ -24,7 +24,9 @@ function tempDir() {
   return mkdtempSync(path.join(tmpdir(), "aihil-ts-"));
 }
 
-function writeConfig(directory) {
+function writeConfig(directory, options = {}) {
+  const allowUpload = options.allowUpload ?? true;
+  const maxUploadSizeMb = options.maxUploadSizeMb ?? 1;
   const configPath = path.join(directory, ".aihil", "config.yaml");
   mkdirSync(path.dirname(configPath), { recursive: true });
   writeFileSync(
@@ -41,6 +43,9 @@ debugger:
 artifacts:
   allowed_roots: ["build"]
   allowed_extensions: [".elf", ".hex", ".bin"]
+  upload_directory: ".aihil/artifacts"
+  max_upload_size_mb: ${maxUploadSizeMb}
+  allow_upload: ${allowUpload ? "true" : "false"}
 reports:
   directory: ".aihil/reports"
 logs:
@@ -51,8 +56,8 @@ logs:
   return configPath;
 }
 
-async function withService(directory, fn) {
-  const service = new AIHILToolService(loadConfig(writeConfig(directory), directory));
+async function withService(directory, fn, configOptions = {}) {
+  const service = new AIHILToolService(loadConfig(writeConfig(directory, configOptions), directory));
   try {
     return await fn(service);
   } finally {
@@ -150,6 +155,71 @@ test("artifact validation blocks outside root", () => {
   }
 });
 
+test("artifact upload stores and resolves artifact ids", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory), directory);
+    const manager = new ArtifactManager(config);
+    const data = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66, 0x61, 0x6b, 0x65]);
+    const uploaded = manager.upload({ filename: "firmware.elf", data_base64: data.toString("base64") });
+    assert.equal(uploaded.ok, true);
+    assert.match(uploaded.artifact_id, /^[a-f0-9]{64}\.elf$/);
+    assert.equal(uploaded.artifact.source, "upload");
+    assert.equal(uploaded.artifact.sha256, createHash("sha256").update(data).digest("hex"));
+
+    const resolved = manager.resolveArtifactId(uploaded.artifact_id);
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.artifact.source, "upload");
+    assert.equal(resolved.artifact.artifact_id, uploaded.artifact_id);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact upload accepts local image paths", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory), directory);
+    const firmware = path.join(directory, "build", "firmware.elf");
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    const data = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]);
+    writeFileSync(firmware, data);
+
+    const uploaded = new ArtifactManager(config).upload({ image_path: "build/firmware.elf" });
+    assert.equal(uploaded.ok, true);
+    assert.match(uploaded.artifact_id, /^[a-f0-9]{64}\.elf$/);
+    assert.equal(uploaded.artifact.source, "upload");
+    assert.equal(uploaded.artifact.source_path, "build/firmware.elf");
+    assert.equal(uploaded.artifact.sha256, createHash("sha256").update(data).digest("hex"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact upload honors allow_upload", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory, { allowUpload: false }), directory);
+    const result = new ArtifactManager(config).upload({ filename: "firmware.elf", data_base64: "fw==" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error_type, "permission_denied");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact upload rejects oversized payloads", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory, { maxUploadSizeMb: 0 }), directory);
+    const result = new ArtifactManager(config).upload({ filename: "firmware.bin", data_base64: "AA==" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error_type, "artifact_too_large");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("mcp initialize and tools/list", async () => {
   const directory = tempDir();
   try {
@@ -159,7 +229,51 @@ test("mcp initialize and tools/list", async () => {
       const listed = await handleMcpMessage({ jsonrpc: "2.0", id: "tools", method: "tools/list" }, service);
       const toolNames = new Set(listed.result.tools.map((tool) => tool.name));
       assert.equal(toolNames.has("aihil_probe_target"), true);
+      assert.equal(toolNames.has("aihil_artifact_upload"), true);
       assert.equal(toolNames.has("aihil_flash_firmware"), true);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("mcp uploads and flashes artifact ids", async () => {
+  const directory = tempDir();
+  try {
+    await withService(directory, async (service) => {
+      const data = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]);
+      const upload = await mcpToolCall(service, "aihil_artifact_upload", {
+        filename: "firmware.elf",
+        data_base64: data.toString("base64"),
+      });
+      assert.equal(upload.ok, true);
+      assert.match(upload.artifact_id, /^[a-f0-9]{64}\.elf$/);
+
+      const flash = await mcpToolCall(service, "aihil_flash_firmware", { artifact_id: upload.artifact_id });
+      assert.equal(flash.ok, true);
+      assert.equal(flash.artifact.source, "upload");
+      assert.equal(flash.artifact.path, upload.artifact.path);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("mcp uploads local image paths and flashes artifact ids", async () => {
+  const directory = tempDir();
+  try {
+    const firmware = path.join(directory, "build", "firmware.elf");
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      const upload = await mcpToolCall(service, "aihil_artifact_upload", { image_path: "build/firmware.elf" });
+      assert.equal(upload.ok, true);
+      assert.equal(upload.artifact.source_path, "build/firmware.elf");
+
+      const flash = await mcpToolCall(service, "aihil_flash_firmware", { artifact_id: upload.artifact_id });
+      assert.equal(flash.ok, true);
+      assert.equal(flash.artifact.source, "upload");
+      assert.equal(flash.artifact.path, upload.artifact.path);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });

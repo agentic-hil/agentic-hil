@@ -1,0 +1,118 @@
+name: Bug report
+description: Report a reproducible AI-HIL setup, hardware, CLI, MCP, or COM failure.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing AI-HIL. Please include structured details so the issue can be reproduced safely.
+  - type: input
+    id: version
+    attributes:
+      label: AI-HIL version
+      description: Run `aihil --version` if available, or provide the npm package version / git commit.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - npm i -g aihil
+        - npm install --global .
+        - npm i -g hp-8472/aihil
+        - other
+    validations:
+      required: true
+  - type: input
+    id: host_os
+    attributes:
+      label: Host OS
+      placeholder: "Windows 11, Ubuntu 24.04, macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js and npm versions
+      description: Run `node --version` and `npm --version`.
+      placeholder: "node v20.x, npm 10.x"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Board and debug probe
+      placeholder: "STM32 Nucleo-F446RE with onboard ST-Link"
+    validations:
+      required: true
+  - type: input
+    id: debugger
+    attributes:
+      label: Debug backend and version
+      placeholder: "OpenOCD 0.12.0, interface/stlink.cfg, target/stm32f4x.cfg"
+    validations:
+      required: true
+  - type: input
+    id: com_ports
+    attributes:
+      label: Serial/COM setup, if relevant
+      placeholder: "COM5 at 115200 baud, /dev/ttyACM0, or not used"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include exact commands and MCP tool calls if applicable.
+      placeholder: |
+        1. aihil init
+        2. aihil doctor
+        3. Agent called aihil_probe_target
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` when present.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Sanitized `.aihil/config.yaml`
+      description: Remove local usernames, secrets, private paths, and unrelated COM devices.
+      render: yaml
+  - type: textarea
+    id: report
+    attributes:
+      label: Last report JSON
+      description: Paste sanitized `.aihil/reports/last-report.json` if available.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste only relevant sanitized OpenOCD or COM log excerpts.
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checks
+      options:
+        - label: I did not run raw OpenOCD/debugger commands to work around AI-HIL.
+        - label: I did not mass erase the target.
+        - label: I stopped after `permission_denied` if it occurred.
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add screenshots, links, or notes that help explain the issue.

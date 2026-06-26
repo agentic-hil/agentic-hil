@@ -15,6 +15,12 @@ Do not hand-write `.aihil/config.yaml` from memory. Use `aihil init` to create t
 
 The schema bundled with the installed `aihil` Node.js package is authoritative. A project-local schema copy is not required for runtime validation.
 
+## Supported First Path
+
+Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js LTS, `interface/stlink.cfg`, `target/stm32f4x.cfg`, and firmware artifacts under `build/` as the reference setup unless project files or the user clearly specify a different target.
+
+If the board, MCU family, debugger interface, target config, COM port, or artifact root cannot be inferred from project files, ask one concise question instead of guessing.
+
 ## Safety Boundaries
 
 - Never use raw OpenOCD or debugger commands for hardware actions.
@@ -46,12 +52,12 @@ Only change these fields unless the user explicitly asks for a broader policy ch
 - `debugger.interface_cfg`: OpenOCD interface config, for example `interface/stlink.cfg`.
 - `debugger.target_cfg`: OpenOCD target config, for example `target/stm32f4x.cfg`.
 - `artifacts.allowed_roots`: firmware build output directories, usually `build`.
-- `artifacts.allowed_extensions`: only add firmware artifact extensions that the project actually emits.
+- `artifacts.allowed_extensions`: keep `.elf`, `.hex`, and `.bin` unless the project actually emits another firmware artifact format.
 - `com_ports.<port_id>.device`: approved serial device for this project, for example `COM5` or `/dev/ttyUSB0`.
 - `com_ports.<port_id>.baudrate`: serial baud rate for the target or fixture.
 - `com_ports.<port_id>.encoding`: text encoding for decoded feedback, usually `utf-8`.
 
-If the board, MCU family, debugger interface, or target config cannot be inferred from project files, ask one concise question instead of guessing.
+If the supported first path does not match the project, change only the fields needed for the actual board and debugger.
 
 ## Validation Loop
 

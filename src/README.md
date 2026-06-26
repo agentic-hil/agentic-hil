@@ -1,14 +1,12 @@
 # Source
 
-This directory will contain the implementation of the AI-HIL host-side bridge.
-
-For now, no implementation language is fixed.
+This directory contains the TypeScript implementation of the AI-HIL host-side bridge.
 
 The source code should eventually provide:
 
-- an MCP server
+- MCP stdio server handling
 - safe MCP tool handlers
-- configuration loading
+- configuration loading and schema validation
 - policy checks
 - OpenOCD process execution
 - configured COM port streaming sessions

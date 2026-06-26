@@ -1,4 +1,11 @@
-build
+# Keep generated build output ignored except the prebuilt ELF used for onboarding.
+build/*
+!build/Debug/
+build/Debug/*
+!build/Debug/nucleo-f446re_demo.elf
 !.settings
+
+# AI-HIL config is host-specific: OpenOCD paths, COM devices, reports, and logs
+# belong to the local machine running the hardware loop.
 /.aihil
 /.vscode

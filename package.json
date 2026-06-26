@@ -14,16 +14,24 @@
   "homepage": "https://github.com/hp-8472/aihil#readme",
   "keywords": [
     "mcp",
-    "hardware-in-the-loop",
+    "model-context-protocol",
     "embedded",
+    "hardware-in-the-loop",
     "openocd",
-    "serial"
+    "firmware",
+    "serial",
+    "stlink",
+    "debugger",
+    "agent-tools",
+    "embedded-ai",
+    "stm32"
   ],
   "bin": {
     "aihil": "dist/main.js"
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs",
+    "pack:check": "npm pack --dry-run",
     "prepare": "npm run build",
     "prepublishOnly": "npm test",
     "test": "npm run build && node tests-ts/run-tests.mjs"
@@ -37,6 +45,10 @@
   "files": [
     "dist",
     "README.md",
+    "TROUBLESHOOTING.md",
+    "AGENTS.md",
+    "AI_AGENT_QUICKSTART.md",
+    "skills/aihil-config-setup/SKILL.md",
     "LICENSE"
   ],
   "dependencies": {

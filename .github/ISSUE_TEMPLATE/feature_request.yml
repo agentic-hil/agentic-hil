@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a scoped AI-HIL workflow, backend, safety, docs, or packaging improvement.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AI-HIL should stay local-first, MCP-native, and safe for agent-driven hardware workflows.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is blocked or painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - MCP tool behavior
+        - CLI setup or doctor
+        - Config validation
+        - OpenOCD backend
+        - COM/serial workflow
+        - Reports and error classification
+        - Documentation or examples
+        - Packaging or release process
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Target hardware or workflow
+      placeholder: "Board, probe, debugger backend, firmware build flow, COM setup"
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and policy impact
+      description: Does this expand hardware permissions, artifact roots, COM access, reset behavior, or debugger commands?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This can be implemented without arbitrary shell access.
+        - label: This can preserve configured artifact roots and COM-port boundaries.
+        - label: This does not require mass erase as a default workflow.

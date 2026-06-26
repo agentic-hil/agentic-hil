@@ -27,6 +27,29 @@ export const MCP_TOOLS: JsonObject[] = [
     inputSchema: EMPTY_OBJECT_SCHEMA,
   },
   {
+    name: "aihil_artifact_upload",
+    description: "Upload a local or base64-encoded firmware artifact into the configured AI-HIL artifact store.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        image_path: {
+          type: "string",
+          description: "Local firmware path under an allowed artifact root, for example build/firmware.elf.",
+        },
+        filename: {
+          type: "string",
+          description: "Original firmware filename for data_base64 uploads, used for extension validation.",
+        },
+        data_base64: {
+          type: "string",
+          description: "Padded base64-encoded firmware bytes.",
+        },
+      },
+      oneOf: [{ required: ["image_path"] }, { required: ["filename", "data_base64"] }],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "aihil_flash_firmware",
     description: "Flash a validated firmware artifact to the configured target. Provide exactly one of image_path or artifact_id.",
     inputSchema: {

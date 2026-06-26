@@ -49,6 +49,10 @@ export class AIHILToolService {
     return this.backend.flashFirmware(validation.artifact as JsonObject);
   }
 
+  async artifactUpload(payload: JsonObject | null = {}): Promise<JsonObject> {
+    return this.artifacts.upload(payload);
+  }
+
   resetTarget(mode = "run"): Promise<JsonObject> {
     return this.backend.resetTarget(mode);
   }
@@ -105,6 +109,9 @@ export class AIHILToolService {
     }
     if (name === "aihil_flash_firmware") {
       return this.flashFirmware(args);
+    }
+    if (name === "aihil_artifact_upload") {
+      return this.artifactUpload(args);
     }
     if (name === "aihil_reset_target") {
       return this.resetTarget(String(args.mode ?? "run"));
