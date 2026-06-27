@@ -3,13 +3,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 build/
-
-# Keep only the prebuilt Nucleo demo ELF versionable for first-run onboarding.
-!examples/nucleo-f446re_demo/build/
-examples/nucleo-f446re_demo/build/*
-!examples/nucleo-f446re_demo/build/Debug/
-examples/nucleo-f446re_demo/build/Debug/*
-!examples/nucleo-f446re_demo/build/Debug/nucleo-f446re_demo.elf
 .aihil/logs/
 .aihil/reports/
 .aihil/artifacts/

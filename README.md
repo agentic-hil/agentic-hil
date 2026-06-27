@@ -50,7 +50,7 @@ aihil mcp-config > .mcp.json
 
 From a local checkout of this repository, use `npm install --global .` instead of `npm i -g aihil`.
 
-The demo includes a prebuilt first-run ELF at `build/Debug/nucleo-f446re_demo.elf`, so you can validate the hardware loop before installing an ARM toolchain. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
+Build the demo firmware locally before flashing; generated ELF, HEX, and BIN files are not checked into source. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
 
 ## Windows First Run
 
@@ -85,7 +85,7 @@ aihil doctor
 aihil mcp-config > .mcp.json
 ```
 
-Run `cmake --preset Debug` and then `cmake --build --preset Debug` only when you want to rebuild the demo firmware locally.
+Run `cmake --preset Debug` and then `cmake --build --preset Debug` before asking an agent to flash `build/Debug/nucleo-f446re_demo.elf`.
 
 If OpenOCD is not on `PATH` or serial feedback is needed, edit the local `.aihil/config.yaml` before running `aihil doctor`. Do not commit machine-specific `.aihil/` files from the demo project.
 

@@ -1,8 +1,5 @@
-# Keep generated build output ignored except the prebuilt ELF used for onboarding.
-build/*
-!build/Debug/
-build/Debug/*
-!build/Debug/nucleo-f446re_demo.elf
+# Generated firmware build output stays local.
+build/
 !.settings
 
 # AI-HIL config is host-specific: OpenOCD paths, COM devices, reports, and logs

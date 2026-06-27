@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fc from "fast-check";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,13 @@ function test(name, fn) {
 function tempDir() {
   return mkdtempSync(path.join(tmpdir(), "aihil-ts-"));
 }
+
+const safePathSegment = fc
+  .array(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"), {
+    minLength: 1,
+    maxLength: 12,
+  })
+  .map((characters) => characters.join(""));
 
 function writeConfig(directory, options = {}) {
   const allowUpload = options.allowUpload ?? true;
@@ -150,6 +158,26 @@ test("artifact validation blocks outside root", () => {
     assert.equal(result.ok, false);
     assert.equal(result.error_type, "artifact_validation_failed");
     assert.equal(result.validation.allowed_root, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact validation rejects traversal segments for arbitrary paths", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory), directory);
+    const manager = new ArtifactManager(config);
+    fc.assert(
+      fc.property(fc.array(safePathSegment, { minLength: 0, maxLength: 3 }), safePathSegment, (prefixSegments, filename) => {
+        const prefix = ["build", ...prefixSegments].join("/");
+        const result = manager.validateLocalPath(`${prefix}/../${filename}.elf`);
+        assert.equal(result.ok, false);
+        assert.equal(result.error_type, "artifact_validation_failed");
+        assert.equal(result.validation.path_traversal_safe, false);
+      }),
+      { numRuns: 100 },
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
