@@ -8,7 +8,7 @@ Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. H
 
 AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, and reading structured reports from a configured local target.
 
-Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 22.14 or newer LTS as the supported first path unless project files or the user clearly identify another setup.
+Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js >=22.14 <25 as the supported first path unless project files or the user clearly identify another setup.
 
 ## Installation Model
 
