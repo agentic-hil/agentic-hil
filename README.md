@@ -1,6 +1,11 @@
 # AI-HIL
 
 [![Node CI](https://github.com/hp-8472/aihil/actions/workflows/ci.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hp-8472/aihil/badge)](https://scorecard.dev/viewer/?uri=github.com/hp-8472/aihil)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13391/badge)](https://www.bestpractices.dev/projects/13391)
+[![npm version](https://img.shields.io/npm/v/aihil.svg)](https://www.npmjs.com/package/aihil)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 **AI-HIL accelerates embedded development by putting your real hardware in the coding-agent loop and making hardware tests reproducible.**
 
@@ -9,6 +14,20 @@
 > Safety model: AI-HIL exposes only configured, high-level hardware actions. Raw debugger commands, direct host COM access outside configured ports, and mass erase stay disabled by default.
 
 It turns firmware work into a hardware-in-the-loop cycle: edit, build, probe, flash, reset, read logs, diagnose, improve, repeat. AI-HIL is the safe MCP stdio control layer that lets agents run and repeat that loop on real boards through configured tools instead of raw debugger or COM-port access.
+
+## Trust & Supply Chain
+
+- Public source, Apache-2.0 license, security policy, issue templates, PR template, and CODEOWNERS are part of the repository.
+- CI tests Node.js 22.14 and 24 with npm 11.5.1+ on Linux, macOS, and Windows; CodeQL scans JavaScript and TypeScript.
+- Dependabot and Dependency Review watch npm and GitHub Actions dependency changes.
+- npm releases use GitHub Actions trusted publishing with OIDC and provenance.
+- The published CLI uses `npm-shrinkwrap.json` to freeze the dependency tree installed by npm.
+- GitHub Releases generate a CycloneDX SBOM and signed artifact attestations for the npm tarball.
+- The threat model, common error classes, and cryptography scope are documented in [docs/security-design.md](docs/security-design.md).
+
+## Feedback and Contributions
+
+Report bugs and request enhancements through [GitHub Issues](https://github.com/hp-8472/aihil/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup, pull request expectations, test requirements, release checks, and hardware safety requirements for acceptable contributions.
 
 ## Quick Start
 
@@ -37,7 +56,7 @@ aihil mcp-config > .mcp.json
 
 From a local checkout of this repository, use `npm install --global .` instead of `npm i -g aihil`.
 
-The demo includes a prebuilt first-run ELF at `build/Debug/nucleo-f446re_demo.elf`, so you can validate the hardware loop before installing an ARM toolchain. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
+Build the demo firmware locally before flashing; generated ELF, HEX, and BIN files are not checked into source. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
 
 ## Windows First Run
 
@@ -72,7 +91,7 @@ aihil doctor
 aihil mcp-config > .mcp.json
 ```
 
-Run `cmake --preset Debug` and then `cmake --build --preset Debug` only when you want to rebuild the demo firmware locally.
+Run `cmake --preset Debug` and then `cmake --build --preset Debug` before asking an agent to flash `build/Debug/nucleo-f446re_demo.elf`.
 
 If OpenOCD is not on `PATH` or serial feedback is needed, edit the local `.aihil/config.yaml` before running `aihil doctor`. Do not commit machine-specific `.aihil/` files from the demo project.
 
@@ -140,7 +159,7 @@ The official reference setup is deliberately narrow:
 - Board: STM32 Nucleo-F446RE.
 - Debug probe: ST-Link, including the onboard Nucleo ST-Link.
 - Debug backend: OpenOCD.
-- Host runtime: Node.js LTS with npm.
+- Host runtime: Node.js 22.14 or newer LTS with npm; CI covers Node.js 22 and 24.
 - OpenOCD interface config: `interface/stlink.cfg`.
 - OpenOCD target config: `target/stm32f4x.cfg`.
 - Firmware artifact root: `build/`.
@@ -193,7 +212,21 @@ npm is the primary distribution channel for AI-HIL. The repository is a native N
 
 PyPI is intentionally not a primary target. Publish a Python package only if AI-HIL grows a deliberate Python wrapper for Python-heavy embedded teams.
 
-When publishing to npm, use trusted publishing from GitHub Actions with OIDC and npm provenance. This avoids long-lived npm tokens in repository secrets and records the build provenance for the published package.
+When publishing to npm, use trusted publishing from GitHub Actions with OIDC and npm provenance. This avoids long-lived npm tokens in repository secrets and records the build provenance for the published package. The published CLI also includes `npm-shrinkwrap.json` so npm installs resolve the audited dependency tree used by CI.
+
+GitHub Releases include the packed npm tarball, a CycloneDX SBOM at `sbom.cdx.json`, and signed artifact attestations that can be verified with `gh attestation verify`.
+
+To verify published artifacts, run the npm registry signature and provenance checks after installing dependencies in a clean checkout:
+
+```bash
+npm audit signatures
+```
+
+For GitHub release assets, download the release tarball and verify its attestation against this repository:
+
+```bash
+gh attestation verify ./aihil-<version>.tgz --repo hp-8472/aihil
+```
 
 AI-HIL is local-first because real hardware access depends on host USB, ST-Link, OpenOCD, and serial/COM devices. Keep the first-run path on the host through the npm CLI and MCP stdio.
 

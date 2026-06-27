@@ -8,6 +8,11 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    groups:
+      runtime-dependencies:
+        dependency-type: production
+      development-dependencies:
+        dependency-type: development
     ignore:
       - dependency-name: serialport
         update-types:
@@ -24,3 +29,7 @@ updates:
       time: "06:30"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

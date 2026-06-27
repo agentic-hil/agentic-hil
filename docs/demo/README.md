@@ -17,6 +17,7 @@ docs/demo/thumbnail.png
 - Run `aihil init` if `.aihil/config.yaml` is missing.
 - Set a Windows OpenOCD executable path only if OpenOCD is not on `PATH`.
 - Add a `com_ports` entry only if serial feedback is part of the recording.
+- Run `cmake --preset Debug` and `cmake --build --preset Debug` so `build/Debug/nucleo-f446re_demo.elf` exists locally.
 - Run `aihil doctor` and confirm `ok: true`.
 
 ## Shot List

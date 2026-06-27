@@ -3,7 +3,14 @@
   "version": "0.1.1",
   "description": "Generic hardware-in-the-loop debugger interface for AI agents",
   "license": "Apache-2.0",
+  "author": {
+    "name": "Hannes Pauli",
+    "email": "mail@hannes-pauli.de"
+  },
   "type": "module",
+  "packageManager": "npm@11.5.1",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hp-8472/aihil.git"
@@ -30,10 +37,13 @@
     "aihil": "dist/main.js"
   },
   "scripts": {
+    "audit:prod": "npm audit --omit=dev",
     "build": "tsc && node scripts/copy-assets.mjs",
     "pack:check": "npm pack --dry-run",
     "prepare": "npm run build",
     "prepublishOnly": "npm test",
+    "sbom": "npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json",
+    "shrinkwrap:check": "node scripts/check-shrinkwrap.mjs",
     "test": "npm run build && node tests-ts/run-tests.mjs"
   },
   "publishConfig": {
@@ -41,7 +51,7 @@
     "provenance": true
   },
   "engines": {
-    "node": ">=16.16"
+    "node": ">=22.14 <25"
   },
   "files": [
     "dist",
@@ -60,7 +70,8 @@
     "yaml": "^2.6.1"
   },
   "devDependencies": {
-    "@types/node": "^16.18.126",
+    "@types/node": "^22.15.0",
+    "fast-check": "^4.8.0",
     "typescript": "^6.0.3"
   }
 }

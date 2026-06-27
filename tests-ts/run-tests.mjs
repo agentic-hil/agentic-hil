@@ -11,6 +11,7 @@ import { runStdioServer } from "../dist/stdio.js";
 import { AIHILToolService } from "../dist/tools.js";
 import { initConfig, mcpConfig, schema } from "../dist/main.js";
 import { Readable, Writable } from "node:stream";
+import { fc, safePathSegment } from "./property-arbitraries.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fakeOpenocd = path.join(root, "tests-ts", "fixtures", "fake-openocd.js").replace(/\\/g, "/");
@@ -259,6 +260,26 @@ test("artifact validation blocks outside root", () => {
   }
 });
 
+test("artifact validation rejects traversal segments for arbitrary paths", () => {
+  const directory = tempDir();
+  try {
+    const config = loadConfig(writeConfig(directory), directory);
+    const manager = new ArtifactManager(config);
+    fc.assert(
+      fc.property(fc.array(safePathSegment, { minLength: 0, maxLength: 3 }), safePathSegment, (prefixSegments, filename) => {
+        const prefix = ["build", ...prefixSegments].join("/");
+        const result = manager.validateLocalPath(`${prefix}/../${filename}.elf`);
+        assert.equal(result.ok, false);
+        assert.equal(result.error_type, "artifact_validation_failed");
+        assert.equal(result.validation.path_traversal_safe, false);
+      }),
+      { numRuns: 100 },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("artifact upload stores and resolves artifact ids", () => {
   const directory = tempDir();
   try {
@@ -399,6 +420,25 @@ test("mcp tool calls debugger and flash paths", async () => {
       const lastReport = await mcpToolCall(service, "aihil_get_last_report");
       assert.equal(lastReport.ok, true);
       assert.equal(lastReport.report.tool, "aihil_flash_firmware");
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("flash command escapes Tcl-special artifact paths in logs", async () => {
+  const directory = tempDir();
+  try {
+    const filename = "firmware $[name].elf";
+    const firmware = path.join(directory, "build", filename);
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      const flash = await mcpToolCall(service, "aihil_flash_firmware", { image_path: `build/${filename}` });
+      assert.equal(flash.ok, true);
+
+      const log = JSON.parse(readFileSync(path.resolve(directory, String(flash.log_path)), "utf8"));
+      assert.match(log.command, /program \\".*firmware \\\\\$\\\\\[name\\\\\]\.elf\\" verify reset/);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
