@@ -1,0 +1,96 @@
+name: Backfill release attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attest, for example v0.1.1
+        required: true
+        default: v0.1.1
+        type: string
+      asset:
+        description: Existing release tarball asset to attest
+        required: true
+        default: aihil-0.1.1.tgz
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Attest existing release asset
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      TAG: ${{ inputs.tag }}
+      ASSET: ${{ inputs.asset }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag must be a strict SemVer tag like v0.1.1" >&2
+            exit 1
+          fi
+          if [[ ! "$ASSET" =~ ^aihil-[0-9]+\.[0-9]+\.[0-9]+\.tgz$ ]]; then
+            echo "asset must be an aihil npm tarball like aihil-0.1.1.tgz" >&2
+            exit 1
+          fi
+
+      - name: Download release asset
+        shell: bash
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET"
+
+      - name: Verify release asset digest
+        id: digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_digest="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[] | select(.name == \"$ASSET\") | .digest")"
+          if [[ ! "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "release asset digest was not available from GitHub" >&2
+            exit 1
+          fi
+          actual_sha="$(sha256sum "$ASSET" | awk '{print $1}')"
+          expected_sha="${expected_digest#sha256:}"
+          if [[ "$actual_sha" != "$expected_sha" ]]; then
+            echo "downloaded asset digest does not match GitHub release metadata" >&2
+            exit 1
+          fi
+          echo "sha256=$actual_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Create post-release attestation predicate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-asset-attestation-predicate.json <<EOF
+          {
+            "tag": "$TAG",
+            "asset": "$ASSET",
+            "sha256": "${{ steps.digest.outputs.sha256 }}",
+            "statement": "This is a post-release attestation of the existing GitHub Release asset digest. It does not claim that this workflow rebuilt the asset."
+          }
+          EOF
+
+      - name: Attest existing release asset
+        id: attest-release-asset
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ github.workspace }}/${{ inputs.asset }}
+          predicate-type: https://github.com/hp-8472/aihil/release-asset-attestation/v1
+          predicate-path: ${{ github.workspace }}/release-asset-attestation-predicate.json
+
+      - name: Upload attestation release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "${{ steps.attest-release-asset.outputs.bundle-path }}" "$ASSET.release.intoto.jsonl"
+          gh release upload "$TAG" "$ASSET.release.intoto.jsonl" --repo "$GITHUB_REPOSITORY" --clobber
