@@ -8,8 +8,34 @@ permissions:
   contents: read
 
 jobs:
+  audit:
+    name: Production dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.14.0"
+          cache: npm
+
+      - name: Use npm 11.5.1 or newer
+        run: npm install -g npm@^11.5.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check shrinkwrap alignment
+        run: npm run shrinkwrap:check
+
+      - name: Audit production dependencies
+        run: npm run audit:prod
+
   test:
-    name: Node LTS on ${{ matrix.os }}
+    name: Node ${{ matrix.node-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -19,6 +45,9 @@ jobs:
           - ubuntu-latest
           - macos-latest
           - windows-latest
+        node-version:
+          - "22.14.0"
+          - "24.x"
 
     steps:
       - name: Checkout
@@ -27,14 +56,20 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: lts/*
+          node-version: ${{ matrix.node-version }}
           cache: npm
+
+      - name: Use npm 11.5.1 or newer
+        run: npm install -g npm@^11.5.1
 
       - name: Install dependencies
         run: npm ci
 
       - name: Run tests
         run: npm test
+
+      - name: Check shrinkwrap alignment
+        run: npm run shrinkwrap:check
 
       - name: Check package contents
         run: npm run pack:check

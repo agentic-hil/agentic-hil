@@ -53,11 +53,11 @@ AI-HIL is designed to let agents perform hardware actions through configured, na
 
 ## Releases
 
-GitHub Releases are created by the release workflow when a strict SemVer tag matching the `package.json` version is pushed. The workflow runs `npm test`, checks the package contents with `npm run pack:check`, packs the npm tarball, and creates a release with generated release notes plus the tarball asset.
+GitHub Releases are created by the release workflow when a strict SemVer tag matching the `package.json` version is pushed. The workflow runs `npm test`, checks the shrinkwrap and package contents, audits production dependencies, packs the npm tarball, generates an SBOM, creates artifact attestations, and creates a release with generated release notes plus the tarball and SBOM assets.
 
 Before tagging a release:
 
 - Update `CHANGELOG.md`.
-- Update `package.json` and `package-lock.json` to the same version.
-- Run `npm test` and `npm run pack:check`.
+- Update `package.json` and `npm-shrinkwrap.json` to the same version.
+- Run `npm test`, `npm run shrinkwrap:check`, and `npm run pack:check`.
 - Confirm the npm publish workflow still uses trusted publishing with provenance.

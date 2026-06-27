@@ -1,6 +1,6 @@
 # Release Strategy
 
-AI-HIL currently has `0.1.0` published on npm, but no GitHub Releases. GitHub Releases are the canonical place for ready-to-use versions, release notes, and later downloadable artifacts.
+AI-HIL publishes through npm and GitHub Releases. GitHub Releases are the canonical place for ready-to-use versions, release notes, the npm tarball, SBOMs, and artifact attestations.
 
 Do not cut the next release for metadata-only or README-only cleanup. Batch hygiene work into the next release that delivers visible user value.
 
@@ -45,6 +45,8 @@ Use npm first. AI-HIL is currently a Node.js CLI with TypeScript builds and a pa
 
 Publish npm releases through GitHub Actions trusted publishing with OIDC and provenance. Do not add long-lived npm automation tokens unless trusted publishing is unavailable for a documented reason.
 
+The release dependency tree is frozen with `npm-shrinkwrap.json`. Treat it as the authoritative lockfile for both repository installs and the published CLI package.
+
 Later packaging candidates are Homebrew, Scoop or WinGet, and optional single-file binaries.
 
 ## Release Checklist
@@ -52,12 +54,29 @@ Later packaging candidates are Homebrew, Scoop or WinGet, and optional single-fi
 Before creating a release:
 
 ```text
-1. Update package.json and package-lock.json to the release version.
+1. Update package.json, npm-shrinkwrap.json, and CHANGELOG.md to the release version.
 2. Run npm test.
-3. Run npm pack --dry-run and inspect the packaged files.
-4. Create a strict SemVer vX.Y.Z Git tag that exactly matches package.json.
-5. Let the release workflow validate the tag, test, pack-check, and create the GitHub Release.
-6. Confirm the npm publish workflow uses OIDC trusted publishing and provenance.
-7. Confirm the version is not already published to npm.
-8. Start from GitHub auto-generated release notes, then edit for clarity.
+3. Run npm run shrinkwrap:check.
+4. Run npm run audit:prod.
+5. Run npm pack --dry-run and inspect the packaged files.
+6. Create a strict SemVer vX.Y.Z Git tag that exactly matches package.json.
+7. Let the release workflow validate the tag, test, audit, pack, generate SBOM, create attestations, and create the GitHub Release.
+8. Confirm the npm publish workflow uses OIDC trusted publishing and provenance.
+9. Confirm the version is not already published to npm.
+10. Start from GitHub auto-generated release notes, then edit for clarity.
+```
+
+## Repository Protection
+
+Keep `master` protected with required status checks for CI, CodeQL, Dependency Review, and Scorecards. Do not enable required human approvals while the project has only one maintainer, because that can make routine releases impossible to merge. Enable required reviews and stale-review dismissal once a second maintainer is available.
+
+Recommended branch protection settings today:
+
+```text
+require pull requests before merging
+require status checks before merging
+require branches to be up to date before merging
+block force pushes
+block branch deletion
+do not require approval count > 0 until a second maintainer exists
 ```

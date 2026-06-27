@@ -42,14 +42,19 @@ jobs:
       - name: Validate release version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: >-
-          node -e "const tag=process.env.RELEASE_TAG; const pkg=require('./package.json'); const lock=require('./package-lock.json'); const strict=/^v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$/; if(!strict.test(tag)){throw new Error('Release tag must be strict SemVer prefixed with v, got '+tag)} if(tag !== 'v'+pkg.version){throw new Error('Release tag '+tag+' does not match package.json version '+pkg.version)} if(lock.version !== pkg.version || lock.packages?.['']?.version !== pkg.version){throw new Error('package-lock.json version does not match package.json version '+pkg.version)}"
+        run: node scripts/validate-release.mjs "$RELEASE_TAG"
 
       - name: Install dependencies
         run: npm ci
 
       - name: Run tests
         run: npm test
+
+      - name: Check shrinkwrap alignment
+        run: npm run shrinkwrap:check
+
+      - name: Audit production dependencies
+        run: npm run audit:prod
 
       - name: Check package contents
         run: npm run pack:check
