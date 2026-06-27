@@ -153,7 +153,7 @@ The official reference setup is deliberately narrow:
 - Board: STM32 Nucleo-F446RE.
 - Debug probe: ST-Link, including the onboard Nucleo ST-Link.
 - Debug backend: OpenOCD.
-- Host runtime: Node.js 22.14 or newer LTS with npm; CI covers Node.js 22 and 24.
+- Host runtime: Node.js >=22.14 <25 with npm; CI covers Node.js 22.14 and 24.x.
 - OpenOCD interface config: `interface/stlink.cfg`.
 - OpenOCD target config: `target/stm32f4x.cfg`.
 - Firmware artifact root: `build/`.
