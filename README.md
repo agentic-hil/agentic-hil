@@ -3,6 +3,7 @@
 [![Node CI](https://github.com/hp-8472/aihil/actions/workflows/ci.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hp-8472/aihil/badge)](https://scorecard.dev/viewer/?uri=github.com/hp-8472/aihil)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13391/badge)](https://www.bestpractices.dev/projects/13391)
 [![npm version](https://img.shields.io/npm/v/aihil.svg)](https://www.npmjs.com/package/aihil)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
@@ -22,6 +23,11 @@ It turns firmware work into a hardware-in-the-loop cycle: edit, build, probe, fl
 - npm releases use GitHub Actions trusted publishing with OIDC and provenance.
 - The published CLI uses `npm-shrinkwrap.json` to freeze the dependency tree installed by npm.
 - GitHub Releases generate a CycloneDX SBOM and signed artifact attestations for the npm tarball.
+- The threat model, common error classes, and cryptography scope are documented in [docs/security-design.md](docs/security-design.md).
+
+## Feedback and Contributions
+
+Report bugs and request enhancements through [GitHub Issues](https://github.com/hp-8472/aihil/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup, pull request expectations, test requirements, release checks, and hardware safety requirements for acceptable contributions.
 
 ## Quick Start
 
