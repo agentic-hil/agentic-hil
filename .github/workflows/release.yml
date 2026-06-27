@@ -29,9 +29,6 @@ jobs:
           node-version: "22.14.0"
           cache: npm
 
-      - name: Use npm 11.5.1 or newer
-        run: npm install -g npm@11.5.1
-
       - name: Validate release tag
         run: node scripts/validate-release.mjs "$GITHUB_REF_NAME"
 
