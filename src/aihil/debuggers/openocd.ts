@@ -117,7 +117,7 @@ export class OpenOCDBackend implements DebuggerBackend {
       return this.permissionDenied("aihil_flash_firmware", "Flashing is disabled while mass erase is allowed.");
     }
 
-    const commandPath = String(artifact.resolved_path).replace(/\\/g, "/").replace(/"/g, '\\"');
+    const commandPath = escapeTclDoubleQuotedWord(openocdPathForCommand(String(artifact.resolved_path)));
     const marker = OPENOCD_SUCCESS_MARKERS.aihil_flash_firmware;
     const result = this.runOpenocd(
       "aihil_flash_firmware",
@@ -535,8 +535,20 @@ function containsFailureText(output: string): boolean {
   return containsAny(output.toLowerCase(), ["error:", "failed", "failure", "mismatch"]);
 }
 
+function openocdPathForCommand(value: string): string {
+  return process.platform === "win32" ? value.replace(/\\/g, "/") : value;
+}
+
+function escapeTclDoubleQuotedWord(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+}
+
 function commandForLog(args: string[]): string {
-  return args.map((arg) => (/[\s"]/u.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg)).join(" ");
+  return args.map((arg) => (/[\s"\\]/u.test(arg) ? `"${escapeCommandLogArg(arg)}"` : arg)).join(" ");
+}
+
+function escapeCommandLogArg(arg: string): string {
+  return arg.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function which(executable: string): string | null {

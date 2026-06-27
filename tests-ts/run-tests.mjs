@@ -301,6 +301,25 @@ test("mcp tool calls debugger and flash paths", async () => {
   }
 });
 
+test("flash command escapes Tcl-special artifact paths in logs", async () => {
+  const directory = tempDir();
+  try {
+    const filename = "firmware $[name].elf";
+    const firmware = path.join(directory, "build", filename);
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      const flash = await mcpToolCall(service, "aihil_flash_firmware", { image_path: `build/${filename}` });
+      assert.equal(flash.ok, true);
+
+      const log = JSON.parse(readFileSync(path.resolve(directory, String(flash.log_path)), "utf8"));
+      assert.match(log.command, /program \\".*firmware \\\\\$\\\\\[name\\\\\]\.elf\\" verify reset/);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("mcp rejects invalid reset mode", async () => {
   const directory = tempDir();
   try {
