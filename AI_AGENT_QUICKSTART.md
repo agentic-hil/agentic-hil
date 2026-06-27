@@ -11,7 +11,7 @@ Prefer the supported first path unless the firmware project or user clearly says
 - STM32 Nucleo-F446RE.
 - ST-Link.
 - OpenOCD.
-- Node.js 22.14 or newer LTS with npm.
+- Node.js >=22.14 <25 with npm.
 - `interface/stlink.cfg`.
 - `target/stm32f4x.cfg`.
 - Firmware artifacts under `build/`.
