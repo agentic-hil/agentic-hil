@@ -17,7 +17,7 @@ The schema bundled with the installed `aihil` Node.js package is authoritative. 
 
 ## Supported First Path
 
-Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js LTS, `interface/stlink.cfg`, `target/stm32f4x.cfg`, and firmware artifacts under `build/` as the reference setup unless project files or the user clearly specify a different target.
+Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js >=22.14 <25, `interface/stlink.cfg`, `target/stm32f4x.cfg`, and firmware artifacts under `build/` as the reference setup unless project files or the user clearly specify a different target.
 
 If the board, MCU family, debugger interface, target config, COM port, or artifact root cannot be inferred from project files, ask one concise question instead of guessing.
 

@@ -4,6 +4,20 @@ All notable changes to AI-HIL will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Added
+
+- Dependency Review and OSSF Scorecard workflows for pull-request and repository hardening signals.
+- `npm-shrinkwrap.json` as the authoritative publishable lockfile for the CLI dependency tree.
+- Release SBOM generation and artifact attestations for GitHub Release tarballs.
+- Shrinkwrap and release metadata validation scripts for CI, release, and npm publish workflows.
+
+### Changed
+
+- Node.js support is now explicit for Node.js 22.14 through 24, with CI covering both supported runtime lines on Linux, macOS, and Windows.
+- Release and contributor documentation now describe SBOMs, attestations, npm provenance, and branch-protection expectations.
+
 ## [0.1.1] - 2026-06-26
 
 ### Added
