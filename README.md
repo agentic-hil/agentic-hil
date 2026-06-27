@@ -210,6 +210,18 @@ When publishing to npm, use trusted publishing from GitHub Actions with OIDC and
 
 GitHub Releases include the packed npm tarball, a CycloneDX SBOM at `sbom.cdx.json`, and signed artifact attestations that can be verified with `gh attestation verify`.
 
+To verify published artifacts, run the npm registry signature and provenance checks after installing dependencies in a clean checkout:
+
+```bash
+npm audit signatures
+```
+
+For GitHub release assets, download the release tarball and verify its attestation against this repository:
+
+```bash
+gh attestation verify ./aihil-<version>.tgz --repo hp-8472/aihil
+```
+
 AI-HIL is local-first because real hardware access depends on host USB, ST-Link, OpenOCD, and serial/COM devices. Keep the first-run path on the host through the npm CLI and MCP stdio.
 
 Later packaging candidates are Homebrew, Scoop or WinGet, and optional single-file binaries.
