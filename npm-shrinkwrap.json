@@ -1,12 +1,12 @@
 {
   "name": "aihil",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "aihil",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "license": "Apache-2.0",
       "dependencies": {
         "ajv": "^8.17.1",
