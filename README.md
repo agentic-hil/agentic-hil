@@ -115,14 +115,7 @@ aihil doctor
 aihil mcp-config > .mcp.json
 ```
 
-Build the demo firmware locally before flashing:
-
-```bash
-cmake --preset Debug
-cmake --build --preset Debug
-```
-
-The flashable ELF is then available at:
+The demo includes a prebuilt first-run ELF at:
 
 ```text
 build/Debug/nucleo-f446re_demo.elf
