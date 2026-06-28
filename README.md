@@ -270,17 +270,26 @@ artifacts:
   max_upload_size_mb: 64
   allow_upload: true
 
+can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "PCAN_USBBUS1"
+    bitrate: 500000
+    timeout_s: 10
+
 permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
   allow_com_read: true
   allow_com_write: true
+  allow_can_read: true
+  allow_can_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 ```
 
-Set `debugger.probe_id` to the intended ST-Link/debug probe serial number when multiple probes are connected. Add `com_ports` only for serial ports that are intentionally part of the project setup.
+Set `debugger.probe_id` to the intended ST-Link/debug probe serial number when multiple probes are connected. Add `com_ports` only for serial ports that are intentionally part of the project setup. Add `can_buses` only for CAN adapters that agents may use; for a PEAK USB adapter on Windows, start with `adapter: "peak"`, `channel: "PCAN_USBBUS1"`, and the intended `bitrate`.
 
 To use ST-Link directly through STM32CubeProgrammer instead of OpenOCD, set `debugger.type` to `stlink`:
 
@@ -328,6 +337,14 @@ The exact paths, timestamps, OpenOCD version, elapsed times, COM device names, a
       "encoding": "utf-8"
     }
   },
+  "can_buses": {
+    "dut_can": {
+      "adapter": "peak",
+      "channel": "PCAN_USBBUS1",
+      "bitrate": 500000,
+      "fd": false
+    }
+  },
   "debugger": {
     "ok": true,
     "tool": "aihil_debugger_info",
@@ -339,7 +356,7 @@ The exact paths, timestamps, OpenOCD version, elapsed times, COM device names, a
 }
 ```
 
-If no serial port is configured, `com_ports` is `{}`.
+If no serial port is configured, `com_ports` is `{}`. If no CAN bus is configured, `can_buses` is `{}`.
 
 ### Successful Probe Report
 
@@ -498,6 +515,7 @@ The default model is:
 - Mass erase is disabled.
 - Firmware paths must be under configured artifact roots.
 - COM access is limited to named `com_ports` entries.
+- CAN access is limited to named `can_buses` entries.
 - Every hardware action returns structured JSON and writes raw logs for human inspection.
 
 ## Repository Layout

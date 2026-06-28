@@ -184,6 +184,106 @@ export const MCP_TOOLS: JsonObject[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "aihil_can_buses_list",
+    description: "List configured named CAN buses, adapter types, and active session status.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    name: "aihil_can_session_start",
+    description: "Open a configured CAN bus and start a session for CAN frame send/read operations.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bus_id: {
+          type: "string",
+          description: "Configured CAN bus id from .aihil/config.yaml, for example dut_can.",
+        },
+        clear_rx_queue: {
+          type: "boolean",
+          default: true,
+          description: "Clear the adapter receive queue when the session starts, if the backend supports it.",
+        },
+      },
+      required: ["bus_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_can_session_stop",
+    description: "Stop a configured CAN bus session and close the adapter channel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bus_id: {
+          type: "string",
+          description: "Configured CAN bus id from .aihil/config.yaml, for example dut_can.",
+        },
+      },
+      required: ["bus_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_can_send",
+    description: "Send one classic CAN frame on an active configured CAN bus session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bus_id: {
+          type: "string",
+          description: "Configured CAN bus id from .aihil/config.yaml, for example dut_can.",
+        },
+        frame_id: {
+          oneOf: [{ type: "integer", minimum: 0 }, { type: "string" }],
+          description: "CAN frame id as integer or string, for example 291 or 0x123.",
+        },
+        extended: {
+          type: "boolean",
+          default: false,
+          description: "Use a 29-bit extended CAN identifier instead of an 11-bit standard identifier.",
+        },
+        rtr: {
+          type: "boolean",
+          default: false,
+          description: "Send a remote transmission request frame.",
+        },
+        data_hex: {
+          type: "string",
+          default: "",
+          description: "CAN payload bytes as hexadecimal text, spaces allowed, for example '01 02 ff'.",
+        },
+      },
+      required: ["bus_id", "frame_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_can_read",
+    description: "Read CAN frames from an active configured CAN bus session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bus_id: {
+          type: "string",
+          description: "Configured CAN bus id from .aihil/config.yaml, for example dut_can.",
+        },
+        max_frames: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum CAN frames to consume from the adapter receive queue.",
+        },
+        wait_timeout_s: {
+          type: "number",
+          minimum: 0,
+          default: 0,
+          description: "Optional wait time for at least one CAN frame if the receive queue is initially empty.",
+        },
+      },
+      required: ["bus_id"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const AIHIL_WORKFLOW_PROMPT = `Use AI-HIL as the safe gate to the configured embedded hardware.
@@ -195,12 +295,14 @@ Workflow:
 4. Read the structured result after every hardware action.
 5. Reset only when needed or when the task explicitly requires it.
 6. For serial stimuli and feedback, use only configured COM port ids, start a session before writing or reading, and stop the session when done.
-7. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
+7. For CAN stimuli and feedback, use only configured CAN bus ids, start a CAN session before sending or reading frames, and stop the session when done.
+8. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
 - Do not request arbitrary shell access for hardware actions.
 - Do not flash files outside configured artifact roots.
+- Do not open CAN adapters directly outside configured AI-HIL CAN tools.
 - Treat permission_denied as authoritative and stop.
 `;
 

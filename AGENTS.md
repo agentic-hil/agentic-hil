@@ -92,9 +92,10 @@ aihil mcp-config > .mcp.json
 4. Flash only validated artifacts with `aihil_flash_firmware`.
 5. Use `aihil_reset_target` only with mode `run`, `halt`, or `init`.
 6. Use configured COM port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop` for serial stimuli and feedback.
-7. Read `aihil_get_last_report` after hardware actions.
-8. Use `aihil_classify_last_error` after failures.
-9. Stop on `permission_denied`; the local AI-HIL configuration is authoritative.
+7. Use configured CAN bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop` for CAN stimuli and feedback.
+8. Read `aihil_get_last_report` after hardware actions.
+9. Use `aihil_classify_last_error` after failures.
+10. Stop on `permission_denied`; the local AI-HIL configuration is authoritative.
 
 Expected healthy signals are `aihil doctor` with `ok: true`, `aihil_probe_target` with `ok: true` and `target_detected: true`, and `aihil_flash_firmware` with `ok: true`, `verify: true`, and `reset_after_flash: true`. The README contains full expected-output JSON examples.
 
@@ -113,6 +114,11 @@ aihil_com_session_start
 aihil_com_write
 aihil_com_read
 aihil_com_session_stop
+aihil_can_buses_list
+aihil_can_session_start
+aihil_can_send
+aihil_can_read
+aihil_can_session_stop
 ```
 
 ## Safety Rules
@@ -122,6 +128,8 @@ Never request or run raw OpenOCD/debugger commands for hardware actions.
 Never use arbitrary shell COM-port tools when an AI-HIL COM-port MCP tool is available.
 
 Do not open host COM devices directly. Use AI-HIL's configured COM MCP tools with named `port_id` values.
+
+Do not open CAN adapters directly. Use AI-HIL's configured CAN MCP tools with named `bus_id` values.
 
 Use `aihil com-stdio` only when the user explicitly wants a continuous text serial channel. The `--port` value must be a configured `com_ports` id.
 

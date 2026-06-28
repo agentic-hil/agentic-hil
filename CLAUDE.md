@@ -63,7 +63,7 @@ For a separate plain text serial channel, use `aihil com-stdio --config .aihil/c
 
 ## Agent Rules
 
-Use the AI-HIL MCP tools for hardware actions. Do not use raw OpenOCD commands or shell commands for probe, flash, reset, or COM port workflows when the MCP server is available.
+Use the AI-HIL MCP tools for hardware actions. Do not use raw OpenOCD commands or shell commands for probe, flash, reset, COM port, or CAN adapter workflows when the MCP server is available.
 
 Follow this sequence for hardware validation:
 
@@ -71,9 +71,10 @@ Follow this sequence for hardware validation:
 2. Call `aihil_probe_target`.
 3. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`, or upload first with `aihil_artifact_upload` using `image_path` and flash the returned `artifact_id`.
 4. For serial stimuli or feedback, use only configured port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
-5. Read the returned JSON result.
-6. Call `aihil_get_last_report`.
-7. Call `aihil_classify_last_error` after failed actions.
+5. For CAN stimuli or feedback, use only configured bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.
+6. Read the returned JSON result.
+7. Call `aihil_get_last_report`.
+8. Call `aihil_classify_last_error` after failed actions.
 
 Stop on `permission_denied` and report the local policy restriction.
 

@@ -16,10 +16,11 @@ The primary risks are:
 
 ## Mitigations
 
-- MCP tools expose named, high-level actions such as probe, flash, reset, report retrieval, and configured COM sessions instead of a raw debugger shell.
+- MCP tools expose named, high-level actions such as probe, flash, reset, report retrieval, configured COM sessions, and configured CAN sessions instead of a raw debugger shell or direct host device access.
 - Firmware artifacts must be under configured artifact roots and match configured extensions before flashing or upload resolution.
 - Uploaded artifacts are size-limited and identified with SHA-256 metadata.
 - COM-port access uses configured `port_id` values. AI-HIL does not open arbitrary host serial devices from agent-provided paths.
+- CAN-bus access uses configured `bus_id` values. AI-HIL does not open arbitrary host CAN adapters from agent-provided paths.
 - `mcp-stdio` is reserved for JSON-RPC. Plain serial text uses the separate `com-stdio` path only when explicitly requested.
 - Reports and structured errors include `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` so failures can be audited without bypassing policy.
 

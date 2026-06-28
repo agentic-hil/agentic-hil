@@ -34,6 +34,23 @@ export interface ComPortConfig {
   max_write_bytes: number;
 }
 
+export interface CanBusConfig {
+  adapter: "peak" | "process";
+  channel: string;
+  bitrate: number;
+  fd: boolean;
+  data_bitrate: number | null;
+  pcanbasic_dll: string | null;
+  executable: string | null;
+  args: string[];
+  timeout_s: number;
+  poll_interval_ms: number;
+  receive_own_messages: boolean;
+  listen_only: boolean;
+  max_buffer_frames: number;
+  max_frame_data_bytes: number;
+}
+
 export interface ValidationConfig {
   require_existing_file: boolean;
   require_allowed_root: boolean;
@@ -48,6 +65,8 @@ export interface PermissionsConfig {
   allow_reset: boolean;
   allow_com_read: boolean;
   allow_com_write: boolean;
+  allow_can_read: boolean;
+  allow_can_write: boolean;
   allow_raw_debugger_commands: boolean;
   allow_mass_erase: boolean;
 }
@@ -67,6 +86,7 @@ export interface AIHILConfig {
   debugger: DebuggerConfig;
   artifacts: ArtifactsConfig;
   com_ports: Record<string, ComPortConfig>;
+  can_buses: Record<string, CanBusConfig>;
   validation: ValidationConfig;
   permissions: PermissionsConfig;
   reports: ReportsConfig;

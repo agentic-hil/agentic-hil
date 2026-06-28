@@ -17,6 +17,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fakeOpenocd = path.join(root, "tests-ts", "fixtures", "fake-openocd.js").replace(/\\/g, "/");
 const fakeStlink = path.join(root, "tests-ts", "fixtures", "fake-stlink.js").replace(/\\/g, "/");
 const fakeStlinkUnconfirmed = path.join(root, "tests-ts", "fixtures", "fake-stlink-unconfirmed.js").replace(/\\/g, "/");
+const fakeCanBridge = path.join(root, "tests-ts", "fixtures", "fake-can-bridge.js").replace(/\\/g, "/");
 const tests = [];
 
 function test(name, fn) {
@@ -34,6 +35,7 @@ function writeConfig(directory, options = {}) {
   const debuggerType = options.debuggerType ?? "openocd";
   const debuggerExecutable = options.debuggerExecutable ?? (debuggerType === "stlink" ? fakeStlink : fakeOpenocd);
   const flashAddress = options.flashAddress ?? null;
+  const canBusesYaml = options.canBusesYaml ?? "";
   const configPath = path.join(directory, ".aihil", "config.yaml");
   mkdirSync(path.dirname(configPath), { recursive: true });
   writeFileSync(
@@ -56,6 +58,7 @@ artifacts:
   upload_directory: ".aihil/artifacts"
   max_upload_size_mb: ${maxUploadSizeMb}
   allow_upload: ${allowUpload ? "true" : "false"}
+${canBusesYaml}
 reports:
   directory: ".aihil/reports"
 logs:
@@ -128,6 +131,9 @@ test("config loads defaults", () => {
     assert.equal(config.target.name, "example-target");
     assert.equal(config.debugger.probe_id, null);
     assert.deepEqual(config.artifacts.allowed_extensions, [".elf", ".hex", ".bin"]);
+    assert.deepEqual(config.can_buses, {});
+    assert.equal(config.permissions.allow_can_read, true);
+    assert.equal(config.permissions.allow_can_write, true);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -380,6 +386,8 @@ test("mcp initialize and tools/list", async () => {
       assert.equal(toolNames.has("aihil_probe_target"), true);
       assert.equal(toolNames.has("aihil_artifact_upload"), true);
       assert.equal(toolNames.has("aihil_flash_firmware"), true);
+      assert.equal(toolNames.has("aihil_can_buses_list"), true);
+      assert.equal(toolNames.has("aihil_can_send"), true);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -424,6 +432,53 @@ test("mcp uploads local image paths and flashes artifact ids", async () => {
       assert.equal(flash.artifact.source, "upload");
       assert.equal(flash.artifact.path, upload.artifact.path);
     });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("mcp sends and reads CAN frames through process adapter", async () => {
+  const directory = tempDir();
+  try {
+    await withService(
+      directory,
+      async (service) => {
+        const listed = await mcpToolCall(service, "aihil_can_buses_list");
+        assert.equal(listed.ok, true);
+        assert.equal(listed.buses.dut_can.adapter, "process");
+
+        const started = await mcpToolCall(service, "aihil_can_session_start", { bus_id: "dut_can" });
+        assert.equal(started.ok, true);
+
+        const sent = await mcpToolCall(service, "aihil_can_send", {
+          bus_id: "dut_can",
+          frame_id: "0x123",
+          data_hex: "01 02 03",
+        });
+        assert.equal(sent.ok, true);
+        assert.equal(sent.frame.id, 0x123);
+        assert.equal(sent.frame.data.hex, "010203");
+
+        const read = await mcpToolCall(service, "aihil_can_read", { bus_id: "dut_can", max_frames: 1 });
+        assert.equal(read.ok, true);
+        assert.equal(read.frames_read, 1);
+        assert.equal(read.frames[0].id, 0x123);
+        assert.equal(read.frames[0].data.hex, "010203");
+
+        const stopped = await mcpToolCall(service, "aihil_can_session_stop", { bus_id: "dut_can" });
+        assert.equal(stopped.ok, true);
+      },
+      {
+        canBusesYaml: `can_buses:
+  dut_can:
+    adapter: "process"
+    channel: "fake0"
+    bitrate: 500000
+    executable: ${JSON.stringify(fakeCanBridge)}
+    timeout_s: 2
+`,
+      },
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
