@@ -2,7 +2,15 @@ name: Node CI
 
 on:
   push:
+    branches:
+      - master
   pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "22.14.0"
+          node-version: "lts/*"
           cache: npm
 
       - name: Install dependencies
@@ -43,8 +51,10 @@ jobs:
           - macos-latest
           - windows-latest
         node-version:
-          - "22.14.0"
+          - "16.16.0"
+          - "22.x"
           - "24.x"
+          - "lts/*"
 
     steps:
       - name: Checkout
@@ -67,3 +77,25 @@ jobs:
 
       - name: Check package contents
         run: npm run pack:check
+
+  required-ci:
+    name: Required CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - audit
+      - test
+    if: ${{ always() }}
+    steps:
+      - name: Check required jobs
+        shell: bash
+        run: |
+          if [[ "${{ needs.audit.result }}" != "success" ]]; then
+            echo "Production dependency audit finished with ${{ needs.audit.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "Node test matrix finished with ${{ needs.test.result }}"
+            exit 1
+          fi

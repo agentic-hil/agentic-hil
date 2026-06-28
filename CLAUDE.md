@@ -8,7 +8,7 @@ Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. H
 
 AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, and reading structured reports from a configured local target.
 
-Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 22.14 or newer LTS as the supported first path unless project files or the user clearly identify another setup.
+Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 16.16 or newer with npm as the supported first path unless project files or the user clearly identify another setup. Current Node.js LTS is recommended.
 
 ## Installation Model
 
@@ -17,6 +17,10 @@ Install the `aihil` command once on the local machine from npm with:
 ```bash
 npm i -g aihil
 ```
+
+If Node.js is missing or too old for AI-HIL's `engines`, do not refuse or stop at the error. Install or activate a supported Node.js/npm runtime, then rerun the AI-HIL install. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless the operator asks for that version; any runtime accepted by `package.json` is fine. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If no safe local installer is apparent, ask one concise question about how the operator wants Node.js installed.
+
+Do not work around an old runtime with `--force`, `--ignore-engines`, or an older AI-HIL version. The correct fix is a supported Node.js/npm runtime.
 
 From this repository checkout, install with:
 

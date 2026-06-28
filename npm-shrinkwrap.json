@@ -22,7 +22,7 @@
         "typescript": "^6.0.3"
       },
       "engines": {
-        "node": ">=22.14 <25"
+        "node": ">=16.16"
       }
     },
     "node_modules/@serialport/binding-mock": {

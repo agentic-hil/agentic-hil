@@ -11,7 +11,7 @@ Prefer the supported first path unless the firmware project or user clearly says
 - STM32 Nucleo-F446RE.
 - ST-Link.
 - OpenOCD.
-- Node.js 22.14 or newer LTS with npm.
+- Node.js 16.16 or newer with npm; current Node.js LTS is recommended.
 - `interface/stlink.cfg`.
 - `target/stm32f4x.cfg`.
 - Firmware artifacts under `build/`.
@@ -25,6 +25,10 @@ Install the `aihil` command once on the local machine from npm with:
 ```bash
 npm i -g aihil
 ```
+
+If the host has no Node.js or an old Node.js, keep going by installing or activating a supported Node.js/npm runtime, then rerun `npm i -g aihil`. Current Node.js LTS is fine, but the agent does not need to pin a specific Node.js patch version; any runtime accepted by `package.json` is fine. An outdated Node.js is a remediable setup prerequisite, not a reason to refuse the AI-HIL setup. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If the safe local install path is unclear, ask one concise question.
+
+Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the Node.js requirement.
 
 From this repository checkout, install with:
 

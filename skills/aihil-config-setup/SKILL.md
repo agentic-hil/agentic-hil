@@ -17,9 +17,11 @@ The schema bundled with the installed `aihil` Node.js package is authoritative. 
 
 ## Supported First Path
 
-Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js 22.14 or newer LTS, `interface/stlink.cfg`, `target/stm32f4x.cfg`, and firmware artifacts under `build/` as the reference setup unless project files or the user clearly specify a different target.
+Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js 16.16 or newer with npm, `interface/stlink.cfg`, `target/stm32f4x.cfg`, and firmware artifacts under `build/` as the reference setup unless project files or the user clearly specify a different target. Current Node.js LTS is recommended.
 
 If the board, MCU family, debugger interface, target config, COM port, or artifact root cannot be inferred from project files, ask one concise question instead of guessing.
+
+If `aihil` is not installed because Node.js is missing or too old, install or activate a supported Node.js/npm runtime before running `aihil init`. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not refuse the setup for an old Node.js runtime, and do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
 
 ## Safety Boundaries
 
