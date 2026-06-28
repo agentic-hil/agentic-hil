@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page covers the most common AI-HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Node.js 22.14 or newer LTS.
+This page covers the most common AI-HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Node.js 16.16 or newer with npm. Current Node.js LTS is recommended.
 
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
@@ -24,6 +24,8 @@ Fix:
 npm i -g aihil
 aihil doctor
 ```
+
+If npm reports an old Node.js version or an `engines` error, install or activate a supported Node.js/npm runtime, open a fresh shell if needed, and rerun `npm i -g aihil`. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the runtime requirement.
 
 If developing from this checkout, run:
 

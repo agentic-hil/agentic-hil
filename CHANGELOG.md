@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- Relaxed the AI-HIL runtime engine from Node.js 22.14+ to Node.js 16.16+ while keeping current Node.js LTS recommended.
+
 ## [0.2.0] - 2026-06-28
 
 ### Added

@@ -51,7 +51,7 @@
     "provenance": true
   },
   "engines": {
-    "node": ">=22.14 <25"
+    "node": ">=16.16"
   },
   "files": [
     "dist",

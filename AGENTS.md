@@ -13,7 +13,7 @@ Use this as the reference setup unless project files or the user clearly specify
 - Board: STM32 Nucleo-F446RE.
 - Debug probe: ST-Link, including the onboard Nucleo ST-Link.
 - Debug backend: OpenOCD.
-- Host runtime: Node.js 22.14 or newer LTS with npm.
+- Host runtime: Node.js 16.16 or newer with npm; current Node.js LTS is recommended.
 - OpenOCD interface config: `interface/stlink.cfg`.
 - OpenOCD target config: `target/stm32f4x.cfg`.
 - Firmware artifact root: `build/`.
@@ -28,6 +28,10 @@ Install the `aihil` command once on the local machine from npm with:
 ```bash
 npm i -g aihil
 ```
+
+If Node.js is missing or too old for AI-HIL's `engines`, do not refuse or stop at the error. Treat it as a host setup prerequisite: install or activate a supported Node.js/npm runtime, then rerun the AI-HIL install. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless the operator asks for that version; any runtime accepted by `package.json` is fine. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If no safe local installer is apparent, ask one concise question about how the operator wants Node.js installed.
+
+Do not work around an old runtime with `--force`, `--ignore-engines`, or an older AI-HIL version. The correct fix is a supported Node.js/npm runtime.
 
 From this repository checkout, install with:
 

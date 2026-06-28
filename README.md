@@ -18,7 +18,7 @@ It turns firmware work into a hardware-in-the-loop cycle: edit, build, probe, fl
 ## Trust & Supply Chain
 
 - Public source, Apache-2.0 license, security policy, issue templates, PR template, and CODEOWNERS are part of the repository.
-- CI tests Node.js 22.14 and 24 with npm 11.5.1+ on Linux, macOS, and Windows; CodeQL scans JavaScript and TypeScript.
+- CI tests Node.js 16.16, 22, and 24 on Linux, macOS, and Windows; CodeQL scans JavaScript and TypeScript.
 - Dependabot and Dependency Review watch npm and GitHub Actions dependency changes.
 - npm releases use GitHub Actions trusted publishing with OIDC and provenance.
 - The published CLI uses `npm-shrinkwrap.json` to freeze the dependency tree installed by npm.
@@ -41,7 +41,7 @@ aihil doctor
 aihil mcp-config > .mcp.json
 ```
 
-Use this path when adding AI-HIL to an existing firmware project. Each project gets its own `.aihil/config.yaml` for target, debugger, artifact roots, permissions, reports, logs, and optional COM ports. If setup fails, start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+Use this path when adding AI-HIL to an existing firmware project. AI-HIL requires Node.js 16.16 or newer with npm; current Node.js LTS is recommended. If `npm i -g aihil` reports an old Node.js or `engines` error, install or activate a supported runtime first and rerun the install. Do not bypass the requirement with `--force`, `--ignore-engines`, or an older AI-HIL version. Each project gets its own `.aihil/config.yaml` for target, debugger, artifact roots, permissions, reports, logs, and optional COM ports. If setup fails, start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### Run the supported Nucleo demo
 
@@ -159,7 +159,7 @@ The official reference setup is deliberately narrow:
 - Board: STM32 Nucleo-F446RE.
 - Debug probe: ST-Link, including the onboard Nucleo ST-Link.
 - Debug backend: OpenOCD.
-- Host runtime: Node.js 22.14 or newer LTS with npm; CI covers Node.js 22 and 24.
+- Host runtime: Node.js 16.16 or newer with npm; current Node.js LTS is recommended, and CI covers Node.js 16.16, 22, and 24.
 - OpenOCD interface config: `interface/stlink.cfg`.
 - OpenOCD target config: `target/stm32f4x.cfg`.
 - Firmware artifact root: `build/`.
@@ -190,6 +190,8 @@ Install the `aihil` command once on the local machine:
 ```bash
 npm i -g aihil
 ```
+
+If the host has no Node.js or an old Node.js, install or activate a supported Node.js/npm runtime, then rerun the AI-HIL install. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. On macOS or Linux, use the local team's preferred version manager or package manager. Do not use `--force`, `--ignore-engines`, or older AI-HIL versions to bypass the runtime requirement.
 
 From this repository checkout, install the local version with:
 

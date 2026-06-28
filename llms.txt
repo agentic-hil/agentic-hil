@@ -8,6 +8,8 @@ Install the `aihil` command and MCP server once on the local machine:
 npm i -g aihil
 ```
 
+AI-HIL requires Node.js 16.16 or newer with npm; current Node.js LTS is recommended. If Node.js is missing or outdated, install or activate a supported runtime first, then rerun the AI-HIL install. Do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
+
 From a repository checkout, use `npm install --global .`.
 
 Each firmware project should contain its own `.aihil/` directory with `.aihil/config.yaml` for that project's target, debugger, permissions, reports, logs, and artifact roots.
