@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listAvailableComPorts } from "./comports.js";
@@ -62,6 +63,8 @@ interface ParsedCommand {
   config?: string | null;
   force?: boolean;
   output?: string | null;
+  target?: string | null;
+  agent?: string | null;
   port?: string;
   maxReadBytes?: number | null;
   readWaitTimeoutS?: number;
@@ -107,6 +110,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     } else {
       printJson(result);
     }
+    return result.ok ? 0 : 1;
+  }
+  if (args.command === "skill-install") {
+    const result = installSkill(args.agent, args.target, Boolean(args.force));
+    printJson(result);
     return result.ok ? 0 : 1;
   }
   if (args.command === "doctor") {
@@ -268,6 +276,60 @@ export function mcpConfig(configPath?: string | null): JsonObject {
   };
 }
 
+export function installSkill(agent?: string | null, target?: string | null, force = false): JsonObject {
+  const resolvedAgent = agent ?? "opencode";
+  if (resolvedAgent !== "opencode") {
+    return {
+      ok: false,
+      error_type: "unsupported_agent",
+      summary: "AI-HIL can currently install skills only for opencode.",
+      agent: resolvedAgent,
+      allowed_agents: ["opencode"],
+    };
+  }
+
+  const sourcePath = bundledSkillPath();
+  const targetPath = target ?? defaultOpencodeSkillPath();
+  const sourceText = readFileSync(sourcePath, "utf8");
+  if (existsSync(targetPath)) {
+    const existingText = readFileSync(targetPath, "utf8");
+    if (existingText === sourceText) {
+      return {
+        ok: true,
+        summary: "AI-HIL opencode skill is already installed.",
+        agent: resolvedAgent,
+        skill: "aihil-config-setup",
+        source_path: sourcePath,
+        target_path: targetPath,
+        installed: false,
+      };
+    }
+    if (!force) {
+      return {
+        ok: false,
+        error_type: "skill_exists",
+        summary: "Target skill file already exists with different content. Use --force to overwrite it.",
+        agent: resolvedAgent,
+        skill: "aihil-config-setup",
+        source_path: sourcePath,
+        target_path: targetPath,
+      };
+    }
+  }
+
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, sourceText, "utf8");
+  return {
+    ok: true,
+    summary: "AI-HIL opencode skill installed.",
+    agent: resolvedAgent,
+    skill: "aihil-config-setup",
+    source_path: sourcePath,
+    target_path: targetPath,
+    installed: true,
+  };
+}
+
 function mcpServerLaunch(configPath: string): McpLaunchConfig {
   return {
     command: process.execPath,
@@ -331,6 +393,14 @@ function parseArgs(argv: string[]): ParsedCommand {
       parsed.output = requireValue(argv, ++index, current);
       continue;
     }
+    if (current === "--target") {
+      parsed.target = requireValue(argv, ++index, current);
+      continue;
+    }
+    if (current === "--agent") {
+      parsed.agent = requireValue(argv, ++index, current);
+      continue;
+    }
     if (current === "--port") {
       parsed.port = requireValue(argv, ++index, current);
       continue;
@@ -373,7 +443,7 @@ function isVersionCommand(command: string | undefined): boolean {
 }
 
 function helpText(): string {
-  return `AI-HIL local MCP stdio server\n\nUsage:\n  aihil <command> [options]\n\nCommands:\n  init [--config <path>] [--force]\n  doctor [--config <path>]\n  com-ports\n  mcp-config [--config <path>]\n  mcp-stdio --config <path>\n  com-stdio --config <path> --port <port_id>\n  schema [--output <path>] [--force]\n\nOptions:\n  --help, -h       Show this help.\n  --version, -v    Show the installed version.\n`;
+  return `AI-HIL local MCP stdio server\n\nUsage:\n  aihil <command> [options]\n\nCommands:\n  init [--config <path>] [--force]\n  doctor [--config <path>]\n  com-ports\n  mcp-config [--config <path>]\n  mcp-stdio --config <path>\n  com-stdio --config <path> --port <port_id>\n  schema [--output <path>] [--force]\n  skill-install [--agent opencode] [--target <path>] [--force]\n\nOptions:\n  --help, -h       Show this help.\n  --version, -v    Show the installed version.\n`;
 }
 
 function packageVersion(): string {
@@ -387,6 +457,14 @@ function packageVersion(): string {
     // Fall through to a stable value when running from an unusual layout.
   }
   return "unknown";
+}
+
+function bundledSkillPath(): string {
+  return path.resolve(path.dirname(modulePath), "..", "skills", "aihil-config-setup", "SKILL.md");
+}
+
+function defaultOpencodeSkillPath(): string {
+  return path.join(homedir(), ".config", "opencode", "skills", "aihil-config-setup", "SKILL.md");
 }
 
 const invokedPath = process.argv[1] ? realpathOrResolve(process.argv[1]) : null;
