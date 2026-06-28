@@ -49,6 +49,8 @@ If you explicitly need the current GitHub repository version instead of the late
 npm i -g github:hp-8472/aihil
 ```
 
+The npm and GitHub npm install paths install only the `aihil` CLI/MCP server. They do not install, register, or update agent skills.
+
 ### Run the supported Nucleo demo
 
 ```bash
@@ -150,11 +152,13 @@ AI agents can edit firmware quickly, but embedded development only speeds up whe
 
 This README is for human developers and hardware operators.
 
-Agent-facing instructions live in:
+Agent-facing instructions in this source repository live in:
 
 - [`AGENTS.md`](AGENTS.md)
 - [`AI_AGENT_QUICKSTART.md`](AI_AGENT_QUICKSTART.md)
 - [`skills/aihil-config-setup/SKILL.md`](skills/aihil-config-setup/SKILL.md)
+
+The skill file is a repository-local agent asset. It is not installed by the npm package.
 
 Troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
@@ -535,7 +539,7 @@ If you want an AI coding agent to set up a firmware project with AI-HIL, open th
 Install https://github.com/hp-8472/aihil and use it for this firmware project.
 ```
 
-The agent should install `aihil`, return to the firmware project, and follow `AGENTS.md`, `AI_AGENT_QUICKSTART.md`, and `skills/aihil-config-setup/SKILL.md`. It should not vendor the AI-HIL source tree into the firmware project unless you explicitly ask for that.
+The agent should install the `aihil` CLI/MCP server, return to the firmware project, and follow `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. Installing `aihil` does not install an agent skill; the repository-local `skills/aihil-config-setup/SKILL.md` is available only from a source checkout. The agent should not vendor the AI-HIL source tree into the firmware project unless you explicitly ask for that.
 
 ## License
 
