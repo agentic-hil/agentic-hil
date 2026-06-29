@@ -44,7 +44,7 @@ follow this model:
 3. Return to the firmware project.
 4. Create or update the project-local `.aihil/config.yaml`.
 5. Validate with `aihil doctor`.
-6. Generate project-local MCP config with `aihil mcp-config > .mcp.json`.
+6. Add the standard portable `.mcp.json` only if the MCP client needs project discovery.
 7. Use AI-HIL MCP tools for hardware actions.
 8. Do not copy or vendor the AI-HIL source tree into the firmware project unless the user explicitly asks for that.
 
@@ -104,7 +104,6 @@ Run setup from the firmware project directory, not from the AI-HIL source reposi
 ```bash
 aihil init
 aihil doctor
-aihil mcp-config > .mcp.json
 ```
 
 Each firmware project owns its own `.aihil/` directory. That directory contains:
@@ -164,15 +163,9 @@ permissions:
 
 ## MCP operating model
 
-AI-HIL uses MCP over stdio.
+AI-HIL uses MCP over stdio. The project-local MCP client config is only a launch entry; it should normally be the stable portable `.mcp.json` shape below.
 
-The project-local MCP client config is generated with:
-
-```bash
-aihil mcp-config > .mcp.json
-```
-
-The generated MCP server entry starts AI-HIL like this:
+The MCP server entry starts AI-HIL like this:
 
 ```text
 aihil mcp-stdio --config .aihil/config.yaml
@@ -355,7 +348,6 @@ Useful CLI commands:
 aihil init
 aihil doctor
 aihil com-ports
-aihil mcp-config
 aihil mcp-stdio --config .aihil/config.yaml
 aihil com-stdio --config .aihil/config.yaml --port dut_uart
 ```

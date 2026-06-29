@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
