@@ -71,10 +71,9 @@ From the firmware project directory:
 ```bash
 aihil init
 aihil doctor
-aihil mcp-config > .mcp.json
 ```
 
-The generated MCP config starts the installed Node entrypoint directly. That is equivalent to:
+Use the standard portable `.mcp.json` launch entry when MCP project discovery is needed. It starts:
 
 ```text
 aihil mcp-stdio --config .aihil/config.yaml

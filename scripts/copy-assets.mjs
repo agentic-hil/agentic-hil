@@ -3,10 +3,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const source = resolve(root, "src", "aihil", "schemas");
-const target = resolve(root, "dist", "schemas");
+const assetDirectories = ["schemas", "templates"];
 
-if (existsSync(source)) {
-  mkdirSync(dirname(target), { recursive: true });
-  cpSync(source, target, { recursive: true });
+for (const directory of assetDirectories) {
+  const source = resolve(root, "src", "aihil", directory);
+  const target = resolve(root, "dist", directory);
+  if (existsSync(source)) {
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: true });
+  }
 }

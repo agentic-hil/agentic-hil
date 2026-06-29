@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `aihil mcp-config` with a shipped portable MCP template at `dist/templates/mcp.json`.
+
 ## [0.2.1] - 2026-06-28
 
 ### Changed

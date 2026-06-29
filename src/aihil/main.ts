@@ -71,11 +71,6 @@ interface ParsedCommand {
   eofIdleTimeoutS?: number;
 }
 
-interface McpLaunchConfig {
-  command: string;
-  args: string[];
-}
-
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0) {
     process.stderr.write(helpText());
@@ -126,10 +121,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const result = await listAvailableComPorts();
     printJson(result);
     return result.ok ? 0 : 1;
-  }
-  if (args.command === "mcp-config") {
-    printJson(mcpConfig(args.config));
-    return 0;
   }
   if (args.command === "mcp-stdio") {
     return mcpStdio(args.config);
@@ -198,7 +189,7 @@ function initNextSteps(availableComPorts: JsonObject): string[] {
   } else {
     nextSteps.push("COM port discovery failed. Run: aihil com-ports after checking the serialport installation.");
   }
-  nextSteps.push("Run: aihil doctor", "Run: aihil mcp-config > .mcp.json");
+  nextSteps.push("Run: aihil doctor", "Create .mcp.json from the documented portable template if your MCP client needs project discovery.");
   return nextSteps;
 }
 
@@ -241,7 +232,6 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
   }
   const debuggerInfo = await createDebuggerBackend(config).info();
   const configDisplayPath = displayPath(config, config.configPath);
-  const mcpLaunch = mcpServerLaunch(configDisplayPath);
   return {
     ok: debuggerInfo.ok === true,
     tool: "aihil_doctor",
@@ -251,8 +241,8 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
     config_path: config.configPath,
     mcp: {
       transport: "stdio",
-      command: mcpLaunch.command,
-      args: mcpLaunch.args,
+      command: "aihil",
+      args: ["mcp-stdio", "--config", configDisplayPath],
     },
     target: {
       name: config.target.name,
@@ -265,14 +255,6 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
       ]),
     ),
     debugger: debuggerInfo,
-  };
-}
-
-export function mcpConfig(configPath?: string | null): JsonObject {
-  return {
-    mcpServers: {
-      aihil: mcpServerLaunch(configPath ?? DEFAULT_CONFIG_PATH),
-    },
   };
 }
 
@@ -327,13 +309,6 @@ export function installSkill(agent?: string | null, target?: string | null, forc
     source_path: sourcePath,
     target_path: targetPath,
     installed: true,
-  };
-}
-
-function mcpServerLaunch(configPath: string): McpLaunchConfig {
-  return {
-    command: process.execPath,
-    args: [modulePath, "mcp-stdio", "--config", configPath],
   };
 }
 
@@ -443,7 +418,7 @@ function isVersionCommand(command: string | undefined): boolean {
 }
 
 function helpText(): string {
-  return `AI-HIL local MCP stdio server\n\nUsage:\n  aihil <command> [options]\n\nCommands:\n  init [--config <path>] [--force]\n  doctor [--config <path>]\n  com-ports\n  mcp-config [--config <path>]\n  mcp-stdio --config <path>\n  com-stdio --config <path> --port <port_id>\n  schema [--output <path>] [--force]\n  skill-install [--agent opencode] [--target <path>] [--force]\n\nOptions:\n  --help, -h       Show this help.\n  --version, -v    Show the installed version.\n`;
+  return `AI-HIL local MCP stdio server\n\nUsage:\n  aihil <command> [options]\n\nCommands:\n  init [--config <path>] [--force]\n  doctor [--config <path>]\n  com-ports\n  mcp-stdio --config <path>\n  com-stdio --config <path> --port <port_id>\n  schema [--output <path>] [--force]\n  skill-install [--agent opencode] [--target <path>] [--force]\n\nOptions:\n  --help, -h       Show this help.\n  --version, -v    Show the installed version.\n`;
 }
 
 function packageVersion(): string {

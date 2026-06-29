@@ -21,6 +21,22 @@ Use STM32 Nucleo-F446RE, ST-Link, OpenOCD, Node.js 16.16 or newer with npm, `int
 
 If the board, MCU family, debugger interface, target config, COM port, or artifact root cannot be inferred from project files, ask one concise question instead of guessing.
 
+## Fast Nucleo-F446RE Path
+
+When the project and user match the supported first path, skip broad discovery and do this directly:
+
+1. Run `aihil init` if `.aihil/config.yaml` is missing.
+2. Set `target.name: "NUCLEO-F446RE"`, `target.controller: "STM32F446RET6"`, `debugger.interface_cfg: "interface/stlink.cfg"`, and `debugger.target_cfg: "target/stm32f4x.cfg"`.
+3. For ST/STM32 targets, check existing environment variables before hard-coded paths. Prefer `PATH`, `OPENOCD`, `OPENOCD_HOME`, `OPENOCD_SCRIPTS`, `STM32_PROGRAMMER_CLI`, `STM32CUBEIDE_PATH`, and `STLINK_PATH` when they point to an existing OpenOCD/ST-Link toolchain. On Windows, also check `%LOCALAPPDATA%/stm32cube/bundles` for STM32Cube-managed tools such as `programmer/*/bin/STM32_Programmer_CLI.exe`, `stlink-gdbserver/*/bin/ST-LINK_gdbserver.exe`, and `stlink-server/*/bin/stlinkserver.exe`. Derive only supported config values from them, usually `debugger.executable`, `debugger.interface_cfg`, and `debugger.target_cfg`.
+4. If the user gives a COM device, add it directly as `com_ports.dut_uart.device`; set `com_ports.dut_uart.baudrate` to the baud rate configured in the firmware code (`HAL_UART_Init`, LL init structs, register setup, or project UART constants). Use `encoding: "ascii"` unless the project or firmware output requires a different encoding.
+5. Run `aihil doctor`. `.mcp.json` is only the MCP launch configuration, not the tool list. Prefer the stable portable entry shipped as `dist/templates/mcp.json`, which runs `aihil mcp-stdio --config .aihil/config.yaml` when `aihil` is on `PATH`. If the MCP client cannot resolve `aihil`, edit `.mcp.json` for that machine instead of changing reusable project instructions.
+
+For UART smoke tests, start the AI-HIL COM session before the reset or flash that should emit text. Accumulate short reads until the expected substring appears, then stop immediately; avoid fixed multi-second waits unless no data arrives. Once the expected text is observed, do not inspect COM logs or reports unless a failure needs diagnosis.
+
+For AI-HIL 0.2.x, `mcp-stdio` expects newline-delimited JSON-RPC on stdio. Do not use `Content-Length` framing for quick smoke clients.
+
+For tiny STM32 projects, check `ninja` early. If a preset requires Ninja and `ninja` is missing, skip the failing CMake build attempt. When the source set is obvious, a direct `arm-none-eabi-gcc` build into `build/` is an acceptable firmware-build fallback before AI-HIL probe/flash.
+
 Before installing, check `aihil --version`. On Windows, also try `aihil.cmd --version`; if that works, do not reinstall. If `aihil` is not installed because Node.js is missing or too old, install or activate a supported Node.js/npm runtime before running `aihil init`. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not refuse the setup for an old Node.js runtime, and do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
 
 ## Safety Boundaries

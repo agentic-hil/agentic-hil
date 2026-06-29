@@ -9,7 +9,7 @@ import { loadConfig } from "../dist/config.js";
 import { handleMcpMessage } from "../dist/mcp.js";
 import { runStdioServer } from "../dist/stdio.js";
 import { AIHILToolService } from "../dist/tools.js";
-import { initConfig, main, mcpConfig, schema } from "../dist/main.js";
+import { initConfig, main, schema } from "../dist/main.js";
 import { Readable, Writable } from "node:stream";
 import { fc, safePathSegment } from "./property-arbitraries.js";
 
@@ -143,11 +143,11 @@ test("main supports help and version flags", async () => {
   assert.match(version.output.trim(), /^(\d+\.\d+\.\d+|unknown)$/);
 });
 
-test("mcpConfig uses current Node entrypoint", () => {
-  const result = mcpConfig("custom.yaml");
-  assert.equal(result.mcpServers.aihil.command, process.execPath);
-  assert.match(result.mcpServers.aihil.args[0].replace(/\\/g, "/"), /dist\/main\.js$/);
-  assert.deepEqual(result.mcpServers.aihil.args.slice(1), ["mcp-stdio", "--config", "custom.yaml"]);
+test("packaged MCP template is portable", () => {
+  const templatePath = path.join(root, "dist", "templates", "mcp.json");
+  const result = JSON.parse(readFileSync(templatePath, "utf8"));
+  assert.equal(result.mcpServers.aihil.command, "aihil");
+  assert.deepEqual(result.mcpServers.aihil.args, ["mcp-stdio", "--config", ".aihil/config.yaml"]);
 });
 
 test("config loads defaults", () => {

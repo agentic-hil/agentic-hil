@@ -40,7 +40,7 @@ The recommended setup path is agent-first: open your firmware project in your MC
 ```text
 Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
 
-Do not vendor the AI-HIL source tree into this firmware repository. Install the aihil command, return to this firmware project, create a project-local .aihil/config.yaml with aihil init, validate it with aihil doctor, generate .mcp.json, and then use AI-HIL for probe, flash, reset, reports, and configured serial feedback.
+Do not vendor the AI-HIL source tree into this firmware repository. Install the aihil command, return to this firmware project, create a project-local .aihil/config.yaml with aihil init, validate it with aihil doctor, add the standard .mcp.json if your MCP client needs project discovery, and then use AI-HIL for probe, flash, reset, reports, and configured serial feedback.
 ```
 
 The agent should install the `aihil` command once on the machine, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
@@ -53,7 +53,19 @@ If you prefer to set it up yourself, run this from your firmware project directo
 npm i -g aihil
 aihil init
 aihil doctor
-aihil mcp-config > .mcp.json
+```
+
+If your MCP client needs a project discovery file, create `.mcp.json` with:
+
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
 ```
 
 Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, and optional named COM ports.
@@ -72,7 +84,6 @@ Then return to your firmware project and run:
 ```bash
 aihil init
 aihil doctor
-aihil mcp-config > .mcp.json
 ```
 
 ## First real hardware loop
@@ -112,7 +123,6 @@ git clone https://github.com/hp-8472/aihil.git
 cd aihil/examples/nucleo-f446re_demo
 aihil init
 aihil doctor
-aihil mcp-config > .mcp.json
 ```
 
 The demo includes a prebuilt first-run ELF at:
@@ -202,11 +212,20 @@ AI coding agent
   -> agent uses real hardware feedback for the next firmware change
 ```
 
-AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit MCP details. Generate the project-local MCP config with:
+AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit MCP details. The portable project-local MCP config is:
 
-```bash
-aihil mcp-config > .mcp.json
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
 ```
+
+The same template is shipped with the package under `dist/templates/mcp.json`. If the MCP client cannot resolve `aihil` from `PATH`, edit `.mcp.json` for that machine instead of changing the project template.
 
 Agent-facing MCP behavior, tool rules, and safety instructions live in [`AGENTS.md`](AGENTS.md). Human troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
@@ -306,7 +325,6 @@ The npm package installs the `aihil` CLI. The CLI provides commands such as:
 aihil init
 aihil doctor
 aihil com-ports
-aihil mcp-config
 aihil mcp-stdio
 aihil com-stdio
 ```

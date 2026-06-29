@@ -96,7 +96,7 @@ Expected healthy result: `ok: true`, `tool: "aihil_doctor"`, `summary: "AI-HIL c
 
 ## Configure MCP
 
-AI-HIL uses MCP over stdio. The generated `.mcp.json` starts the installed Node entrypoint directly; this is equivalent to `aihil mcp-stdio` and avoids local `PATH` collisions.
+AI-HIL uses MCP over stdio. `.mcp.json` is only the MCP launch entry and should normally be the stable portable shape below.
 
 `mcp-stdio` does not take `--port`; it is project-scoped. COM MCP tool calls pass `port_id` as tool arguments.
 
@@ -106,11 +106,18 @@ Project-level MCP client discovery config belongs in:
 .mcp.json
 ```
 
-Generate it with:
-
-```bash
-aihil mcp-config > .mcp.json
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
 ```
+
+The same template is shipped with the package under `dist/templates/mcp.json`. If the MCP client cannot resolve `aihil` from `PATH`, edit `.mcp.json` for that machine instead of changing the project template.
 
 Use the configured COM MCP tools for serial stimuli and feedback. Do not open host COM devices directly.
 
