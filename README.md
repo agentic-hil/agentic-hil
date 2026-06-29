@@ -7,12 +7,20 @@ AI-HIL connects MCP-capable coding agents such as Claude Code, Codex, opencode, 
 For embedded engineers, the value is simple: **less manual hardware handling, fewer context switches, and faster feedback from the real target board.** Instead of repeatedly flashing firmware, resetting the board, opening serial tools, copying logs, and explaining the result back to the agent, AI-HIL gives the agent a safe, repeatable way to run that loop itself.
 
 ```text
-change firmware -> build -> probe target -> flash -> reset -> read report/serial feedback -> improve -> repeat
+change firmware -> build -> probe target -> flash -> reset -> test -> improve -> repeat
 ```
 
 AI-HIL is not an SDK and not a generic remote shell. It is a **local, project-scoped hardware bridge** that exposes only configured, high-level hardware actions to the agent.
 
-> Current reference path: **STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js/npm**. Other OpenOCD-supported targets may work through project configuration, but the Nucleo path is the documented baseline.
+## Start here: ask your agent to install it
+
+The recommended setup path is agent-first: open your firmware project in your MCP-capable coding agent and paste this prompt.
+
+```text
+Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
+```
+
+The agent should install the `aihil` command once on the machine, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
 
 ## Why embedded engineers use it
 
@@ -32,59 +40,6 @@ Without AI-HIL, the engineer often has to:
 With AI-HIL, the agent can use bounded tools to probe, flash, reset, read structured reports, and optionally read/write configured serial ports. The engineer stays in control of the hardware policy, while the agent gets the feedback it needs to make the next code change.
 
 That means AI-HIL is designed to save the time normally lost to repetitive hardware-operation steps and to make AI-assisted embedded development productive on **real boards**, not only in a simulator or editor.
-
-## Start here: ask your agent to install it
-
-The recommended setup path is agent-first: open your firmware project in your MCP-capable coding agent and paste this prompt.
-
-```text
-Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
-
-Do not vendor the AI-HIL source tree into this firmware repository. Install the aihil command, return to this firmware project, create a project-local .aihil/config.yaml with aihil init, validate it with aihil doctor, add the standard .mcp.json if your MCP client needs project discovery, and then use AI-HIL for probe, flash, reset, reports, and configured serial feedback.
-```
-
-The agent should install the `aihil` command once on the machine, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
-
-## Manual setup fallback
-
-If you prefer to set it up yourself, run this from your firmware project directory:
-
-```bash
-npm i -g aihil
-aihil init
-aihil doctor
-```
-
-If your MCP client needs a project discovery file, create `.mcp.json` with:
-
-```json
-{
-  "mcpServers": {
-    "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
-    }
-  }
-}
-```
-
-Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, and optional named COM ports.
-
-If you are developing AI-HIL from this repository checkout instead of using the npm package:
-
-```bash
-git clone https://github.com/hp-8472/aihil.git
-cd aihil
-npm install
-npm install --global .
-```
-
-Then return to your firmware project and run:
-
-```bash
-aihil init
-aihil doctor
-```
 
 ## First real hardware loop
 
@@ -112,48 +67,6 @@ Healthy signals include:
 - `aihil_probe_target` returns `ok: true` and `target_detected: true`.
 - `aihil_flash_firmware` returns `ok: true`, `verify: true`, and `reset_after_flash: true`.
 - Every hardware action writes structured reports and raw logs under `.aihil/`.
-
-## Try the supported Nucleo demo
-
-The repository contains a first-run demo for the STM32 Nucleo-F446RE.
-
-```bash
-npm i -g aihil
-git clone https://github.com/hp-8472/aihil.git
-cd aihil/examples/nucleo-f446re_demo
-aihil init
-aihil doctor
-```
-
-The demo includes a prebuilt first-run ELF at:
-
-```text
-build/Debug/nucleo-f446re_demo.elf
-```
-
-With a NUCLEO-F446RE connected over USB/ST-LINK, ask your agent:
-
-```text
-Use AI-HIL to probe the target, flash build/Debug/nucleo-f446re_demo.elf, reset it in run mode, read the last report, and read the configured COM port if one is available.
-```
-
-If OpenOCD is not on `PATH`, set `debugger.executable` in `.aihil/config.yaml` to your local OpenOCD executable. On Windows this may look like:
-
-```yaml
-debugger:
-  type: "openocd"
-  executable: "C:/Program Files/OpenOCD/bin/openocd.exe"
-  interface_cfg: "interface/stlink.cfg"
-  target_cfg: "target/stm32f4x.cfg"
-```
-
-To discover serial ports for optional UART feedback:
-
-```bash
-aihil com-ports
-```
-
-Only add COM ports that are intentionally part of the test setup.
 
 ## What AI-HIL provides
 
@@ -225,8 +138,6 @@ AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit M
 }
 ```
 
-The same template is shipped with the package under `dist/templates/mcp.json`. If the MCP client cannot resolve `aihil` from `PATH`, edit `.mcp.json` for that machine instead of changing the project template.
-
 Agent-facing MCP behavior, tool rules, and safety instructions live in [`AGENTS.md`](AGENTS.md). Human troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ## Project configuration
@@ -271,8 +182,6 @@ permissions:
   allow_mass_erase: false
 ```
 
-Add `com_ports` only for serial devices that are intentionally part of the project workflow.
-
 ## Troubleshooting
 
 Start with:
@@ -294,6 +203,47 @@ log_path
 ```
 
 Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), including missing OpenOCD, wrong target configuration, target not detected, permission errors, artifact validation failures, and COM-port setup.
+
+## Manual setup fallback
+
+If you prefer to set it up yourself, run this from your firmware project directory:
+
+```bash
+npm i -g aihil
+aihil init
+aihil doctor
+```
+
+If your MCP client needs a project discovery file, create `.mcp.json` with:
+
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
+```
+
+Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, and optional named COM ports.
+
+If you are developing AI-HIL from this repository checkout instead of using the npm package:
+
+```bash
+git clone https://github.com/hp-8472/aihil.git
+cd aihil
+npm install
+npm install --global .
+```
+
+Then return to your firmware project and run:
+
+```bash
+aihil init
+aihil doctor
+```
 
 ## Repository layout
 
