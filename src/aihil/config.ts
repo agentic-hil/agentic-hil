@@ -270,7 +270,7 @@ function comPortConfig(name: string, value: unknown): ComPortConfig {
 function canBusConfig(name: string, value: unknown): CanBusConfig {
   const raw = mapping(value, `can_buses.${name}`);
   const adapter = String(raw.adapter ?? "peak");
-  const allowedAdapters = ["peak", "process"];
+  const allowedAdapters = ["peak", "socketcan", "process"];
   if (!allowedAdapters.includes(adapter)) {
     throw new ConfigError("config_invalid", "Unsupported can_buses adapter.", {
       field: `can_buses.${name}.adapter`,
@@ -280,7 +280,7 @@ function canBusConfig(name: string, value: unknown): CanBusConfig {
   }
   const fd = Boolean(raw.fd ?? false);
   return {
-    adapter: adapter as "peak" | "process",
+    adapter: adapter as "peak" | "socketcan" | "process",
     channel: String(raw.channel),
     bitrate: Number.parseInt(String(raw.bitrate ?? 500000), 10),
     fd,

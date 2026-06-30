@@ -35,7 +35,7 @@ export interface ComPortConfig {
 }
 
 export interface CanBusConfig {
-  adapter: "peak" | "process";
+  adapter: "peak" | "socketcan" | "process";
   channel: string;
   bitrate: number;
   fd: boolean;

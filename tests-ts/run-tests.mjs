@@ -139,6 +139,60 @@ test("config loads defaults", () => {
   }
 });
 
+test("mcp lists configured SocketCAN buses without opening hardware", async () => {
+  const directory = tempDir();
+  try {
+    await withService(
+      directory,
+      async (service) => {
+        const listed = await mcpToolCall(service, "aihil_can_buses_list");
+        assert.equal(listed.ok, true);
+        assert.equal(listed.buses.dut_can.adapter, "socketcan");
+        assert.equal(listed.buses.dut_can.channel, "can0");
+        assert.equal(listed.supported_adapters.includes("socketcan"), true);
+      },
+      {
+        canBusesYaml: `can_buses:
+  dut_can:
+    adapter: "socketcan"
+    channel: "can0"
+    bitrate: 500000
+`,
+      },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === "linux") {
+  test("peak adapter on Linux requires SocketCAN interface names", async () => {
+    const directory = tempDir();
+    try {
+      await withService(
+        directory,
+        async (service) => {
+          const started = await mcpToolCall(service, "aihil_can_session_start", { bus_id: "dut_can" });
+          assert.equal(started.ok, false);
+          assert.equal(started.error_type, "config_invalid");
+          assert.equal(started.field, "can_buses.dut_can.channel");
+          assert.match(started.summary, /SocketCAN/);
+        },
+        {
+          canBusesYaml: `can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "PCAN_USBBUS1"
+    bitrate: 500000
+`,
+        },
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("openocd passes configured probe id", async () => {
   const directory = tempDir();
   try {

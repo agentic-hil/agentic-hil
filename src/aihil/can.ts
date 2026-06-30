@@ -6,7 +6,7 @@ import { displayPath, resolveWorkPath } from "./config.js";
 import { logsDirectory, timestampForFilename, utcNowIso, writeReport } from "./report.js";
 import type { AIHILConfig, CanBusConfig, JsonObject } from "./types.js";
 
-const SUPPORTED_CAN_ADAPTERS = ["peak", "process"];
+const SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"];
 
 interface CanFrame {
   id: number;
@@ -712,7 +712,13 @@ class JsonLineBridgeProcess {
 }
 
 function createCanAdapter(config: AIHILConfig, busConfig: CanBusConfig): CanAdapter {
+  if (busConfig.adapter === "socketcan") {
+    return new ProcessCanAdapter(config, "socketcan", socketCanBridgeCommand);
+  }
   if (busConfig.adapter === "peak") {
+    if (process.platform === "linux") {
+      return new ProcessCanAdapter(config, "socketcan", socketCanBridgeCommand);
+    }
     return new ProcessCanAdapter(config, "peak", peakBridgeCommand);
   }
   return new ProcessCanAdapter(config, "process", processBridgeCommand);
@@ -735,6 +741,41 @@ function processBridgeCommand(config: AIHILConfig, busId: string, busConfig: Can
     ok: true,
     bridge_command: {
       command: [...invocation(String(executable.executable_path)), ...busConfig.args],
+    } satisfies BridgeCommand,
+  };
+}
+
+function socketCanBridgeCommand(_config: AIHILConfig, busId: string, busConfig: CanBusConfig): JsonObject {
+  if (process.platform !== "linux") {
+    return {
+      ok: false,
+      error_type: "can_adapter_backend_not_available",
+      summary: "SocketCAN is available only on Linux.",
+      field: `can_buses.${busId}.adapter`,
+    };
+  }
+  const channel = busConfig.channel.trim();
+  if (!channel) {
+    return {
+      ok: false,
+      error_type: "config_invalid",
+      summary: "Linux SocketCAN requires can_buses.<bus_id>.channel to be a network interface such as can0.",
+      field: `can_buses.${busId}.channel`,
+    };
+  }
+  if (/^(PCAN_|0x[0-9a-f]+$|[0-9]+$)/i.test(channel)) {
+    return {
+      ok: false,
+      error_type: "config_invalid",
+      summary: "Linux SocketCAN requires a SocketCAN network interface such as can0. PCAN_USBBUS* and numeric handles are Windows PCANBasic channels.",
+      field: `can_buses.${busId}.channel`,
+      channel: busConfig.channel,
+    };
+  }
+  return {
+    ok: true,
+    bridge_command: {
+      command: ["python3", "-u", "-c", socketCanPythonBridgeScript()],
     } satisfies BridgeCommand,
   };
 }
@@ -890,7 +931,7 @@ function publicBackendResult(result: JsonObject, omitFields: string[] = []): Jso
 function commandForLog(command: string[]): string {
   const sanitized = [...command];
   for (let index = 1; index < sanitized.length; index += 1) {
-    if (["-EncodedCommand", "-Command"].includes(sanitized[index - 1])) {
+    if (["-EncodedCommand", "-Command", "-c"].includes(sanitized[index - 1])) {
       sanitized[index] = "<redacted>";
     }
   }
@@ -907,6 +948,313 @@ function hexId(id: number): string {
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function socketCanPythonBridgeScript(): string {
+  return `
+import errno
+import json
+import select
+import socket
+import struct
+import sys
+import time
+
+CAN_EFF_FLAG = 0x80000000
+CAN_RTR_FLAG = 0x40000000
+CAN_ERR_FLAG = 0x20000000
+CAN_SFF_MASK = 0x000007ff
+CAN_EFF_MASK = 0x1fffffff
+CAN_MTU = 16
+CANFD_MTU = 72
+CANFD_BRS = 0x01
+CANFD_ESI = 0x02
+CAN_RAW = getattr(socket, "CAN_RAW", 1)
+SOL_CAN_RAW = getattr(socket, "SOL_CAN_RAW", 101)
+CAN_RAW_RECV_OWN_MSGS = getattr(socket, "CAN_RAW_RECV_OWN_MSGS", 4)
+CAN_RAW_FD_FRAMES = getattr(socket, "CAN_RAW_FD_FRAMES", 5)
+
+sock = None
+open_channel = None
+fd_enabled = False
+shutdown = False
+
+def write_json(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\\n")
+    sys.stdout.flush()
+
+def reply(request, value):
+    value["reply_id"] = request.get("request_id")
+    write_json(value)
+
+def bool_value(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+def int_value(value, default=0):
+    if value is None:
+        return default
+    return int(value)
+
+def float_value(value, default=0.0):
+    if value is None:
+        return default
+    return float(value)
+
+def unsupported(summary):
+    return {
+        "ok": False,
+        "backend": "socketcan",
+        "error_type": "unsupported_can_option",
+        "summary": summary,
+    }
+
+def os_error(summary, error, operation):
+    err_no = getattr(error, "errno", None)
+    error_type = "can_adapter_error"
+    if operation == "open" and err_no in (errno.ENODEV, errno.ENXIO, errno.ENOTDIR):
+        error_type = "can_channel_not_available"
+    elif err_no in (errno.EACCES, errno.EPERM):
+        error_type = "permission_denied"
+    elif err_no == getattr(errno, "EPROTONOSUPPORT", -1):
+        error_type = "can_adapter_backend_not_available"
+    result = {
+        "ok": False,
+        "backend": "socketcan",
+        "error_type": error_type,
+        "summary": summary,
+        "backend_error": str(error),
+    }
+    if err_no is not None:
+        result["errno"] = err_no
+        result["backend_error_type"] = "errno_" + str(err_no)
+    return result
+
+def hex_bytes(value):
+    text = "" if value is None else str(value)
+    clean = "".join(text.split())
+    if len(clean) % 2 != 0 or any(ch not in "0123456789abcdefABCDEF" for ch in clean):
+        raise ValueError("data_hex must contain valid hexadecimal bytes.")
+    return bytes.fromhex(clean)
+
+def close_socket():
+    global sock, open_channel, fd_enabled
+    if sock is not None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    sock = None
+    open_channel = None
+    fd_enabled = False
+
+def pack_frame(frame):
+    data = hex_bytes(frame.get("data_hex", ""))
+    extended = bool_value(frame.get("extended"), False)
+    rtr = bool_value(frame.get("rtr"), False)
+    frame_id = int_value(frame.get("id"), 0)
+    if extended:
+        can_id = (frame_id & CAN_EFF_MASK) | CAN_EFF_FLAG
+    else:
+        can_id = frame_id & CAN_SFF_MASK
+    if rtr:
+        can_id = can_id | CAN_RTR_FLAG
+    if rtr and len(data) > 8:
+        raise ValueError("RTR frames support at most 8 DLC bytes.")
+    if len(data) > 64:
+        raise ValueError("SocketCAN FD frames support at most 64 data bytes.")
+    if fd_enabled and len(data) > 8:
+        if rtr:
+            raise ValueError("CAN FD does not support RTR frames.")
+        return struct.pack("=IBBBB64s", can_id, len(data), 0, 0, 0, data + bytes(64 - len(data)))
+    if len(data) > 8:
+        raise ValueError("Classic CAN frames support at most 8 data bytes. Enable fd for CAN FD frames.")
+    return struct.pack("=IB3x8s", can_id, len(data), data + bytes(8 - len(data)))
+
+def unpack_frame(raw):
+    fd_frame = len(raw) == CANFD_MTU
+    if fd_frame:
+        can_id, length, fd_flags, _res0, _res1, data = struct.unpack("=IBBBB64s", raw)
+        length = min(int(length), 64)
+    elif len(raw) >= CAN_MTU:
+        can_id, length, data = struct.unpack("=IB3x8s", raw[:CAN_MTU])
+        fd_flags = 0
+        length = min(int(length), 8)
+    else:
+        raise ValueError("short SocketCAN frame received")
+    extended = (can_id & CAN_EFF_FLAG) != 0
+    frame_id = can_id & (CAN_EFF_MASK if extended else CAN_SFF_MASK)
+    flags = []
+    if (can_id & CAN_ERR_FLAG) != 0:
+        flags.append("error")
+    if fd_frame:
+        flags.append("fd")
+        if (fd_flags & CANFD_BRS) != 0:
+            flags.append("brs")
+        if (fd_flags & CANFD_ESI) != 0:
+            flags.append("esi")
+    result = {
+        "id": frame_id,
+        "id_hex": "0x" + format(frame_id, "x"),
+        "extended": extended,
+        "rtr": (can_id & CAN_RTR_FLAG) != 0,
+        "data_hex": data[:length].hex(),
+        "dlc": length,
+        "timestamp_us": int(time.time() * 1000000),
+    }
+    if flags:
+        result["flags"] = flags
+    return result
+
+def receive_available(max_frames):
+    frames = []
+    while sock is not None and len(frames) < max_frames:
+        try:
+            readable, _writable, _errors = select.select([sock], [], [], 0)
+        except (OSError, ValueError):
+            break
+        if not readable:
+            break
+        try:
+            frames.append(unpack_frame(sock.recv(CANFD_MTU)))
+        except BlockingIOError:
+            break
+    return frames
+
+def handle_open(request):
+    global sock, open_channel, fd_enabled
+    if bool_value(request.get("listen_only"), False):
+        reply(request, unsupported("SocketCAN listen-only mode must be configured on the Linux network interface before AI-HIL opens it."))
+        return
+    if not hasattr(socket, "AF_CAN"):
+        reply(request, {
+            "ok": False,
+            "backend": "socketcan",
+            "error_type": "can_adapter_backend_not_available",
+            "summary": "Python on this host does not expose AF_CAN SocketCAN support.",
+        })
+        return
+    channel = str(request.get("channel") or "").strip()
+    if not channel:
+        reply(request, {
+            "ok": False,
+            "backend": "socketcan",
+            "error_type": "invalid_argument",
+            "summary": "SocketCAN channel must be a Linux CAN network interface such as can0.",
+        })
+        return
+    close_socket()
+    new_sock = None
+    try:
+        new_sock = socket.socket(socket.AF_CAN, socket.SOCK_RAW, CAN_RAW)
+        if bool_value(request.get("receive_own_messages"), False):
+            new_sock.setsockopt(SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, struct.pack("i", 1))
+        enable_fd = bool_value(request.get("fd"), False)
+        if enable_fd:
+            new_sock.setsockopt(SOL_CAN_RAW, CAN_RAW_FD_FRAMES, struct.pack("i", 1))
+        new_sock.bind((channel,))
+        new_sock.setblocking(False)
+        sock = new_sock
+        open_channel = channel
+        fd_enabled = enable_fd
+        if bool_value(request.get("clear_rx_queue"), True):
+            receive_available(4096)
+        reply(request, {
+            "ok": True,
+            "backend": "socketcan",
+            "channel": channel,
+            "bitrate": int_value(request.get("bitrate"), 0),
+            "fd": fd_enabled,
+            "bitrate_configured_by": "linux_network_interface",
+            "summary": "SocketCAN interface opened. Bitrate is expected to be configured on the Linux network interface.",
+        })
+    except OSError as error:
+        if new_sock is not None:
+            try:
+                new_sock.close()
+            except OSError:
+                pass
+        reply(request, os_error("SocketCAN interface could not be opened.", error, "open"))
+
+def handle_send(request):
+    if sock is None:
+        reply(request, {"ok": False, "backend": "socketcan", "error_type": "session_not_active", "summary": "SocketCAN interface is not open."})
+        return
+    try:
+        payload = pack_frame(request.get("frame") or {})
+        sent = sock.send(payload)
+        if sent != len(payload):
+            reply(request, {"ok": False, "backend": "socketcan", "error_type": "can_adapter_error", "summary": "SocketCAN frame write was incomplete.", "bytes_written": sent, "bytes_expected": len(payload)})
+            return
+        reply(request, {"ok": True, "backend": "socketcan", "summary": "SocketCAN frame written."})
+    except ValueError as error:
+        reply(request, {"ok": False, "backend": "socketcan", "error_type": "invalid_argument", "summary": str(error)})
+    except OSError as error:
+        reply(request, os_error("SocketCAN frame write failed.", error, "send"))
+
+def handle_read(request):
+    if sock is None:
+        reply(request, {"ok": False, "backend": "socketcan", "error_type": "session_not_active", "summary": "SocketCAN interface is not open."})
+        return
+    max_frames = max(1, int_value(request.get("max_frames"), 1))
+    wait_timeout_s = max(0.0, float_value(request.get("wait_timeout_s"), 0.0))
+    poll_interval_s = max(0.001, int_value(request.get("poll_interval_ms"), 10) / 1000.0)
+    frames = receive_available(max_frames)
+    deadline = time.monotonic() + wait_timeout_s
+    while not frames and time.monotonic() < deadline:
+        timeout = min(poll_interval_s, max(0.0, deadline - time.monotonic()))
+        try:
+            readable, _writable, _errors = select.select([sock], [], [], timeout)
+        except (OSError, ValueError) as error:
+            reply(request, os_error("SocketCAN frame read failed.", error, "read"))
+            return
+        if readable:
+            frames = receive_available(max_frames)
+    reply(request, {"ok": True, "backend": "socketcan", "frames": frames, "summary": "SocketCAN read completed."})
+
+def handle_close(request):
+    global shutdown
+    close_socket()
+    shutdown = True
+    reply(request, {"ok": True, "backend": "socketcan", "summary": "SocketCAN interface closed."})
+
+def handle_request(request):
+    op = str(request.get("op") or "")
+    if op == "open":
+        handle_open(request)
+    elif op == "send":
+        handle_send(request)
+    elif op == "read":
+        handle_read(request)
+    elif op == "close":
+        handle_close(request)
+    else:
+        reply(request, {"ok": False, "backend": "socketcan", "error_type": "invalid_argument", "summary": "Unknown bridge operation " + op + "."})
+
+try:
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request_id = None
+        try:
+            request = json.loads(line)
+            request_id = request.get("request_id")
+            handle_request(request)
+            if shutdown:
+                break
+        except Exception as error:
+            result = {"ok": False, "backend": "socketcan", "error_type": "can_adapter_bridge_error", "summary": str(error)}
+            if request_id is not None:
+                result["reply_id"] = request_id
+            write_json(result)
+finally:
+    close_socket()
+`;
 }
 
 function psSingleQuoted(value: string): string {

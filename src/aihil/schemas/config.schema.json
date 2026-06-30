@@ -183,10 +183,11 @@
         "properties": {
           "adapter": {
             "type": "string",
-            "description": "CAN adapter backend. peak uses PEAK PCANBasic; process uses a JSON-lines bridge executable.",
+            "description": "CAN adapter backend. peak uses PEAK PCANBasic on Windows and SocketCAN on Linux; socketcan uses a Linux SocketCAN interface; process uses a JSON-lines bridge executable.",
             "default": "peak",
             "enum": [
               "peak",
+              "socketcan",
               "process"
             ]
           },
@@ -201,7 +202,7 @@
           },
           "fd": {
             "type": "boolean",
-            "description": "Whether CAN FD frames are allowed for this bus. The initial PEAK backend supports classic CAN frames only.",
+            "description": "Whether CAN FD frames are allowed for this bus. The Windows PEAK backend supports classic CAN frames only.",
             "default": false
           },
           "data_bitrate": {

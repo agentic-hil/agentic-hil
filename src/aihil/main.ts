@@ -176,7 +176,7 @@ function initNextSteps(availableComPorts: JsonObject): string[] {
   } else {
     nextSteps.push("COM port discovery failed. Run: aihil com-ports after checking the serialport installation.");
   }
-  nextSteps.push("For CAN access, add a named bus under can_buses, for example adapter: peak, channel: PCAN_USBBUS1, bitrate: 500000.");
+  nextSteps.push("For CAN access, add a named bus under can_buses, for example adapter: socketcan, channel: can0, bitrate: 500000 on Linux.");
   nextSteps.push("Run: aihil doctor", "Run: aihil mcp-config > .mcp.json");
   return nextSteps;
 }
