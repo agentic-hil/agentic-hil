@@ -6,9 +6,18 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-30
+
+### Added
+
+- Added configured CAN MCP tools for listing buses, managing sessions, sending frames, and reading frames through named `bus_id` values.
+- Added PEAK, Linux SocketCAN, and process bridge CAN adapter support so agents can run bounded CAN feedback loops without direct host adapter access.
+- Added CAN configuration schema fields, permissions, and tests for named project-local bus access.
+
 ### Changed
 
 - Replaced `aihil mcp-config` with a shipped portable MCP template at `dist/templates/mcp.json`.
+- Documented CAN setup, MCP tool usage, safety boundaries, and troubleshooting for human and agent workflows.
 
 ## [0.2.1] - 2026-06-28
 
