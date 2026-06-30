@@ -2,7 +2,7 @@
 
 This file is for AI coding agents.
 
-Use AI-HIL as the safe local hardware-in-the-loop bridge for embedded projects. AI-HIL gives the agent bounded MCP tools for real hardware actions such as probing, flashing, resetting, reading structured reports, and interacting with configured serial/COM ports and CAN buses.
+Use AI-HIL for embedded firmware development as the safe local hardware-in-the-loop bridge for real embedded targets. AI-HIL gives the agent bounded MCP tools for real hardware actions such as probing, flashing, resetting, reading structured reports, and interacting with configured serial/COM ports and CAN buses.
 
 Do not use raw OpenOCD commands, arbitrary debugger shells, direct host COM-port access, or direct CAN adapter access when an AI-HIL MCP tool is available.
 
@@ -41,12 +41,13 @@ follow this model:
 
 1. Stay aware of the difference between the firmware project and the AI-HIL source repository.
 2. Install the `aihil` command.
-3. Return to the firmware project.
-4. Create or update the project-local `.aihil/config.yaml`.
-5. Validate with `aihil doctor`.
-6. Add the standard portable `.mcp.json` only if the MCP client needs project discovery.
-7. Use AI-HIL MCP tools for hardware actions.
-8. Do not copy or vendor the AI-HIL source tree into the firmware project unless the user explicitly asks for that.
+3. Update and register the agent skill from the installed CLI with `aihil skill-install --agent <agent>` when the active agent supports it. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
+4. Return to the firmware project.
+5. Create or update the project-local `.aihil/config.yaml`.
+6. Validate with `aihil doctor`.
+7. Add the standard portable `.mcp.json` only if the MCP client needs project discovery.
+8. Use AI-HIL MCP tools for hardware actions.
+9. Do not copy or vendor the AI-HIL source tree into the firmware project unless the user explicitly asks for that.
 
 Before installing, check whether AI-HIL is already available:
 
@@ -213,47 +214,7 @@ Do not mix plain COM text into `mcp-stdio`. MCP stdout must remain JSON-RPC only
 
 ## Available MCP tools
 
-Use `tools/list` to discover the current tool list. The expected AI-HIL tools are:
-
-```text
-aihil_debugger_info
-aihil_probe_target
-aihil_flash_firmware
-aihil_reset_target
-aihil_get_last_report
-aihil_classify_last_error
-aihil_com_ports_list
-aihil_com_session_start
-aihil_com_write
-aihil_com_read
-aihil_com_session_stop
-aihil_can_buses_list
-aihil_can_session_start
-aihil_can_send
-aihil_can_read
-aihil_can_session_stop
-```
-
-Tool intent:
-
-| Tool | Use |
-| --- | --- |
-| `aihil_debugger_info` | Check whether the configured debugger backend is available. |
-| `aihil_probe_target` | Detect the configured embedded target before flashing. |
-| `aihil_flash_firmware` | Flash exactly one validated `image_path` or `artifact_id`. |
-| `aihil_reset_target` | Reset the target with mode `run`, `halt`, or `init`. |
-| `aihil_get_last_report` | Read the most recent structured AI-HIL report. |
-| `aihil_classify_last_error` | Classify the most recent hardware/debugger failure. |
-| `aihil_com_ports_list` | List configured COM ports and detected host serial ports. |
-| `aihil_com_session_start` | Start feedback capture on a configured COM port. |
-| `aihil_com_write` | Send text or hex stimulus to a configured COM session. |
-| `aihil_com_read` | Read buffered serial feedback from a configured COM session. |
-| `aihil_com_session_stop` | Stop and close a configured COM session. |
-| `aihil_can_buses_list` | List configured CAN buses and supported adapter backends. |
-| `aihil_can_session_start` | Start a configured CAN bus session. |
-| `aihil_can_send` | Send one CAN frame through a configured CAN session. |
-| `aihil_can_read` | Read buffered CAN frames from a configured CAN session. |
-| `aihil_can_session_stop` | Stop and close a configured CAN session. |
+Use `tools/list` to discover the current tool list from the running MCP server. `src/aihil/mcp.ts` is authoritative for source-tree development. The installed `aihil` CLI is authoritative for the agent skill version; if they differ, update the skill from the CLI.
 
 ## Required hardware workflow
 
@@ -262,7 +223,7 @@ Use this loop for firmware tasks:
 1. Build the firmware first.
 2. Check debugger availability with `aihil_debugger_info` if setup is unclear.
 3. Probe the target with `aihil_probe_target` before flashing.
-4. Flash only validated artifacts with `aihil_flash_firmware`.
+4. Flash only validated artifacts with `aihil_flash_firmware`; use `aihil_artifact_upload` first when the workflow needs an `artifact_id`.
 5. Reset with `aihil_reset_target` only when needed or requested.
 6. For serial feedback, use configured COM port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
 7. For CAN stimuli or feedback, use configured CAN bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.

@@ -18,6 +18,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Replaced `aihil mcp-config` with a shipped portable MCP template at `dist/templates/mcp.json`.
 - Documented CAN setup, MCP tool usage, safety boundaries, and troubleshooting for human and agent workflows.
+- Made MCP `initialize` report the package version instead of a stale hard-coded server version.
+- Tied the agent setup skill to the AI-HIL package version and made the installed CLI authoritative for skill updates.
+- Included the setup skill in the npm package so `aihil skill-install` can update version-drifted AI-HIL skills from the installed CLI.
+- Added `aihil skill-install` support for opencode, Claude Code, Codex, common aliases, and explicit custom target paths.
 
 ## [0.2.1] - 2026-06-28
 

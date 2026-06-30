@@ -1,6 +1,6 @@
 # AI Agent Quickstart
 
-Use AI-HIL as the local MCP server for embedded hardware actions.
+Use AI-HIL as the local MCP server for embedded firmware development and embedded hardware actions.
 
 This file is for agents. Humans should start with `README.md` and use `TROUBLESHOOTING.md` for operator-facing diagnostics.
 
@@ -43,7 +43,7 @@ Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass t
 
 ## Install Agent Skill
 
-Agent-driven AI-HIL installation includes installing `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed.
+Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed. The installed CLI is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent <agent>`.
 
 If this source checkout is not available, clone or fetch the AI-HIL repository outside the firmware project only for the skill source, then remove that temporary checkout if it is no longer needed.
 
@@ -51,8 +51,11 @@ Known user-level skill destinations:
 
 - opencode: `$HOME/.config/opencode/skills/aihil-config-setup/SKILL.md`.
 - Claude Code: `$HOME/.claude/skills/aihil-config-setup/SKILL.md`.
+- Codex: `$HOME/.codex/skills/aihil-config-setup/SKILL.md`.
 
-For other skill-capable agents, use that agent's documented user-level skill directory. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
+`skill-install` also performs the known registration step for the selected agent. opencode and Claude Code discover skills from their skill directories. Codex additionally gets a marked AI-HIL block in `$HOME/.codex/AGENTS.md` pointing at the installed skill.
+
+CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
 
 Do not rely on npm for skills, and do not add npm `postinstall` hooks for skill installation. Skill installation is an agent workflow responsibility, not package-manager behavior.
 
@@ -134,12 +137,13 @@ Do not mix plain COM text into `aihil mcp-stdio`; MCP stdio must remain JSON-RPC
 Use `tools/list` to discover available MCP tools, then follow this loop:
 
 1. Build firmware.
-2. Probe with `aihil_probe_target`.
-3. Flash with `aihil_flash_firmware` using `image_path`, usually `build/firmware.elf`, or first call `aihil_artifact_upload` with `image_path` and flash the returned `artifact_id`.
-4. For serial feedback, start `aihil_com_session_start`, send stimuli with `aihil_com_write`, read feedback with `aihil_com_read`, then stop with `aihil_com_session_stop`.
-5. For CAN feedback, start `aihil_can_session_start`, send frames with `aihil_can_send`, read frames with `aihil_can_read`, then stop with `aihil_can_session_stop`.
-6. Read the tool result and `aihil_get_last_report`.
-7. Diagnose failures with `aihil_classify_last_error`.
+2. Check debugger availability with `aihil_debugger_info` if setup is unclear.
+3. Probe with `aihil_probe_target`.
+4. Flash with `aihil_flash_firmware` using `image_path`, usually `build/firmware.elf`, or first call `aihil_artifact_upload` with `image_path` and flash the returned `artifact_id`.
+5. For serial feedback, start `aihil_com_session_start`, send stimuli with `aihil_com_write`, read feedback with `aihil_com_read`, then stop with `aihil_com_session_stop`.
+6. For CAN feedback, start `aihil_can_session_start`, send frames with `aihil_can_send`, read frames with `aihil_can_read`, then stop with `aihil_can_session_stop`.
+7. Read the tool result and `aihil_get_last_report`.
+8. Diagnose failures with `aihil_classify_last_error`.
 
 Do not use raw OpenOCD commands, arbitrary COM port shell tools, or direct CAN adapter tools when an AI-HIL MCP tool is available.
 

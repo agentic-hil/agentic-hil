@@ -6,7 +6,7 @@ Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. H
 
 ## Project Overview
 
-AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, configured CAN bus stimulus/feedback, and reading structured reports from a configured local target.
+AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded firmware development with local hardware-in-the-loop targets. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, configured CAN bus stimulus/feedback, and reading structured reports from a configured local embedded target.
 
 Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 16.16 or newer with npm as the supported first path unless project files or the user clearly identify another setup. Current Node.js LTS is recommended.
 
@@ -35,7 +35,7 @@ Do not work around an old runtime with `--force`, `--ignore-engines`, or an olde
 
 ## Agent Skill Installation
 
-Agent-driven AI-HIL installation includes installing `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed.
+Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed. The installed CLI is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent claude-code`.
 
 If this source checkout is not available, clone or fetch the AI-HIL repository outside the firmware project only for the skill source, then remove that temporary checkout if it is no longer needed.
 
@@ -43,8 +43,11 @@ Known user-level skill destinations:
 
 - opencode: `$HOME/.config/opencode/skills/aihil-config-setup/SKILL.md`.
 - Claude Code: `$HOME/.claude/skills/aihil-config-setup/SKILL.md`.
+- Codex: `$HOME/.codex/skills/aihil-config-setup/SKILL.md`.
 
-For other skill-capable agents, use that agent's documented user-level skill directory. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
+`skill-install` also performs the known registration step for the selected agent. opencode and Claude Code discover skills from their skill directories. Codex additionally gets a marked AI-HIL block in `$HOME/.codex/AGENTS.md` pointing at the installed skill.
+
+CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
 
 Do not rely on npm for skills, and do not add npm `postinstall` hooks for skill installation. Skill installation is an agent workflow responsibility, not package-manager behavior.
 
@@ -98,13 +101,14 @@ Use the AI-HIL MCP tools for hardware actions. Do not use raw OpenOCD commands o
 Follow this sequence for hardware validation:
 
 1. Build firmware.
-2. Call `aihil_probe_target`.
-3. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`, or upload first with `aihil_artifact_upload` using `image_path` and flash the returned `artifact_id`.
-4. For serial stimuli or feedback, use only configured port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
-5. For CAN stimuli or feedback, use only configured bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.
-6. Read the returned JSON result.
-7. Call `aihil_get_last_report`.
-8. Call `aihil_classify_last_error` after failed actions.
+2. Call `aihil_debugger_info` if setup is unclear.
+3. Call `aihil_probe_target`.
+4. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`, or upload first with `aihil_artifact_upload` using `image_path` and flash the returned `artifact_id`.
+5. For serial stimuli or feedback, use only configured port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
+6. For CAN stimuli or feedback, use only configured bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.
+7. Read the returned JSON result.
+8. Call `aihil_get_last_report`.
+9. Call `aihil_classify_last_error` after failed actions.
 
 Stop on `permission_denied` and report the local policy restriction.
 

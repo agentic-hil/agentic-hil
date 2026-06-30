@@ -61,6 +61,7 @@
     "docs/demo/README.md",
     "AGENTS.md",
     "AI_AGENT_QUICKSTART.md",
+    "skills/aihil-config-setup/SKILL.md",
     "LICENSE"
   ],
   "dependencies": {

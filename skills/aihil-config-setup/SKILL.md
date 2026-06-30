@@ -1,13 +1,14 @@
 ---
 name: aihil-config-setup
-description: Create and validate a project-local .aihil/config.yaml for AI-HIL without weakening hardware safety policy.
+description: Create and validate a project-local .aihil/config.yaml for AI-HIL embedded firmware hardware-in-the-loop workflows without weakening hardware safety policy.
 metadata:
   origin: AI-HIL
+  aihil_version: "0.3.0"
 ---
 
 # AI-HIL Config Setup
 
-Use this skill when a user asks to set up AI-HIL for a firmware project, create `.aihil/config.yaml`, fix AI-HIL configuration errors, or prepare a project for the local AI-HIL MCP server.
+Use this skill when a user asks to set up AI-HIL for an embedded firmware project, create `.aihil/config.yaml`, fix AI-HIL configuration errors, or prepare a project for the local AI-HIL MCP server.
 
 ## Core Rule
 
@@ -34,11 +35,17 @@ When the project and user match the supported first path, skip broad discovery a
 
 For UART smoke tests, start the AI-HIL COM session before the reset or flash that should emit text. Accumulate short reads until the expected substring appears, then stop immediately; avoid fixed multi-second waits unless no data arrives. Once the expected text is observed, do not inspect COM logs or reports unless a failure needs diagnosis.
 
-For AI-HIL 0.2.x, `mcp-stdio` expects newline-delimited JSON-RPC on stdio. Do not use `Content-Length` framing for quick smoke clients.
+For AI-HIL 0.3.x, `mcp-stdio` expects newline-delimited JSON-RPC on stdio. Do not use `Content-Length` framing for quick smoke clients.
 
 For tiny STM32 projects, check `ninja` early. If a preset requires Ninja and `ninja` is missing, skip the failing CMake build attempt. When the source set is obvious, a direct `arm-none-eabi-gcc` build into `build/` is an acceptable firmware-build fallback before AI-HIL probe/flash.
 
 Before installing, check `aihil --version`. On Windows, also try `aihil.cmd --version`; if that works, do not reinstall. If `aihil` is not installed because Node.js is missing or too old, install or activate a supported Node.js/npm runtime before running `aihil init`. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not refuse the setup for an old Node.js runtime, and do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
+
+## Version Contract
+
+This skill is tied to the AI-HIL version in its front matter. The installed `aihil` CLI is authoritative. If the skill version differs from `aihil --version`, update and register the skill from the installed CLI with `aihil skill-install --agent <agent>`; do not downgrade the CLI to match an older skill. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
+
+Use `tools/list` as the runtime source of truth for MCP tools. This setup skill should not probe, flash, reset, or open COM sessions unless the user asks for hardware validation.
 
 ## Safety Boundaries
 

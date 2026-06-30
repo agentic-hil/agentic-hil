@@ -9,7 +9,7 @@ import { loadConfig } from "../dist/config.js";
 import { handleMcpMessage } from "../dist/mcp.js";
 import { runStdioServer } from "../dist/stdio.js";
 import { AIHILToolService } from "../dist/tools.js";
-import { initConfig, main, schema } from "../dist/main.js";
+import { initConfig, installSkill, main, schema } from "../dist/main.js";
 import { Readable, Writable } from "node:stream";
 import { fc, safePathSegment } from "./property-arbitraries.js";
 
@@ -112,6 +112,30 @@ async function mcpToolCall(service, name, arguments_ = {}) {
   return response.result.structuredContent;
 }
 
+function packageMetadata() {
+  return JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+}
+
+function skillAihilVersion() {
+  const text = readFileSync(path.join(root, "skills", "aihil-config-setup", "SKILL.md"), "utf8");
+  const match = /^  aihil_version: "([^"]+)"$/m.exec(text);
+  assert.ok(match, "skill front matter must declare metadata.aihil_version");
+  return match[1];
+}
+
+function oldAihilSkill(version = "0.0.0") {
+  return `---
+name: aihil-config-setup
+description: old skill
+metadata:
+  origin: AI-HIL
+  aihil_version: "${version}"
+---
+
+# Old AI-HIL Skill
+`;
+}
+
 test("initConfig writes starter config", async () => {
   const directory = tempDir();
   try {
@@ -151,6 +175,79 @@ test("packaged MCP template is portable", () => {
   const result = JSON.parse(readFileSync(templatePath, "utf8"));
   assert.equal(result.mcpServers.aihil.command, "aihil");
   assert.deepEqual(result.mcpServers.aihil.args, ["mcp-stdio", "--config", ".aihil/config.yaml"]);
+});
+
+test("agent skill version matches package version", () => {
+  assert.equal(skillAihilVersion(), packageMetadata().version);
+});
+
+test("package ships agent setup skill for CLI-driven updates", () => {
+  assert.ok(packageMetadata().files.includes("skills/aihil-config-setup/SKILL.md"));
+});
+
+test("skill install updates AI-HIL skill version drift", () => {
+  const directory = tempDir();
+  try {
+    const target = path.join(directory, "skills", "aihil-config-setup", "SKILL.md");
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, oldAihilSkill(), "utf8");
+
+    const result = installSkill("opencode", target);
+    assert.equal(result.ok, true);
+    assert.equal(result.updated, true);
+    assert.equal(result.previous_version, "0.0.0");
+    assert.equal(result.version, packageMetadata().version);
+    assert.equal(readFileSync(target, "utf8"), readFileSync(path.join(root, "skills", "aihil-config-setup", "SKILL.md"), "utf8"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("skill install supports common agent aliases", () => {
+  const directory = tempDir();
+  try {
+    const cases = [
+      ["opencode", "opencode"],
+      ["open-code", "opencode"],
+      ["claude-code", "claude-code"],
+      ["claude", "claude-code"],
+      ["codex", "codex"],
+      ["codex-cli", "codex"],
+      ["openai-codex", "codex"],
+    ];
+    for (const [agent, expected] of cases) {
+      const target = path.join(directory, String(agent), "SKILL.md");
+      const result = installSkill(String(agent), target);
+      assert.equal(result.ok, true);
+      assert.equal(result.agent, expected);
+      assert.equal(result.target_path, target);
+      assert.equal(readFileSync(target, "utf8"), readFileSync(path.join(root, "skills", "aihil-config-setup", "SKILL.md"), "utf8"));
+      if (expected === "codex") {
+        const registration = readFileSync(path.join(path.dirname(target), "AGENTS.md"), "utf8");
+        assert.match(registration, /AI-HIL is for embedded firmware development/);
+        assert.match(registration, new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("skill install supports explicit target for unknown agents", () => {
+  const directory = tempDir();
+  try {
+    const target = path.join(directory, "custom", "SKILL.md");
+    const installed = installSkill("cursor", target);
+    assert.equal(installed.ok, true);
+    assert.equal(installed.agent, "cursor");
+
+    const rejected = installSkill("cursor");
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error_type, "unsupported_agent");
+    assert.deepEqual(rejected.allowed_agents, ["opencode", "claude-code", "codex"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("config loads defaults", () => {
@@ -464,6 +561,7 @@ test("mcp initialize and tools/list", async () => {
     await withService(directory, async (service) => {
       const initialized = await handleMcpMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, service);
       assert.equal(initialized.result.serverInfo.name, "aihil");
+      assert.equal(initialized.result.serverInfo.version, packageMetadata().version);
       const listed = await handleMcpMessage({ jsonrpc: "2.0", id: "tools", method: "tools/list" }, service);
       const toolNames = new Set(listed.result.tools.map((tool) => tool.name));
       assert.equal(toolNames.has("aihil_probe_target"), true);

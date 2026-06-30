@@ -1,5 +1,6 @@
 import type { JsonObject } from "./types.js";
 import type { AIHILToolService } from "./tools.js";
+import { packageVersion } from "./version.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
@@ -290,13 +291,14 @@ const AIHIL_WORKFLOW_PROMPT = `Use AI-HIL as the safe gate to the configured emb
 
 Workflow:
 1. Build the firmware first.
-2. Probe the target before flashing.
-3. Flash only validated artifacts from configured allowed roots.
-4. Read the structured result after every hardware action.
-5. Reset only when needed or when the task explicitly requires it.
-6. For serial stimuli and feedback, use only configured COM port ids, start a session before writing or reading, and stop the session when done.
-7. For CAN stimuli and feedback, use only configured CAN bus ids, start a CAN session before sending or reading frames, and stop the session when done.
-8. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
+2. Check debugger availability with aihil_debugger_info if setup is unclear.
+3. Probe the target before flashing.
+4. Flash with a validated image_path from configured allowed roots, or upload first with aihil_artifact_upload when you need an artifact_id.
+5. Read the structured result after every hardware action.
+6. Reset only when needed or when the task explicitly requires it.
+7. For serial stimuli and feedback, use only configured COM port ids, start a session before writing or reading, and stop the session when done.
+8. For CAN stimuli and feedback, use only configured CAN bus ids, start a CAN session before sending or reading frames, and stop the session when done.
+9. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path before changing code again.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
@@ -370,7 +372,7 @@ async function handleMethod(requestId: unknown, method: string, params: unknown,
       },
       serverInfo: {
         name: "aihil",
-        version: "0.1.0",
+        version: packageVersion(),
       },
     });
   }
