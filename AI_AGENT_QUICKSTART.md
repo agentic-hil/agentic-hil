@@ -80,7 +80,7 @@ In every firmware project that should use AI-HIL, create a project-local `.aihil
 aihil init
 ```
 
-Edit `.aihil/config.yaml` for the local board, OpenOCD interface, target config, allowed firmware artifact roots, and any named COM ports.
+Edit `.aihil/config.yaml` for the local board, OpenOCD interface, target config, allowed firmware artifact roots, any named COM ports, and any named CAN buses.
 
 Agents should follow `skills/aihil-config-setup/SKILL.md` for the exact setup workflow: use `aihil init`, edit only project-specific fields, keep safety policy restrictive, then validate with `aihil doctor`.
 
@@ -98,7 +98,7 @@ Expected healthy result: `ok: true`, `tool: "aihil_doctor"`, `summary: "AI-HIL c
 
 AI-HIL uses MCP over stdio. `.mcp.json` is only the MCP launch entry and should normally be the stable portable shape below.
 
-`mcp-stdio` does not take `--port`; it is project-scoped. COM MCP tool calls pass `port_id` as tool arguments.
+`mcp-stdio` does not take `--port`; it is project-scoped. COM MCP tool calls pass `port_id` and CAN MCP tool calls pass `bus_id` as tool arguments.
 
 Project-level MCP client discovery config belongs in:
 
@@ -119,7 +119,7 @@ Project-level MCP client discovery config belongs in:
 
 The same template is shipped with the package under `dist/templates/mcp.json`. If the MCP client cannot resolve `aihil` from `PATH`, edit `.mcp.json` for that machine instead of changing the project template.
 
-Use the configured COM MCP tools for serial stimuli and feedback. Do not open host COM devices directly.
+Use the configured COM MCP tools for serial stimuli and feedback. Use the configured CAN MCP tools for CAN stimuli and feedback. Do not open host COM devices or CAN adapters directly.
 
 If the user explicitly wants a continuous plain text serial channel instead of MCP tool calls, start a separate process:
 
@@ -137,9 +137,10 @@ Use `tools/list` to discover available MCP tools, then follow this loop:
 2. Probe with `aihil_probe_target`.
 3. Flash with `aihil_flash_firmware` using `image_path`, usually `build/firmware.elf`, or first call `aihil_artifact_upload` with `image_path` and flash the returned `artifact_id`.
 4. For serial feedback, start `aihil_com_session_start`, send stimuli with `aihil_com_write`, read feedback with `aihil_com_read`, then stop with `aihil_com_session_stop`.
-5. Read the tool result and `aihil_get_last_report`.
-6. Diagnose failures with `aihil_classify_last_error`.
+5. For CAN feedback, start `aihil_can_session_start`, send frames with `aihil_can_send`, read frames with `aihil_can_read`, then stop with `aihil_can_session_stop`.
+6. Read the tool result and `aihil_get_last_report`.
+7. Diagnose failures with `aihil_classify_last_error`.
 
-Do not use raw OpenOCD commands or arbitrary COM port shell tools when an AI-HIL MCP tool is available.
+Do not use raw OpenOCD commands, arbitrary COM port shell tools, or direct CAN adapter tools when an AI-HIL MCP tool is available.
 
 Healthy probe and flash signals are `target_detected: true`, `success_confirmed: true`, `verify: true`, `reset_after_flash: true`, plus `report_path` and `log_path` for auditability.

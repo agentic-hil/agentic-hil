@@ -168,6 +168,108 @@
       },
       "default": {}
     },
+    "can_buses": {
+      "type": "object",
+      "description": "Named CAN buses that AI-HIL may open for stimuli and feedback.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "channel"
+        ],
+        "properties": {
+          "adapter": {
+            "type": "string",
+            "description": "CAN adapter backend. peak uses PEAK PCANBasic on Windows and SocketCAN on Linux; socketcan uses a Linux SocketCAN interface; process uses a JSON-lines bridge executable.",
+            "default": "peak",
+            "enum": [
+              "peak",
+              "socketcan",
+              "process"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "description": "Adapter channel, for example PCAN_USBBUS1, 0x51, or can0 depending on backend."
+          },
+          "bitrate": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 500000
+          },
+          "fd": {
+            "type": "boolean",
+            "description": "Whether CAN FD frames are allowed for this bus. The Windows PEAK backend supports classic CAN frames only.",
+            "default": false
+          },
+          "data_bitrate": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "default": null
+          },
+          "pcanbasic_dll": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional PCANBasic.dll path for the PEAK backend when the DLL is not discoverable through the system PATH.",
+            "default": null
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Bridge executable for adapter: process.",
+            "default": null
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional bridge executable arguments for adapter: process.",
+            "default": []
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 10.0
+          },
+          "poll_interval_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10
+          },
+          "receive_own_messages": {
+            "type": "boolean",
+            "default": false
+          },
+          "listen_only": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_buffer_frames": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1024
+          },
+          "max_frame_data_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64,
+            "default": 8
+          }
+        }
+      },
+      "default": {}
+    },
     "validation": {
       "type": "object",
       "additionalProperties": false,
@@ -215,6 +317,14 @@
           "default": true
         },
         "allow_com_write": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_can_read": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_can_write": {
           "type": "boolean",
           "default": true
         },

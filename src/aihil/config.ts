@@ -7,6 +7,7 @@ import YAML from "yaml";
 import type {
   AIHILConfig,
   ArtifactsConfig,
+  CanBusConfig,
   ComPortConfig,
   DebuggerConfig,
   JsonObject,
@@ -117,6 +118,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
   }
   const artifactsRaw = mapping(raw.artifacts, "artifacts");
   const comPortsRaw = mapping(raw.com_ports, "com_ports");
+  const canBusesRaw = mapping(raw.can_buses, "can_buses");
   const validationRaw = mapping(raw.validation, "validation");
   const permissionsRaw = mapping(raw.permissions, "permissions");
   const reportsRaw = mapping(raw.reports, "reports");
@@ -129,6 +131,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
     debugger: debuggerConfig(debuggerRaw, debuggerType),
     artifacts: artifactsConfig(artifactsRaw),
     com_ports: Object.fromEntries(Object.entries(comPortsRaw).map(([name, value]) => [name, comPortConfig(name, value)])),
+    can_buses: Object.fromEntries(Object.entries(canBusesRaw).map(([name, value]) => [name, canBusConfig(name, value)])),
     validation: validationConfig(validationRaw),
     permissions: permissionsConfig(permissionsRaw),
     reports: reportsConfig(reportsRaw),
@@ -264,6 +267,36 @@ function comPortConfig(name: string, value: unknown): ComPortConfig {
   };
 }
 
+function canBusConfig(name: string, value: unknown): CanBusConfig {
+  const raw = mapping(value, `can_buses.${name}`);
+  const adapter = String(raw.adapter ?? "peak");
+  const allowedAdapters = ["peak", "socketcan", "process"];
+  if (!allowedAdapters.includes(adapter)) {
+    throw new ConfigError("config_invalid", "Unsupported can_buses adapter.", {
+      field: `can_buses.${name}.adapter`,
+      value: adapter,
+      allowed_values: allowedAdapters,
+    });
+  }
+  const fd = Boolean(raw.fd ?? false);
+  return {
+    adapter: adapter as "peak" | "socketcan" | "process",
+    channel: String(raw.channel),
+    bitrate: Number.parseInt(String(raw.bitrate ?? 500000), 10),
+    fd,
+    data_bitrate: raw.data_bitrate === undefined || raw.data_bitrate === null ? null : Number.parseInt(String(raw.data_bitrate), 10),
+    pcanbasic_dll: optionalString(raw.pcanbasic_dll),
+    executable: optionalString(raw.executable),
+    args: stringList(raw.args, []),
+    timeout_s: Number(raw.timeout_s ?? 10.0),
+    poll_interval_ms: Number.parseInt(String(raw.poll_interval_ms ?? 10), 10),
+    receive_own_messages: Boolean(raw.receive_own_messages ?? false),
+    listen_only: Boolean(raw.listen_only ?? false),
+    max_buffer_frames: Number.parseInt(String(raw.max_buffer_frames ?? 1024), 10),
+    max_frame_data_bytes: Number.parseInt(String(raw.max_frame_data_bytes ?? (fd ? 64 : 8)), 10),
+  };
+}
+
 function validationConfig(raw: JsonObject): ValidationConfig {
   return {
     require_existing_file: Boolean(raw.require_existing_file ?? true),
@@ -281,6 +314,8 @@ function permissionsConfig(raw: JsonObject): PermissionsConfig {
     allow_reset: Boolean(raw.allow_reset ?? true),
     allow_com_read: Boolean(raw.allow_com_read ?? true),
     allow_com_write: Boolean(raw.allow_com_write ?? true),
+    allow_can_read: Boolean(raw.allow_can_read ?? true),
+    allow_can_write: Boolean(raw.allow_can_write ?? true),
     allow_raw_debugger_commands: Boolean(raw.allow_raw_debugger_commands ?? false),
     allow_mass_erase: Boolean(raw.allow_mass_erase ?? false),
   };

@@ -1,4 +1,5 @@
 import { ArtifactManager } from "./artifacts.js";
+import { CanBusService } from "./can.js";
 import { ComPortService } from "./comports.js";
 import type { DebuggerBackend } from "./debugger.js";
 import { createDebuggerBackend } from "./debugger.js";
@@ -9,16 +10,19 @@ export class AIHILToolService {
   readonly backend: DebuggerBackend;
   readonly artifacts: ArtifactManager;
   readonly comPorts: ComPortService;
+  readonly canBuses: CanBusService;
 
   constructor(
     private readonly config: AIHILConfig,
     backend?: DebuggerBackend,
     artifacts?: ArtifactManager,
     comPorts?: ComPortService,
+    canBuses?: CanBusService,
   ) {
     this.backend = backend ?? createDebuggerBackend(config);
     this.artifacts = artifacts ?? new ArtifactManager(config);
     this.comPorts = comPorts ?? new ComPortService(config);
+    this.canBuses = canBuses ?? new CanBusService(config);
   }
 
   debuggerInfo(): Promise<JsonObject> {
@@ -95,8 +99,31 @@ export class AIHILToolService {
     return this.comPorts.read(String(payload?.port_id ?? ""), payload?.max_bytes, payload?.wait_timeout_s ?? 0.0);
   }
 
+  canBusesList(): Promise<JsonObject> {
+    return this.canBuses.listBuses();
+  }
+
+  canSessionStart(payload: JsonObject | null = {}): Promise<JsonObject> {
+    return this.canBuses.sessionStart(String(payload?.bus_id ?? ""), Boolean(payload?.clear_rx_queue ?? true));
+  }
+
+  canSessionStop(payload: JsonObject | null = {}): Promise<JsonObject> {
+    return this.canBuses.sessionStop(String(payload?.bus_id ?? ""));
+  }
+
+  canSend(payload: JsonObject | null = {}): Promise<JsonObject> {
+    const busId = String(payload?.bus_id ?? "");
+    const sendPayload = Object.fromEntries(Object.entries(payload ?? {}).filter(([key]) => key !== "bus_id"));
+    return this.canBuses.send(busId, sendPayload);
+  }
+
+  canRead(payload: JsonObject | null = {}): Promise<JsonObject> {
+    return this.canBuses.read(String(payload?.bus_id ?? ""), payload?.max_frames, payload?.wait_timeout_s ?? 0.0);
+  }
+
   async close(): Promise<void> {
     await this.comPorts.close();
+    await this.canBuses.close();
   }
 
   async call(name: string, arguments_: JsonObject | null = {}): Promise<JsonObject> {
@@ -136,6 +163,21 @@ export class AIHILToolService {
     }
     if (name === "aihil_com_read") {
       return this.comRead(args);
+    }
+    if (name === "aihil_can_buses_list") {
+      return this.canBusesList();
+    }
+    if (name === "aihil_can_session_start") {
+      return this.canSessionStart(args);
+    }
+    if (name === "aihil_can_session_stop") {
+      return this.canSessionStop(args);
+    }
+    if (name === "aihil_can_send") {
+      return this.canSend(args);
+    }
+    if (name === "aihil_can_read") {
+      return this.canRead(args);
     }
     return {
       ok: false,

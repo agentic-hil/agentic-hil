@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code when working in this repository.
 
-Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. Human-facing setup and expected-output examples live in `README.md`.
+Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. Human-facing setup and troubleshooting entry points live in `README.md`.
 
 ## Project Overview
 
-AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, and reading structured reports from a configured local target.
+AI-HIL is a TypeScript/Node.js MCP stdio server for safe embedded hardware-in-the-loop access. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, configured CAN bus stimulus/feedback, and reading structured reports from a configured local target.
 
 Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 16.16 or newer with npm as the supported first path unless project files or the user clearly identify another setup. Current Node.js LTS is recommended.
 
@@ -62,7 +62,7 @@ npm install
 npm test
 ```
 
-Each firmware project should contain its own `.aihil/` directory with `.aihil/config.yaml` for that project's target, debugger, named COM ports, permissions, reports, logs, and artifact roots.
+Each firmware project should contain its own `.aihil/` directory with `.aihil/config.yaml` for that project's target, debugger, named COM ports, named CAN buses, permissions, reports, logs, and artifact roots.
 
 ## First Steps Per Project
 
@@ -93,7 +93,7 @@ For a separate plain text serial channel, use `aihil com-stdio --config .aihil/c
 
 ## Agent Rules
 
-Use the AI-HIL MCP tools for hardware actions. Do not use raw OpenOCD commands or shell commands for probe, flash, reset, or COM port workflows when the MCP server is available.
+Use the AI-HIL MCP tools for hardware actions. Do not use raw OpenOCD commands or shell commands for probe, flash, reset, COM port, or CAN adapter workflows when the MCP server is available.
 
 Follow this sequence for hardware validation:
 
@@ -101,9 +101,10 @@ Follow this sequence for hardware validation:
 2. Call `aihil_probe_target`.
 3. Call `aihil_flash_firmware` with a validated artifact path, usually `build/firmware.elf`, or upload first with `aihil_artifact_upload` using `image_path` and flash the returned `artifact_id`.
 4. For serial stimuli or feedback, use only configured port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
-5. Read the returned JSON result.
-6. Call `aihil_get_last_report`.
-7. Call `aihil_classify_last_error` after failed actions.
+5. For CAN stimuli or feedback, use only configured bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.
+6. Read the returned JSON result.
+7. Call `aihil_get_last_report`.
+8. Call `aihil_classify_last_error` after failed actions.
 
 Stop on `permission_denied` and report the local policy restriction.
 
@@ -123,6 +124,7 @@ src/aihil/tools.ts        Shared tool service used by MCP
 src/aihil/config.ts       .aihil/config.yaml parsing and policy
 src/aihil/artifacts.ts    Firmware artifact validation
 src/aihil/comports.ts     Configured COM port streaming sessions
+src/aihil/can.ts          Configured CAN bus sessions and adapters
 src/aihil/debuggers/      Debugger backends
 tests-ts/                 Node-based TypeScript migration tests
 ```

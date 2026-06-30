@@ -37,7 +37,7 @@ Without AI-HIL, the engineer often has to:
 7. ask for the next fix,
 8. repeat the same procedure again.
 
-With AI-HIL, the agent can use bounded tools to probe, flash, reset, read structured reports, and optionally read/write configured serial ports. The engineer stays in control of the hardware policy, while the agent gets the feedback it needs to make the next code change.
+With AI-HIL, the agent can use bounded tools to probe, flash, reset, read structured reports, and optionally read/write configured serial ports and CAN buses. The engineer stays in control of the hardware policy, while the agent gets the feedback it needs to make the next code change.
 
 That means AI-HIL is designed to save the time normally lost to repetitive hardware-operation steps and to make AI-assisted embedded development productive on **real boards**, not only in a simulator or editor.
 
@@ -46,7 +46,7 @@ That means AI-HIL is designed to save the time normally lost to repetitive hardw
 Once `.aihil/config.yaml` and `.mcp.json` exist in your firmware project, open your agent in that project and ask:
 
 ```text
-Use AI-HIL to build the firmware, probe the target, flash the firmware artifact from the configured build output directory, reset the target in run mode, read the last report, and read the configured COM port if one is available. Use the hardware feedback for the next firmware fix.
+Use AI-HIL to build the firmware, probe the target, flash the firmware artifact from the configured build output directory, reset the target in run mode, read the last report, and read the configured COM port or CAN bus if one is available. Use the hardware feedback for the next firmware fix.
 ```
 
 The expected loop is:
@@ -58,7 +58,8 @@ The expected loop is:
 4. aihil_reset_target
 5. aihil_get_last_report
 6. optional COM session/read/write through configured port_id values
-7. use the result for the next code change
+7. optional CAN session/send/read through configured bus_id values
+8. use the result for the next code change
 ```
 
 Healthy signals include:
@@ -80,6 +81,7 @@ AI-HIL gives agents a narrow hardware control surface instead of raw host access
 | Structured reports | Every run produces machine-readable JSON for diagnosis and repeatability. |
 | Raw logs | OpenOCD and hardware-action logs remain available for human inspection. |
 | Configured COM access | Serial feedback and stimuli can flow through named, approved port IDs. |
+| Configured CAN access | CAN feedback and stimuli can flow through named, approved bus IDs. |
 | Local policy | The project-local `.aihil/config.yaml` defines what is allowed. |
 
 ## Safety model
@@ -94,6 +96,7 @@ By default:
 - raw debugger commands are not exposed,
 - mass erase is disabled,
 - COM access is limited to named `com_ports` entries,
+- CAN access is limited to named `can_buses` entries,
 - every hardware action returns structured JSON and writes logs for review.
 
 This is what makes the loop useful for AI agents without turning your development machine into an unrestricted hardware-control shell.
@@ -120,7 +123,7 @@ AI coding agent
   -> builds or receives a firmware artifact
   -> calls AI-HIL MCP tools
   -> AI-HIL checks .aihil/config.yaml policy
-  -> OpenOCD / ST-Link / configured COM ports touch the board
+  -> OpenOCD / ST-Link / configured COM ports / configured CAN buses touch the board
   -> AI-HIL writes structured reports and logs
   -> agent uses real hardware feedback for the next firmware change
 ```
@@ -148,7 +151,7 @@ Create the starter config with:
 aihil init
 ```
 
-The default `.aihil/config.yaml` is intentionally local project state. Edit only the values that describe your board, debugger, artifact roots, permissions, and approved COM ports.
+The default `.aihil/config.yaml` is intentionally local project state. Edit only the values that describe your board, debugger, artifact roots, permissions, approved COM ports, and approved CAN buses.
 
 For the supported Nucleo path, the important values are:
 
@@ -172,14 +175,55 @@ artifacts:
     - ".hex"
     - ".bin"
 
+can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "PCAN_USBBUS1"
+    bitrate: 500000
+    timeout_s: 10
+
 permissions:
   allow_probe: true
   allow_flash: true
   allow_reset: true
   allow_com_read: true
   allow_com_write: true
+  allow_can_read: true
+  allow_can_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
+```
+
+Set `debugger.probe_id` to the intended ST-Link/debug probe serial number when multiple probes are connected. Add `com_ports` only for serial ports that are intentionally part of the project setup. Add `can_buses` only for CAN adapters that agents may use; for a PEAK USB adapter on Windows, start with `adapter: "peak"`, `channel: "PCAN_USBBUS1"`, and the intended `bitrate`.
+
+For Linux SocketCAN, configure a network interface name as the channel:
+
+```yaml
+can_buses:
+  dut_can:
+    adapter: "socketcan"
+    channel: "can0"
+    bitrate: 500000
+```
+
+CAN access always goes through a configured `bus_id`; agents should not open PCANBasic, SocketCAN, CANable, or other host adapters directly. Supported adapter values are `peak`, `socketcan`, and `process`. The `peak` adapter uses PEAK PCANBasic on Windows and SocketCAN interface names on Linux. The `socketcan` adapter is Linux-only. The `process` adapter runs the configured bridge executable with optional `args`.
+
+The MCP CAN loop is:
+
+```json
+["aihil_can_buses_list", "aihil_can_session_start", "aihil_can_send", "aihil_can_read", "aihil_can_session_stop"]
+```
+
+Example CAN frame payload for `aihil_can_send`:
+
+```json
+{
+  "bus_id": "dut_can",
+  "frame_id": "0x123",
+  "data_hex": "01 02 03 04",
+  "extended": false,
+  "rtr": false
+}
 ```
 
 ## Troubleshooting
@@ -202,7 +246,7 @@ report_path
 log_path
 ```
 
-Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), including missing OpenOCD, wrong target configuration, target not detected, permission errors, artifact validation failures, and COM-port setup.
+Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), including missing OpenOCD, wrong target configuration, target not detected, permission errors, artifact validation failures, COM-port setup, and CAN-bus setup.
 
 ## Manual setup fallback
 
@@ -227,7 +271,7 @@ If your MCP client needs a project discovery file, create `.mcp.json` with:
 }
 ```
 
-Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, and optional named COM ports.
+Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, optional named COM ports, and optional named CAN buses.
 
 If you are developing AI-HIL from this repository checkout instead of using the npm package:
 

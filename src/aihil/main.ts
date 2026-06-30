@@ -35,6 +35,8 @@ artifacts:
 
 com_ports: {}
 
+can_buses: {}
+
 validation:
   require_existing_file: true
   require_allowed_root: true
@@ -48,6 +50,8 @@ permissions:
   allow_reset: true
   allow_com_read: true
   allow_com_write: true
+  allow_can_read: true
+  allow_can_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 
@@ -189,6 +193,7 @@ function initNextSteps(availableComPorts: JsonObject): string[] {
   } else {
     nextSteps.push("COM port discovery failed. Run: aihil com-ports after checking the serialport installation.");
   }
+  nextSteps.push("For CAN access, add a named bus under can_buses, for example adapter: socketcan, channel: can0, bitrate: 500000 on Linux.");
   nextSteps.push("Run: aihil doctor", "Create .mcp.json from the documented portable template if your MCP client needs project discovery.");
   return nextSteps;
 }
@@ -252,6 +257,12 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
       Object.entries(config.com_ports).map(([portId, port]) => [
         portId,
         { device: port.device, baudrate: port.baudrate, encoding: port.encoding },
+      ]),
+    ),
+    can_buses: Object.fromEntries(
+      Object.entries(config.can_buses).map(([busId, bus]) => [
+        busId,
+        { adapter: bus.adapter, channel: bus.channel, bitrate: bus.bitrate, fd: bus.fd },
       ]),
     ),
     debugger: debuggerInfo,

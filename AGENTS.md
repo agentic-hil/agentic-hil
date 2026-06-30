@@ -2,15 +2,15 @@
 
 This file is for AI coding agents.
 
-Use AI-HIL as the safe local hardware-in-the-loop bridge for embedded projects. AI-HIL gives the agent bounded MCP tools for real hardware actions such as probing, flashing, resetting, reading structured reports, and interacting with configured serial/COM ports.
+Use AI-HIL as the safe local hardware-in-the-loop bridge for embedded projects. AI-HIL gives the agent bounded MCP tools for real hardware actions such as probing, flashing, resetting, reading structured reports, and interacting with configured serial/COM ports and CAN buses.
 
-Do not use raw OpenOCD commands, arbitrary debugger shells, or direct host COM-port access when an AI-HIL MCP tool is available.
+Do not use raw OpenOCD commands, arbitrary debugger shells, direct host COM-port access, or direct CAN adapter access when an AI-HIL MCP tool is available.
 
 ## Core rule
 
 AI-HIL is the hardware gate. The project-local `.aihil/config.yaml` is the policy.
 
-If an AI-HIL command or MCP tool returns `permission_denied`, stop. Do not work around the policy with shell commands, raw OpenOCD, mass erase, direct serial tools, or unconfigured host device access.
+If an AI-HIL command or MCP tool returns `permission_denied`, stop. Do not work around the policy with shell commands, raw OpenOCD, mass erase, direct serial tools, direct CAN adapter tools, or unconfigured host device access.
 
 ## Human vs agent documentation
 
@@ -115,6 +115,7 @@ Each firmware project owns its own `.aihil/` directory. That directory contains:
 - raw log paths
 - uploaded artifacts, if used
 - optional named COM ports
+- optional named CAN buses
 
 Treat `.aihil/config.yaml` as project-local hardware policy. Preserve existing policy decisions when editing it. Do not overwrite an existing config with `aihil init --force` unless the user explicitly asks.
 
@@ -144,6 +145,14 @@ Only change these fields unless the user explicitly asks for a broader policy ch
 - `com_ports.<port_id>.device`
 - `com_ports.<port_id>.baudrate`
 - `com_ports.<port_id>.encoding`
+- `can_buses.<bus_id>.adapter`
+- `can_buses.<bus_id>.channel`
+- `can_buses.<bus_id>.bitrate`
+- `can_buses.<bus_id>.fd`
+- `can_buses.<bus_id>.data_bitrate`
+- `can_buses.<bus_id>.pcanbasic_dll`
+- `can_buses.<bus_id>.executable`
+- `can_buses.<bus_id>.args`
 
 Do not enable these unless the user explicitly understands the risk and asks for a policy change:
 
@@ -218,6 +227,11 @@ aihil_com_session_start
 aihil_com_write
 aihil_com_read
 aihil_com_session_stop
+aihil_can_buses_list
+aihil_can_session_start
+aihil_can_send
+aihil_can_read
+aihil_can_session_stop
 ```
 
 Tool intent:
@@ -235,6 +249,11 @@ Tool intent:
 | `aihil_com_write` | Send text or hex stimulus to a configured COM session. |
 | `aihil_com_read` | Read buffered serial feedback from a configured COM session. |
 | `aihil_com_session_stop` | Stop and close a configured COM session. |
+| `aihil_can_buses_list` | List configured CAN buses and supported adapter backends. |
+| `aihil_can_session_start` | Start a configured CAN bus session. |
+| `aihil_can_send` | Send one CAN frame through a configured CAN session. |
+| `aihil_can_read` | Read buffered CAN frames from a configured CAN session. |
+| `aihil_can_session_stop` | Stop and close a configured CAN session. |
 
 ## Required hardware workflow
 
@@ -245,15 +264,16 @@ Use this loop for firmware tasks:
 3. Probe the target with `aihil_probe_target` before flashing.
 4. Flash only validated artifacts with `aihil_flash_firmware`.
 5. Reset with `aihil_reset_target` only when needed or requested.
-6. For serial feedback, use configured COM port ids with:
-   - `aihil_com_session_start`
-   - `aihil_com_write`
-   - `aihil_com_read`
-   - `aihil_com_session_stop`
-7. Read `aihil_get_last_report` after hardware actions.
-8. Use `aihil_classify_last_error` after failures.
-9. Use the real hardware feedback for the next code change.
-10. Repeat until the task is complete or a safety/configuration boundary is reached.
+6. For serial feedback, use configured COM port ids with `aihil_com_session_start`, `aihil_com_write`, `aihil_com_read`, and `aihil_com_session_stop`.
+7. For CAN stimuli or feedback, use configured CAN bus ids with `aihil_can_session_start`, `aihil_can_send`, `aihil_can_read`, and `aihil_can_session_stop`.
+8. Read `aihil_get_last_report` after hardware actions.
+9. Use `aihil_classify_last_error` after failures.
+10. Use the real hardware feedback for the next code change.
+11. Repeat until the task is complete or a safety/configuration boundary is reached.
+
+Do not open CAN adapters directly. Use AI-HIL's configured CAN MCP tools with named `bus_id` values.
+
+Use `aihil com-stdio` only when the user explicitly wants a continuous text serial channel. The `--port` value must be a configured `com_ports` id.
 
 Healthy signals:
 
@@ -295,6 +315,7 @@ Never:
 
 - run raw OpenOCD/debugger commands for hardware actions when AI-HIL tools are available,
 - open host COM devices directly when AI-HIL COM tools are available,
+- open CAN adapters directly when AI-HIL CAN tools are available,
 - flash files outside configured artifact roots,
 - bypass artifact validation,
 - mass erase,
