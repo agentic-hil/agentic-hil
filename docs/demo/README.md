@@ -24,7 +24,7 @@ docs/demo/thumbnail.png
 
 1. Show the connected NUCLEO-F446RE briefly.
 2. Show `aihil doctor` returning `ok: true`.
-3. Show `aihil mcp-config > .mcp.json` or the generated MCP config.
+3. Show the standard portable `.mcp.json` launch config if MCP project discovery is part of the recording.
 4. Show the agent prompt:
 
 ```text

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page covers the most common AI-HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Node.js 22.14 or newer LTS.
+This page covers the most common AI-HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Node.js 16.16 or newer with npm. Current Node.js LTS is recommended.
 
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
@@ -10,7 +10,8 @@ Always inspect structured JSON first. The most useful fields are `ok`, `error_ty
 - Use forward slashes in YAML paths to avoid accidental escape sequences.
 - Run `aihil com-ports` after reconnecting USB serial hardware.
 - Configure Windows COM devices such as `COM5` under named `com_ports` ids, then use those ids from MCP COM tools.
-- Do not bypass AI-HIL with raw OpenOCD commands or arbitrary serial tools in agent workflows.
+- Configure PEAK CAN devices under named `can_buses` ids, for example `adapter: "peak"` and `channel: "PCAN_USBBUS1"` on Windows.
+- Do not bypass AI-HIL with raw OpenOCD commands, arbitrary serial tools, or direct CAN adapter tools in agent workflows.
 
 ## 1. `aihil` Command Not Found
 
@@ -22,12 +23,16 @@ Fix:
 
 ```bash
 npm i -g aihil
+aihil --version
 aihil doctor
 ```
+
+If npm reports an old Node.js version or an `engines` error, install or activate a supported Node.js/npm runtime, open a fresh shell if needed, and rerun `npm i -g aihil`. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the runtime requirement.
 
 If developing from this checkout, run:
 
 ```bash
+npm install
 npm install --global .
 ```
 
@@ -95,7 +100,7 @@ Symptom: an MCP tool returns `error_type: "permission_denied"`.
 
 Likely cause: the local `.aihil/config.yaml` policy intentionally disables that action.
 
-Fix: stop and ask the human operator. Do not work around the policy with raw OpenOCD, direct COM-port tools, mass erase, or shell commands. The local AI-HIL config is authoritative.
+Fix: stop and ask the human operator. Do not work around the policy with raw OpenOCD, direct COM-port tools, direct CAN adapter tools, mass erase, or shell commands. The local AI-HIL config is authoritative.
 
 ## 8. Artifact Not Found Or Fails Validation
 
@@ -128,3 +133,11 @@ Symptom: COM tools cannot start a session, return permission errors, or read no 
 Likely cause: the port is not configured under `com_ports`, the wrong device name is used, the baud rate is wrong, another program owns the port, or serial access permissions are missing.
 
 Fix: run `aihil com-ports`, add only the approved project port to `.aihil/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id` instead of opening host COM devices directly. On Windows, the configured device can be a value such as `COM5`; the MCP calls should still use the AI-HIL id such as `dut_uart`.
+
+## 11. CAN Bus Does Not Work
+
+Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_adapter_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
+
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read` or `allow_can_write` is disabled, the adapter backend is unavailable on the host, another program owns the adapter, or the `channel` value is for a different backend.
+
+Fix: add only the approved project bus to `.aihil/config.yaml`, close other CAN tools, and use MCP CAN tools with the configured `bus_id` instead of opening host CAN adapters directly. On Windows with PEAK, start with `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and a network interface such as `can0`; `PCAN_USBBUS*` and numeric PCAN handles are Windows PCANBasic channels, not SocketCAN interface names.

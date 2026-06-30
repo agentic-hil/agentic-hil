@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `aihil mcp-config` with a shipped portable MCP template at `dist/templates/mcp.json`.
+
+## [0.2.1] - 2026-06-28
+
+### Changed
+
+- Relaxed the AI-HIL runtime engine from Node.js 22.14+ to Node.js 16.16+ while keeping current Node.js LTS recommended.
+- Added explicit CI coverage for the current Node.js LTS alias so industrial deployment environments remain visible in release checks.
+- Made `aihil mcp-config` emit a Node entrypoint launch instead of relying on the `aihil` command name, avoiding Windows PATH collisions with unrelated executables.
+- Clarified the agent install fast path, GitHub direct install fallback, and mandatory agent-side skill installation in setup documentation.
+- Kept human setup guidance in `README.md` while moving LLM-specific installation responsibilities to `AGENTS.md`.
+- Removed the AI-HIL setup skill from npm package contents so the package remains CLI/MCP-only and agent skills remain separate agent configuration.
+
+### Added
+
+- Added `aihil --help` and `aihil --version` for faster install checks.
+
 ## [0.2.0] - 2026-06-28
 
 ### Added

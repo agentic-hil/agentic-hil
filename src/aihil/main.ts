@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listAvailableComPorts } from "./comports.js";
@@ -66,6 +67,8 @@ interface ParsedCommand {
   config?: string | null;
   force?: boolean;
   output?: string | null;
+  target?: string | null;
+  agent?: string | null;
   port?: string;
   maxReadBytes?: number | null;
   readWaitTimeoutS?: number;
@@ -73,6 +76,19 @@ interface ParsedCommand {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv.length === 0) {
+    process.stderr.write(helpText());
+    return 2;
+  }
+  if (isHelpCommand(argv[0])) {
+    process.stdout.write(helpText());
+    return 0;
+  }
+  if (isVersionCommand(argv[0])) {
+    process.stdout.write(`${packageVersion()}\n`);
+    return 0;
+  }
+
   let args: ParsedCommand;
   try {
     args = parseArgs(argv);
@@ -95,6 +111,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
     return result.ok ? 0 : 1;
   }
+  if (args.command === "skill-install") {
+    const result = installSkill(args.agent, args.target, Boolean(args.force));
+    printJson(result);
+    return result.ok ? 0 : 1;
+  }
   if (args.command === "doctor") {
     const result = await doctor(args.config);
     printJson(result);
@@ -104,10 +125,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const result = await listAvailableComPorts();
     printJson(result);
     return result.ok ? 0 : 1;
-  }
-  if (args.command === "mcp-config") {
-    printJson(mcpConfig(args.config));
-    return 0;
   }
   if (args.command === "mcp-stdio") {
     return mcpStdio(args.config);
@@ -177,7 +194,7 @@ function initNextSteps(availableComPorts: JsonObject): string[] {
     nextSteps.push("COM port discovery failed. Run: aihil com-ports after checking the serialport installation.");
   }
   nextSteps.push("For CAN access, add a named bus under can_buses, for example adapter: socketcan, channel: can0, bitrate: 500000 on Linux.");
-  nextSteps.push("Run: aihil doctor", "Run: aihil mcp-config > .mcp.json");
+  nextSteps.push("Run: aihil doctor", "Create .mcp.json from the documented portable template if your MCP client needs project discovery.");
   return nextSteps;
 }
 
@@ -252,14 +269,57 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
   };
 }
 
-export function mcpConfig(configPath?: string | null): JsonObject {
+export function installSkill(agent?: string | null, target?: string | null, force = false): JsonObject {
+  const resolvedAgent = agent ?? "opencode";
+  if (resolvedAgent !== "opencode") {
+    return {
+      ok: false,
+      error_type: "unsupported_agent",
+      summary: "AI-HIL can currently install skills only for opencode.",
+      agent: resolvedAgent,
+      allowed_agents: ["opencode"],
+    };
+  }
+
+  const sourcePath = bundledSkillPath();
+  const targetPath = target ?? defaultOpencodeSkillPath();
+  const sourceText = readFileSync(sourcePath, "utf8");
+  if (existsSync(targetPath)) {
+    const existingText = readFileSync(targetPath, "utf8");
+    if (existingText === sourceText) {
+      return {
+        ok: true,
+        summary: "AI-HIL opencode skill is already installed.",
+        agent: resolvedAgent,
+        skill: "aihil-config-setup",
+        source_path: sourcePath,
+        target_path: targetPath,
+        installed: false,
+      };
+    }
+    if (!force) {
+      return {
+        ok: false,
+        error_type: "skill_exists",
+        summary: "Target skill file already exists with different content. Use --force to overwrite it.",
+        agent: resolvedAgent,
+        skill: "aihil-config-setup",
+        source_path: sourcePath,
+        target_path: targetPath,
+      };
+    }
+  }
+
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, sourceText, "utf8");
   return {
-    mcpServers: {
-      aihil: {
-        command: "aihil",
-        args: ["mcp-stdio", "--config", configPath ?? DEFAULT_CONFIG_PATH],
-      },
-    },
+    ok: true,
+    summary: "AI-HIL opencode skill installed.",
+    agent: resolvedAgent,
+    skill: "aihil-config-setup",
+    source_path: sourcePath,
+    target_path: targetPath,
+    installed: true,
   };
 }
 
@@ -319,6 +379,14 @@ function parseArgs(argv: string[]): ParsedCommand {
       parsed.output = requireValue(argv, ++index, current);
       continue;
     }
+    if (current === "--target") {
+      parsed.target = requireValue(argv, ++index, current);
+      continue;
+    }
+    if (current === "--agent") {
+      parsed.agent = requireValue(argv, ++index, current);
+      continue;
+    }
     if (current === "--port") {
       parsed.port = requireValue(argv, ++index, current);
       continue;
@@ -350,6 +418,39 @@ function requireValue(argv: string[], index: number, flag: string): string {
 
 function printJson(value: JsonObject): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function isHelpCommand(command: string | undefined): boolean {
+  return command === "--help" || command === "-h" || command === "help";
+}
+
+function isVersionCommand(command: string | undefined): boolean {
+  return command === "--version" || command === "-v" || command === "version";
+}
+
+function helpText(): string {
+  return `AI-HIL local MCP stdio server\n\nUsage:\n  aihil <command> [options]\n\nCommands:\n  init [--config <path>] [--force]\n  doctor [--config <path>]\n  com-ports\n  mcp-stdio --config <path>\n  com-stdio --config <path> --port <port_id>\n  schema [--output <path>] [--force]\n  skill-install [--agent opencode] [--target <path>] [--force]\n\nOptions:\n  --help, -h       Show this help.\n  --version, -v    Show the installed version.\n`;
+}
+
+function packageVersion(): string {
+  const packagePath = path.resolve(path.dirname(modulePath), "..", "package.json");
+  try {
+    const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as { version?: unknown };
+    if (typeof packageJson.version === "string") {
+      return packageJson.version;
+    }
+  } catch {
+    // Fall through to a stable value when running from an unusual layout.
+  }
+  return "unknown";
+}
+
+function bundledSkillPath(): string {
+  return path.resolve(path.dirname(modulePath), "..", "skills", "aihil-config-setup", "SKILL.md");
+}
+
+function defaultOpencodeSkillPath(): string {
+  return path.join(homedir(), ".config", "opencode", "skills", "aihil-config-setup", "SKILL.md");
 }
 
 const invokedPath = process.argv[1] ? realpathOrResolve(process.argv[1]) : null;

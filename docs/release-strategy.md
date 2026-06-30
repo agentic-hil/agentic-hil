@@ -41,7 +41,7 @@ Npm remains the primary installation channel. Add downloadable binary artifacts 
 
 ## Distribution Channels
 
-Use npm first. AI-HIL is currently a Node.js CLI with TypeScript builds and a package `bin` mapping, so PyPI should stay out of the primary path unless the project intentionally adds a Python wrapper.
+Use npm first. AI-HIL is currently a Node.js CLI with TypeScript builds and a package `bin` mapping.
 
 Publish npm releases through GitHub Actions trusted publishing with OIDC and provenance. Do not add long-lived npm automation tokens unless trusted publishing is unavailable for a documented reason.
 

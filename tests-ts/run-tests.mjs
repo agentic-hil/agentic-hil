@@ -9,7 +9,7 @@ import { loadConfig } from "../dist/config.js";
 import { handleMcpMessage } from "../dist/mcp.js";
 import { runStdioServer } from "../dist/stdio.js";
 import { AIHILToolService } from "../dist/tools.js";
-import { initConfig, mcpConfig, schema } from "../dist/main.js";
+import { initConfig, main, schema } from "../dist/main.js";
 import { Readable, Writable } from "node:stream";
 import { fc, safePathSegment } from "./property-arbitraries.js";
 
@@ -26,6 +26,26 @@ function test(name, fn) {
 
 function tempDir() {
   return mkdtempSync(path.join(tmpdir(), "aihil-ts-"));
+}
+
+async function captureStdout(fn) {
+  let output = "";
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk, encoding, callback) => {
+    output += String(chunk);
+    if (typeof encoding === "function") {
+      encoding();
+    } else if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
+  try {
+    const result = await fn();
+    return { result, output };
+  } finally {
+    process.stdout.write = originalWrite;
+  }
 }
 
 function writeConfig(directory, options = {}) {
@@ -116,12 +136,21 @@ test("schema exports bundled config schema", () => {
   }
 });
 
-test("mcpConfig uses stdio command", () => {
-  const result = mcpConfig("custom.yaml");
-  assert.deepEqual(result.mcpServers.aihil, {
-    command: "aihil",
-    args: ["mcp-stdio", "--config", "custom.yaml"],
-  });
+test("main supports help and version flags", async () => {
+  const help = await captureStdout(() => main(["--help"]));
+  assert.equal(help.result, 0);
+  assert.match(help.output, /Usage:/);
+
+  const version = await captureStdout(() => main(["--version"]));
+  assert.equal(version.result, 0);
+  assert.match(version.output.trim(), /^(\d+\.\d+\.\d+|unknown)$/);
+});
+
+test("packaged MCP template is portable", () => {
+  const templatePath = path.join(root, "dist", "templates", "mcp.json");
+  const result = JSON.parse(readFileSync(templatePath, "utf8"));
+  assert.equal(result.mcpServers.aihil.command, "aihil");
+  assert.deepEqual(result.mcpServers.aihil.args, ["mcp-stdio", "--config", ".aihil/config.yaml"]);
 });
 
 test("config loads defaults", () => {

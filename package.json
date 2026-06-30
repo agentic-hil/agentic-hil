@@ -1,6 +1,6 @@
 {
   "name": "aihil",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Generic hardware-in-the-loop debugger interface for AI agents",
   "license": "Apache-2.0",
   "author": {
@@ -51,7 +51,7 @@
     "provenance": true
   },
   "engines": {
-    "node": ">=22.14 <25"
+    "node": ">=16.16"
   },
   "files": [
     "dist",
@@ -61,7 +61,6 @@
     "docs/demo/README.md",
     "AGENTS.md",
     "AI_AGENT_QUICKSTART.md",
-    "skills/aihil-config-setup/SKILL.md",
     "LICENSE"
   ],
   "dependencies": {

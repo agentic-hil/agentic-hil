@@ -1,250 +1,159 @@
-# AI-HIL
+# AI-HIL [![Node CI](https://github.com/hp-8472/aihil/actions/workflows/ci.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/ci.yml)
 
-[![Node CI](https://github.com/hp-8472/aihil/actions/workflows/ci.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml/badge.svg)](https://github.com/hp-8472/aihil/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hp-8472/aihil/badge)](https://scorecard.dev/viewer/?uri=github.com/hp-8472/aihil)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13391/badge)](https://www.bestpractices.dev/projects/13391)
-[![npm version](https://img.shields.io/npm/v/aihil.svg)](https://www.npmjs.com/package/aihil)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+**Give your AI coding agent safe hands-on access to real embedded hardware.**
 
-**AI-HIL accelerates embedded development by putting your real hardware in the coding-agent loop and making hardware tests reproducible.**
+AI-HIL connects MCP-capable coding agents such as Claude Code, Codex, opencode, or similar tools to a local embedded hardware-in-the-loop setup.
 
-> For embedded engineers who want Claude Code, Codex, opencode, or another MCP-capable agent to probe, flash, reset, and read serial feedback from real boards.
-
-> Safety model: AI-HIL exposes only configured, high-level hardware actions. Raw debugger commands, direct host COM access outside configured ports, and mass erase stay disabled by default.
-
-It turns firmware work into a hardware-in-the-loop cycle: edit, build, probe, flash, reset, read logs, diagnose, improve, repeat. AI-HIL is the safe MCP stdio control layer that lets agents run and repeat that loop on real boards through configured tools instead of raw debugger or COM-port access.
-
-## Trust & Supply Chain
-
-- Public source, Apache-2.0 license, security policy, issue templates, PR template, and CODEOWNERS are part of the repository.
-- CI tests Node.js 22.14 and 24 with npm 11.5.1+ on Linux, macOS, and Windows; CodeQL scans JavaScript and TypeScript.
-- Dependabot and Dependency Review watch npm and GitHub Actions dependency changes.
-- npm releases use GitHub Actions trusted publishing with OIDC and provenance.
-- The published CLI uses `npm-shrinkwrap.json` to freeze the dependency tree installed by npm.
-- GitHub Releases generate a CycloneDX SBOM and signed artifact attestations for the npm tarball.
-- The threat model, common error classes, and cryptography scope are documented in [docs/security-design.md](docs/security-design.md).
-
-## Feedback and Contributions
-
-Report bugs and request enhancements through [GitHub Issues](https://github.com/hp-8472/aihil/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup, pull request expectations, test requirements, release checks, and hardware safety requirements for acceptable contributions.
-
-## Quick Start
-
-### Install from npm for a firmware project
-
-```bash
-npm i -g aihil
-cd /path/to/your/firmware-project
-aihil init
-aihil doctor
-aihil mcp-config > .mcp.json
-```
-
-Use this path when adding AI-HIL to an existing firmware project. Each project gets its own `.aihil/config.yaml` for target, debugger, artifact roots, permissions, reports, logs, and optional COM ports. If setup fails, start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
-### Run the supported Nucleo demo
-
-```bash
-npm i -g aihil
-git clone https://github.com/hp-8472/aihil.git
-cd aihil/examples/nucleo-f446re_demo
-aihil init
-aihil doctor
-aihil mcp-config > .mcp.json
-```
-
-From a local checkout of this repository, use `npm install --global .` instead of `npm i -g aihil`.
-
-Build the demo firmware locally before flashing; generated ELF, HEX, and BIN files are not checked into source. The demo `.aihil/config.yaml` is intentionally local machine state. Create it with `aihil init`, then edit only host-specific fields such as a non-`PATH` OpenOCD executable or configured COM ports. Keep the firmware artifact root as `build/`.
-
-## Windows First Run
-
-Windows is supported, but OpenOCD and COM device names often need explicit local configuration.
-
-If `aihil doctor` reports `debugger_not_found` or `openocd_not_found`, set `debugger.executable` in `.aihil/config.yaml` to the installed OpenOCD executable:
-
-```yaml
-debugger:
-  type: "openocd"
-  executable: "C:/Program Files/OpenOCD/bin/openocd.exe"
-  interface_cfg: "interface/stlink.cfg"
-  target_cfg: "target/stm32f4x.cfg"
-```
-
-For serial feedback, discover host ports with:
-
-```bash
-aihil com-ports
-```
-
-Then add only the intended device under `com_ports` and use its configured `port_id` from the MCP COM tools. For example, the Windows device might be `COM5`, while the AI-HIL port id is `dut_uart`. Do not bypass AI-HIL with direct serial tools in agent workflows.
-
-For setup failures, see [Windows quick notes](TROUBLESHOOTING.md#windows-quick-notes), [`openocd_not_found`](TROUBLESHOOTING.md#3-debugger_not_found--openocd_not_found), and [COM port troubleshooting](TROUBLESHOOTING.md#10-com-port-does-not-work).
-
-## 60-Second Nucleo Loop
-
-With a NUCLEO-F446RE connected over USB/ST-LINK and a local `.aihil/config.yaml` created by `aihil init`:
-
-```bash
-aihil doctor
-aihil mcp-config > .mcp.json
-```
-
-Run `cmake --preset Debug` and then `cmake --build --preset Debug` before asking an agent to flash `build/Debug/nucleo-f446re_demo.elf`.
-
-If OpenOCD is not on `PATH` or serial feedback is needed, edit the local `.aihil/config.yaml` before running `aihil doctor`. Do not commit machine-specific `.aihil/` files from the demo project.
-
-Open Claude Code, opencode, Codex, or another MCP-capable coding agent in `examples/nucleo-f446re_demo` and ask:
+For embedded engineers, the value is simple: **less manual hardware handling, fewer context switches, and faster feedback from the real target board.** Instead of repeatedly flashing firmware, resetting the board, opening serial tools, copying logs, and explaining the result back to the agent, AI-HIL gives the agent a safe, repeatable way to run that loop itself.
 
 ```text
-Use AI-HIL to probe the target, flash build/Debug/nucleo-f446re_demo.elf, reset it in run mode, read the last report, and read the configured COM port if one is available.
+change firmware -> build -> probe target -> flash -> reset -> test -> improve -> repeat
 ```
 
-Expected firmware-in-the-loop path:
+AI-HIL is not an SDK and not a generic remote shell. It is a **local, project-scoped hardware bridge** that exposes only configured, high-level hardware actions to the agent.
+
+## Start here: ask your agent to install it
+
+The recommended setup path is agent-first: open your firmware project in your MCP-capable coding agent and paste this prompt.
 
 ```text
-change firmware
-build firmware
-aihil_probe_target
-aihil_flash_firmware
-aihil_reset_target
-aihil_get_last_report and optional COM read
-use real hardware feedback for the next firmware patch
-repeat
+Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
 ```
 
-If the probe result has `ok: true` and `target_detected: true`, AI-HIL can see the board. If the flash result has `ok: true`, `verify: true`, and `reset_after_flash: true`, the first hardware-in-the-loop cycle worked.
+The agent should install the `aihil` command once on the machine, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
 
-## Demo Asset
+## Why embedded engineers use it
 
-A real demo GIF or video should show an actual NUCLEO-F446RE session, not mocked command output. Use the recording checklist in [`docs/demo/README.md`](docs/demo/README.md), then add the captured assets as:
+Embedded development is slow whenever the feedback loop leaves the coding environment.
+
+Without AI-HIL, the engineer often has to:
+
+1. wait for the agent to edit firmware,
+2. build manually,
+3. flash manually,
+4. reset the board,
+5. open a serial monitor,
+6. copy the result back into the chat,
+7. ask for the next fix,
+8. repeat the same procedure again.
+
+With AI-HIL, the agent can use bounded tools to probe, flash, reset, read structured reports, and optionally read/write configured serial ports and CAN buses. The engineer stays in control of the hardware policy, while the agent gets the feedback it needs to make the next code change.
+
+That means AI-HIL is designed to save the time normally lost to repetitive hardware-operation steps and to make AI-assisted embedded development productive on **real boards**, not only in a simulator or editor.
+
+## First real hardware loop
+
+Once `.aihil/config.yaml` and `.mcp.json` exist in your firmware project, open your agent in that project and ask:
 
 ```text
-docs/demo/aihil-nucleo-loop.gif
-docs/demo/aihil-nucleo-loop.mp4
-docs/demo/thumbnail.png
+Use AI-HIL to build the firmware, probe the target, flash the firmware artifact from the configured build output directory, reset the target in run mode, read the last report, and read the configured COM port or CAN bus if one is available. Use the hardware feedback for the next firmware fix.
 ```
 
-Once recorded, embed the GIF under the README header so first-time visitors immediately see the probe, flash, reset, report, and optional COM-read loop on real hardware.
+The expected loop is:
 
-## Reproducible Hardware Tests
+```text
+1. build firmware
+2. aihil_probe_target
+3. aihil_flash_firmware
+4. aihil_reset_target
+5. aihil_get_last_report
+6. optional COM session/read/write through configured port_id values
+7. optional CAN session/send/read through configured bus_id values
+8. use the result for the next code change
+```
 
-AI-HIL treats every hardware run as something that should be repeatable. The local `.aihil/` setup captures the target, debugger, permissions, allowed firmware artifacts, reports, and logs so the next agent, developer, or CI job can inspect the same hardware-in-the-loop test under the same constraints.
+Healthy signals include:
 
-Today, `.aihil/config.yaml` contains both portable project choices and machine-specific values such as OpenOCD executable paths and COM devices. For checked-in examples, keep `.aihil/` ignored and document the stable values instead of committing a host-specific config file.
+- `aihil doctor` returns `ok: true`.
+- `aihil_probe_target` returns `ok: true` and `target_detected: true`.
+- `aihil_flash_firmware` returns `ok: true`, `verify: true`, and `reset_after_flash: true`.
+- Every hardware action writes structured reports and raw logs under `.aihil/`.
 
-Reproducibility is part of the value: a passing or failing firmware result should be explainable from structured JSON, raw OpenOCD logs, COM logs, the flashed artifact path, and the project configuration.
+## What AI-HIL provides
 
-## Why It Exists
+AI-HIL gives agents a narrow hardware control surface instead of raw host access:
 
-AI agents can edit firmware quickly, but embedded development only speeds up when the agent can run the firmware on the actual board, learn from the result, and reproduce the same test later. AI-HIL closes that gap by making real hardware part of the development loop while keeping hardware access bounded, configured, reproducible, and auditable.
+| Capability | What it gives the engineer |
+| --- | --- |
+| Target probing | The agent can check whether the board is reachable before flashing. |
+| Firmware flashing | The agent can flash only validated artifacts from allowed project roots. |
+| Reset control | The agent can reset the target in configured modes. |
+| Structured reports | Every run produces machine-readable JSON for diagnosis and repeatability. |
+| Raw logs | OpenOCD and hardware-action logs remain available for human inspection. |
+| Configured COM access | Serial feedback and stimuli can flow through named, approved port IDs. |
+| Configured CAN access | CAN feedback and stimuli can flow through named, approved bus IDs. |
+| Local policy | The project-local `.aihil/config.yaml` defines what is allowed. |
 
-## Audience
+## Safety model
 
-This README is for human developers and hardware operators.
+AI-HIL is designed around a simple rule: **the agent can only do what the project-local configuration allows.**
 
-Agent-facing instructions live in:
+By default:
 
-- [`AGENTS.md`](AGENTS.md)
-- [`AI_AGENT_QUICKSTART.md`](AI_AGENT_QUICKSTART.md)
-- [`skills/aihil-config-setup/SKILL.md`](skills/aihil-config-setup/SKILL.md)
+- hardware actions require explicit permissions,
+- firmware files must be under configured allowed roots,
+- firmware extensions are restricted, usually to `.elf`, `.hex`, and `.bin`,
+- raw debugger commands are not exposed,
+- mass erase is disabled,
+- COM access is limited to named `com_ports` entries,
+- CAN access is limited to named `can_buses` entries,
+- every hardware action returns structured JSON and writes logs for review.
 
-Troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+This is what makes the loop useful for AI agents without turning your development machine into an unrestricted hardware-control shell.
 
-## Supported First Path
+## Supported first path
 
-The official reference setup is deliberately narrow:
+The official reference setup is deliberately narrow so that the first user experience is reproducible:
 
-- Board: STM32 Nucleo-F446RE.
-- Debug probe: ST-Link, including the onboard Nucleo ST-Link.
-- Debug backend: OpenOCD.
-- Host runtime: Node.js 22.14 or newer LTS with npm; CI covers Node.js 22 and 24.
-- OpenOCD interface config: `interface/stlink.cfg`.
-- OpenOCD target config: `target/stm32f4x.cfg`.
-- Firmware artifact root: `build/`.
-- Firmware artifact formats: `.elf`, `.hex`, or `.bin`.
+- Board: STM32 Nucleo-F446RE
+- Debug probe: ST-Link, including the onboard Nucleo ST-Link
+- Debug backend: OpenOCD
+- Host runtime: Node.js with npm
+- OpenOCD interface config: `interface/stlink.cfg`
+- OpenOCD target config: `target/stm32f4x.cfg`
+- Firmware artifact root: `build/`
+- Firmware artifact formats: `.elf`, `.hex`, `.bin`
 
 Other OpenOCD-supported boards, probes, and targets may work when represented in `.aihil/config.yaml`, but the supported first path is the baseline for documentation, examples, and issue reproduction.
 
-## How It Works
+## How it works
 
 ```text
-AI agent edits firmware
-  -> build artifact
-AI-HIL MCP stdio
-  -> .aihil/config.yaml policy
-OpenOCD / ST-Link / configured COM ports
-  -> real target board
-AI-HIL reports and logs
-  -> AI agent improves firmware
-  -> repeat
+AI coding agent
+  -> builds or receives a firmware artifact
+  -> calls AI-HIL MCP tools
+  -> AI-HIL checks .aihil/config.yaml policy
+  -> OpenOCD / ST-Link / configured COM ports / configured CAN buses touch the board
+  -> AI-HIL writes structured reports and logs
+  -> agent uses real hardware feedback for the next firmware change
 ```
 
-The agent does not receive a generic OpenOCD shell. It receives narrow tools such as `aihil_probe_target`, `aihil_flash_firmware`, `aihil_reset_target`, and configured COM-port tools.
+AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit MCP details. The portable project-local MCP config is:
 
-## Install
-
-Install the `aihil` command once on the local machine:
-
-```bash
-npm i -g aihil
+```json
+{
+  "mcpServers": {
+    "aihil": {
+      "command": "aihil",
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+    }
+  }
+}
 ```
 
-From this repository checkout, install the local version with:
+Agent-facing MCP behavior, tool rules, and safety instructions live in [`AGENTS.md`](AGENTS.md). Human troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
-```bash
-npm install --global .
-```
+## Project configuration
 
-For local AI-HIL development:
-
-```bash
-npm install
-npm test
-```
-
-AI-HIL is a Node.js CLI. The npm package builds TypeScript during installation and installs the `aihil` executable on `PATH` when installed globally.
-
-## Distribution
-
-npm is the primary distribution channel for AI-HIL. The repository is a native Node.js CLI with `package.json`, TypeScript builds, and a package `bin` entry for the `aihil` command.
-
-PyPI is intentionally not a primary target. Publish a Python package only if AI-HIL grows a deliberate Python wrapper for Python-heavy embedded teams.
-
-When publishing to npm, use trusted publishing from GitHub Actions with OIDC and npm provenance. This avoids long-lived npm tokens in repository secrets and records the build provenance for the published package. The published CLI also includes `npm-shrinkwrap.json` so npm installs resolve the audited dependency tree used by CI.
-
-GitHub Releases include the packed npm tarball, a CycloneDX SBOM at `sbom.cdx.json`, and signed artifact attestations that can be verified with `gh attestation verify`.
-
-To verify published artifacts, run the npm registry signature and provenance checks after installing dependencies in a clean checkout:
-
-```bash
-npm audit signatures
-```
-
-For GitHub release assets, download the release tarball and verify its attestation against this repository:
-
-```bash
-gh attestation verify ./aihil-<version>.tgz --repo hp-8472/aihil
-```
-
-AI-HIL is local-first because real hardware access depends on host USB, ST-Link, OpenOCD, and serial/COM devices. Keep the first-run path on the host through the npm CLI and MCP stdio.
-
-Later packaging candidates are Homebrew, Scoop or WinGet, and optional single-file binaries.
-
-## Per-Project Setup
-
-Run setup from the firmware project directory, not from the AI-HIL source repository:
+Create the starter config with:
 
 ```bash
 aihil init
-aihil doctor
-aihil mcp-config > .mcp.json
 ```
 
-Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, hardware permissions, allowed artifact roots, reports, logs, and uploaded artifacts. Treat it as local machine state unless the project has an explicit policy for sharing sanitized AI-HIL config.
+The default `.aihil/config.yaml` is intentionally local project state. Edit only the values that describe your board, debugger, artifact roots, permissions, approved COM ports, and approved CAN buses.
 
-For the supported first path, start from `aihil init` and set the important fields like this:
+For the supported Nucleo path, the important values are:
 
 ```yaml
 target:
@@ -254,7 +163,6 @@ target:
 debugger:
   type: "openocd"
   executable: null
-  probe_id: null
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60
@@ -262,13 +170,10 @@ debugger:
 artifacts:
   allowed_roots:
     - "build"
-  upload_directory: ".aihil/artifacts"
   allowed_extensions:
     - ".elf"
     - ".hex"
     - ".bin"
-  max_upload_size_mb: 64
-  allow_upload: true
 
 can_buses:
   dut_can:
@@ -291,260 +196,135 @@ permissions:
 
 Set `debugger.probe_id` to the intended ST-Link/debug probe serial number when multiple probes are connected. Add `com_ports` only for serial ports that are intentionally part of the project setup. Add `can_buses` only for CAN adapters that agents may use; for a PEAK USB adapter on Windows, start with `adapter: "peak"`, `channel: "PCAN_USBBUS1"`, and the intended `bitrate`.
 
-To use ST-Link directly through STM32CubeProgrammer instead of OpenOCD, set `debugger.type` to `stlink`:
+For Linux SocketCAN, configure a network interface name as the channel:
 
 ```yaml
-debugger:
-  type: "stlink"
-  executable: "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe"
-  probe_id: null
-  interface: "SWD"
-  flash_address: null
-  timeout_s: 60
+can_buses:
+  dut_can:
+    adapter: "socketcan"
+    channel: "can0"
+    bitrate: 500000
 ```
 
-Use `debugger.probe_id` when more than one ST-Link is attached. For raw `.bin` files, set `debugger.flash_address`, for example `0x08000000`; `.elf` and `.hex` artifacts carry their own addresses.
+CAN access always goes through a configured `bus_id`; agents should not open PCANBasic, SocketCAN, CANable, or other host adapters directly. Supported adapter values are `peak`, `socketcan`, and `process`. The `peak` adapter uses PEAK PCANBasic on Windows and SocketCAN interface names on Linux. The `socketcan` adapter is Linux-only. The `process` adapter runs the configured bridge executable with optional `args`.
 
-## Expected Output
+The MCP CAN loop is:
 
-The exact paths, timestamps, OpenOCD version, elapsed times, COM device names, and SHA-256 values will differ by machine. The shape and key fields should match these examples.
+```json
+["aihil_can_buses_list", "aihil_can_session_start", "aihil_can_send", "aihil_can_read", "aihil_can_session_stop"]
+```
 
-### `aihil doctor`
+Example CAN frame payload for `aihil_can_send`:
 
 ```json
 {
-  "ok": true,
-  "tool": "aihil_doctor",
-  "summary": "AI-HIL configuration loaded and debugger checked.",
-  "config_path": ".aihil/config.yaml",
-  "mcp": {
-    "transport": "stdio",
-    "command": "aihil",
-    "args": [
-      "mcp-stdio",
-      "--config",
-      ".aihil/config.yaml"
-    ]
-  },
-  "target": {
-    "name": "nucleo-f446re",
-    "controller": "stm32f446re"
-  },
-  "com_ports": {
-    "dut_uart": {
-      "device": "COM5",
-      "baudrate": 115200,
-      "encoding": "utf-8"
-    }
-  },
-  "can_buses": {
-    "dut_can": {
-      "adapter": "peak",
-      "channel": "PCAN_USBBUS1",
-      "bitrate": 500000,
-      "fd": false
-    }
-  },
-  "debugger": {
-    "ok": true,
-    "tool": "aihil_debugger_info",
-    "backend": "openocd",
-    "executable": "C:/Program Files/OpenOCD/bin/openocd.exe",
-    "version": "Open On-Chip Debugger 0.12.0",
-    "summary": "OpenOCD is available."
-  }
+  "bus_id": "dut_can",
+  "frame_id": "0x123",
+  "data_hex": "01 02 03 04",
+  "extended": false,
+  "rtr": false
 }
 ```
 
-If no serial port is configured, `com_ports` is `{}`. If no CAN bus is configured, `can_buses` is `{}`.
+## Troubleshooting
 
-### Successful Probe Report
-
-After an agent calls `aihil_probe_target`, the MCP tool result and `.aihil/reports/last-report.json` should look like this:
-
-```json
-{
-  "ok": true,
-  "tool": "aihil_probe_target",
-  "backend": "openocd",
-  "started_at": "2026-06-26T10:14:23.121Z",
-  "finished_at": "2026-06-26T10:14:24.088Z",
-  "elapsed_ms": 967,
-  "summary": "Target detected through OpenOCD.",
-  "log_path": ".aihil/logs/openocd-20260626T101423121Z-aihil_probe_target.log",
-  "success_confirmed": true,
-  "target_detected": true,
-  "report_path": ".aihil/reports/last-report.json"
-}
-```
-
-### Successful Flash Report
-
-After an agent calls `aihil_flash_firmware` with `image_path: "build/firmware.elf"`, a successful report should look like this:
-
-```json
-{
-  "ok": true,
-  "tool": "aihil_flash_firmware",
-  "backend": "openocd",
-  "started_at": "2026-06-26T10:15:02.442Z",
-  "finished_at": "2026-06-26T10:15:06.659Z",
-  "elapsed_ms": 4217,
-  "summary": "Firmware flashed, verified, and target reset.",
-  "log_path": ".aihil/logs/openocd-20260626T101502442Z-aihil_flash_firmware.log",
-  "success_confirmed": true,
-  "artifact": {
-    "source": "path",
-    "path": "build/firmware.elf",
-    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  },
-  "verify": true,
-  "reset_after_flash": true,
-  "report_path": ".aihil/reports/last-report.json"
-}
-```
-
-For failures, inspect `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` before changing configuration or firmware.
-
-### `aihil_get_last_report`
-
-`aihil_get_last_report` wraps the most recent report from `.aihil/reports/last-report.json`:
-
-```json
-{
-  "ok": true,
-  "tool": "aihil_get_last_report",
-  "report": {
-    "ok": true,
-    "tool": "aihil_flash_firmware",
-    "backend": "openocd",
-    "summary": "Firmware flashed, verified, and target reset.",
-    "artifact": {
-      "source": "path",
-      "path": "build/Debug/nucleo-f446re_demo.elf",
-      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    },
-    "verify": true,
-    "reset_after_flash": true,
-    "report_path": ".aihil/reports/last-report.json",
-    "log_path": ".aihil/logs/openocd-20260626T101502442Z-aihil_flash_firmware.log"
-  }
-}
-```
-
-If no hardware action has written a report yet, the result is:
-
-```json
-{
-  "ok": false,
-  "tool": "aihil_get_last_report",
-  "error_type": "report_not_found",
-  "summary": "No AI-HIL report has been written yet."
-}
-```
-
-### `aihil_classify_last_error`
-
-After a failed hardware action, `aihil_classify_last_error` returns a compact diagnosis from the most recent report:
-
-```json
-{
-  "ok": true,
-  "tool": "aihil_classify_last_error",
-  "error_type": "target_not_detected",
-  "backend_error_type": "target_not_detected",
-  "summary": "OpenOCD could not detect the target.",
-  "likely_causes": [
-    "target board is not powered",
-    "debug probe is disconnected or already in use",
-    "wrong OpenOCD interface or target config",
-    "SWD/JTAG wiring or boot-mode issue"
-  ],
-  "report_path": ".aihil/reports/last-report.json",
-  "log_path": ".aihil/logs/openocd-20260626T101423121Z-aihil_probe_target.log"
-}
-```
-
-If the last report succeeded, the classifier returns `ok: true`, `error_type: null`, and `summary: "Last AI-HIL report did not contain an error."`.
-
-## MCP Client Configuration
-
-AI-HIL uses MCP over stdio. Generate project-local MCP discovery config with:
+Start with:
 
 ```bash
-aihil mcp-config > .mcp.json
+aihil doctor
 ```
 
-Example `.mcp.json`:
+The most useful fields are:
+
+```text
+ok
+error_type
+backend_error_type
+summary
+likely_causes
+report_path
+log_path
+```
+
+Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), including missing OpenOCD, wrong target configuration, target not detected, permission errors, artifact validation failures, COM-port setup, and CAN-bus setup.
+
+## Manual setup fallback
+
+If you prefer to set it up yourself, run this from your firmware project directory:
+
+```bash
+npm i -g aihil
+aihil init
+aihil doctor
+```
+
+If your MCP client needs a project discovery file, create `.mcp.json` with:
 
 ```json
 {
   "mcpServers": {
     "aihil": {
       "command": "aihil",
-      "args": [
-        "mcp-stdio",
-        "--config",
-        ".aihil/config.yaml"
-      ]
+      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }
 ```
 
-`mcp-stdio` is project-scoped. Do not add `--port` to it. COM MCP tool calls provide configured `port_id` values when needed.
+Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, optional named COM ports, and optional named CAN buses.
 
-## Plain COM Text Stdio
-
-Use the MCP COM tools for normal agent workflows. If a separate plain-text serial channel is explicitly needed, start:
+If you are developing AI-HIL from this repository checkout instead of using the npm package:
 
 ```bash
-aihil com-stdio --config .aihil/config.yaml --port dut_uart
+git clone https://github.com/hp-8472/aihil.git
+cd aihil
+npm install
+npm install --global .
 ```
 
-`com-stdio` is not MCP. It binds one plain text stream to one configured COM port. Do not mix COM text into `mcp-stdio`; MCP stdout must remain JSON-RPC only.
+Then return to your firmware project and run:
 
-## Safety Model
+```bash
+aihil init
+aihil doctor
+```
 
-AI-HIL's safety boundary is the project-local `.aihil/config.yaml` file.
-
-The default model is:
-
-- Probe, flash, reset, and COM actions require explicit permissions.
-- Raw debugger commands are not exposed.
-- Mass erase is disabled.
-- Firmware paths must be under configured artifact roots.
-- COM access is limited to named `com_ports` entries.
-- CAN access is limited to named `can_buses` entries.
-- Every hardware action returns structured JSON and writes raw logs for human inspection.
-
-## Repository Layout
+## Repository layout
 
 ```text
 .
-|-- AGENTS.md
-|-- AI_AGENT_QUICKSTART.md
-|-- CLAUDE.md
-|-- README.md
-|-- TROUBLESHOOTING.md
-|-- skills/
-|-- src/aihil/
-|-- tests-ts/
+|-- AGENTS.md                         # agent-facing MCP and workflow rules
+|-- AI_AGENT_QUICKSTART.md            # compact agent setup notes
+|-- README.md                         # human-facing project overview
+|-- TROUBLESHOOTING.md                # operator diagnostics
+|-- examples/nucleo-f446re_demo/      # supported first hardware path
+|-- skills/aihil-config-setup/        # agent setup skill
+|-- src/aihil/                        # AI-HIL CLI, config, MCP, reports, tools
+|-- tests-ts/                         # TypeScript test suite
 `-- package.json
 ```
 
-## Agent Entry Point
+## Development
 
-If you want an AI coding agent to set up a firmware project with AI-HIL, open the firmware project and say:
+For AI-HIL development:
 
-```text
-Install https://github.com/hp-8472/aihil and use it for this firmware project.
+```bash
+npm install
+npm test
 ```
 
-The agent should install `aihil`, return to the firmware project, and follow `AGENTS.md`, `AI_AGENT_QUICKSTART.md`, and `skills/aihil-config-setup/SKILL.md`. It should not vendor the AI-HIL source tree into the firmware project unless you explicitly ask for that.
+The npm package installs the `aihil` CLI. The CLI provides commands such as:
+
+```text
+aihil init
+aihil doctor
+aihil com-ports
+aihil mcp-stdio
+aihil com-stdio
+```
 
 ## License
 
 Copyright 2026 Hannes Pauli.
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+Licensed under the Apache License 2.0. See [`LICENSE`](LICENSE).
