@@ -180,8 +180,18 @@ test("main supports help and version flags", async () => {
 test("packaged MCP template is portable", () => {
   const templatePath = path.join(root, "dist", "templates", "mcp.json");
   const result = JSON.parse(readFileSync(templatePath, "utf8"));
-  assert.equal(result.mcpServers.aihil.command, "aihil");
-  assert.deepEqual(result.mcpServers.aihil.args, ["mcp-stdio", "--config", ".aihil/config.yaml"]);
+  assert.equal(result.mcpServers.aihil.command, "npm");
+  assert.deepEqual(result.mcpServers.aihil.args, [
+    "exec",
+    "--yes",
+    "--package",
+    "aihil",
+    "--",
+    "aihil",
+    "mcp-stdio",
+    "--config",
+    ".aihil/config.yaml",
+  ]);
 });
 
 test("agent skill version matches package version", () => {

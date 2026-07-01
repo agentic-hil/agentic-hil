@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+      "command": "npm",
+      "args": ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }

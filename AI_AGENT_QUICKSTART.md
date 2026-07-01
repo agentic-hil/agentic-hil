@@ -18,34 +18,34 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
 
-## Install Once
+## Start AI-HIL
 
 Fast path:
 
 1. If `aihil --version` works, do not reinstall. On Windows, also try `aihil.cmd --version`.
-2. If AI-HIL is missing, first try installing the `aihil` command once on the local machine from npm:
+2. If AI-HIL is missing but npm is available, use npm's package runner. This does not require admin rights or an `aihil` entry in `PATH`:
 
 ```bash
-npm i -g aihil
+npm exec --yes --package aihil -- aihil --version
 ```
 
-3. If that npm registry install fails after Node.js/npm are available and accepted by this repository, install directly from GitHub:
+3. If that npm registry package lookup fails after Node.js/npm are available and accepted by this repository, try the GitHub package source as a package source only. Do not clone or keep a source checkout in the firmware project:
 
 ```bash
-npm i -g github:hp-8472/aihil
+npm exec --yes --package github:hp-8472/aihil -- aihil --version
 ```
 
-Installing from npm or GitHub installs only the `aihil` CLI/MCP server. It does not install, register, or update agent skills. When an AI agent is asked to install AI-HIL, the agent must install the skills separately as an agent setup step.
+Running from npm or GitHub makes only the `aihil` CLI/MCP server available for that command. It does not install, register, or update agent skills. When an AI agent is asked to install AI-HIL, the agent must install the skills separately as an agent setup step.
 
-If the host has no Node.js or an old Node.js, keep going by installing or activating a supported Node.js/npm runtime, then rerun `npm i -g aihil`. Current Node.js LTS is fine, but the agent does not need to pin a specific Node.js patch version; any runtime accepted by `package.json` is fine. An outdated Node.js is a remediable setup prerequisite, not a reason to refuse the AI-HIL setup. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If the safe local install path is unclear, ask one concise question.
+If the host has no Node.js or an old Node.js, keep going by installing or activating a supported Node.js/npm runtime, then rerun the `npm exec` command. Current Node.js LTS is fine, but the agent does not need to pin a specific Node.js patch version; any runtime accepted by `package.json` is fine. An outdated Node.js is a remediable setup prerequisite, not a reason to refuse the AI-HIL setup. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If the safe local install path is unclear, ask one concise question.
 
 Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the Node.js requirement.
 
 ## Install Agent Skill
 
-Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed. The installed CLI is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent <agent>`.
+Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the CLI is available through `aihil` or `npm exec`. The CLI package is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent <agent>` or `npm exec --yes --package aihil -- aihil skill-install --agent <agent>`.
 
-If this source checkout is not available, clone or fetch the AI-HIL repository outside the firmware project only for the skill source, then remove that temporary checkout if it is no longer needed.
+Do not clone the AI-HIL repository just to install the skill. The npm package includes the setup skill, and `skill-install` can copy it into the active agent's user-level skill directory.
 
 Known user-level skill destinations:
 
@@ -55,15 +55,16 @@ Known user-level skill destinations:
 
 `skill-install` also performs the known registration step for the selected agent. opencode and Claude Code discover skills from their skill directories. Codex additionally gets a marked AI-HIL block in `$HOME/.codex/AGENTS.md` pointing at the installed skill.
 
-CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
+CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>` or `npm exec --yes --package aihil -- aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
 
 Do not rely on npm for skills, and do not add npm `postinstall` hooks for skill installation. Skill installation is an agent workflow responsibility, not package-manager behavior.
 
-From this repository checkout for AI-HIL development, install dependencies first and then link the checkout globally:
+From this repository checkout for AI-HIL development only, install dependencies and run the local CLI directly:
 
 ```bash
 npm install
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
 For local AI-HIL development and tests, use the Node.js toolchain:
@@ -73,26 +74,26 @@ npm install
 npm test
 ```
 
-If you were given only the AI-HIL repository URL and asked to set up the current firmware project, install AI-HIL with the fast path above, install the AI-HIL skill into the active agent's skill directory, then return to the firmware project. Do not vendor the AI-HIL source tree into the firmware project.
+If you were given only the AI-HIL repository URL and asked to set up the current firmware project, use AI-HIL with the fast path above, install the AI-HIL skill into the active agent's skill directory, then return to the firmware project. Do not clone, checkout, or vendor the AI-HIL source tree into the firmware project for normal setup.
 
 ## Configure Each Project
 
 In every firmware project that should use AI-HIL, create a project-local `.aihil/config.yaml`:
 
 ```bash
-aihil init
+npm exec --yes --package aihil -- aihil init
 ```
 
 Edit `.aihil/config.yaml` for the local board, OpenOCD interface, target config, allowed firmware artifact roots, any named COM ports, and any named CAN buses.
 
-Agents should follow `skills/aihil-config-setup/SKILL.md` for the exact setup workflow: use `aihil init`, edit only project-specific fields, keep safety policy restrictive, then validate with `aihil doctor`.
+Agents should follow `skills/aihil-config-setup/SKILL.md` for the exact setup workflow: use `aihil init` or `npm exec --yes --package aihil -- aihil init`, edit only project-specific fields, keep safety policy restrictive, then validate with `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor`.
 
 Keep `.aihil/` with the project because it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall the MCP server inside every project.
 
 ## Check Setup
 
 ```bash
-aihil doctor
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 Expected healthy result: `ok: true`, `tool: "aihil_doctor"`, `summary: "AI-HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
@@ -113,14 +114,14 @@ Project-level MCP client discovery config belongs in:
 {
   "mcpServers": {
     "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+      "command": "npm",
+      "args": ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }
 ```
 
-The same template is shipped with the package under `dist/templates/mcp.json`. If the MCP client cannot resolve `aihil` from `PATH`, edit `.mcp.json` for that machine instead of changing the project template.
+The same template is shipped with the package under `dist/templates/mcp.json`. If the machine already has a user-local `aihil` command on `PATH`, a direct `command: "aihil"` entry is also fine.
 
 Use the configured COM MCP tools for serial stimuli and feedback. Use the configured CAN MCP tools for CAN stimuli and feedback. Do not open host COM devices or CAN adapters directly.
 

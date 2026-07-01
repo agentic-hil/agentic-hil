@@ -31,7 +31,7 @@ When the project and user match the supported first path, skip broad discovery a
 3. For ST/STM32 targets, check existing environment variables before hard-coded paths. Prefer `PATH`, `OPENOCD`, `OPENOCD_HOME`, `OPENOCD_SCRIPTS`, `STM32_PROGRAMMER_CLI`, `STM32CUBEIDE_PATH`, and `STLINK_PATH` when they point to an existing OpenOCD/ST-Link toolchain. On Windows, also check `%LOCALAPPDATA%/stm32cube/bundles` for STM32Cube-managed tools such as `programmer/*/bin/STM32_Programmer_CLI.exe`, `stlink-gdbserver/*/bin/ST-LINK_gdbserver.exe`, and `stlink-server/*/bin/stlinkserver.exe`. Derive only supported config values from them, usually `debugger.executable`, `debugger.interface_cfg`, and `debugger.target_cfg`.
 4. If the user gives a COM device, add it directly as `com_ports.dut_uart.device`; set `com_ports.dut_uart.baudrate` to the baud rate configured in the firmware code (`HAL_UART_Init`, LL init structs, register setup, or project UART constants). Use `encoding: "ascii"` unless the project or firmware output requires a different encoding.
 5. If the user gives a CAN adapter, add it directly as `can_buses.dut_can`; on Windows with PEAK use `adapter: "peak"`, `channel: "PCAN_USBBUS1"`, and the intended `bitrate`, while Linux SocketCAN uses `adapter: "socketcan"` and a network interface such as `can0`.
-6. Run `aihil doctor`. `.mcp.json` is only the MCP launch configuration, not the tool list. Prefer the stable portable entry shipped as `dist/templates/mcp.json`, which runs `aihil mcp-stdio --config .aihil/config.yaml` when `aihil` is on `PATH`. If the MCP client cannot resolve `aihil`, edit `.mcp.json` for that machine instead of changing reusable project instructions.
+6. Run `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor`. `.mcp.json` is only the MCP launch configuration, not the tool list. Prefer the stable portable entry shipped as `dist/templates/mcp.json`, which runs `aihil mcp-stdio --config .aihil/config.yaml` through `npm exec` and does not require `aihil` on `PATH`. If the machine already has a user-local `aihil` command on `PATH`, a direct `command: "aihil"` entry is also fine.
 
 For UART smoke tests, start the AI-HIL COM session before the reset or flash that should emit text. Accumulate short reads until the expected substring appears, then stop immediately; avoid fixed multi-second waits unless no data arrives. Once the expected text is observed, do not inspect COM logs or reports unless a failure needs diagnosis.
 
@@ -39,11 +39,11 @@ For AI-HIL 0.3.x, `mcp-stdio` expects newline-delimited JSON-RPC on stdio. Do no
 
 For tiny STM32 projects, check `ninja` early. If a preset requires Ninja and `ninja` is missing, skip the failing CMake build attempt. When the source set is obvious, a direct `arm-none-eabi-gcc` build into `build/` is an acceptable firmware-build fallback before AI-HIL probe/flash.
 
-Before installing, check `aihil --version`. On Windows, also try `aihil.cmd --version`; if that works, do not reinstall. If `aihil` is not installed because Node.js is missing or too old, install or activate a supported Node.js/npm runtime before running `aihil init`. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not refuse the setup for an old Node.js runtime, and do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
+Before installing anything, check `aihil --version`. On Windows, also try `aihil.cmd --version`; if that works, do not reinstall. If `aihil` is not installed but npm is available, use `npm exec --yes --package aihil -- aihil <command>`. If Node.js is missing or too old, install or activate a supported Node.js/npm runtime before running AI-HIL. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless asked; any runtime accepted by `package.json` is fine. Do not refuse the setup for an old Node.js runtime, and do not bypass `engines` with `--force`, `--ignore-engines`, or an older AI-HIL version.
 
 ## Version Contract
 
-This skill is tied to the AI-HIL version in its front matter. The installed `aihil` CLI is authoritative. If the skill version differs from `aihil --version`, update and register the skill from the installed CLI with `aihil skill-install --agent <agent>`; do not downgrade the CLI to match an older skill. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
+This skill is tied to the AI-HIL version in its front matter. The available AI-HIL CLI package is authoritative. If the skill version differs from `aihil --version` or `npm exec --yes --package aihil -- aihil --version`, update and register the skill from that CLI with `aihil skill-install --agent <agent>` or `npm exec --yes --package aihil -- aihil skill-install --agent <agent>`; do not downgrade the CLI to match an older skill. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
 
 Use `tools/list` as the runtime source of truth for MCP tools. This setup skill should not probe, flash, reset, or open COM sessions unless the user asks for hardware validation.
 
@@ -63,9 +63,9 @@ Use `tools/list` as the runtime source of truth for MCP tools. This setup skill 
 1. Confirm you are in the firmware project directory, not the AI-HIL source repo unless the task is AI-HIL development.
 2. Check whether `.aihil/config.yaml` already exists.
 3. If it exists, read it, preserve existing policy decisions, and do not overwrite it with `aihil init --force` unless the user explicitly asks.
-4. If it is missing, run `aihil init` from the firmware project directory.
+4. If it is missing, run `aihil init` or `npm exec --yes --package aihil -- aihil init` from the firmware project directory.
 5. Edit only project-specific fields.
-6. Run `aihil doctor` and inspect the JSON result.
+6. Run `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor` and inspect the JSON result.
 7. If `error_type` is `config_invalid`, fix the config using `summary`, `field`, `allowed_fields`, and `allowed_values`.
 8. If the config is valid but debugger detection fails, report the debugger issue separately instead of loosening config policy.
 
