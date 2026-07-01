@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-01
+
+### Added
+
+- Added typed OpenOCD + GDB/MI debug-session MCP tools for starting and stopping sessions, managing breakpoints, continuing or halting execution, reading stop reasons, resolving symbols, and dumping symbol memory to Intel HEX.
+- Added `debug` configuration for selecting the GDB executable, constraining allowed symbols, and bounding debug symbol dump size.
+- Added fake OpenOCD and GDB fixtures plus end-to-end tests for the typed debug workflow.
+
+### Changed
+
+- Made MCP `initialize` report the package version instead of a stale hard-coded server version.
+- Tied the agent setup skill to the AI-HIL package version and made the installed CLI authoritative for skill updates.
+- Included the setup skill in the npm package so `aihil skill-install` can update version-drifted AI-HIL skills from the installed CLI.
+- Added `aihil skill-install` support for opencode, Claude Code, Codex, common aliases, and explicit custom target paths.
+
+### Fixed
+
+- Rejected non-finite `debug.max_dump_size_bytes` values so YAML `.inf` cannot disable the debug dump size policy.
+
 ## [0.3.0] - 2026-06-30
 
 ### Added
@@ -18,10 +37,6 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Replaced `aihil mcp-config` with a shipped portable MCP template at `dist/templates/mcp.json`.
 - Documented CAN setup, MCP tool usage, safety boundaries, and troubleshooting for human and agent workflows.
-- Made MCP `initialize` report the package version instead of a stale hard-coded server version.
-- Tied the agent setup skill to the AI-HIL package version and made the installed CLI authoritative for skill updates.
-- Included the setup skill in the npm package so `aihil skill-install` can update version-drifted AI-HIL skills from the installed CLI.
-- Added `aihil skill-install` support for opencode, Claude Code, Codex, common aliases, and explicit custom target paths.
 
 ## [0.2.1] - 2026-06-28
 

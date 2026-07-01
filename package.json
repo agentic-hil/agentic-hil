@@ -1,6 +1,6 @@
 {
   "name": "aihil",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Generic hardware-in-the-loop debugger interface for AI agents",
   "license": "Apache-2.0",
   "author": {

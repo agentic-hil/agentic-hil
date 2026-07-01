@@ -3,7 +3,7 @@ name: aihil-config-setup
 description: Create and validate a project-local .aihil/config.yaml for AI-HIL embedded firmware hardware-in-the-loop workflows without weakening hardware safety policy.
 metadata:
   origin: AI-HIL
-  aihil_version: "0.3.0"
+  aihil_version: "0.4.0"
 ---
 
 # AI-HIL Config Setup
