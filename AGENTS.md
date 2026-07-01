@@ -46,7 +46,7 @@ follow this model:
 3. Update and register the agent skill from the available CLI with `aihil skill-install --agent <agent>` or `npm exec --yes --package aihil -- aihil skill-install --agent <agent>` when the active agent supports it. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
 4. Return to the firmware project.
 5. Create or update the project-local `.aihil/config.yaml`.
-6. Validate with `aihil doctor`.
+6. Validate with `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor`.
 7. Add the standard portable `.mcp.json` only if the MCP client needs project discovery.
 8. Use AI-HIL MCP tools for hardware actions.
 9. Do not copy or vendor the AI-HIL source tree into the firmware project unless the user explicitly asks for that.
@@ -106,8 +106,8 @@ Other boards may work, but do not guess target, debugger, COM port, or artifact 
 Run setup from the firmware project directory, not from the AI-HIL source repository:
 
 ```bash
-aihil init
-aihil doctor
+npm exec --yes --package aihil -- aihil init
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 Each firmware project owns its own `.aihil/` directory. That directory contains:
@@ -127,10 +127,10 @@ Treat `.aihil/config.yaml` as project-local hardware policy. Preserve existing p
 
 Do not hand-write `.aihil/config.yaml` from memory.
 
-Use `aihil init` to create the starter config, then edit only project-specific values. Validate after each edit:
+Use `aihil init` or `npm exec --yes --package aihil -- aihil init` to create the starter config, then edit only project-specific values. Validate after each edit:
 
 ```bash
-aihil doctor
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 Only change these fields unless the user explicitly asks for a broader policy change:

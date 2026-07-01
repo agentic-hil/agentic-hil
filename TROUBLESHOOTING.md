@@ -23,8 +23,10 @@ Fix:
 
 ```bash
 npm exec --yes --package aihil -- aihil --version
-npm exec --yes --package aihil -- aihil doctor
+npm exec --yes --package aihil -- aihil --help
 ```
+
+After the CLI starts, run `npm exec --yes --package aihil -- aihil doctor` from the firmware project directory to validate that project's `.aihil/config.yaml`.
 
 If npm reports an old Node.js version or an `engines` error, install or activate a supported Node.js/npm runtime, open a fresh shell if needed, and rerun the `npm exec` command. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the runtime requirement.
 

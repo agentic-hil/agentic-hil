@@ -73,8 +73,8 @@ Each firmware project should contain its own `.aihil/` directory with `.aihil/co
 From the firmware project directory:
 
 ```bash
-aihil init
-aihil doctor
+npm exec --yes --package aihil -- aihil init
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 Use the standard portable `.mcp.json` launch entry when MCP project discovery is needed. It starts:

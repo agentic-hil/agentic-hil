@@ -63,9 +63,9 @@ Use `tools/list` as the runtime source of truth for MCP tools. This setup skill 
 1. Confirm you are in the firmware project directory, not the AI-HIL source repo unless the task is AI-HIL development.
 2. Check whether `.aihil/config.yaml` already exists.
 3. If it exists, read it, preserve existing policy decisions, and do not overwrite it with `aihil init --force` unless the user explicitly asks.
-4. If it is missing, run `aihil init` from the firmware project directory.
+4. If it is missing, run `aihil init` or `npm exec --yes --package aihil -- aihil init` from the firmware project directory.
 5. Edit only project-specific fields.
-6. Run `aihil doctor` and inspect the JSON result.
+6. Run `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor` and inspect the JSON result.
 7. If `error_type` is `config_invalid`, fix the config using `summary`, `field`, `allowed_fields`, and `allowed_values`.
 8. If the config is valid but debugger detection fails, report the debugger issue separately instead of loosening config policy.
 

@@ -213,6 +213,7 @@ export async function initConfig(configPath?: string | null, force = false): Pro
 }
 
 function initNextSteps(availableComPorts: JsonObject): string[] {
+  const aihilCommand = "npm exec --yes --package aihil -- aihil";
   const nextSteps = [
     "Keep this .aihil/config.yaml with the firmware project; use npm exec or one user-local aihil command instead of reinstalling per project.",
     "Edit target.name and target.controller for your board.",
@@ -226,13 +227,13 @@ function initNextSteps(availableComPorts: JsonObject): string[] {
       const suffix = ports.length <= 5 ? "" : `, and ${ports.length - 5} more`;
       nextSteps.push(`Detected COM ports: ${devices}${suffix}. Add the DUT UART under com_ports if serial feedback is needed.`);
     } else {
-      nextSteps.push("No host COM ports detected. Connect USB serial hardware and run: aihil com-ports");
+      nextSteps.push(`No host COM ports detected. Connect USB serial hardware and run: ${aihilCommand} com-ports`);
     }
   } else {
-    nextSteps.push("COM port discovery failed. Run: aihil com-ports after checking the serialport installation.");
+    nextSteps.push(`COM port discovery failed. Run: ${aihilCommand} com-ports after checking the serialport installation.`);
   }
   nextSteps.push("For CAN access, add a named bus under can_buses, for example adapter: socketcan, channel: can0, bitrate: 500000 on Linux.");
-  nextSteps.push("Run: aihil doctor", "Create .mcp.json from the documented portable template if your MCP client needs project discovery.");
+  nextSteps.push(`Run: ${aihilCommand} doctor`, "Create .mcp.json from the documented portable template if your MCP client needs project discovery.");
   return nextSteps;
 }
 

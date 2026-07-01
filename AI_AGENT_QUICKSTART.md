@@ -81,19 +81,19 @@ If you were given only the AI-HIL repository URL and asked to set up the current
 In every firmware project that should use AI-HIL, create a project-local `.aihil/config.yaml`:
 
 ```bash
-aihil init
+npm exec --yes --package aihil -- aihil init
 ```
 
 Edit `.aihil/config.yaml` for the local board, OpenOCD interface, target config, allowed firmware artifact roots, any named COM ports, and any named CAN buses.
 
-Agents should follow `skills/aihil-config-setup/SKILL.md` for the exact setup workflow: use `aihil init`, edit only project-specific fields, keep safety policy restrictive, then validate with `aihil doctor`.
+Agents should follow `skills/aihil-config-setup/SKILL.md` for the exact setup workflow: use `aihil init` or `npm exec --yes --package aihil -- aihil init`, edit only project-specific fields, keep safety policy restrictive, then validate with `aihil doctor` or `npm exec --yes --package aihil -- aihil doctor`.
 
 Keep `.aihil/` with the project because it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall the MCP server inside every project.
 
 ## Check Setup
 
 ```bash
-aihil doctor
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 Expected healthy result: `ok: true`, `tool: "aihil_doctor"`, `summary: "AI-HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
