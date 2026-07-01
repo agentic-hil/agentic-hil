@@ -182,6 +182,13 @@ can_buses:
     bitrate: 500000
     timeout_s: 10
 
+can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "PCAN_USBBUS1"
+    bitrate: 500000
+    timeout_s: 10
+
 permissions:
   allow_probe: true
   allow_flash: true
@@ -288,6 +295,18 @@ Then return to your firmware project and run:
 aihil init
 aihil doctor
 ```
+
+AI-HIL's safety boundary is the project-local `.aihil/config.yaml` file.
+
+The default model is:
+
+- Probe, flash, reset, and COM actions require explicit permissions.
+- Raw debugger commands are not exposed.
+- Mass erase is disabled.
+- Firmware paths must be under configured artifact roots.
+- COM access is limited to named `com_ports` entries.
+- CAN access is limited to named `can_buses` entries.
+- Every hardware action returns structured JSON and writes raw logs for human inspection.
 
 ## Repository layout
 

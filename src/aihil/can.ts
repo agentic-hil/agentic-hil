@@ -495,7 +495,7 @@ class ProcessCanAdapter implements CanAdapter {
     );
     const elapsedMs = Math.trunc(performance.now() - start);
     if (!opened.ok) {
-      bridge.stop();
+      await bridge.stop();
       return {
         tool: "aihil_can_session_start",
         bus_id: busId,
@@ -550,7 +550,7 @@ class ProcessCanAdapterSession implements CanAdapterSession {
     try {
       await this.bridge.request("close", {}, Math.min(this.busConfig.timeout_s, 1));
     } finally {
-      this.bridge.stop();
+      await this.bridge.stop();
     }
   }
 
@@ -565,6 +565,7 @@ class ProcessCanAdapterSession implements CanAdapterSession {
 class JsonLineBridgeProcess {
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
+  private readonly closedPromise: Promise<void>;
   private stdoutBuffer = "";
   private stderrText = "";
   private exited = false;
@@ -573,6 +574,12 @@ class JsonLineBridgeProcess {
     private readonly child: ChildProcessWithoutNullStreams,
     private readonly backendName: string,
   ) {
+    this.closedPromise = new Promise((resolve) => {
+      child.once("close", () => {
+        this.exited = true;
+        resolve();
+      });
+    });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (data: string) => this.handleStdout(data));
@@ -641,10 +648,14 @@ class JsonLineBridgeProcess {
     });
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    if (this.exited) {
+      return;
+    }
     if (!this.child.killed) {
       this.child.kill();
     }
+    await Promise.race([this.closedPromise, sleep(1000)]);
   }
 
   private handleStdout(data: string): void {
@@ -936,6 +947,10 @@ function commandForLog(command: string[]): string {
     }
   }
   return sanitized.map((part) => JSON.stringify(part)).join(" ");
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function safeFilename(value: string): string {
