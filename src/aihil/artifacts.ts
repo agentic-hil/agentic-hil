@@ -170,20 +170,20 @@ export class ArtifactManager {
     };
   }
 
-  resolveArtifactId(artifactId: string): JsonObject {
+  resolveArtifactId(artifactId: string, tool = "aihil_flash_firmware"): JsonObject {
     if (!this.config.artifacts.allow_upload) {
       return {
         ok: false,
-        tool: "aihil_flash_firmware",
+        tool,
         error_type: "permission_denied",
-        summary: "Flashing uploaded artifacts is disabled by .aihil/config.yaml.",
+        summary: "Using uploaded artifacts is disabled by .aihil/config.yaml.",
         artifact_id: artifactId,
       };
     }
     if (!isSafeArtifactId(artifactId)) {
       return {
         ok: false,
-        tool: "aihil_flash_firmware",
+        tool,
         error_type: "invalid_argument",
         summary: "artifact_id must be a safe uploaded artifact id.",
         artifact_id: artifactId,
@@ -193,7 +193,7 @@ export class ArtifactManager {
     if (!existsSync(resolved)) {
       return {
         ok: false,
-        tool: "aihil_flash_firmware",
+        tool,
         error_type: "artifact_not_found",
         summary: "Uploaded artifact could not be found.",
         artifact_id: artifactId,
@@ -203,6 +203,7 @@ export class ArtifactManager {
     const validation = this.validateLocalPath(resolved);
     if (!validation.ok) {
       validation.artifact_id = artifactId;
+      validation.tool = tool;
       return validation;
     }
     const artifact = validation.artifact as JsonObject;
@@ -215,11 +216,50 @@ export class ArtifactManager {
     };
   }
 
+  validateOutputPath(outputPath: string, tool: string, allowedExtensions = [".hex", ".ihex"]): JsonObject {
+    const resolved = resolveWorkPath(this.config, outputPath);
+    const validation: JsonObject = {
+      path_traversal_safe: !hasTraversalSegment(outputPath),
+      allowed_root: this.isUnderAllowedRoots(resolved),
+      allowed_extension: allowedExtensions.includes(path.extname(resolved).toLowerCase()),
+    };
+
+    if (!validation.path_traversal_safe) {
+      return this.outputValidationError(tool, "Output path contains traversal segments.", validation);
+    }
+    if (this.config.validation.require_allowed_root && !validation.allowed_root) {
+      return this.outputValidationError(tool, "Output path is outside allowed artifact roots.", validation);
+    }
+    if (!validation.allowed_extension) {
+      return this.outputValidationError(tool, "Output path extension is not allowed for this debug dump.", validation);
+    }
+
+    mkdirSync(path.dirname(resolved), { recursive: true });
+    return {
+      ok: true,
+      output: {
+        path: displayPath(this.config, outputPath),
+        resolved_path: resolved,
+      },
+      validation,
+    };
+  }
+
   private validationError(summary: string, validation: JsonObject, errorType = "artifact_validation_failed"): JsonObject {
     return {
       ok: false,
       tool: "aihil_flash_firmware",
       error_type: errorType,
+      summary,
+      validation,
+    };
+  }
+
+  private outputValidationError(tool: string, summary: string, validation: JsonObject): JsonObject {
+    return {
+      ok: false,
+      tool,
+      error_type: "output_validation_failed",
       summary,
       validation,
     };

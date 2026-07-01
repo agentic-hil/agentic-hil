@@ -174,6 +174,52 @@ export class STLinkBackend implements DebuggerBackend {
     return this.writeActionReport(result);
   }
 
+  async debugStartSession(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_start_session");
+  }
+
+  async debugStopSession(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_stop_session");
+  }
+
+  async debugGetSessionStatus(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_get_session_status");
+  }
+
+  async debugSetBreakpoint(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_set_breakpoint");
+  }
+
+  async debugListBreakpoints(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_list_breakpoints");
+  }
+
+  async debugClearBreakpoints(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_clear_breakpoints");
+  }
+
+  async debugContinue(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_continue");
+  }
+
+  async debugHalt(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_halt");
+  }
+
+  async debugGetStopReason(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_get_stop_reason");
+  }
+
+  async debugSymbolInfo(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_symbol_info");
+  }
+
+  async debugDumpSymbolIhex(): Promise<JsonObject> {
+    return this.unsupportedDebugTool("aihil_debug_dump_symbol_ihex");
+  }
+
+  async close(): Promise<void> {}
+
   async classifyLastError(): Promise<JsonObject> {
     const report = readLastReport(this.config);
     if (!report.ok && report.error_type === "report_not_found") {
@@ -421,6 +467,16 @@ export class STLinkBackend implements DebuggerBackend {
       tool,
       error_type: "permission_denied",
       summary,
+    };
+  }
+
+  private unsupportedDebugTool(tool: string): JsonObject {
+    return {
+      ok: false,
+      tool,
+      backend: this.backendName,
+      error_type: "not_supported",
+      summary: "Typed debug sessions require the OpenOCD backend in this AI-HIL version.",
     };
   }
 

@@ -15,6 +15,7 @@ import { fc, safePathSegment } from "./property-arbitraries.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fakeOpenocd = path.join(root, "tests-ts", "fixtures", "fake-openocd.js").replace(/\\/g, "/");
+const fakeGdb = path.join(root, "tests-ts", "fixtures", "fake-gdb.js").replace(/\\/g, "/");
 const fakeStlink = path.join(root, "tests-ts", "fixtures", "fake-stlink.js").replace(/\\/g, "/");
 const fakeStlinkUnconfirmed = path.join(root, "tests-ts", "fixtures", "fake-stlink-unconfirmed.js").replace(/\\/g, "/");
 const fakeCanBridge = path.join(root, "tests-ts", "fixtures", "fake-can-bridge.js").replace(/\\/g, "/");
@@ -54,6 +55,8 @@ function writeConfig(directory, options = {}) {
   const probeId = options.probeId ?? null;
   const debuggerType = options.debuggerType ?? "openocd";
   const debuggerExecutable = options.debuggerExecutable ?? (debuggerType === "stlink" ? fakeStlink : fakeOpenocd);
+  const gdbExecutable = options.gdbExecutable ?? fakeGdb;
+  const maxDumpSizeBytes = options.maxDumpSizeBytes ?? 1048576;
   const flashAddress = options.flashAddress ?? null;
   const canBusesYaml = options.canBusesYaml ?? "";
   const configPath = path.join(directory, ".aihil", "config.yaml");
@@ -72,6 +75,10 @@ debugger:
   target_cfg: "target/stm32f4x.cfg"
   flash_address: ${flashAddress === null ? "null" : `"${flashAddress}"`}
   timeout_s: 5
+debug:
+  gdb_executable: ${JSON.stringify(gdbExecutable)}
+  allowed_symbols: []
+  max_dump_size_bytes: ${maxDumpSizeBytes}
 artifacts:
   allowed_roots: ["build"]
   allowed_extensions: [".elf", ".hex", ".bin"]
@@ -257,9 +264,27 @@ test("config loads defaults", () => {
     assert.equal(config.target.name, "example-target");
     assert.equal(config.debugger.probe_id, null);
     assert.deepEqual(config.artifacts.allowed_extensions, [".elf", ".hex", ".bin"]);
+    assert.equal(config.debug.gdb_executable, fakeGdb);
     assert.deepEqual(config.can_buses, {});
     assert.equal(config.permissions.allow_can_read, true);
     assert.equal(config.permissions.allow_can_write, true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("config rejects non-finite debug dump size", () => {
+  const directory = tempDir();
+  try {
+    const configPath = writeConfig(directory, { maxDumpSizeBytes: ".inf" });
+    assert.throws(
+      () => loadConfig(configPath, directory),
+      (error) => {
+        assert.equal(error.errorType, "config_invalid");
+        assert.equal(error.details.field, "debug.max_dump_size_bytes");
+        return true;
+      },
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -567,8 +592,95 @@ test("mcp initialize and tools/list", async () => {
       assert.equal(toolNames.has("aihil_probe_target"), true);
       assert.equal(toolNames.has("aihil_artifact_upload"), true);
       assert.equal(toolNames.has("aihil_flash_firmware"), true);
+      assert.equal(toolNames.has("aihil_debug_start_session"), true);
+      assert.equal(toolNames.has("aihil_debug_dump_symbol_ihex"), true);
       assert.equal(toolNames.has("aihil_can_buses_list"), true);
       assert.equal(toolNames.has("aihil_can_send"), true);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("mcp runs typed debug session and dumps CTC_array as Intel HEX", async () => {
+  const directory = tempDir();
+  try {
+    const firmware = path.join(directory, "build", "unit-tests.elf");
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      const started = await mcpToolCall(service, "aihil_debug_start_session", { image_path: "build/unit-tests.elf", mode: "load" });
+      assert.equal(started.ok, true);
+      assert.equal(started.session.status, "halted");
+
+      const breakpoint = await mcpToolCall(service, "aihil_debug_set_breakpoint", { location: { symbol: "test_done" } });
+      assert.equal(breakpoint.ok, true);
+      assert.equal(breakpoint.breakpoint.location.symbol, "test_done");
+
+      const continued = await mcpToolCall(service, "aihil_debug_continue", { timeout_s: 2 });
+      assert.equal(continued.ok, true);
+      assert.equal(continued.stop_reason, "breakpoint_hit");
+
+      const stopReason = await mcpToolCall(service, "aihil_debug_get_stop_reason");
+      assert.equal(stopReason.ok, true);
+      assert.equal(stopReason.stop_reason, "breakpoint_hit");
+
+      const symbol = await mcpToolCall(service, "aihil_debug_symbol_info", { symbol: "CTC_array" });
+      assert.equal(symbol.ok, true);
+      assert.equal(symbol.address, "0x200006f0");
+      assert.equal(symbol.size_bytes, 408);
+
+      const dumped = await mcpToolCall(service, "aihil_debug_dump_symbol_ihex", {
+        symbol: "CTC_array",
+        output_path: "build/ctcpp/memory.hex",
+      });
+      assert.equal(dumped.ok, true);
+      assert.equal(dumped.output_path, "build/ctcpp/memory.hex");
+      const hexText = readFileSync(path.join(directory, "build", "ctcpp", "memory.hex"), "utf8");
+      assert.match(hexText, /^:020000042000DA/m);
+      assert.match(hexText, /:00000001FF/);
+
+      const stopped = await mcpToolCall(service, "aihil_debug_stop_session");
+      assert.equal(stopped.ok, true);
+      assert.equal(stopped.session.status, "stopped");
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("debug symbol info returns structured missing-symbol error", async () => {
+  const directory = tempDir();
+  try {
+    const firmware = path.join(directory, "build", "unit-tests.elf");
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      assert.equal((await mcpToolCall(service, "aihil_debug_start_session", { image_path: "build/unit-tests.elf" })).ok, true);
+      const missing = await mcpToolCall(service, "aihil_debug_symbol_info", { symbol: "missing_symbol" });
+      assert.equal(missing.ok, false);
+      assert.equal(missing.error_type, "symbol_not_found");
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("debug dump rejects output paths outside allowed roots", async () => {
+  const directory = tempDir();
+  try {
+    const firmware = path.join(directory, "build", "unit-tests.elf");
+    mkdirSync(path.dirname(firmware), { recursive: true });
+    writeFileSync(firmware, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x66]));
+    await withService(directory, async (service) => {
+      assert.equal((await mcpToolCall(service, "aihil_debug_start_session", { image_path: "build/unit-tests.elf" })).ok, true);
+      const rejected = await mcpToolCall(service, "aihil_debug_dump_symbol_ihex", {
+        symbol: "CTC_array",
+        output_path: "other/memory.hex",
+      });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.error_type, "output_validation_failed");
+      assert.equal(rejected.validation.allowed_root, false);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });

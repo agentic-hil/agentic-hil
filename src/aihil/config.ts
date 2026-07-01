@@ -9,6 +9,7 @@ import type {
   ArtifactsConfig,
   CanBusConfig,
   ComPortConfig,
+  DebugInterfaceConfig,
   DebuggerConfig,
   JsonObject,
   LogsConfig,
@@ -107,6 +108,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
 
   const targetRaw = mapping(raw.target, "target");
   const debuggerRaw = mapping(raw.debugger, "debugger");
+  const debugRaw = mapping(raw.debug, "debug");
   const debuggerType = String(debuggerRaw.type ?? "openocd");
   const allowedDebuggerTypes = ["openocd", "stlink"];
   if (!allowedDebuggerTypes.includes(debuggerType)) {
@@ -129,6 +131,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
     workDir: base,
     target: targetConfig(targetRaw),
     debugger: debuggerConfig(debuggerRaw, debuggerType),
+    debug: debugInterfaceConfig(debugRaw),
     artifacts: artifactsConfig(artifactsRaw),
     com_ports: Object.fromEntries(Object.entries(comPortsRaw).map(([name, value]) => [name, comPortConfig(name, value)])),
     can_buses: Object.fromEntries(Object.entries(canBusesRaw).map(([name, value]) => [name, canBusConfig(name, value)])),
@@ -244,6 +247,14 @@ function debuggerConfig(raw: JsonObject, debuggerType: string): DebuggerConfig {
   };
 }
 
+function debugInterfaceConfig(raw: JsonObject): DebugInterfaceConfig {
+  return {
+    gdb_executable: optionalString(raw.gdb_executable),
+    allowed_symbols: stringList(raw.allowed_symbols, []),
+    max_dump_size_bytes: positiveIntegerConfig(raw.max_dump_size_bytes, 1024 * 1024, "debug.max_dump_size_bytes"),
+  };
+}
+
 function artifactsConfig(raw: JsonObject): ArtifactsConfig {
   return {
     allowed_roots: stringList(raw.allowed_roots, ["build"]),
@@ -355,6 +366,14 @@ function stringList(value: unknown, defaultValue: string[]): string[] {
     throw new ConfigError("config_invalid", "Configuration value must be a list.");
   }
   return value.map((item) => String(item));
+}
+
+function positiveIntegerConfig(value: unknown, defaultValue: number, field: string): number {
+  const parsed = Number(value ?? defaultValue);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
+    throw new ConfigError("config_invalid", `${field} must be a finite integer >= 1.`, { field, value });
+  }
+  return parsed;
 }
 
 function isRecord(value: unknown): value is JsonObject {

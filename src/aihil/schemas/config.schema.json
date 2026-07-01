@@ -118,6 +118,36 @@
         }
       }
     },
+    "debug": {
+      "type": "object",
+      "description": "Typed debug-session settings for safe GDB/OpenOCD operations.",
+      "additionalProperties": false,
+      "properties": {
+        "gdb_executable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional GDB executable used for typed debug sessions. If null, AI-HIL searches common GDB executables on PATH.",
+          "default": null
+        },
+        "allowed_symbols": {
+          "type": "array",
+          "description": "Optional symbol allowlist for debug symbol reads and dumps. Empty means no symbol allowlist is enforced.",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$"
+          },
+          "default": []
+        },
+        "max_dump_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1048576
+        }
+      },
+      "default": {}
+    },
     "com_ports": {
       "type": "object",
       "description": "Named serial/COM ports that AI-HIL may open for stimuli and feedback.",
