@@ -86,6 +86,165 @@ export const MCP_TOOLS: JsonObject[] = [
     },
   },
   {
+    name: "aihil_debug_start_session",
+    description: "Start a typed OpenOCD/GDB debug session for a validated ELF artifact. Provide exactly one of image_path or artifact_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        image_path: {
+          type: "string",
+          description: "Local ELF path under an allowed artifact root, for example build/tests.elf.",
+        },
+        artifact_id: {
+          type: "string",
+          description: "Uploaded ELF artifact id, if artifact upload support is available.",
+        },
+        mode: {
+          type: "string",
+          enum: ["attach", "reset_halt", "load"],
+          default: "attach",
+          description: "attach only connects and halts; reset_halt resets and halts; load downloads the ELF through GDB and resets/halt.",
+        },
+        timeout_s: {
+          type: "number",
+          minimum: 0,
+          description: "Optional startup timeout in seconds.",
+        },
+      },
+      oneOf: [{ required: ["image_path"] }, { required: ["artifact_id"] }],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_stop_session",
+    description: "Stop the active typed debug session and close debugger processes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout_s: {
+          type: "number",
+          minimum: 0,
+          description: "Optional stop timeout in seconds.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_get_session_status",
+    description: "Return active debug-session status: running, halted, stopped, or error.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    name: "aihil_debug_set_breakpoint",
+    description: "Set a typed breakpoint by safe symbol/function name or by file and line.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        location: {
+          oneOf: [
+            {
+              type: "string",
+              description: "Safe symbol/function name, for example test_done.",
+            },
+            {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                symbol: { type: "string" },
+                function: { type: "string" },
+                file: { type: "string" },
+                line: { type: "integer", minimum: 1 },
+              },
+              oneOf: [{ required: ["symbol"] }, { required: ["function"] }, { required: ["file", "line"] }],
+            },
+          ],
+        },
+      },
+      required: ["location"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_list_breakpoints",
+    description: "List AI-HIL breakpoints currently set in the active debug session.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    name: "aihil_debug_clear_breakpoints",
+    description: "Clear all breakpoints from the active debug session.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    name: "aihil_debug_continue",
+    description: "Continue target execution until a breakpoint, timeout, fault, reset, target exit, debugger error, or unknown stop.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout_s: {
+          type: "number",
+          minimum: 0,
+          description: "Continue timeout in seconds.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_halt",
+    description: "Halt the target in the active debug session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout_s: {
+          type: "number",
+          minimum: 0,
+          description: "Optional halt timeout in seconds.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_get_stop_reason",
+    description: "Return the last structured stop reason for the active debug session.",
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    name: "aihil_debug_symbol_info",
+    description: "Resolve an allowed debug symbol from the loaded ELF and return address and size.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: {
+          type: "string",
+          description: "Safe C/C++ symbol name, for example CTC_array.",
+        },
+      },
+      required: ["symbol"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aihil_debug_dump_symbol_ihex",
+    description: "Read an allowed symbol from target memory and write it as an Intel HEX file under an allowed output/artifact root.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: {
+          type: "string",
+          description: "Safe C/C++ symbol name, for example CTC_array.",
+        },
+        output_path: {
+          type: "string",
+          description: "Intel HEX output path under an allowed artifact root, for example build/ctcpp/memory.hex.",
+        },
+      },
+      required: ["symbol", "output_path"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "aihil_get_last_report",
     description: "Return the most recent structured AI-HIL report.",
     inputSchema: EMPTY_OBJECT_SCHEMA,

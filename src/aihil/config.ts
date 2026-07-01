@@ -9,6 +9,7 @@ import type {
   ArtifactsConfig,
   CanBusConfig,
   ComPortConfig,
+  DebugInterfaceConfig,
   DebuggerConfig,
   JsonObject,
   LogsConfig,
@@ -107,6 +108,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
 
   const targetRaw = mapping(raw.target, "target");
   const debuggerRaw = mapping(raw.debugger, "debugger");
+  const debugRaw = mapping(raw.debug, "debug");
   const debuggerType = String(debuggerRaw.type ?? "openocd");
   const allowedDebuggerTypes = ["openocd", "stlink"];
   if (!allowedDebuggerTypes.includes(debuggerType)) {
@@ -129,6 +131,7 @@ export function loadConfig(configPath?: string | null, workDir?: string | null):
     workDir: base,
     target: targetConfig(targetRaw),
     debugger: debuggerConfig(debuggerRaw, debuggerType),
+    debug: debugInterfaceConfig(debugRaw),
     artifacts: artifactsConfig(artifactsRaw),
     com_ports: Object.fromEntries(Object.entries(comPortsRaw).map(([name, value]) => [name, comPortConfig(name, value)])),
     can_buses: Object.fromEntries(Object.entries(canBusesRaw).map(([name, value]) => [name, canBusConfig(name, value)])),
@@ -241,6 +244,14 @@ function debuggerConfig(raw: JsonObject, debuggerType: string): DebuggerConfig {
     target_cfg: String(raw.target_cfg ?? "target/stm32f4x.cfg"),
     flash_address: optionalString(raw.flash_address),
     timeout_s: Number(raw.timeout_s ?? 60),
+  };
+}
+
+function debugInterfaceConfig(raw: JsonObject): DebugInterfaceConfig {
+  return {
+    gdb_executable: optionalString(raw.gdb_executable),
+    allowed_symbols: stringList(raw.allowed_symbols, []),
+    max_dump_size_bytes: Number.parseInt(String(raw.max_dump_size_bytes ?? 1024 * 1024), 10),
   };
 }
 
