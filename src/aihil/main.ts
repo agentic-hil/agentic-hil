@@ -23,6 +23,11 @@ debugger:
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60
 
+debug:
+  gdb_executable: null
+  allowed_symbols: []
+  max_dump_size_bytes: 1048576
+
 artifacts:
   allowed_roots:
     - "build"

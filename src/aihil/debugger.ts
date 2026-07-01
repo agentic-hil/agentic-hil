@@ -8,7 +8,19 @@ export interface DebuggerBackend {
   probeTarget(): Promise<JsonObject>;
   flashFirmware(artifact: JsonObject): Promise<JsonObject>;
   resetTarget(mode?: string): Promise<JsonObject>;
+  debugStartSession(artifact: JsonObject, mode?: string, timeoutS?: number): Promise<JsonObject>;
+  debugStopSession(timeoutS?: number): Promise<JsonObject>;
+  debugGetSessionStatus(): Promise<JsonObject>;
+  debugSetBreakpoint(location: JsonObject): Promise<JsonObject>;
+  debugListBreakpoints(): Promise<JsonObject>;
+  debugClearBreakpoints(): Promise<JsonObject>;
+  debugContinue(timeoutS?: number): Promise<JsonObject>;
+  debugHalt(timeoutS?: number): Promise<JsonObject>;
+  debugGetStopReason(): Promise<JsonObject>;
+  debugSymbolInfo(symbol: string): Promise<JsonObject>;
+  debugDumpSymbolIhex(symbol: string, output: JsonObject): Promise<JsonObject>;
   classifyLastError(): Promise<JsonObject>;
+  close(): Promise<void>;
 }
 
 export function createDebuggerBackend(config: AIHILConfig): DebuggerBackend {

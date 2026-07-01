@@ -16,6 +16,12 @@ export interface DebuggerConfig {
   timeout_s: number;
 }
 
+export interface DebugInterfaceConfig {
+  gdb_executable: string | null;
+  allowed_symbols: string[];
+  max_dump_size_bytes: number;
+}
+
 export interface ArtifactsConfig {
   allowed_roots: string[];
   upload_directory: string;
@@ -84,6 +90,7 @@ export interface AIHILConfig {
   workDir: string;
   target: TargetConfig;
   debugger: DebuggerConfig;
+  debug: DebugInterfaceConfig;
   artifacts: ArtifactsConfig;
   com_ports: Record<string, ComPortConfig>;
   can_buses: Record<string, CanBusConfig>;
