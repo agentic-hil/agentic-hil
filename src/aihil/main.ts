@@ -214,7 +214,7 @@ export async function initConfig(configPath?: string | null, force = false): Pro
 
 function initNextSteps(availableComPorts: JsonObject): string[] {
   const nextSteps = [
-    "Keep this .aihil/config.yaml with the firmware project; install aihil only once per machine.",
+    "Keep this .aihil/config.yaml with the firmware project; use npm exec or one user-local aihil command instead of reinstalling per project.",
     "Edit target.name and target.controller for your board.",
     "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
     "If multiple debug probes are connected, set debugger.probe_id to the intended probe serial number.",
@@ -284,8 +284,8 @@ export async function doctor(configPath?: string | null): Promise<JsonObject> {
     config_path: config.configPath,
     mcp: {
       transport: "stdio",
-      command: "aihil",
-      args: ["mcp-stdio", "--config", configDisplayPath],
+      command: "npm",
+      args: ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", configDisplayPath],
     },
     target: {
       name: config.target.name,
@@ -352,7 +352,7 @@ export function installSkill(agent?: string | null, target?: string | null, forc
       const registration = registerSkill(resolvedAgent, targetPath, sourceVersion, requestedAgent);
       return {
         ok: true,
-        summary: `AI-HIL ${agentName} skill updated to match the installed CLI.`,
+        summary: `AI-HIL ${agentName} skill updated to match the current CLI package.`,
         agent: agentId,
         requested_agent: requestedAgent,
         skill: SKILL_NAME,
@@ -469,7 +469,7 @@ function codexRegistrationBlock(targetPath: string, version: string, requestedAg
 - AI-HIL version: \`${version}\`
 - AI-HIL is for embedded firmware development with local hardware-in-the-loop targets.
 - For AI-HIL setup, configuration, MCP, or embedded hardware workflows, read and follow this skill before acting.
-- If this version differs from \`aihil --version\`, run \`aihil skill-install --agent ${requestedAgent}\` and use the installed CLI as authoritative.
+- If this version differs from \`aihil --version\` or the AI-HIL package version from npm exec, run \`aihil skill-install --agent ${requestedAgent}\` or \`npm exec --yes --package aihil -- aihil skill-install --agent ${requestedAgent}\` and use that CLI package as authoritative.
 ${AIHIL_REGISTRATION_END}`;
 }
 

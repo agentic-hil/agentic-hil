@@ -20,7 +20,7 @@ The recommended setup path is agent-first: open your firmware project in your MC
 Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
 ```
 
-The agent should install the `aihil` command once on the machine, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
+The agent should use the npm package through `npm exec` or an already available user-local `aihil` command, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
 
 ## Why embedded engineers use it
 
@@ -128,18 +128,20 @@ AI coding agent
   -> agent uses real hardware feedback for the next firmware change
 ```
 
-AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit MCP details. The portable project-local MCP config is:
+AI-HIL uses MCP over stdio internally. Most users should not need to hand-edit MCP details. The portable project-local MCP config uses npm as the stable entry point, so `aihil` does not need a separate installation or an entry in the user's `PATH`:
 
 ```json
 {
   "mcpServers": {
     "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+      "command": "npm",
+      "args": ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }
 ```
+
+If your machine already has a user-local `aihil` command on `PATH`, the shorter direct entry with `command: "aihil"` is also fine.
 
 Agent-facing MCP behavior, tool rules, and safety instructions live in [`AGENTS.md`](AGENTS.md). Human troubleshooting lives in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
@@ -257,12 +259,11 @@ Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)
 
 ## Manual setup fallback
 
-If you prefer to set it up yourself, run this from your firmware project directory:
+If you prefer to set it up yourself, run this from your firmware project directory. This uses npm's per-user cache and does not require admin rights or an `aihil` entry in `PATH`:
 
 ```bash
-npm i -g aihil
-aihil init
-aihil doctor
+npm exec --yes --package aihil -- aihil init
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 If your MCP client needs a project discovery file, create `.mcp.json` with:
@@ -271,12 +272,14 @@ If your MCP client needs a project discovery file, create `.mcp.json` with:
 {
   "mcpServers": {
     "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+      "command": "npm",
+      "args": ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }
 ```
+
+A persistent `aihil` CLI command is optional. Use it only when npm is configured to install into a user-owned location.
 
 Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, optional named COM ports, and optional named CAN buses.
 
@@ -286,14 +289,15 @@ If you are developing AI-HIL from this repository checkout instead of using the 
 git clone https://github.com/hp-8472/aihil.git
 cd aihil
 npm install
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
-Then return to your firmware project and run:
+For normal firmware-project setup, prefer the npm package runner instead of linking this checkout into a global npm prefix:
 
 ```bash
-aihil init
-aihil doctor
+npm exec --yes --package aihil -- aihil init
+npm exec --yes --package aihil -- aihil doctor
 ```
 
 AI-HIL's safety boundary is the project-local `.aihil/config.yaml` file.
@@ -332,7 +336,7 @@ npm install
 npm test
 ```
 
-The npm package installs the `aihil` CLI. The CLI provides commands such as:
+The npm package provides the `aihil` CLI. Run it through `npm exec --yes --package aihil -- aihil <command>` or through an existing user-local `aihil` command. Common commands are:
 
 ```text
 aihil init

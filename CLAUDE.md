@@ -15,27 +15,27 @@ Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Node.js 16.16 or newer with npm as
 Fast path:
 
 1. If `aihil --version` works, do not reinstall. On Windows, also try `aihil.cmd --version`.
-2. If AI-HIL is missing, first try installing the `aihil` command once on the local machine from npm:
+2. If AI-HIL is missing but npm is available, use npm's package runner. This does not require admin rights or an `aihil` entry in `PATH`:
 
 ```bash
-npm i -g aihil
+npm exec --yes --package aihil -- aihil --version
 ```
 
-3. If that npm registry install fails after Node.js/npm are available and accepted by this repository, install directly from GitHub without keeping a checkout in the firmware project:
+3. If that npm registry package lookup fails after Node.js/npm are available and accepted by this repository, try the GitHub package source without keeping a checkout in the firmware project:
 
 ```bash
-npm i -g github:hp-8472/aihil
+npm exec --yes --package github:hp-8472/aihil -- aihil --version
 ```
 
-Installing from npm or GitHub installs only the `aihil` CLI/MCP server. It does not install, register, or update agent skills. When an AI agent is asked to install AI-HIL, the agent must install the skills separately as an agent setup step.
+Running from npm or GitHub makes only the `aihil` CLI/MCP server available for that command. It does not install, register, or update agent skills. When an AI agent is asked to install AI-HIL, the agent must install the skills separately as an agent setup step.
 
-If Node.js is missing or too old for AI-HIL's `engines`, do not refuse or stop at the error. Install or activate a supported Node.js/npm runtime, then rerun the AI-HIL install. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless the operator asks for that version; any runtime accepted by `package.json` is fine. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If no safe local installer is apparent, ask one concise question about how the operator wants Node.js installed.
+If Node.js is missing or too old for AI-HIL's `engines`, do not refuse or stop at the error. Install or activate a supported Node.js/npm runtime, then rerun the `npm exec` command. Current Node.js LTS is fine, but do not pin a specific Node.js patch version unless the operator asks for that version; any runtime accepted by `package.json` is fine. Prefer an existing version manager such as `nvm`, `fnm`, Volta, or `asdf`, or the local platform package manager such as `winget install OpenJS.NodeJS.LTS` on Windows or `brew install node` on macOS. If no safe local installer is apparent, ask one concise question about how the operator wants Node.js installed.
 
 Do not work around an old runtime with `--force`, `--ignore-engines`, or an older AI-HIL version. The correct fix is a supported Node.js/npm runtime.
 
 ## Agent Skill Installation
 
-Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the `aihil` command is installed. The installed CLI is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent claude-code`.
+Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the CLI is available through `aihil` or `npm exec`. The CLI package is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent claude-code` or `npm exec --yes --package aihil -- aihil skill-install --agent claude-code`.
 
 If this source checkout is not available, clone or fetch the AI-HIL repository outside the firmware project only for the skill source, then remove that temporary checkout if it is no longer needed.
 
@@ -47,15 +47,16 @@ Known user-level skill destinations:
 
 `skill-install` also performs the known registration step for the selected agent. opencode and Claude Code discover skills from their skill directories. Codex additionally gets a marked AI-HIL block in `$HOME/.codex/AGENTS.md` pointing at the installed skill.
 
-CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
+CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/`claude`, and `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents, use that agent's documented user-level skill directory with `aihil skill-install --agent <name> --target <path>` or `npm exec --yes --package aihil -- aihil skill-install --agent <name> --target <path>`. If the active agent has no skill mechanism or the destination cannot be determined, ask one concise question instead of silently skipping skill installation.
 
 Do not rely on npm for skills, and do not add npm `postinstall` hooks for skill installation. Skill installation is an agent workflow responsibility, not package-manager behavior.
 
-From this repository checkout for AI-HIL development, install dependencies first and then link the checkout globally:
+From this repository checkout for AI-HIL development, install dependencies and run the local CLI directly:
 
 ```bash
 npm install
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
 For local AI-HIL development and tests, use the Node.js toolchain:

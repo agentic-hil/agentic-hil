@@ -29,7 +29,7 @@ The setup skill is the preferred workflow for creating or fixing `.aihil/config.
 
 ## Installation model
 
-AI-HIL is installed once on the local machine as the `aihil` command. Each firmware project gets its own `.aihil/` directory and `.mcp.json`.
+AI-HIL is normally launched through npm's package runner or an existing user-local `aihil` command. Each firmware project gets its own `.aihil/` directory and `.mcp.json`.
 
 When the user says something like:
 
@@ -40,8 +40,8 @@ Install https://github.com/hp-8472/aihil for this firmware project.
 follow this model:
 
 1. Stay aware of the difference between the firmware project and the AI-HIL source repository.
-2. Install the `aihil` command.
-3. Update and register the agent skill from the installed CLI with `aihil skill-install --agent <agent>` when the active agent supports it. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
+2. Make the AI-HIL CLI available, preferably with `npm exec` when `aihil` is not already on `PATH`.
+3. Update and register the agent skill from the available CLI with `aihil skill-install --agent <agent>` or `npm exec --yes --package aihil -- aihil skill-install --agent <agent>` when the active agent supports it. Supported defaults include `opencode`, `claude-code`, and `codex`; use `--target` for other skill-capable agents.
 4. Return to the firmware project.
 5. Create or update the project-local `.aihil/config.yaml`.
 6. Validate with `aihil doctor`.
@@ -61,17 +61,18 @@ On Windows, also try:
 aihil.cmd --version
 ```
 
-If AI-HIL is not installed, install from npm:
+If AI-HIL is not installed but npm is available, use npm's package runner instead of requiring admin rights or changing the user's `PATH`:
 
 ```bash
-npm i -g aihil
+npm exec --yes --package aihil -- aihil --version
 ```
 
-If the current working directory is a checkout of the AI-HIL repository and the task is AI-HIL development, install that local checkout with:
+If the current working directory is a checkout of the AI-HIL repository and the task is AI-HIL development, install dependencies and run the local CLI directly:
 
 ```bash
 npm install
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
 For AI-HIL development and tests, use:
@@ -191,8 +192,8 @@ Example `.mcp.json` shape:
 {
   "mcpServers": {
     "aihil": {
-      "command": "aihil",
-      "args": ["mcp-stdio", "--config", ".aihil/config.yaml"]
+      "command": "npm",
+      "args": ["exec", "--yes", "--package", "aihil", "--", "aihil", "mcp-stdio", "--config", ".aihil/config.yaml"]
     }
   }
 }
@@ -214,7 +215,7 @@ Do not mix plain COM text into `mcp-stdio`. MCP stdout must remain JSON-RPC only
 
 ## Available MCP tools
 
-Use `tools/list` to discover the current tool list from the running MCP server. `src/aihil/mcp.ts` is authoritative for source-tree development. The installed `aihil` CLI is authoritative for the agent skill version; if they differ, update the skill from the CLI.
+Use `tools/list` to discover the current tool list from the running MCP server. `src/aihil/mcp.ts` is authoritative for source-tree development. The available `aihil` CLI package is authoritative for the agent skill version; if they differ, update the skill from the CLI.
 
 ## Required hardware workflow
 
@@ -321,7 +322,8 @@ For AI-HIL repository development:
 ```bash
 npm install
 npm test
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
 Useful CLI commands:

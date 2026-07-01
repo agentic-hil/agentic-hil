@@ -15,25 +15,27 @@ Always inspect structured JSON first. The most useful fields are `ok`, `error_ty
 
 ## 1. `aihil` Command Not Found
 
-Symptom: the shell or MCP client cannot start `aihil`.
+Symptom: the shell or MCP client cannot start AI-HIL.
 
-Likely cause: AI-HIL is not installed globally, npm's global bin directory is not on `PATH`, or the MCP client starts with a different environment.
+Likely cause: `npm` is not available to the shell or MCP client, package download is blocked, or a direct `aihil` command is used even though `aihil` is not on `PATH`.
 
 Fix:
 
 ```bash
-npm i -g aihil
-aihil --version
-aihil doctor
+npm exec --yes --package aihil -- aihil --version
+npm exec --yes --package aihil -- aihil doctor
 ```
 
-If npm reports an old Node.js version or an `engines` error, install or activate a supported Node.js/npm runtime, open a fresh shell if needed, and rerun `npm i -g aihil`. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the runtime requirement.
+If npm reports an old Node.js version or an `engines` error, install or activate a supported Node.js/npm runtime, open a fresh shell if needed, and rerun the `npm exec` command. Current Node.js LTS is fine, but you do not need to install a specific Node.js patch version; any runtime accepted by `package.json` is fine. On Windows, `winget install OpenJS.NodeJS.LTS` is the usual direct path when `winget` is available. Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass the runtime requirement.
+
+A persistent `aihil` CLI command is optional. Use it only when npm is configured to install into a user-owned location.
 
 If developing from this checkout, run:
 
 ```bash
 npm install
-npm install --global .
+npm run build
+node dist/main.js --version
 ```
 
 ## 2. `config_file_not_found` / `config_invalid`
