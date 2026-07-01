@@ -30,7 +30,7 @@ If npm reports an old Node.js version or an `engines` error, install or activate
 
 A persistent `aihil` CLI command is optional. Use it only when npm is configured to install into a user-owned location.
 
-If developing from this checkout, run:
+Repository maintainers developing AI-HIL itself can run the local checkout directly:
 
 ```bash
 npm install

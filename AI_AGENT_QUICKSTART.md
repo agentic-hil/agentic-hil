@@ -29,7 +29,7 @@ Fast path:
 npm exec --yes --package aihil -- aihil --version
 ```
 
-3. If that npm registry package lookup fails after Node.js/npm are available and accepted by this repository, try the GitHub package source without keeping a checkout in the firmware project:
+3. If that npm registry package lookup fails after Node.js/npm are available and accepted by this repository, try the GitHub package source as a package source only. Do not clone or keep a source checkout in the firmware project:
 
 ```bash
 npm exec --yes --package github:hp-8472/aihil -- aihil --version
@@ -45,7 +45,7 @@ Do not use `--force`, `--ignore-engines`, or an older AI-HIL version to bypass t
 
 Agent-driven AI-HIL installation includes installing the matching `skills/aihil-config-setup/SKILL.md` into the active agent's user-level skill directory after the CLI is available through `aihil` or `npm exec`. The CLI package is authoritative: if the skill front matter version differs from `aihil --version`, update the skill from the CLI with `aihil skill-install --agent <agent>` or `npm exec --yes --package aihil -- aihil skill-install --agent <agent>`.
 
-If this source checkout is not available, clone or fetch the AI-HIL repository outside the firmware project only for the skill source, then remove that temporary checkout if it is no longer needed.
+Do not clone the AI-HIL repository just to install the skill. The npm package includes the setup skill, and `skill-install` can copy it into the active agent's user-level skill directory.
 
 Known user-level skill destinations:
 
@@ -59,7 +59,7 @@ CLI-supported agent names and aliases are `opencode`/`open-code`, `claude-code`/
 
 Do not rely on npm for skills, and do not add npm `postinstall` hooks for skill installation. Skill installation is an agent workflow responsibility, not package-manager behavior.
 
-From this repository checkout for AI-HIL development, install dependencies and run the local CLI directly:
+From this repository checkout for AI-HIL development only, install dependencies and run the local CLI directly:
 
 ```bash
 npm install
@@ -74,7 +74,7 @@ npm install
 npm test
 ```
 
-If you were given only the AI-HIL repository URL and asked to set up the current firmware project, use AI-HIL with the fast path above, install the AI-HIL skill into the active agent's skill directory, then return to the firmware project. Do not vendor the AI-HIL source tree into the firmware project.
+If you were given only the AI-HIL repository URL and asked to set up the current firmware project, use AI-HIL with the fast path above, install the AI-HIL skill into the active agent's skill directory, then return to the firmware project. Do not clone, checkout, or vendor the AI-HIL source tree into the firmware project for normal setup.
 
 ## Configure Each Project
 

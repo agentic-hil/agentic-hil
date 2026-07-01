@@ -31,6 +31,8 @@ The setup skill is the preferred workflow for creating or fixing `.aihil/config.
 
 AI-HIL is normally launched through npm's package runner or an existing user-local `aihil` command. Each firmware project gets its own `.aihil/` directory and `.mcp.json`.
 
+Do not clone the AI-HIL repository for normal firmware-project setup. Use the npm package directly unless the task is AI-HIL source development.
+
 When the user says something like:
 
 ```text

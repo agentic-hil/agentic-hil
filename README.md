@@ -20,7 +20,7 @@ The recommended setup path is agent-first: open your firmware project in your MC
 Install https://github.com/hp-8472/aihil for this firmware project and use it as the local MCP hardware-in-the-loop bridge.
 ```
 
-The agent should use the npm package through `npm exec` or an already available user-local `aihil` command, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`.
+The agent should use the npm package through `npm exec` or an already available user-local `aihil` command, then configure the current firmware project with its own `.aihil/config.yaml` and `.mcp.json`. Normal firmware-project setup does not require cloning this repository.
 
 ## Why embedded engineers use it
 
@@ -259,7 +259,7 @@ Common setup issues are documented in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)
 
 ## Manual setup fallback
 
-If you prefer to set it up yourself, run this from your firmware project directory. This uses npm's per-user cache and does not require admin rights or an `aihil` entry in `PATH`:
+If you prefer to set it up yourself, run this from your firmware project directory. This uses npm's per-user cache, does not require admin rights, does not require an `aihil` entry in `PATH`, and does not require cloning the AI-HIL repository:
 
 ```bash
 npm exec --yes --package aihil -- aihil init
@@ -282,23 +282,6 @@ If your MCP client needs a project discovery file, create `.mcp.json` with:
 A persistent `aihil` CLI command is optional. Use it only when npm is configured to install into a user-owned location.
 
 Each firmware project owns its own `.aihil/` directory. That directory contains the local target configuration, debugger settings, permissions, allowed firmware artifact roots, reports, logs, optional named COM ports, and optional named CAN buses.
-
-If you are developing AI-HIL from this repository checkout instead of using the npm package:
-
-```bash
-git clone https://github.com/hp-8472/aihil.git
-cd aihil
-npm install
-npm run build
-node dist/main.js --version
-```
-
-For normal firmware-project setup, prefer the npm package runner instead of linking this checkout into a global npm prefix:
-
-```bash
-npm exec --yes --package aihil -- aihil init
-npm exec --yes --package aihil -- aihil doctor
-```
 
 AI-HIL's safety boundary is the project-local `.aihil/config.yaml` file.
 
@@ -329,11 +312,13 @@ The default model is:
 
 ## Development
 
-For AI-HIL development:
+For AI-HIL repository development only:
 
 ```bash
 npm install
 npm test
+npm run build
+node dist/main.js --version
 ```
 
 The npm package provides the `aihil` CLI. Run it through `npm exec --yes --package aihil -- aihil <command>` or through an existing user-local `aihil` command. Common commands are:
