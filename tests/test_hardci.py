@@ -55,7 +55,7 @@ logs:
         encoding="utf-8",
     )
     mcp = tmp_path / ".mcp.json"
-    mcp.write_text(json.dumps({"mcpServers": {"aihil": {"command": "npm"}, "other": {"command": "keep"}}}), encoding="utf-8")
+    mcp.write_text(json.dumps({"mcpServers": {"aihil": {"command": "aihil"}, "other": {"command": "keep"}}}), encoding="utf-8")
 
     result = migrate_aihil(str(source), str(tmp_path / ".hardci" / "config.yaml"), str(mcp), False)
 
