@@ -1,5 +1,6 @@
 include README.md
 include AGENTS.md
+include LICENSE
 recursive-include src/hardci/schemas *.json
 recursive-include src/hardci/templates *.json
 recursive-include src/hardci/skills *.md
