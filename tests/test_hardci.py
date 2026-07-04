@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from conftest import FAKE_STLINK_UNCONFIRMED, write_config
 
 from hardci.artifacts import ArtifactManager
+from hardci.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from hardci.cli import init_config, install_skill, schema
+from hardci.comports import ComPortService
 from hardci.config import load_config
-from hardci.mcp import handle_mcp_message
+from hardci.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from hardci.tools import HardCIToolService
 
 
@@ -166,6 +171,96 @@ def test_skill_install_supports_agent_aliases(tmp_path: Path) -> None:
     assert "hardci_version" in target.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("command", ["hardci_debugger_info", "hardci_flash_firmware", "hardci_can_read"])
-def test_mcp_tool_names_are_hardci_prefixed(command: str) -> None:
-    assert command.startswith("hardci_")
+def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
+    assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
+    assert all(name.startswith("hardci_") for name in MCP_TOOL_NAMES)
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        for name in MCP_TOOL_NAMES:
+            result = service.call(name, {})
+            assert result.get("error_type") != "unknown_tool", f"{name} is advertised but not dispatched"
+    finally:
+        service.close()
+
+
+def test_mcp_initialize_rejects_unsupported_protocol_version(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}},
+            service,
+        )
+    finally:
+        service.close()
+    assert isinstance(response, dict)
+    assert response["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+
+def test_com_write_rejects_unencodable_text(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                com_ports_yaml='''com_ports:
+  dut_uart:
+    device: "/dev/ttyNONEXISTENT"
+    encoding: "ascii"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    service = ComPortService(config)
+    try:
+        result = service.write("dut_uart", {"text": "Temperatur: 25 °C"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+
+
+def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def test_process_can_adapter_close_reaps_child() -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    session.close()
+    assert child.poll() is not None
+
+
+def test_process_can_adapter_request_after_exit_returns_error() -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    session.close()
+    result = session.send(CanFrame(id=1, extended=False, rtr=False, data=b""))
+    assert result["ok"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only PEAK channel validation")
+def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                can_buses_yaml='''can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "USBBUS1"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"

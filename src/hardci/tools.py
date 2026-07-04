@@ -36,7 +36,7 @@ class HardCIToolService:
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
-            return {"ok": False, "tool": "hardci_flash_firmware", "error_type": "invalid_argument", "summary": "Provide exactly one of image_path or artifact_id."}
+            return tool_error("hardci_flash_firmware", "invalid_argument", "Provide exactly one of image_path or artifact_id.")
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation

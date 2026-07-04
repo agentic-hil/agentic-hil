@@ -275,6 +275,8 @@ def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject
             return {"ok": True, "data": payload["text"].encode(port_config.encoding)}
         except LookupError:
             return {"ok": False, "tool": "hardci_com_write", "error_type": "config_invalid", "summary": "COM port encoding is not supported by Python.", "encoding": port_config.encoding}
+        except UnicodeEncodeError:
+            return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "text cannot be encoded with the configured COM port encoding.", "encoding": port_config.encoding}
     if not isinstance(payload.get("hex"), str):
         return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "hex must be a string."}
     cleaned = re.sub(r"\s+", "", payload["hex"])

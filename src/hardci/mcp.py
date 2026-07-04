@@ -8,6 +8,7 @@ from hardci.tools import HardCIToolService
 from hardci.types import JsonObject
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
 JSONRPC_PARSE_ERROR = -32700
 JSONRPC_INVALID_REQUEST = -32600
@@ -131,7 +132,9 @@ def handle_single_mcp_message(message: Any, tools: HardCIToolService) -> JsonObj
 def handle_method(request_id: Any, method: str, params: Any, tools: HardCIToolService) -> JsonObject:
     if method == "initialize":
         params_object = params_object_or_throw(params)
-        return result_response(request_id, {"protocolVersion": str(params_object.get("protocolVersion", MCP_PROTOCOL_VERSION)), "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "hardci", "version": __version__}})
+        requested_version = params_object.get("protocolVersion")
+        negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "hardci", "version": __version__}})
     if method == "ping":
         return result_response(request_id, {})
     if method == "tools/list":

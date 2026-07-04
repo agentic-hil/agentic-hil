@@ -15,6 +15,7 @@ def write_config(
     debugger_executable: Path | None = None,
     probe_id: str | None = None,
     flash_address: str | None = None,
+    com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
 ) -> Path:
     if debugger_executable is None:
@@ -44,7 +45,7 @@ artifacts:
   upload_directory: ".hardci/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{can_buses_yaml}reports:
+{com_ports_yaml}{can_buses_yaml}reports:
   directory: ".hardci/reports"
 logs:
   directory: ".hardci/logs"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import subprocess
@@ -244,7 +245,7 @@ def open_python_can_adapter(config: HardCIConfig, bus_id: str, bus_config: CanBu
     if (
         bus_config.adapter == "peak"
         and not is_windows_peak_channel(bus_config.channel)
-        and Path("/").exists()
+        and os.name != "nt"
         and not re.fullmatch(r"can\d+|vcan\d+|slcan\d+", bus_config.channel)
     ):
         return {"ok": False, "tool": "hardci_can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0."}
@@ -286,18 +287,30 @@ class ProcessCanAdapterSession:
         finally:
             self.closed = True
             self.child.terminate()
+            try:
+                self.child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+                with suppress(subprocess.TimeoutExpired):
+                    self.child.wait(timeout=5)
 
     def status(self) -> JsonObject:
         return {"active": not self.closed and self.child.poll() is None, "backend": self.adapter_name}
 
     def request(self, method: str, params: JsonObject, timeout_s: float) -> JsonObject:
+        if self.closed or self.child.poll() is not None:
+            return {"ok": False, "adapter": self.adapter_name, "error_type": "can_adapter_process_exited", "summary": "CAN adapter bridge process is not running."}
         with self.lock:
             request_id = self.next_request_id
             self.next_request_id += 1
             response_queue: queue.Queue[JsonObject] = queue.Queue(maxsize=1)
             self.pending[request_id] = response_queue
-            self.child.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
-            self.child.stdin.flush()
+            try:
+                self.child.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
+                self.child.stdin.flush()
+            except (OSError, ValueError):
+                self.pending.pop(request_id, None)
+                return {"ok": False, "adapter": self.adapter_name, "error_type": "can_adapter_process_exited", "summary": "CAN adapter bridge process closed its input."}
         try:
             response = response_queue.get(timeout=max(0.0, timeout_s))
         except queue.Empty:
