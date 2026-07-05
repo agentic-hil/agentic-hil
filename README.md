@@ -3,11 +3,11 @@
 **Your AI agent can develop firmware on its own — because HardCI closes the loop with real hardware.**
 
 ```
-┌─▶ build ─▶ flash ─▶ stimulate ─▶ observe ─┐
-│                                           │
-└◀──────────── diagnose & fix ─────────────┘
++--> build --> flash --> stimulate --> observe --+
+|                                                |
++<-------------- diagnose & fix -----------------+
 
-  your agent, unattended — you review the pull request
+  your agent, unattended -- you review the pull request
 ```
 
 HardCI is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, test adapters, reports, and logs — without giving an agent arbitrary host or debugger access. A project-local policy file (`.hardci/config.yaml`) defines exactly which devices, actions, paths, and limits are allowed. That policy gate is what makes unattended hardware access workable in the first place.
