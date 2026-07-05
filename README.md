@@ -178,7 +178,7 @@ python -m build
 twine check dist/*
 ```
 
-The package is configured for PyPI publishing through GitHub trusted publishing in `.github/workflows/pypi-publish.yml`.
+The package is configured for PyPI publishing through GitHub trusted publishing in `.github/workflows/workflow.yml`.
 
 ## Security
 
