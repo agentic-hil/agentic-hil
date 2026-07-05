@@ -9,6 +9,7 @@ FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
+FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
 
 
@@ -20,6 +21,9 @@ def write_config(
     probe_id: str | None = None,
     target_type: str | None = None,
     flash_address: str | None = None,
+    gdb_executable: Path | None = None,
+    allowed_symbols: list[str] | None = None,
+    max_dump_size_bytes: int = 1048576,
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
     adapters_yaml: str = "adapters: {}\n",
@@ -45,9 +49,9 @@ debugger:
   flash_address: {('null' if flash_address is None else repr(flash_address))}
   timeout_s: 5
 debug:
-  gdb_executable: null
-  allowed_symbols: []
-  max_dump_size_bytes: 1048576
+  gdb_executable: {('null' if gdb_executable is None else repr(gdb_executable.as_posix()))}
+  allowed_symbols: {(allowed_symbols if allowed_symbols is not None else [])}
+  max_dump_size_bytes: {max_dump_size_bytes}
 artifacts:
   allowed_roots: ["build"]
   allowed_extensions: [".elf", ".hex", ".bin"]

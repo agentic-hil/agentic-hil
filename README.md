@@ -124,7 +124,7 @@ Export the full JSON schema with `hardci schema --output hardci-config.schema.js
 | CAN | `hardci_can_buses_list`, `hardci_can_session_start`, `hardci_can_session_stop`, `hardci_can_send`, `hardci_can_read` | PEAK, SocketCAN, or a process bridge |
 | Test adapters | `hardci_adapters_list`, `hardci_adapter_session_start`, `hardci_adapter_session_stop`, `hardci_adapter_set_value`, `hardci_adapter_inject_fault`, `hardci_adapter_clear_fault`, `hardci_adapter_measure` | sensor/actuator/fault simulation via the [adapter bridge protocol](examples/adapters/README.md) |
 | Diagnostics | `hardci_get_last_report`, `hardci_classify_last_error` | structured error classification with likely causes |
-| Debug sessions | `hardci_debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | reserved API — returns `not_supported` in this build |
+| Debug sessions | `hardci_debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; symbol allowlist and dump-size limits from the `debug:` policy section |
 
 A typical loop: build firmware → `hardci_flash_firmware` → `hardci_com_session_start` → stimulate via `hardci_com_write`/`hardci_can_send`/`hardci_adapter_set_value` → assert on `hardci_com_read`/`hardci_can_read`/`hardci_adapter_measure` → on failure, `hardci_classify_last_error`.
 

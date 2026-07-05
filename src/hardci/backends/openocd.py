@@ -12,6 +12,7 @@ from hardci.backends.common import (
     spawn_command,
     which,
 )
+from hardci.backends.gdbdebug import GdbDebugSessions
 from hardci.config import display_path, resolve_work_path
 from hardci.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
 from hardci.types import HardCIConfig, JsonObject
@@ -45,7 +46,13 @@ class OpenOCDBackend:
 
     def __init__(self, config: HardCIConfig):
         self.config = config
-        self._debug_session: JsonObject | None = None
+        self._debug = GdbDebugSessions(
+            config,
+            backend_name=self.backend_name,
+            resolve_server=self._resolve_executable,
+            build_server_args=self._debug_server_args,
+            classify_server_output=self._classify_output,
+        )
 
     def info(self) -> JsonObject:
         resolved = self._resolve_executable()
@@ -129,38 +136,37 @@ class OpenOCDBackend:
         return self._write_action_report(result)
 
     def debug_start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_start_session")
+        return self._debug.start_session(artifact, mode, timeout_s)
 
     def debug_stop_session(self, timeout_s: float | None = None) -> JsonObject:
-        self._debug_session = None
-        return {"ok": True, "tool": "hardci_debug_stop_session", "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
+        return self._debug.stop_session(timeout_s)
 
     def debug_get_session_status(self) -> JsonObject:
-        return {"ok": True, "tool": "hardci_debug_get_session_status", "backend": self.backend_name, "active": False, "status": "stopped", "session": None}
+        return self._debug.get_session_status()
 
     def debug_set_breakpoint(self, location: JsonObject) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_set_breakpoint")
+        return self._debug.set_breakpoint(location.get("location", ""))
 
     def debug_list_breakpoints(self) -> JsonObject:
-        return {"ok": True, "tool": "hardci_debug_list_breakpoints", "backend": self.backend_name, "active": False, "breakpoints": []}
+        return self._debug.list_breakpoints()
 
     def debug_clear_breakpoints(self) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_clear_breakpoints")
+        return self._debug.clear_breakpoints()
 
     def debug_continue(self, timeout_s: float | None = None) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_continue")
+        return self._debug.continue_execution(timeout_s)
 
     def debug_halt(self, timeout_s: float | None = None) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_halt")
+        return self._debug.halt(timeout_s)
 
     def debug_get_stop_reason(self) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_get_stop_reason")
+        return self._debug.get_stop_reason()
 
     def debug_symbol_info(self, symbol: str) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_symbol_info")
+        return self._debug.symbol_info(symbol)
 
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject:
-        return self._debug_not_supported("hardci_debug_dump_symbol_ihex")
+        return self._debug.dump_symbol_ihex(symbol, output)
 
     def classify_last_error(self) -> JsonObject:
         report = read_last_report(self.config)
@@ -183,7 +189,26 @@ class OpenOCDBackend:
         return result
 
     def close(self) -> None:
-        self._debug_session = None
+        self._debug.close()
+
+    def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
+        startup = "init; reset halt" if reset else "init; halt"
+        return [
+            *invocation(executable_path),
+            "-f",
+            self.config.debugger.interface_cfg,
+            *self._probe_selection_commands(),
+            "-f",
+            self.config.debugger.target_cfg,
+            "-c",
+            f"gdb_port {gdb_port}",
+            "-c",
+            "tcl_port disabled",
+            "-c",
+            "telnet_port disabled",
+            "-c",
+            startup,
+        ]
 
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
@@ -268,9 +293,6 @@ class OpenOCDBackend:
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
-
-    def _debug_not_supported(self, tool: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "not_supported", "summary": "Typed GDB debug sessions are not enabled in this HardCI Python build yet."}
 
     def _probe_selection_commands(self) -> list[str]:
         return [] if self.config.debugger.probe_id is None else ["-c", f"adapter serial {self.config.debugger.probe_id}"]
