@@ -130,6 +130,21 @@ Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_nt
 - Test adapter channels and fault names are explicit allowlists — HardCI rejects anything not named in the config before it reaches the adapter bridge.
 - All actions log to `.hardci/logs/` and write a structured report to `.hardci/reports/`.
 
+## pytest Plugin
+
+Installing `hardci` registers a pytest plugin, so CI regression suites can drive the same policy-gated tools without an MCP client:
+
+```python
+def test_open_sensor_diagnosis(hardci):
+    started = hardci.call("hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+    assert started["ok"] is True
+    injected = hardci.call("hardci_adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})
+    assert injected["ok"] is True
+    # ...assert the firmware's reaction via hardci_com_read...
+```
+
+The `hardci` fixture loads `.hardci/config.yaml` relative to the pytest rootdir (override with `--hardci-config` or the `hardci_config` ini option). Tests are skipped when no configuration file exists, but an existing invalid configuration fails loudly — a config typo must not silently disable the hardware suite in CI. Adapter, COM, and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/pytest/](examples/pytest/) for a full diagnosis-loop example.
+
 ## Common Commands
 
 ```text

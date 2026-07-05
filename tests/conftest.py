@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+pytest_plugins = ["pytester"]
+
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"

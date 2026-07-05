@@ -13,7 +13,7 @@ from hardci.artifacts import ArtifactManager
 from hardci.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from hardci.cli import init_config, install_skill, schema
 from hardci.comports import ComPortService
-from hardci.config import load_config
+from hardci.config import ConfigError, load_config
 from hardci.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from hardci.tools import HardCIToolService
 
@@ -169,6 +169,22 @@ def test_skill_install_supports_agent_aliases(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["agent"] == "opencode"
     assert "hardci_version" in target.read_text(encoding="utf-8")
+
+
+def test_load_config_reports_unreadable_path_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / ".hardci" / "config.yaml"
+    config_path.mkdir(parents=True)  # a directory passes exists() but cannot be read
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+    assert excinfo.value.error_type == "config_unreadable"
+
+
+def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_bytes(b"\xff\xfe\x00 broken")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+    assert excinfo.value.error_type == "config_invalid"
 
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:

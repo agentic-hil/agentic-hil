@@ -81,6 +81,18 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
 
     try:
         loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ConfigError(
+            "config_unreadable",
+            "HardCI configuration file could not be read.",
+            {"path": resolved_config_path, "backend_error": str(error)},
+        ) from error
+    except UnicodeDecodeError as error:
+        raise ConfigError(
+            "config_invalid",
+            "HardCI configuration file is not valid UTF-8 text.",
+            {"path": resolved_config_path},
+        ) from error
     except yaml.YAMLError as error:
         raise ConfigError(
             "config_invalid",

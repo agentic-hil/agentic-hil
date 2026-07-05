@@ -1,0 +1,52 @@
+"""Example: temperature-sensor diagnosis loop driven by the HardCI pytest plugin.
+
+Run from a checkout of the hardci repository (or copy this file together with
+examples/adapters/sim_ntc_adapter.py into your firmware project) with a
+.hardci/config.yaml whose adapters section points at the simulator, as shown
+in examples/adapters/README.md:
+
+    pip install hardci
+    pytest test_ntc_diagnosis.py
+
+The `hardci` fixture skips these tests when no HardCI configuration file
+exists, so the suite stays green in code-only environments, and it stops
+adapter sessions after each test so fault state cannot leak between tests.
+
+These tests only exercise the stimulus side: they assert what the adapter
+presents to the device under test. In a real project each fault injection is
+paired with assertions on the firmware's reaction, e.g. its diagnosis output
+read via hardci_com_read.
+"""
+from __future__ import annotations
+
+import pytest
+
+ADAPTER_ID = "ntc_sim"
+
+
+@pytest.fixture()
+def ntc(hardci):
+    started = hardci.call("hardci_adapter_session_start", {"adapter_id": ADAPTER_ID})
+    assert started["ok"] is True, started["summary"]
+    return hardci  # the plugin stops adapter sessions after each test
+
+
+def test_nominal_temperature_reading(ntc) -> None:
+    set_result = ntc.call("hardci_adapter_set_value", {"adapter_id": ADAPTER_ID, "channel": "temperature", "value": 25})
+    assert set_result["ok"] is True
+    resistance = ntc.call("hardci_adapter_measure", {"adapter_id": ADAPTER_ID, "channel": "resistance"})
+    assert 9000 < resistance["value"] < 11000  # 10k NTC at 25 degC
+
+
+def test_open_sensor_fault_is_injectable(ntc) -> None:
+    injected = ntc.call("hardci_adapter_inject_fault", {"adapter_id": ADAPTER_ID, "fault": "open"})
+    assert injected["ok"] is True
+    resistance = ntc.call("hardci_adapter_measure", {"adapter_id": ADAPTER_ID, "channel": "resistance"})
+    assert resistance["value"] >= 1e9  # the adapter now presents an open circuit to the firmware
+
+
+def test_short_to_gnd_fault_is_injectable(ntc) -> None:
+    injected = ntc.call("hardci_adapter_inject_fault", {"adapter_id": ADAPTER_ID, "fault": "short_to_gnd"})
+    assert injected["ok"] is True
+    resistance = ntc.call("hardci_adapter_measure", {"adapter_id": ADAPTER_ID, "channel": "resistance"})
+    assert resistance["value"] == 0.0  # the adapter now presents a short to the firmware
