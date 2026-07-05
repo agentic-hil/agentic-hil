@@ -143,7 +143,7 @@ def test_open_sensor_diagnosis(hardci):
     # ...assert the firmware's reaction via hardci_com_read...
 ```
 
-The `hardci` fixture loads `.hardci/config.yaml` relative to the pytest rootdir (override with `--hardci-config` or the `hardci_config` ini option). Tests are skipped when no configuration file exists, but an existing invalid configuration fails loudly — a config typo must not silently disable the hardware suite in CI. Adapter, COM, and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/pytest/](examples/pytest/) for a full diagnosis-loop example.
+The `hardci` fixture loads `.hardci/config.yaml` relative to the pytest rootdir (override with `--hardci-config` or the `hardci_config` ini option). Tests are skipped when no configuration file exists, but an existing invalid configuration fails loudly — a config typo must not silently disable the hardware suite in CI. Adapter, COM, and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/pytest/](examples/pytest/) for a full diagnosis-loop example, and [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) for the complete loop on real hardware: a bare-metal STM32 firmware that is built, flashed, reset, and asserted on via its UART boot banner.
 
 ## Common Commands
 
