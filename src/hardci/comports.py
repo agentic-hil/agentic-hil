@@ -87,7 +87,15 @@ class ComPortService:
         ports: JsonObject = {}
         for port_id, port_config in self.config.com_ports.items():
             ports[port_id] = self._port_status(port_config, self.sessions.get(port_id))
-        available = list_available_com_ports()
+        if self.config.permissions.allow_com_read:
+            available = list_available_com_ports()
+        else:
+            available = {
+                "ok": False,
+                "tool": "hardci_com_ports_available",
+                "error_type": "permission_denied",
+                "summary": "Host COM port discovery is disabled by .hardci/config.yaml (allow_com_read).",
+            }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
             "ok": True,
@@ -228,7 +236,11 @@ class ComPortService:
             return port
         session = self.sessions.get(port_id)
         if session is None or not self._session_is_active(session):
-            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with hardci_com_session_start first."}
+            result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with hardci_com_session_start first."}
+            if session is not None and session.reader_error:
+                result["reader_error"] = session.reader_error
+                result["summary"] = "COM port session failed and is no longer active. Start it again with hardci_com_session_start."
+            return result
         return {"ok": True, "session": session}
 
     def _port_status(self, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
@@ -244,6 +256,8 @@ class ComPortService:
         return result
 
     def _session_is_active(self, session: ComPortSession) -> bool:
+        if session.reader_error is not None:
+            return False
         return session.active and bool(getattr(session.serial_handle, "is_open", True))
 
     def _stop_session(self, session: ComPortSession, reason: str) -> None:

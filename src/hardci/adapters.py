@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
 from hardci.backends.common import command_for_log, invocation
@@ -213,7 +214,8 @@ class AdapterService:
 
     def _stop_session(self, session: AdapterSession, reason: str) -> None:
         session.active = False
-        session.bridge.close()
+        with suppress(Exception):
+            session.bridge.close()
         append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:

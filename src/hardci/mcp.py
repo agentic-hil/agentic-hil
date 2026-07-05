@@ -119,8 +119,14 @@ def parse_error_response() -> JsonObject:
     return error_response(None, JSONRPC_PARSE_ERROR, "Parse error")
 
 
+def oversized_message_response(max_message_chars: int) -> JsonObject:
+    return error_response(None, JSONRPC_INVALID_REQUEST, "Request too large", {"max_message_chars": max_message_chars})
+
+
 def handle_mcp_message(message: Any, tools: HardCIToolService) -> JsonObject | list[JsonObject] | None:
     if isinstance(message, list):
+        if not message:
+            return error_response(None, JSONRPC_INVALID_REQUEST, "Invalid Request")
         responses = [response for item in message if (response := handle_single_mcp_message(item, tools)) is not None]
         return responses or None
     return handle_single_mcp_message(message, tools)

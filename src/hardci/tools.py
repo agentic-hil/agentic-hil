@@ -36,6 +36,8 @@ class HardCIToolService:
 
     def flash_firmware(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
+        if not self.config.permissions.allow_flash:
+            return tool_error("hardci_flash_firmware", "permission_denied", "Flashing is disabled by .hardci/config.yaml.")
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -73,8 +75,12 @@ class HardCIToolService:
         return self.backend.debug_get_session_status()
 
     def debug_set_breakpoint(self, payload: JsonObject | None = None) -> JsonObject:
-        payload = payload or {}
-        return self.backend.debug_set_breakpoint({"location": payload.get("location", payload)})
+        location = (payload or {}).get("location")
+        has_symbol_location = isinstance(location, str) and bool(location.strip())
+        has_typed_location = isinstance(location, dict) and bool(location)
+        if not has_symbol_location and not has_typed_location:
+            return tool_error("hardci_debug_set_breakpoint", "invalid_argument", "location must be a non-empty string or object.")
+        return self.backend.debug_set_breakpoint({"location": location})
 
     def debug_list_breakpoints(self) -> JsonObject:
         return self.backend.debug_list_breakpoints()

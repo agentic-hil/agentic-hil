@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import threading
 import time
 from typing import BinaryIO, TextIO
 
 from hardci.comports import ComPortService
 from hardci.types import HardCIConfig, JsonObject
+
+STDIN_CHUNK_BYTES = 4096
+STDIN_POLL_TIMEOUT_S = 0.01
 
 
 def run_com_stdio(
@@ -35,14 +40,15 @@ def run_com_stdio(
         read_size = max_read_bytes or port.max_buffer_bytes
         last_data_at = time.monotonic()
         input_stream_closed = False
+        stdin_chunks = start_stdin_reader(input_stream)
         while not failed:
-            chunk = input_stream.read1(4096) if hasattr(input_stream, "read1") else input_stream.read(4096)
+            chunk = next_stdin_chunk(stdin_chunks)
             if chunk:
                 written = service.write_bytes(port_id, chunk, "hardci_com_stdio_write")
                 if not written.get("ok"):
                     failed = True
                     write_error(error_stream, written)
-            else:
+            elif chunk == b"":
                 input_stream_closed = True
             result = service.read_bytes(port_id, read_size, read_wait_timeout_s, "hardci_com_stdio_read")
             if not result.get("ok"):
@@ -56,12 +62,34 @@ def run_com_stdio(
                 continue
             if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
                 break
-            time.sleep(0.01)
         return 1 if failed else 0
     finally:
         if started_ok:
             service.session_stop(port_id)
         service.close()
+
+
+def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:
+    """Read stdin on a daemon thread so a blocked terminal read cannot stall serial output relaying."""
+    chunks: queue.Queue[bytes] = queue.Queue()
+
+    def pump() -> None:
+        while True:
+            data = input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
+            chunks.put(bytes(data))
+            if not data:
+                return
+
+    threading.Thread(target=pump, daemon=True).start()
+    return chunks
+
+
+def next_stdin_chunk(chunks: queue.Queue[bytes]) -> bytes | None:
+    """Return the next stdin chunk, b"" on EOF, or None when nothing is pending."""
+    try:
+        return chunks.get(timeout=STDIN_POLL_TIMEOUT_S)
+    except queue.Empty:
+        return None
 
 
 def write_error(output: TextIO, result: JsonObject) -> None:

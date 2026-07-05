@@ -312,6 +312,8 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
 
 
 def parse_can_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, int):
         return value
     if isinstance(value, str):

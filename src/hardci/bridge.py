@@ -9,6 +9,8 @@ from contextlib import suppress
 from hardci.types import JsonObject
 
 CHILD_REAP_TIMEOUT_S = 5.0
+STDERR_TAIL_CHARS = 65536
+ERROR_STDERR_TAIL_CHARS = 2000
 
 
 class ProcessBridgeSession:
@@ -78,7 +80,10 @@ class ProcessBridgeSession:
         return self._bridge_error("invalid_response", f"{self.bridge_label} returned a non-object result.")
 
     def _bridge_error(self, kind: str, summary: str) -> JsonObject:
-        return {"ok": False, "adapter": self.adapter_name, "error_type": f"{self.error_prefix}_{kind}", "summary": summary}
+        result: JsonObject = {"ok": False, "adapter": self.adapter_name, "error_type": f"{self.error_prefix}_{kind}", "summary": summary}
+        if self.stderr:
+            result["stderr_tail"] = self.stderr[-ERROR_STDERR_TAIL_CHARS:]
+        return result
 
     def _stdout_reader(self) -> None:
         for line in self.child.stdout:
@@ -93,7 +98,7 @@ class ProcessBridgeSession:
 
     def _stderr_reader(self) -> None:
         for line in self.child.stderr:
-            self.stderr += line
+            self.stderr = (self.stderr + line)[-STDERR_TAIL_CHARS:]
 
 
 def public_backend_result(result: JsonObject, omit: list[str] | None = None) -> JsonObject:

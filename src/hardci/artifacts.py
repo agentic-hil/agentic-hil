@@ -54,7 +54,7 @@ class ArtifactManager:
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
             "sha256_computed": False,
         }
-        validation["require_allowed_root"] = validation["allowed_root"]
+        validation["require_allowed_root"] = self.config.validation.require_allowed_root
 
         if not validation["path_traversal_safe"]:
             return self._validation_error("Firmware artifact path contains traversal segments.", validation)
@@ -157,6 +157,9 @@ class ArtifactManager:
         if not source["ok"]:
             source["tool"] = "hardci_artifact_upload"
             return source
+        size_bytes = int(source["artifact"].get("size_bytes") or 0)
+        if size_bytes > self._max_upload_bytes():
+            return self._artifact_too_large(size_bytes)
         try:
             data = Path(source["artifact"]["resolved_path"]).read_bytes()
         except OSError as error:
@@ -170,16 +173,8 @@ class ArtifactManager:
         return self._store_uploaded_data(data, Path(image_path).name, display_path(self.config, image_path))
 
     def _store_uploaded_data(self, data: bytes, filename: str, source_path: str | None = None) -> JsonObject:
-        max_bytes = max(0, self.config.artifacts.max_upload_size_mb) * 1024 * 1024
-        if len(data) > max_bytes:
-            return {
-                "ok": False,
-                "tool": "hardci_artifact_upload",
-                "error_type": "artifact_too_large",
-                "summary": "Uploaded artifact exceeds configured max_upload_size_mb.",
-                "bytes": len(data),
-                "max_bytes": max_bytes,
-            }
+        if len(data) > self._max_upload_bytes():
+            return self._artifact_too_large(len(data))
 
         digest = hashlib.sha256(data).hexdigest()
         artifact_id = f"{digest}{Path(filename).suffix.lower()}"
@@ -209,6 +204,19 @@ class ArtifactManager:
             "summary": "Firmware artifact uploaded and validated.",
         }
 
+    def _max_upload_bytes(self) -> int:
+        return max(0, self.config.artifacts.max_upload_size_mb) * 1024 * 1024
+
+    def _artifact_too_large(self, size_bytes: int) -> JsonObject:
+        return {
+            "ok": False,
+            "tool": "hardci_artifact_upload",
+            "error_type": "artifact_too_large",
+            "summary": "Uploaded artifact exceeds configured max_upload_size_mb.",
+            "bytes": size_bytes,
+            "max_bytes": self._max_upload_bytes(),
+        }
+
     def _validation_error(self, summary: str, validation: JsonObject, error_type: str = "artifact_validation_failed") -> JsonObject:
         return {"ok": False, "tool": "hardci_flash_firmware", "error_type": error_type, "summary": summary, "validation": validation}
 
@@ -225,7 +233,8 @@ class ArtifactManager:
         suffix = file_path.suffix.lower()
         if suffix == ".elf":
             try:
-                return {"elf_header": file_path.read_bytes()[:4] == b"\x7fELF"}
+                with file_path.open("rb") as handle:
+                    return {"elf_header": handle.read(4) == b"\x7fELF"}
             except OSError:
                 return {"elf_header": False}
         if suffix == ".hex":
@@ -238,9 +247,14 @@ class ArtifactManager:
         return {}
 
 
+SHA256_CHUNK_BYTES = 1024 * 1024
+
+
 def sha256_file(file_path: Path) -> str:
     digest = hashlib.sha256()
-    digest.update(file_path.read_bytes())
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(SHA256_CHUNK_BYTES), b""):
+            digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -278,25 +292,28 @@ def is_safe_artifact_id(value: str) -> bool:
 
 
 def looks_like_intel_hex(file_path: Path) -> bool:
+    saw_record = False
     try:
-        lines = [line.strip() for line in file_path.read_text(encoding="ascii").splitlines() if line.strip()]
+        with file_path.open("r", encoding="ascii") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if not line.startswith(":"):
+                    return False
+                payload = line[1:]
+                if len(payload) < 10 or len(payload) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", payload) is None:
+                    return False
+                data = bytes.fromhex(payload)
+                byte_count = data[0]
+                if len(data) != byte_count + 5:
+                    return False
+                if sum(data) & 0xFF:
+                    return False
+                saw_record = True
     except (OSError, UnicodeDecodeError):
         return False
-    if not lines:
-        return False
-    for line in lines:
-        if not line.startswith(":"):
-            return False
-        payload = line[1:]
-        if len(payload) < 10 or len(payload) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", payload) is None:
-            return False
-        data = bytes.fromhex(payload)
-        byte_count = data[0]
-        if len(data) != byte_count + 5:
-            return False
-        if sum(data) & 0xFF:
-            return False
-    return True
+    return saw_record
 
 
 def is_relative_to(candidate: Path, root: Path) -> bool:
