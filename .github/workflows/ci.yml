@@ -57,12 +57,35 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
 
+  audit:
+    name: Production dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+          cache: pip
+
+      - name: Install production dependencies
+        run: python -m pip install '.[can]'
+
+      - name: Audit production dependencies
+        run: |
+          python -m pip install pip-audit
+          pip-audit
+
   required-ci:
     name: Required CI
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
       - test
+      - audit
     if: ${{ always() }}
     steps:
       - name: Check required jobs
@@ -70,5 +93,9 @@ jobs:
         run: |
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Python test matrix finished with ${{ needs.test.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.audit.result }}" != "success" ]]; then
+            echo "Dependency audit finished with ${{ needs.audit.result }}"
             exit 1
           fi

@@ -1,0 +1,52 @@
+name: Scorecards
+
+on:
+  branch_protection_rule:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - CodeQL
+    types:
+      - completed
+    branches:
+      - main
+  schedule:
+    - cron: "31 3 * * 1"
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  analysis:
+    name: OSSF Scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+      issues: read
+      pull-requests: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
