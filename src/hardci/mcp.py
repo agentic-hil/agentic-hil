@@ -8,6 +8,7 @@ from hardci.tools import HardCIToolService
 from hardci.types import JsonObject
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
 JSONRPC_PARSE_ERROR = -32700
 JSONRPC_INVALID_REQUEST = -32600
@@ -46,6 +47,13 @@ MCP_TOOL_NAMES = [
     "hardci_can_session_stop",
     "hardci_can_send",
     "hardci_can_read",
+    "hardci_adapters_list",
+    "hardci_adapter_session_start",
+    "hardci_adapter_session_stop",
+    "hardci_adapter_set_value",
+    "hardci_adapter_inject_fault",
+    "hardci_adapter_clear_fault",
+    "hardci_adapter_measure",
 ]
 
 MCP_TOOLS: list[JsonObject] = [
@@ -77,6 +85,13 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "hardci_can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}}, "required": ["bus_id"], "additionalProperties": False}},
     {"name": "hardci_can_send", "description": "Send one classic CAN frame on an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, "required": ["bus_id", "frame_id"], "additionalProperties": False}},
     {"name": "hardci_can_read", "description": "Read CAN frames from an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": {"type": "number", "minimum": 0, "default": 0}}, "required": ["bus_id"], "additionalProperties": False}},
+    {"name": "hardci_adapters_list", "description": "List configured test adapters (sensor/actuator/fault simulation) and session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "hardci_adapter_session_start", "description": "Start a session with a configured test adapter bridge.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "hardci_adapter_session_stop", "description": "Stop a configured test adapter session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "hardci_adapter_set_value", "description": "Set a configured test adapter channel to a value (e.g. simulated sensor temperature).", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}}, "required": ["adapter_id", "channel", "value"], "additionalProperties": False}},
+    {"name": "hardci_adapter_inject_fault", "description": "Inject a configured fault state (e.g. open sensor, short to GND) on a test adapter.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "fault"], "additionalProperties": False}},
+    {"name": "hardci_adapter_clear_fault", "description": "Clear an injected fault (or all faults) on a test adapter.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "hardci_adapter_measure", "description": "Measure a configured test adapter channel and return the structured value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
 ]
 
 HARDCI_WORKFLOW_PROMPT = """Use HardCI as the safe gate to the configured embedded hardware.
@@ -87,7 +102,7 @@ Workflow:
 3. Probe the target before flashing.
 4. Flash only validated artifacts from configured allowed roots.
 5. Read structured results after every hardware action.
-6. Use configured COM port ids and CAN bus ids only.
+6. Use configured COM port ids, CAN bus ids, adapter ids, channel names, and fault names only.
 7. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 
 Safety rules:
@@ -131,7 +146,9 @@ def handle_single_mcp_message(message: Any, tools: HardCIToolService) -> JsonObj
 def handle_method(request_id: Any, method: str, params: Any, tools: HardCIToolService) -> JsonObject:
     if method == "initialize":
         params_object = params_object_or_throw(params)
-        return result_response(request_id, {"protocolVersion": str(params_object.get("protocolVersion", MCP_PROTOCOL_VERSION)), "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "hardci", "version": __version__}})
+        requested_version = params_object.get("protocolVersion")
+        negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "hardci", "version": __version__}})
     if method == "ping":
         return result_response(request_id, {})
     if method == "tools/list":

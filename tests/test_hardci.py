@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_STLINK_UNCONFIRMED, write_config
+from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
 
 from hardci.artifacts import ArtifactManager
-from hardci.cli import init_config, install_skill, schema
-from hardci.config import load_config
-from hardci.mcp import handle_mcp_message
+from hardci.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
+from hardci.cli import init_config, install_skill, mcp_config, schema
+from hardci.comports import ComPortService
+from hardci.config import ConfigError, load_config
+from hardci.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from hardci.tools import HardCIToolService
 
 
@@ -34,6 +40,25 @@ def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     result = schema(str(schema_path))
     assert result["ok"] is True
     assert "HardCI project configuration" in schema_path.read_text(encoding="utf-8")
+
+
+def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
+    output_path = tmp_path / ".mcp.json"
+    result = mcp_config(str(output_path))
+    assert result["ok"] is True
+    content = json.loads(output_path.read_text(encoding="utf-8"))
+    assert content["mcpServers"]["hardci"]["command"] == "hardci"
+    assert "mcp-stdio" in content["mcpServers"]["hardci"]["args"]
+
+
+def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
+    output_path = tmp_path / ".mcp.json"
+    output_path.write_text("{}", encoding="utf-8")
+    result = mcp_config(str(output_path))
+    assert result["ok"] is False
+    assert result["error_type"] == "mcp_config_exists"
+    result_forced = mcp_config(str(output_path), force=True)
+    assert result_forced["ok"] is True
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
@@ -166,6 +191,221 @@ def test_skill_install_supports_agent_aliases(tmp_path: Path) -> None:
     assert "hardci_version" in target.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("command", ["hardci_debugger_info", "hardci_flash_firmware", "hardci_can_read"])
-def test_mcp_tool_names_are_hardci_prefixed(command: str) -> None:
-    assert command.startswith("hardci_")
+def test_load_config_reports_unreadable_path_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / ".hardci" / "config.yaml"
+    config_path.mkdir(parents=True)  # a directory passes exists() but cannot be read
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+    assert excinfo.value.error_type == "config_unreadable"
+
+
+def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_bytes(b"\xff\xfe\x00 broken")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+    assert excinfo.value.error_type == "config_invalid"
+
+
+def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
+    assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
+    assert all(name.startswith("hardci_") for name in MCP_TOOL_NAMES)
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        for name in MCP_TOOL_NAMES:
+            result = service.call(name, {})
+            assert result.get("error_type") != "unknown_tool", f"{name} is advertised but not dispatched"
+    finally:
+        service.close()
+
+
+def test_mcp_initialize_rejects_unsupported_protocol_version(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}},
+            service,
+        )
+    finally:
+        service.close()
+    assert isinstance(response, dict)
+    assert response["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+
+
+def test_com_write_rejects_unencodable_text(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                com_ports_yaml='''com_ports:
+  dut_uart:
+    device: "/dev/ttyNONEXISTENT"
+    encoding: "ascii"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    service = ComPortService(config)
+    try:
+        result = service.write("dut_uart", {"text": "Temperatur: 25 °C"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+
+
+def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def test_process_can_adapter_close_reaps_child() -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    session.close()
+    assert child.poll() is not None
+
+
+def test_process_can_adapter_request_after_exit_returns_error() -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    session.close()
+    result = session.send(CanFrame(id=1, extended=False, rtr=False, data=b""))
+    assert result["ok"] is False
+
+
+NTC_ADAPTER_YAML = f'''adapters:
+  ntc_sim:
+    executable: "{SIM_NTC_ADAPTER.as_posix()}"
+    channels: ["temperature", "resistance"]
+    faults: ["open", "short_to_gnd", "short_to_vcc"]
+'''
+
+
+def test_adapter_config_loads(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
+    assert config.adapters["ntc_sim"].channels == ["temperature", "resistance"]
+    assert config.adapters["ntc_sim"].faults == ["open", "short_to_gnd", "short_to_vcc"]
+    assert config.permissions.allow_adapter_read is True
+    assert config.permissions.allow_adapter_write is True
+
+
+def test_adapter_set_value_measure_and_fault_roundtrip(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        listed = mcp_tool_call(service, "hardci_adapters_list")
+        assert listed["ok"] is True
+        assert listed["adapters"]["ntc_sim"]["session_active"] is False
+
+        started = mcp_tool_call(service, "hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+        assert started["ok"] is True
+
+        set_result = mcp_tool_call(service, "hardci_adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 85})
+        assert set_result["ok"] is True
+
+        measured = mcp_tool_call(service, "hardci_adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
+        assert measured["ok"] is True
+        assert measured["value"] == 85.0
+
+        injected = mcp_tool_call(service, "hardci_adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})
+        assert injected["ok"] is True
+        open_resistance = mcp_tool_call(service, "hardci_adapter_measure", {"adapter_id": "ntc_sim", "channel": "resistance"})
+        assert open_resistance["value"] >= 1e9
+
+        cleared = mcp_tool_call(service, "hardci_adapter_clear_fault", {"adapter_id": "ntc_sim"})
+        assert cleared["ok"] is True
+        hot_resistance = mcp_tool_call(service, "hardci_adapter_measure", {"adapter_id": "ntc_sim", "channel": "resistance"})
+        assert 500 < hot_resistance["value"] < 5000  # 10k NTC (B=3950) at 85 degC
+
+        stopped = mcp_tool_call(service, "hardci_adapter_session_stop", {"adapter_id": "ntc_sim"})
+        assert stopped["ok"] is True
+    finally:
+        service.close()
+
+
+def test_adapter_rejects_unconfigured_channel_fault_and_bad_value(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        started = mcp_tool_call(service, "hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+        assert started["ok"] is True
+
+        bad_channel = mcp_tool_call(service, "hardci_adapter_set_value", {"adapter_id": "ntc_sim", "channel": "voltage", "value": 3.3})
+        assert bad_channel["ok"] is False
+        assert bad_channel["error_type"] == "channel_not_configured"
+
+        bad_fault = mcp_tool_call(service, "hardci_adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "stuck"})
+        assert bad_fault["ok"] is False
+        assert bad_fault["error_type"] == "fault_not_configured"
+
+        bad_value = mcp_tool_call(service, "hardci_adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": True})
+        assert bad_value["ok"] is False
+        assert bad_value["error_type"] == "invalid_argument"
+    finally:
+        service.close()
+
+
+def test_adapter_requires_active_session(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        result = mcp_tool_call(service, "hardci_adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 25})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "session_not_active"
+
+
+def test_adapter_write_permission_denied(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                adapters_yaml=NTC_ADAPTER_YAML,
+                permissions_yaml='''permissions:
+  allow_adapter_write: false
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    service = HardCIToolService(config)
+    try:
+        started = mcp_tool_call(service, "hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+        assert started["ok"] is True
+        denied = mcp_tool_call(service, "hardci_adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 25})
+        assert denied["ok"] is False
+        assert denied["error_type"] == "permission_denied"
+        measured = mcp_tool_call(service, "hardci_adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
+        assert measured["ok"] is True
+    finally:
+        service.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only PEAK channel validation")
+def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                can_buses_yaml='''can_buses:
+  dut_can:
+    adapter: "peak"
+    channel: "USBBUS1"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"

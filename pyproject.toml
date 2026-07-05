@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -59,6 +59,9 @@ Issues = "https://github.com/hp-8472/hardci/issues"
 
 [project.scripts]
 hardci = "hardci.cli:entrypoint"
+
+[project.entry-points.pytest11]
+hardci = "hardci.pytest_plugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]

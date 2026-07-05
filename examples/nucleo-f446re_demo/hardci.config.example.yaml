@@ -1,0 +1,21 @@
+# Copy to .hardci/config.yaml inside this demo directory and adjust the
+# serial device for your host. The config is the policy: HardCI only allows
+# what is named here.
+target:
+  name: "nucleo-f446re-demo"
+  controller: "stm32f446ret6"
+
+debugger:
+  type: "openocd"            # or "stlink" for STM32CubeProgrammer CLI
+  interface_cfg: "interface/stlink.cfg"
+  target_cfg: "target/stm32f4x.cfg"
+  timeout_s: 60
+
+artifacts:
+  allowed_roots: ["build"]
+  allowed_extensions: [".elf", ".hex", ".bin"]
+
+com_ports:
+  dut_uart:
+    device: "/dev/ttyACM0"   # Nucleo ST-LINK virtual COM port; e.g. COM5 on Windows
+    baudrate: 115200

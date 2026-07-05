@@ -1,6 +1,14 @@
 include README.md
 include AGENTS.md
+include AI_AGENT_QUICKSTART.md
+include TROUBLESHOOTING.md
+include SECURITY.md
+include llms.txt
+include LICENSE
 recursive-include src/hardci/schemas *.json
 recursive-include src/hardci/templates *.json
 recursive-include src/hardci/skills *.md
 recursive-include tests *.py
+recursive-include examples *.py *.md
+# The firmware demo is repository content, not package content.
+prune examples/nucleo-f446re_demo

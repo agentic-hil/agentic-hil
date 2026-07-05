@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -8,7 +7,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from hardci.config import display_path
-from hardci.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
+from hardci.report import append_jsonl, logs_directory, safe_filename, timestamp_for_filename, utc_now_iso, write_report
 from hardci.types import ComPortConfig, HardCIConfig, JsonObject
 
 
@@ -210,7 +209,7 @@ class ComPortService:
             return {"ok": False, "tool": "hardci_com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install HardCI with its runtime dependencies", "pyserial installation is broken"]}
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
-            log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id)}.jsonl")
+            log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
             return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path)}
         except Exception as error:
             return {"ok": False, "tool": "hardci_com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
@@ -275,6 +274,8 @@ def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject
             return {"ok": True, "data": payload["text"].encode(port_config.encoding)}
         except LookupError:
             return {"ok": False, "tool": "hardci_com_write", "error_type": "config_invalid", "summary": "COM port encoding is not supported by Python.", "encoding": port_config.encoding}
+        except UnicodeEncodeError:
+            return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "text cannot be encoded with the configured COM port encoding.", "encoding": port_config.encoding}
     if not isinstance(payload.get("hex"), str):
         return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "hex must be a string."}
     cleaned = re.sub(r"\s+", "", payload["hex"])
@@ -305,17 +306,6 @@ def available_port_info(port_info: object) -> JsonObject:
         if value is not None:
             result[output_name] = value
     return result
-
-
-def append_jsonl(log_path: str, event: JsonObject) -> None:
-    entry = dict(event)
-    entry.setdefault("time", utc_now_iso())
-    with Path(log_path).open("a", encoding="utf-8") as file:
-        file.write(json.dumps(entry) + "\n")
-
-
-def safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or "port"
 
 
 def likely_causes(error_type: str) -> list[str]:

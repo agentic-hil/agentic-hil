@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hardci.adapters import AdapterService
 from hardci.artifacts import ArtifactManager
 from hardci.can import CanBusService
 from hardci.comports import ComPortService
@@ -18,12 +19,14 @@ class HardCIToolService:
         artifacts: ArtifactManager | None = None,
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
+        adapters: AdapterService | None = None,
     ):
         self.config = config
         self.backend = backend or create_debugger_backend(config)
         self.artifacts = artifacts or ArtifactManager(config)
         self.com_ports = com_ports or ComPortService(config)
         self.can_buses = can_buses or CanBusService(config)
+        self.adapters = adapters or AdapterService(config)
 
     def debugger_info(self) -> JsonObject:
         return self.backend.info()
@@ -36,7 +39,7 @@ class HardCIToolService:
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
-            return {"ok": False, "tool": "hardci_flash_firmware", "error_type": "invalid_argument", "summary": "Provide exactly one of image_path or artifact_id."}
+            return tool_error("hardci_flash_firmware", "invalid_argument", "Provide exactly one of image_path or artifact_id.")
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
@@ -147,6 +150,13 @@ class HardCIToolService:
             "hardci_can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "hardci_can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
             "hardci_can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
+            "hardci_adapters_list": lambda: self.adapters.list_adapters(),
+            "hardci_adapter_session_start": lambda: self.adapters.session_start(str(args.get("adapter_id", ""))),
+            "hardci_adapter_session_stop": lambda: self.adapters.session_stop(str(args.get("adapter_id", ""))),
+            "hardci_adapter_set_value": lambda: self.adapters.set_value(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "hardci_adapter_inject_fault": lambda: self.adapters.inject_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "hardci_adapter_clear_fault": lambda: self.adapters.clear_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "hardci_adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
         }
         if name in dispatch:
             return dispatch[name]()
@@ -156,6 +166,11 @@ class HardCIToolService:
         self.backend.close()
         self.com_ports.close()
         self.can_buses.close()
+        self.adapters.close()
+
+
+def adapter_payload(args: JsonObject) -> JsonObject:
+    return {key: value for key, value in args.items() if key != "adapter_id"}
 
 
 def number_argument(value: object) -> float | None:

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-import queue
+import os
 import re
 import subprocess
-import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -12,8 +10,9 @@ from pathlib import Path
 from typing import Protocol
 
 from hardci.backends.common import command_for_log, invocation
+from hardci.bridge import ProcessBridgeSession, public_backend_result
 from hardci.config import display_path, resolve_work_path
-from hardci.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
+from hardci.report import append_jsonl, logs_directory, safe_filename, timestamp_for_filename, utc_now_iso, write_report
 from hardci.types import CanBusConfig, HardCIConfig, JsonObject
 
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
@@ -76,7 +75,7 @@ class CanBusService:
         adapter_session = opened["session"]
         if clear_rx_queue and self.config.permissions.allow_can_read:
             adapter_session.read(bus_config.max_buffer_frames, 0)
-        log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id)}.jsonl")
+        log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
         session = CanBusSession(bus_id, bus_config, adapter_session, log_path)
         self.sessions[bus_id] = session
         append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
@@ -244,7 +243,7 @@ def open_python_can_adapter(config: HardCIConfig, bus_id: str, bus_config: CanBu
     if (
         bus_config.adapter == "peak"
         and not is_windows_peak_channel(bus_config.channel)
-        and Path("/").exists()
+        and os.name != "nt"
         and not re.fullmatch(r"can\d+|vcan\d+|slcan\d+", bus_config.channel)
     ):
         return {"ok": False, "tool": "hardci_can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0."}
@@ -261,70 +260,16 @@ def open_python_can_adapter(config: HardCIConfig, bus_id: str, bus_config: CanBu
         return {"ok": False, "tool": "hardci_can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
 
 
-class ProcessCanAdapterSession:
+class ProcessCanAdapterSession(ProcessBridgeSession):
     adapter_name = "process"
-
-    def __init__(self, child: subprocess.Popen[str]):
-        self.child = child
-        self.pending: dict[int, queue.Queue[JsonObject]] = {}
-        self.next_request_id = 1
-        self.lock = threading.Lock()
-        self.closed = False
-        self.stderr = ""
-        threading.Thread(target=self._stdout_reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+    error_prefix = "can_adapter"
+    bridge_label = "CAN adapter bridge"
 
     def send(self, frame: CanFrame) -> JsonObject:
         return self.request("send", {"frame": bridge_frame(frame)}, 10)
 
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
         return self.request("read", {"max_frames": max_frames, "wait_timeout_s": wait_timeout_s}, max(10, wait_timeout_s + 1))
-
-    def close(self) -> None:
-        try:
-            self.request("close", {}, 1)
-        finally:
-            self.closed = True
-            self.child.terminate()
-
-    def status(self) -> JsonObject:
-        return {"active": not self.closed and self.child.poll() is None, "backend": self.adapter_name}
-
-    def request(self, method: str, params: JsonObject, timeout_s: float) -> JsonObject:
-        with self.lock:
-            request_id = self.next_request_id
-            self.next_request_id += 1
-            response_queue: queue.Queue[JsonObject] = queue.Queue(maxsize=1)
-            self.pending[request_id] = response_queue
-            self.child.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
-            self.child.stdin.flush()
-        try:
-            response = response_queue.get(timeout=max(0.0, timeout_s))
-        except queue.Empty:
-            self.pending.pop(request_id, None)
-            return {"ok": False, "adapter": self.adapter_name, "error_type": "can_adapter_timeout", "summary": "CAN adapter bridge request timed out."}
-        if "error" in response:
-            error = response["error"]
-            if isinstance(error, dict):
-                return {"ok": False, **error}
-            return {"ok": False, "error_type": "can_adapter_error", "summary": str(error)}
-        result = response.get("result", {})
-        return result if isinstance(result, dict) else {"ok": False, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned a non-object result."}
-
-    def _stdout_reader(self) -> None:
-        for line in self.child.stdout:
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            request_id = response.get("id")
-            queue_ = self.pending.pop(request_id, None)
-            if queue_ is not None:
-                queue_.put(response)
-
-    def _stderr_reader(self) -> None:
-        for line in self.child.stderr:
-            self.stderr += line
 
 
 def open_process_adapter(config: HardCIConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
@@ -403,22 +348,6 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject]:
             if frame_id is not None and data is not None:
                 frames.append({"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": bool(raw.get("extended", False)), "rtr": bool(raw.get("rtr", False)), "data_hex": data.hex(), "dlc": len(data)})
     return frames
-
-
-def public_backend_result(result: JsonObject, omit: list[str] | None = None) -> JsonObject:
-    omit_set = {"session", *(omit or [])}
-    return {key: value for key, value in result.items() if key not in omit_set}
-
-
-def append_jsonl(log_path: str, event: JsonObject) -> None:
-    entry = dict(event)
-    entry.setdefault("time", utc_now_iso())
-    with Path(log_path).open("a", encoding="utf-8") as file:
-        file.write(json.dumps(entry) + "\n")
-
-
-def safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or "bus"
 
 
 def is_windows_peak_channel(channel: str) -> bool:

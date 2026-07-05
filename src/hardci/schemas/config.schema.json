@@ -101,6 +101,24 @@
       },
       "default": {}
     },
+    "adapters": {
+      "type": "object",
+      "description": "Named test adapters (sensor, actuator, load, and fault-simulation bridges) that HardCI may control.",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["executable"],
+        "properties": {
+          "executable": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
+          "channels": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] },
+          "faults": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] }
+        }
+      },
+      "default": {}
+    },
     "validation": {
       "type": "object",
       "additionalProperties": false,
@@ -123,6 +141,8 @@
         "allow_com_write": { "type": "boolean", "default": true },
         "allow_can_read": { "type": "boolean", "default": true },
         "allow_can_write": { "type": "boolean", "default": true },
+        "allow_adapter_read": { "type": "boolean", "default": true },
+        "allow_adapter_write": { "type": "boolean", "default": true },
         "allow_raw_debugger_commands": { "type": "boolean", "default": false },
         "allow_mass_erase": { "type": "boolean", "default": false }
       }

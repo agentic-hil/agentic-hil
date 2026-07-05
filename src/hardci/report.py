@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +27,17 @@ def logs_directory(config: HardCIConfig) -> str:
     directory = Path(resolve_work_path(config, config.logs.directory))
     directory.mkdir(parents=True, exist_ok=True)
     return str(directory)
+
+
+def append_jsonl(log_path: str, event: JsonObject) -> None:
+    entry = dict(event)
+    entry.setdefault("time", utc_now_iso())
+    with Path(log_path).open("a", encoding="utf-8") as file:
+        file.write(json.dumps(entry) + "\n")
+
+
+def safe_filename(value: str, fallback: str = "item") -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or fallback
 
 
 def last_report_path(config: HardCIConfig) -> str:

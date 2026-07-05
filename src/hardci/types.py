@@ -70,6 +70,15 @@ class CanBusConfig:
 
 
 @dataclass(frozen=True)
+class AdapterConfig:
+    executable: str
+    args: list[str]
+    timeout_s: float
+    channels: list[str]
+    faults: list[str]
+
+
+@dataclass(frozen=True)
 class ValidationConfig:
     require_existing_file: bool
     require_allowed_root: bool
@@ -87,6 +96,8 @@ class PermissionsConfig:
     allow_com_write: bool
     allow_can_read: bool
     allow_can_write: bool
+    allow_adapter_read: bool
+    allow_adapter_write: bool
     allow_raw_debugger_commands: bool
     allow_mass_erase: bool
 
@@ -111,6 +122,7 @@ class HardCIConfig:
     artifacts: ArtifactsConfig
     com_ports: dict[str, ComPortConfig]
     can_buses: dict[str, CanBusConfig]
+    adapters: dict[str, AdapterConfig]
     validation: ValidationConfig
     permissions: PermissionsConfig
     reports: ReportsConfig

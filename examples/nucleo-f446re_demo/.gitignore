@@ -1,0 +1,8 @@
+# Generated firmware build output stays local.
+build/
+!.settings
+
+# HardCI config is host-specific: OpenOCD paths, COM devices, reports, and logs
+# belong to the local machine running the hardware loop.
+/.hardci
+/.vscode
