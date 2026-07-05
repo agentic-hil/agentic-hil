@@ -18,9 +18,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "type": { "type": "string", "default": "openocd", "enum": ["openocd", "stlink"] },
+        "type": { "type": "string", "default": "openocd", "enum": ["openocd", "stlink", "pyocd"] },
         "executable": { "type": ["string", "null"], "default": null },
         "probe_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null },
+        "target_type": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+$", "default": null },
         "interface": { "type": "string", "default": "SWD", "enum": ["SWD", "JTAG"] },
         "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
         "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },

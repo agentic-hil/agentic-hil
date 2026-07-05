@@ -24,6 +24,7 @@ debugger:
   type: "openocd"
   executable: null
   probe_id: null
+  target_type: null
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60

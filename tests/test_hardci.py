@@ -131,6 +131,54 @@ def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None
     assert "-rst" in log_text
 
 
+def test_pyocd_backend_probes_flashes_and_resets_with_probe_and_target(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = load_config(
+        str(write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re")),
+        str(tmp_path),
+    )
+    service = HardCIToolService(config)
+    try:
+        info = mcp_tool_call(service, "hardci_debugger_info")
+        probe = mcp_tool_call(service, "hardci_probe_target")
+        flash = mcp_tool_call(service, "hardci_flash_firmware", {"image_path": "build/firmware.elf"})
+        reset = mcp_tool_call(service, "hardci_reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+    assert info["ok"] is True
+    assert "0.36.0" in info["version"]
+    assert probe["ok"] is True
+    assert probe["target_detected"] is True
+    probe_log = (tmp_path / probe["log_path"]).read_text(encoding="utf-8")
+    assert "--uid PYOCD123" in probe_log
+    assert "--target stm32f446re" in probe_log
+    assert flash["ok"] is True
+    assert flash["reset_after_flash"] is True
+    flash_log = (tmp_path / flash["log_path"]).read_text(encoding="utf-8")
+    assert "flash" in flash_log
+    assert "firmware.elf" in flash_log
+    assert reset["ok"] is True
+    reset_log = (tmp_path / reset["log_path"]).read_text(encoding="utf-8")
+    assert "reset halt" in reset_log
+
+
+def test_pyocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd")), str(tmp_path))
+    service = HardCIToolService(config)
+    try:
+        result = mcp_tool_call(service, "hardci_flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert "debugger.flash_address" in result["summary"]
+
+
 def test_stlink_rejects_unconfirmed_successful_exit(tmp_path: Path) -> None:
     config = load_config(
         str(write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_UNCONFIRMED)),

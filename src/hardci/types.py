@@ -14,9 +14,10 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class DebuggerConfig:
-    type: Literal["openocd", "stlink"]
+    type: Literal["openocd", "stlink", "pyocd"]
     executable: str | None
     probe_id: str | None
+    target_type: str | None
     interface: str
     interface_cfg: str
     target_cfg: str

@@ -118,11 +118,11 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     logs_raw = mapping(raw.get("logs"), "logs")
 
     debugger_type = str(debugger_raw.get("type", "openocd"))
-    if debugger_type not in {"openocd", "stlink"}:
+    if debugger_type not in {"openocd", "stlink", "pyocd"}:
         raise ConfigError(
             "config_invalid",
             "Unsupported debugger.type.",
-            {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink"]},
+            {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
 
     return HardCIConfig(
@@ -212,6 +212,7 @@ def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
         type=debugger_type,  # type: ignore[arg-type]
         executable=optional_string(raw.get("executable")),
         probe_id=optional_string(raw.get("probe_id")),
+        target_type=optional_string(raw.get("target_type")),
         interface=str(raw.get("interface", "SWD")),
         interface_cfg=str(raw.get("interface_cfg", "interface/stlink.cfg")),
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),

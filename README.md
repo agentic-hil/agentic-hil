@@ -9,7 +9,7 @@ HardCI is a Python package that exposes bounded MCP tools for probing, flashing,
 A green build is not enough in embedded development: firmware has to behave correctly on the real board. AI agents and CI pipelines need that hardware feedback loop, but handing them a raw debugger shell or direct serial access is neither safe nor reproducible. HardCI closes the gap with a small, auditable gate:
 
 ```
-AI agent / CI  ──MCP (stdio)──▶  HardCI  ──policy check──▶  OpenOCD / STM32CubeProgrammer
+AI agent / CI  ──MCP (stdio)──▶  HardCI  ──policy check──▶  OpenOCD / pyOCD / STM32CubeProgrammer
                                     │                        serial ports (pyserial)
                                     │                        CAN (PEAK / SocketCAN / bridge)
                                     ▼
@@ -69,7 +69,7 @@ target:
   controller: "stm32f4"
 
 debugger:
-  type: "openocd"            # or "stlink" (STM32CubeProgrammer CLI)
+  type: "openocd"            # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60
@@ -110,7 +110,7 @@ Export the full JSON schema with `hardci schema --output hardci-config.schema.js
 
 | Group | Tools | Notes |
 |-------|-------|-------|
-| Debugger | `hardci_debugger_info`, `hardci_probe_target`, `hardci_reset_target` | OpenOCD or STM32CubeProgrammer CLI |
+| Debugger | `hardci_debugger_info`, `hardci_probe_target`, `hardci_reset_target` | OpenOCD, pyOCD, or STM32CubeProgrammer CLI |
 | Firmware | `hardci_flash_firmware`, `hardci_artifact_upload` | artifacts are validated (path, extension, format, SHA-256) before flashing |
 | Serial | `hardci_com_ports_list`, `hardci_com_session_start`, `hardci_com_session_stop`, `hardci_com_write`, `hardci_com_read` | named ports only, buffered background reader |
 | CAN | `hardci_can_buses_list`, `hardci_can_session_start`, `hardci_can_session_stop`, `hardci_can_send`, `hardci_can_read` | PEAK, SocketCAN, or a process bridge |
@@ -166,7 +166,7 @@ hardci skill-install --agent opencode
 
 ## Platform Support
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `hardci[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
+Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`hardci[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `hardci[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
 
 ## Development
 

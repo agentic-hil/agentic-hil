@@ -42,9 +42,9 @@ Fix: run `hardci init` from the firmware project directory, edit only project-sp
 
 Symptom: `hardci doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
 
-Likely cause: OpenOCD (or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or `debugger.executable` points to a missing file.
+Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or `debugger.executable` points to a missing file.
 
-Fix: install the debugger tool, restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path.
+Fix: install the debugger tool (`pyocd` comes with the `hardci[pyocd]` extra), restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
 
 ## 4. `debugger_config_not_found`
 

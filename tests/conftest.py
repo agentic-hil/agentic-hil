@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
+FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
 
 
@@ -17,6 +18,7 @@ def write_config(
     debugger_type: str = "openocd",
     debugger_executable: Path | None = None,
     probe_id: str | None = None,
+    target_type: str | None = None,
     flash_address: str | None = None,
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
@@ -24,7 +26,8 @@ def write_config(
     permissions_yaml: str = "",
 ) -> Path:
     if debugger_executable is None:
-        debugger_executable = FAKE_STLINK if debugger_type == "stlink" else FAKE_OPENOCD
+        fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD}
+        debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
     config_path = directory / ".hardci" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -35,6 +38,7 @@ debugger:
   type: "{debugger_type}"
   executable: "{debugger_executable.as_posix()}"
   probe_id: {('null' if probe_id is None else repr(probe_id))}
+  target_type: {('null' if target_type is None else repr(target_type))}
   interface: "SWD"
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"

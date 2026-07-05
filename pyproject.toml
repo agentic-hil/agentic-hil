@@ -45,6 +45,7 @@ dependencies = [
 
 [project.optional-dependencies]
 can = ["python-can>=4.4"]
+pyocd = ["pyocd>=0.36"]
 dev = [
   "build>=1.2",
   "pytest>=8.0",

@@ -51,8 +51,12 @@ def create_debugger_backend(config: HardCIConfig) -> DebuggerBackend:
         from hardci.backends.stlink import STLinkBackend
 
         return STLinkBackend(config)
+    if config.debugger.type == "pyocd":
+        from hardci.backends.pyocd import PyOCDBackend
+
+        return PyOCDBackend(config)
     raise ConfigError(
         "config_invalid",
         "Unsupported debugger.type.",
-        {"field": "debugger.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink"]},
+        {"field": "debugger.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink", "pyocd"]},
     )
