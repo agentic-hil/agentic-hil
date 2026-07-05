@@ -11,3 +11,4 @@ dist/
 .venv/
 .hardci/
 .mcp.json
+uv.lock
