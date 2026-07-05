@@ -9,9 +9,9 @@ The bridge speaks JSON per line on stdin/stdout:
 Channels: temperature (degC, settable and measurable), resistance (ohm, measurable)
 Faults:   open, short_to_gnd, short_to_vcc
 
-Real AI-HIL hardware adapters implement the same protocol; this simulator lets
-agents and CI pipelines exercise the full flash -> stimulate -> assert loop
-without hardware attached.
+Physical test-adapter hardware implements the same protocol; this simulator
+lets agents and CI pipelines exercise the full flash -> stimulate -> assert
+loop without hardware attached.
 """
 from __future__ import annotations
 
