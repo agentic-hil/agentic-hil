@@ -201,6 +201,8 @@ class OpenOCDBackend:
             "-f",
             self.config.debugger.target_cfg,
             "-c",
+            "bindto 127.0.0.1",
+            "-c",
             f"gdb_port {gdb_port}",
             "-c",
             "tcl_port disabled",

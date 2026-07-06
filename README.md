@@ -140,7 +140,7 @@ Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_nt
 - Firmware artifacts must live under `artifacts.allowed_roots`, match an allowed extension, pass format plausibility checks, and are hashed before flashing. Path traversal is rejected.
 - Every action class has its own permission switch; `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
 - Deliberate interlock: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
-- Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`).
+- Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
 - Test adapter channels and fault names are explicit allowlists — HardCI rejects anything not named in the config before it reaches the adapter bridge.
 - All actions log to `.hardci/logs/` and write a structured report to `.hardci/reports/`.
 
