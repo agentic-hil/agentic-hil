@@ -1,6 +1,6 @@
-# HardCI
+# Agentic HIL
 
-**Your AI agent can develop firmware on its own — because HardCI closes the loop with real hardware.**
+**Your AI agent can develop firmware on its own — because Agentic HIL closes the loop with real hardware.**
 
 ```
 +--> build --> flash --> stimulate --> observe --+
@@ -10,14 +10,16 @@
   your agent, unattended -- you review the pull request
 ```
 
-HardCI is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, test adapters, reports, and logs — without giving an agent arbitrary host or debugger access. A project-local policy file (`.hardci/config.yaml`) defines exactly which devices, actions, paths, and limits are allowed. That policy gate is what makes unattended hardware access workable in the first place.
+Agentic HIL is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, test adapters, reports, and logs — without giving an agent arbitrary host or debugger access. A project-local policy file (`.hardci/config.yaml`) defines exactly which devices, actions, paths, and limits are allowed. That policy gate is what makes unattended hardware access workable in the first place.
+
+HardCI adapters are the reference hardware for Agentic HIL: physical pytest fixtures for sensor simulation, loads, and fault injection.
 
 ## Why
 
-A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps — flash here, read a log there — but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. HardCI closes the gap with a small, auditable gate:
+A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps — flash here, read a log there — but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
 
 ```
-AI agent / CI  ──MCP (stdio)──▶  HardCI  ──policy check──▶  OpenOCD / pyOCD / STM32CubeProgrammer
+AI agent / CI  ──MCP (stdio)──▶  Agentic HIL  ──policy check──▶  OpenOCD / pyOCD / STM32CubeProgrammer
                                     │                        serial ports (pyserial)
                                     │                        CAN (PEAK / SocketCAN / bridge)
                                     ▼
@@ -30,27 +32,27 @@ Every hardware action is validated against the project policy, executed with tim
 
 The easiest path: tell your AI agent
 
-> Install HardCI from https://github.com/hp-8472/hardci and set it up for this project.
+> Install Agentic HIL and set it up for this project.
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
 
 By hand, without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
 
 ```bash
-uvx hardci --version                                                # from PyPI
-uvx --from git+https://github.com/hp-8472/hardci hardci --version   # from the repository
+uvx agentic-hil --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
 Persistent user-local install (recommended for the MCP server entry):
 
 ```bash
-uv tool install hardci      # or: pipx install hardci
-hardci init
-hardci doctor
-hardci mcp-config --output .mcp.json
+uv tool install agentic-hil      # or: pipx install agentic-hil
+agentic-hil init
+agentic-hil doctor
+agentic-hil mcp-config --output .mcp.json
 ```
 
-For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'hardci[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
+For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
 
 ## MCP Entry
 
@@ -59,8 +61,8 @@ Project-local `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "hardci": {
-      "command": "hardci",
+    "agentic-hil": {
+      "command": "agentic-hil",
       "args": ["mcp-stdio", "--config", ".hardci/config.yaml"]
     }
   }
@@ -69,7 +71,7 @@ Project-local `.mcp.json`:
 
 ## Configuration
 
-`hardci init` writes a starter `.hardci/config.yaml`. The file is the policy — it names the target, the debugger backend, allowed artifact roots, named serial ports and CAN buses, and per-action permissions:
+`agentic-hil init` writes a starter `.hardci/config.yaml`. The file is the policy — it names the target, the debugger backend, allowed artifact roots, named serial ports and CAN buses, and per-action permissions:
 
 ```yaml
 target:
@@ -112,7 +114,7 @@ permissions:
   allow_mass_erase: false
 ```
 
-Export the full JSON schema with `hardci schema --output hardci-config.schema.json`.
+Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
 ## MCP Tools
 
@@ -146,35 +148,35 @@ Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_nt
 
 ## pytest Plugin
 
-Installing `hardci` registers a pytest plugin, so CI regression suites can drive the same policy-gated tools without an MCP client:
+Installing `agentic-hil` registers a pytest plugin, so CI regression suites can drive the same policy-gated tools without an MCP client:
 
 ```python
-def test_open_sensor_diagnosis(hardci):
-    started = hardci.call("hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+def test_open_sensor_diagnosis(agentic_hil):
+    started = agentic_hil.call("hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
     assert started["ok"] is True
-    injected = hardci.call("hardci_adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})
+    injected = agentic_hil.call("hardci_adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})
     assert injected["ok"] is True
     # ...assert the firmware's reaction via hardci_com_read...
 ```
 
-The `hardci` fixture loads `.hardci/config.yaml` relative to the pytest rootdir (override with `--hardci-config` or the `hardci_config` ini option). Tests are skipped when no configuration file exists, but an existing invalid configuration fails loudly — a config typo must not silently disable the hardware suite in CI. Adapter, COM, and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/pytest/](examples/pytest/) for a full diagnosis-loop example, and [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) for the complete loop on real hardware: a bare-metal STM32 firmware that is built, flashed, reset, and asserted on via its UART boot banner.
+The `agentic_hil` fixture loads `.hardci/config.yaml` relative to the pytest rootdir (override with `--hardci-config` or the `hardci_config` ini option). Tests are skipped when no configuration file exists, but an existing invalid configuration fails loudly — a config typo must not silently disable the hardware suite in CI. Adapter, COM, and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/pytest/](examples/pytest/) for a full diagnosis-loop example, and [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) for the complete loop on real hardware: a bare-metal STM32 firmware that is built, flashed, reset, and asserted on via its UART boot banner.
 
 ## Common Commands
 
 ```text
-hardci init
-hardci doctor
-hardci com-ports
-hardci mcp-config --output .mcp.json
-hardci mcp-stdio --config .hardci/config.yaml
-hardci com-stdio --config .hardci/config.yaml --port dut_uart
-hardci schema --output hardci-config.schema.json
-hardci skill-install --agent opencode
+agentic-hil init
+agentic-hil doctor
+agentic-hil com-ports
+agentic-hil mcp-config --output .mcp.json
+agentic-hil mcp-stdio --config .hardci/config.yaml
+agentic-hil com-stdio --config .hardci/config.yaml --port dut_uart
+agentic-hil schema --output agentic-hil-config.schema.json
+agentic-hil skill-install --agent opencode
 ```
 
 ## Platform Support
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`hardci[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `hardci[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
+Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
 
 ## Development
 

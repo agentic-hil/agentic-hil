@@ -1,12 +1,12 @@
-"""pytest plugin exposing HardCI as fixtures for hardware-in-the-loop test suites.
+"""pytest plugin exposing Agentic HIL fixtures for hardware-in-the-loop test suites.
 
 Usage in a firmware project with a `.hardci/config.yaml`:
 
-    def test_open_sensor_diagnosis(hardci):
-        started = hardci.call("hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
+    def test_open_sensor_diagnosis(agentic_hil):
+        started = agentic_hil.call("hardci_adapter_session_start", {"adapter_id": "ntc_sim"})
         assert started["ok"] is True
 
-Tests using the fixtures are skipped when no HardCI configuration file exists,
+Tests using the fixtures are skipped when no Agentic HIL configuration file exists,
 so suites stay green on machines without a hardware setup. An existing but
 invalid configuration fails loudly instead — a typo must not silently disable
 the hardware suite in CI.
@@ -31,12 +31,12 @@ DEFAULT_CONFIG_PATH = ".hardci/config.yaml"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("hardci")
+    group = parser.getgroup("agentic_hil")
     group.addoption(
         "--hardci-config",
         action="store",
         default=None,
-        help=f"Path to the HardCI project configuration (default: {DEFAULT_CONFIG_PATH}).",
+        help=f"Path to the Agentic HIL project configuration (default: {DEFAULT_CONFIG_PATH}).",
     )
     parser.addini("hardci_config", help="Path to the HardCI project configuration.", default=None)
 
@@ -57,7 +57,7 @@ def rootdir_anchored(config: pytest.Config, path: str) -> str:
 
 @pytest.fixture(scope="session")
 def hardci_config(request: pytest.FixtureRequest) -> HardCIConfig:
-    """The validated HardCI project configuration.
+    """The validated Agentic HIL project configuration.
 
     Skips when the configuration file does not exist; fails when it exists but
     is unreadable or invalid.
@@ -69,8 +69,11 @@ def hardci_config(request: pytest.FixtureRequest) -> HardCIConfig:
         return load_config(config_path, work_dir=str(request.config.rootpath))
     except ConfigError as error:
         if error.error_type == "config_file_not_found":
-            pytest.skip(f"HardCI configuration unavailable: {error.summary} [path: {config_path}]")
-        pytest.fail(f"HardCI configuration invalid ({error.error_type}): {error.summary} [path: {config_path}]", pytrace=False)
+            pytest.skip(f"Agentic HIL configuration unavailable: {error.summary} [path: {config_path}]")
+        pytest.fail(
+            f"Agentic HIL configuration invalid ({error.error_type}): {error.summary} [path: {config_path}]",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(scope="session")
@@ -85,7 +88,7 @@ def _hardci_service(hardci_config: HardCIConfig) -> Iterator[HardCIToolService]:
 
 
 @pytest.fixture()
-def hardci(_hardci_service: HardCIToolService) -> Iterator[HardCIToolService]:
+def agentic_hil(_hardci_service: HardCIToolService) -> Iterator[HardCIToolService]:
     """A ready HardCIToolService; call tools by name exactly like an MCP agent would.
 
     The service (config, debugger backend) is shared across the session, but

@@ -365,7 +365,7 @@ def codex_registration_block(target_path: str, version: str, requested_agent: st
 - HardCI version: `{version}`
 - HardCI is for embedded firmware development with local hardware-in-the-loop targets.
 - For HardCI setup, configuration, MCP, or embedded hardware workflows, read and follow this skill before acting.
-- If this version differs from `hardci --version`, run `hardci skill-install --agent {requested_agent}`.
+- If this version differs from `agentic-hil --version`, run `agentic-hil skill-install --agent {requested_agent}`.
 {HARDCI_REGISTRATION_END}"""
 
 

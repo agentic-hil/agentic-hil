@@ -1,14 +1,14 @@
 # AI Agent Quickstart
 
-Use HardCI as the local MCP server for embedded firmware development and embedded hardware actions.
+Use Agentic HIL as the local MCP server for embedded firmware development and embedded hardware actions. HardCI adapters are the reference hardware.
 
 This file is for agents. Humans should start with `README.md` and use `TROUBLESHOOTING.md` for operator-facing diagnostics.
 
-If you were given only the HardCI repository URL and asked to set it up: run the fast path below, install the HardCI skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the HardCI source tree into the firmware project for normal setup.
+If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
 
 ## Ground Rules
 
-- Never use `sudo` or any administrator privileges for the HardCI installation. Every step below works user-local.
+- Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
 - Never use `pip install --break-system-packages`, and do not install into the system Python (PEP 668 environments will refuse, and they are right).
 - If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
 
@@ -21,84 +21,84 @@ Prefer the supported first path unless the firmware project or user clearly says
 - Python 3.10 or newer.
 - Firmware artifacts under `build/`.
 
-## Start HardCI
+## Start Agentic HIL
 
 Fast path, in order — stop at the first step that works:
 
-1. If `hardci --version` works, do not reinstall.
-2. If `uv` is available, run HardCI without installing anything (no admin rights, no `PATH` changes):
+1. If `agentic-hil --version` works, do not reinstall.
+2. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
 
 ```bash
-uvx hardci --version
+uvx agentic-hil --version
 ```
 
 3. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
 
 ```bash
-uvx --from git+https://github.com/hp-8472/hardci hardci --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
-4. If `uv` is missing but `pipx` is available, the equivalents are `pipx run hardci --version` and `pipx run --spec git+https://github.com/hp-8472/hardci hardci --version`.
+4. If `uv` is missing but `pipx` is available, the equivalents are `pipx run agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil agentic-hil --version`.
 5. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-then rerun step 2. A missing runner is a remediable setup prerequisite, not a reason to refuse the HardCI setup.
+then rerun step 2. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
 
-For the MCP server entry it is usually better to install the `hardci` command persistently (still user-local, still no admin rights):
+For the MCP server entry it is usually better to install the `agentic-hil` command persistently (still user-local, still no admin rights):
 
 ```bash
-uv tool install hardci        # or from the repository: uv tool install git+https://github.com/hp-8472/hardci
+uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil
 ```
 
-`pipx install hardci` is the equivalent. Both place `hardci` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
+`pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
 
 ## Install Agent Skill
 
-Agent-driven HardCI installation includes installing the bundled `hardci-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
+Agent-driven Agentic HIL installation includes installing the bundled `hardci-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
-hardci skill-install --agent <agent>          # or: uvx hardci skill-install --agent <agent>
+agentic-hil skill-install --agent <agent>          # or: uvx agentic-hil skill-install --agent <agent>
 ```
 
-Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The CLI package is authoritative: if the installed skill's front-matter version differs from `hardci --version`, rerun `skill-install`.
+Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The CLI package is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
 
 ## Configure Each Project
 
-In every firmware project that should use HardCI:
+In every firmware project that should use Agentic HIL:
 
 ```bash
-hardci init                 # writes the starter .hardci/config.yaml
+agentic-hil init            # writes the starter .hardci/config.yaml
 # edit .hardci/config.yaml: target, debugger configs, allowed artifact roots,
 # named com_ports / can_buses / adapters — keep the safety policy restrictive
-hardci doctor               # validates config and checks the debugger
-hardci mcp-config --output .mcp.json
+agentic-hil doctor          # validates config and checks the debugger
+agentic-hil mcp-config --output .mcp.json
 ```
 
-Keep `.hardci/` with the project: it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall HardCI inside every project.
+Keep `.hardci/` with the project: it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall Agentic HIL inside every project.
 
-Expected healthy `hardci doctor` result: `ok: true`, `summary: "HardCI configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
+Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "HardCI configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
 
 ## Configure MCP
 
-`.mcp.json` is only the MCP launch entry. The default written by `hardci mcp-config` assumes `hardci` is on `PATH`:
+`.mcp.json` is only the MCP launch entry. The default written by `agentic-hil mcp-config` assumes `agentic-hil` is on `PATH`:
 
 ```json
 {
   "mcpServers": {
-    "hardci": {
-      "command": "hardci",
+    "agentic-hil": {
+      "command": "agentic-hil",
       "args": ["mcp-stdio", "--config", ".hardci/config.yaml"]
     }
   }
 }
 ```
 
-If `hardci` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["hardci", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
+If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
 
-`mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `hardci com-stdio --config .hardci/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
+`mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --config .hardci/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
 
 ## Use The Tools
 
@@ -115,8 +115,8 @@ Use `tools/list` to discover available MCP tools, then follow this loop:
 
 Healthy probe and flash signals: `target_detected: true`, `success_confirmed: true`, `verify: true`, an intentional `reset_after_flash` value, plus `report_path` and `log_path` for auditability.
 
-Do not use raw OpenOCD commands, arbitrary COM-port shell tools, direct CAN adapter tools, or direct test-adapter access when a HardCI MCP tool is available. Treat `permission_denied` as authoritative and stop.
+Do not use raw OpenOCD commands, arbitrary COM-port shell tools, direct CAN adapter tools, or direct test-adapter access when an Agentic HIL MCP tool is available. Treat `permission_denied` as authoritative and stop.
 
 ## pytest Suites
 
-For CI regression suites the installed package registers a pytest plugin: the `hardci` fixture drives the same tools via `hardci.call(name, arguments)`. Tests skip when no `.hardci/config.yaml` exists and fail loudly when the config is invalid. See `examples/pytest/` and `examples/nucleo-f446re_demo/tests/`.
+For CI regression suites the installed package registers a pytest plugin: the `agentic_hil` fixture drives the same tools via `agentic_hil.call(name, arguments)`. Tests skip when no `.hardci/config.yaml` exists and fail loudly when the config is invalid. See `examples/pytest/` and `examples/nucleo-f446re_demo/tests/`.

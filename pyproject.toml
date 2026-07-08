@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hardci"
+name = "agentic-hil"
 version = "0.2.0"
-description = "Safe local hardware-in-the-loop bridge for AI-assisted embedded CI loops"
+description = "Agentic hardware-in-the-loop tools for AI-assisted embedded firmware loops"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -22,6 +22,8 @@ keywords = [
   "serial",
   "stlink",
   "debugger",
+  "agentic-hil",
+  "agentic",
   "hardci",
   "stm32"
 ]
@@ -54,15 +56,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hp-8472/hardci"
-Repository = "https://github.com/hp-8472/hardci.git"
-Issues = "https://github.com/hp-8472/hardci/issues"
+Homepage = "https://github.com/agentic-hil/agentic-hil"
+Repository = "https://github.com/agentic-hil/agentic-hil.git"
+Issues = "https://github.com/agentic-hil/agentic-hil/issues"
 
 [project.scripts]
-hardci = "hardci.cli:entrypoint"
+agentic-hil = "agentic_hil.cli:entrypoint"
 
 [project.entry-points.pytest11]
-hardci = "hardci.pytest_plugin"
+agentic_hil = "agentic_hil.pytest_plugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]
