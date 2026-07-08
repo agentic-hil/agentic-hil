@@ -2,7 +2,7 @@
 
 Agentic HIL is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection. HardCI adapters are the reference hardware.
 
-Canonical setup request: `Install Agentic HIL from https://github.com/hp-8472/agentic-hil and set it up for this project.`
+Canonical setup request: `Install from https://github.com/hp-8472/agentic-hil and set it up for this project.`
 
 Run without installing (no admin rights, no PATH changes):
 

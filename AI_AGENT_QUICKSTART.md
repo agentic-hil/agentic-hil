@@ -7,7 +7,7 @@ This file is for agents. Humans should start with `README.md` and use `TROUBLESH
 Canonical copy/paste user request:
 
 ```text
-Install Agentic HIL from https://github.com/hp-8472/agentic-hil and set it up for this project.
+Install from https://github.com/hp-8472/agentic-hil and set it up for this project.
 ```
 
 If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
