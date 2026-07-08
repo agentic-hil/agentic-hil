@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: pypi
-      url: https://pypi.org/p/hardci
+      url: https://pypi.org/p/agentic-hil
     permissions:
       id-token: write
       contents: read
@@ -107,8 +107,8 @@ jobs:
       - name: Stage release attestation assets
         run: |
           set -euo pipefail
-          cp "${{ steps.attest-dists.outputs.bundle-path }}" hardci-dists.intoto.jsonl
-          cp "${{ steps.attest-sbom.outputs.bundle-path }}" hardci-dists.sbom.intoto.jsonl
+          cp "${{ steps.attest-dists.outputs.bundle-path }}" agentic-hil-dists.intoto.jsonl
+          cp "${{ steps.attest-sbom.outputs.bundle-path }}" agentic-hil-dists.sbom.intoto.jsonl
 
       - name: Upload distributions, SBOM, and attestations
         env:
