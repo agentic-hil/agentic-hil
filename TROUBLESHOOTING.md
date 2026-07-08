@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page covers the most common HardCI setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Python 3.10 or newer.
+This page covers the most common Agentic HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Python 3.10 or newer.
 
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
@@ -8,43 +8,43 @@ Always inspect structured JSON first. The most useful fields are `ok`, `error_ty
 
 - If OpenOCD is installed but not on `PATH`, set `debugger.executable` explicitly, for example `C:/Program Files/OpenOCD/bin/openocd.exe`.
 - Use forward slashes in YAML paths to avoid accidental escape sequences.
-- Run `hardci com-ports` after reconnecting USB serial hardware.
+- Run `agentic-hil com-ports` after reconnecting USB serial hardware.
 - Configure Windows COM devices such as `COM5` under named `com_ports` ids, then use those ids from MCP COM tools.
 - Configure PEAK CAN devices under named `can_buses` ids, for example `adapter: "peak"` and `channel: "PCAN_USBBUS1"` on Windows.
 
-## 1. `hardci` Command Not Found
+## 1. `agentic-hil` Command Not Found
 
 Symptom: the shell or MCP client cannot start HardCI.
 
-Likely cause: HardCI is not installed, `~/.local/bin` is not on `PATH`, or the MCP client starts with a minimal environment.
+Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or the MCP client starts with a minimal environment.
 
 Fix — all user-local, never with admin rights:
 
 ```bash
-uvx hardci --version                                          # run without installing
-uvx --from git+https://github.com/hp-8472/hardci hardci --version   # repository as package source
-uv tool install hardci                                        # persistent user-local install
+uvx agentic-hil --version                                                # run without installing
+uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version   # repository as package source
+uv tool install agentic-hil                                              # persistent user-local install
 ```
 
-`pipx run hardci` / `pipx install hardci` are equivalents. If `hardci` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+`pipx run agentic-hil` / `pipx install agentic-hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
-In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["hardci", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
+In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
 
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
-Symptom: `hardci doctor` returns one of these `error_type` values.
+Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
 Likely cause: `.hardci/config.yaml` is missing, the command runs from the wrong directory, the YAML is invalid or not UTF-8, or the file contains an unknown field or unsupported value.
 
-Fix: run `hardci init` from the firmware project directory, edit only project-specific fields, then run `hardci doctor` again. Use the structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init` from the firmware project directory, edit only project-specific fields, then run `agentic-hil doctor` again. Use the structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
 ## 3. `debugger_not_found`
 
-Symptom: `hardci doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
+Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or `debugger.executable` points to a missing file.
 
-Fix: install the debugger tool (`pyocd` comes with the `hardci[pyocd]` extra), restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
 
 ## 4. `debugger_config_not_found`
 
@@ -60,7 +60,7 @@ Symptom: OpenOCD starts but HardCI reports `error_type: "adapter_not_found"`.
 
 Likely cause: the debug probe is not connected, the USB cable is charge-only, a driver/udev rule is missing, or another process owns the probe.
 
-Fix: reconnect with a data-capable USB cable, close other debugger sessions, check OS drivers or udev rules, then run `hardci doctor` and probe again.
+Fix: reconnect with a data-capable USB cable, close other debugger sessions, check OS drivers or udev rules, then run `agentic-hil doctor` and probe again.
 
 ## 6. `target_not_detected`
 
@@ -100,7 +100,7 @@ Symptom: COM tools cannot start a session, return permission errors, or read no 
 
 Likely cause: the port is not configured under `com_ports`, the device name is wrong, the baud rate is wrong, another program owns the port, or serial access permissions are missing.
 
-Fix: run `hardci com-ports`, add only the approved project port to `.hardci/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id`.
+Fix: run `agentic-hil com-ports`, add only the approved project port to `.hardci/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id`.
 
 Linux permission note: if opening the device fails with a permission error, the user typically needs membership in the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or a udev rule for the adapter. This is the one setup step that may genuinely need an administrator once; HardCI itself never needs admin rights.
 

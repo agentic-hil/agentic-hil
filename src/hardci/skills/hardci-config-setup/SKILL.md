@@ -1,22 +1,22 @@
 ---
 name: hardci-config-setup
-description: Configure HardCI as the safe local hardware-in-the-loop MCP bridge for an embedded firmware project.
+description: Configure Agentic HIL as the safe local hardware-in-the-loop MCP bridge for an embedded firmware project.
 metadata:
   origin: HardCI
-  hardci_version: "0.1.0"
+  hardci_version: "0.2.0"
 ---
 
-# HardCI Config Setup
+# Agentic HIL Config Setup
 
-Use HardCI as the project-local hardware gate. The policy file is `.hardci/config.yaml`.
+Use Agentic HIL as the project-local hardware gate. The policy file is `.hardci/config.yaml`.
 
 Install and initialize from the firmware project directory:
 
 ```bash
-hardci init
-hardci doctor
+agentic-hil init
+agentic-hil doctor
 ```
 
-Never bypass HardCI policy with raw debugger commands, direct serial device access, or direct CAN adapter access when a HardCI MCP tool is available.
+Never bypass Agentic HIL policy with raw debugger commands, direct serial device access, or direct CAN adapter access when an Agentic HIL MCP tool is available.
 
-If any HardCI tool returns `permission_denied`, stop and ask the user before changing policy.
+If any Agentic HIL tool returns `permission_denied`, stop and ask the user before changing policy.

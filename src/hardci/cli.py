@@ -213,14 +213,14 @@ def init_next_steps(available_com_ports: JsonObject) -> list[str]:
             suffix = "" if len(ports) <= 5 else f", and {len(ports) - 5} more"
             next_steps.append(f"Detected COM ports: {devices}{suffix}. Add the DUT UART under com_ports if serial feedback is needed.")
         else:
-            next_steps.append("No host COM ports detected. Connect USB serial hardware and run: hardci com-ports")
+            next_steps.append("No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
     else:
-        next_steps.append("COM port discovery failed. Run: hardci com-ports after checking the pyserial installation.")
+        next_steps.append("COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation.")
     next_steps.extend(
         [
             "For CAN access, add a named bus under can_buses.",
             "For sensor/actuator/fault simulation, add a named test adapter under adapters.",
-            "Run: hardci doctor",
+            "Run: agentic-hil doctor",
             "Create or update .mcp.json if your MCP client needs project discovery.",
         ]
     )
@@ -359,12 +359,12 @@ def skill_install_root(target_path: str) -> str:
 
 def codex_registration_block(target_path: str, version: str, requested_agent: str) -> str:
     return f"""{HARDCI_REGISTRATION_START}
-## HardCI Skill
+## Agentic HIL Skill
 
 - Skill path: `{target_path}`
-- HardCI version: `{version}`
-- HardCI is for embedded firmware development with local hardware-in-the-loop targets.
-- For HardCI setup, configuration, MCP, or embedded hardware workflows, read and follow this skill before acting.
+- Agentic HIL version: `{version}`
+- Agentic HIL is for embedded firmware development with local hardware-in-the-loop targets.
+- For Agentic HIL setup, configuration, MCP, or embedded hardware workflows, read and follow this skill before acting.
 - If this version differs from `agentic-hil --version`, run `agentic-hil skill-install --agent {requested_agent}`.
 {HARDCI_REGISTRATION_END}"""
 

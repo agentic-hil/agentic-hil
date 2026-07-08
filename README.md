@@ -30,9 +30,11 @@ Every hardware action is validated against the project policy, executed with tim
 
 ## Install
 
-The easiest path: tell your AI agent
+The easiest path: copy/paste this prompt to your AI agent:
 
-> Install Agentic HIL and set it up for this project.
+```text
+Install Agentic HIL from https://github.com/hp-8472/agentic-hil and set it up for this project.
+```
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
 
@@ -40,7 +42,7 @@ By hand, without installing anything (no `PATH` changes; needs [uv](https://docs
 
 ```bash
 uvx agentic-hil --version
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
 ```
 
 Persistent user-local install (recommended for the MCP server entry):

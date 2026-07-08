@@ -9,6 +9,7 @@ on:
     types:
       - completed
     branches:
+      - master
       - main
   schedule:
     - cron: "31 3 * * 1"

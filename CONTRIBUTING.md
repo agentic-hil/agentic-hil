@@ -32,7 +32,7 @@ Good first contributions are usually docs, examples, setup diagnostics, error-me
 
 Use the bug report issue template when possible. Include enough information for someone else to reproduce the setup without guessing:
 
-- HardCI version (`hardci --version`) and installation method (uv, pipx, pip, source).
+- Agentic HIL version (`agentic-hil --version`) and installation method (uv, pipx, pip, source).
 - Host OS, Python version, and OpenOCD or STM32CubeProgrammer version.
 - Board, debug probe, debugger backend, and serial/CAN/adapter hardware if relevant.
 - Minimal command sequence that triggered the failure.
@@ -40,7 +40,7 @@ Use the bug report issue template when possible. Include enough information for 
 - Sanitized `.hardci/config.yaml` with local paths, usernames, and secrets removed.
 - Relevant `.hardci/reports/last-report.json` content.
 - Relevant debugger, COM, CAN, or adapter `log_path` output, sanitized if needed.
-- Whether the failure is reproducible after reconnecting the board and rerunning `hardci doctor`.
+- Whether the failure is reproducible after reconnecting the board and rerunning `agentic-hil doctor`.
 
 ## Hardware Safety
 

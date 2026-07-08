@@ -18,7 +18,7 @@ Recommended additions as the project grows:
 
 Branch protection is configured in GitHub repository settings, not in this source tree.
 
-Use these settings for `main`:
+Use these settings for the default branch, `master`:
 
 ```text
 require pull requests before merging
