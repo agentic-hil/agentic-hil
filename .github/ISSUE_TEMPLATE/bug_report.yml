@@ -21,9 +21,9 @@ body:
     attributes:
       label: Installation method
       options:
-        - pip install agentic-hil
-        - pipx install agentic-hil
-        - uv tool install agentic-hil
+        - pip install agentic_hil
+        - pipx install agentic_hil
+        - uv tool install agentic_hil
         - pip install from git checkout
         - other
     validations:

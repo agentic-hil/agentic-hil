@@ -5,7 +5,7 @@ examples/adapters/sim_ntc_adapter.py into your firmware project) with a
 .hardci/config.yaml whose adapters section points at the simulator, as shown
 in examples/adapters/README.md:
 
-    pip install agentic-hil
+    pip install agentic_hil
     pytest test_ntc_diagnosis.py
 
 The `agentic_hil` fixture skips these tests when no Agentic HIL configuration file

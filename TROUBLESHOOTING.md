@@ -2,6 +2,8 @@
 
 This page covers the most common Agentic HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Python 3.10 or newer.
 
+Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
 ## Windows Quick Notes
@@ -18,17 +20,24 @@ Symptom: the shell or MCP client cannot start HardCI.
 
 Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or the MCP client starts with a minimal environment.
 
-Fix — all user-local, never with admin rights:
+Fix — all user-local, never with admin rights. Start with the PyPI/pip package:
 
 ```bash
-uvx agentic-hil --version                                                # run without installing
-uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version   # repository as package source
-uv tool install agentic-hil                                              # persistent user-local install
+python -m pip install --user agentic_hil
+agentic-hil --version
 ```
 
-`pipx run agentic-hil` / `pipx install agentic-hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+If that fails, use `uv` or `pipx` instead:
 
-In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
+```bash
+uvx --from agentic_hil agentic-hil --version                                  # run without installing
+uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version    # repository as package source
+uv tool install agentic_hil                                                    # isolated user-local install
+```
+
+`pipx run --spec agentic_hil agentic-hil` / `pipx install agentic_hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+
+In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["--from", "agentic_hil", "agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
 
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
@@ -44,7 +53,7 @@ Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_no
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or `debugger.executable` points to a missing file.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic_hil[pyocd]` extra), restart the shell or MCP client, and either leave `debugger.executable: null` or set it to the actual executable path. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
 
 ## 4. `debugger_config_not_found`
 
@@ -108,7 +117,7 @@ Linux permission note: if opening the device fails with a permission error, the 
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
 
-Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` → install `hardci[can]`), another program owns the adapter, or the `channel` value is for a different backend.
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic_hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: add only the approved project bus to `.hardci/config.yaml` and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
 

@@ -12,6 +12,8 @@ ruff check src tests examples
 pytest
 ```
 
+Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+
 ## Pull Requests
 
 - Keep changes focused and describe the user-facing behavior they affect.
