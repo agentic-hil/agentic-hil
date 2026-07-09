@@ -14,6 +14,34 @@ Agentic HIL is a Python package that exposes bounded MCP tools for probing, flas
 
 HardCI adapters are the reference hardware for Agentic HIL: physical pytest fixtures for sensor simulation, loads, and fault injection.
 
+## Install
+
+The easiest path: copy/paste this prompt to your AI agent:
+
+```text
+Install from https://github.com/hp-8472/agentic-hil and set it up for this project.
+```
+
+Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
+
+By hand, without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
+
+```bash
+uvx agentic-hil --version
+uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
+```
+
+Persistent user-local install (recommended for the MCP server entry):
+
+```bash
+uv tool install agentic-hil      # or: pipx install agentic-hil
+agentic-hil init
+agentic-hil doctor
+agentic-hil mcp-config --output .mcp.json
+```
+
+For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
+
 ## Why
 
 A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps — flash here, read a log there — but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
@@ -27,32 +55,6 @@ AI agent / CI  ──MCP (stdio)──▶  Agentic HIL  ──policy check──
 ```
 
 Every hardware action is validated against the project policy, executed with timeouts, logged to `.hardci/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on.
-
-## Install
-
-The easiest path: tell your AI agent
-
-> Install Agentic HIL and set it up for this project.
-
-Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
-
-By hand, without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
-
-```bash
-uvx agentic-hil --version
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
-```
-
-Persistent user-local install (recommended for the MCP server entry):
-
-```bash
-uv tool install agentic-hil      # or: pipx install agentic-hil
-agentic-hil init
-agentic-hil doctor
-agentic-hil mcp-config --output .mcp.json
-```
-
-For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
 
 ## MCP Entry
 

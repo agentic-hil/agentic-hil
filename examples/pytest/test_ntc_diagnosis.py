@@ -1,14 +1,14 @@
-"""Example: temperature-sensor diagnosis loop driven by the HardCI pytest plugin.
+"""Example: temperature-sensor diagnosis loop driven by the Agentic HIL pytest plugin.
 
-Run from a checkout of the hardci repository (or copy this file together with
+Run from a checkout of the agentic-hil repository (or copy this file together with
 examples/adapters/sim_ntc_adapter.py into your firmware project) with a
 .hardci/config.yaml whose adapters section points at the simulator, as shown
 in examples/adapters/README.md:
 
-    pip install hardci
+    pip install agentic-hil
     pytest test_ntc_diagnosis.py
 
-The `hardci` fixture skips these tests when no HardCI configuration file
+The `agentic_hil` fixture skips these tests when no Agentic HIL configuration file
 exists, so the suite stays green in code-only environments, and it stops
 adapter sessions after each test so fault state cannot leak between tests.
 
@@ -25,10 +25,10 @@ ADAPTER_ID = "ntc_sim"
 
 
 @pytest.fixture()
-def ntc(hardci):
-    started = hardci.call("hardci_adapter_session_start", {"adapter_id": ADAPTER_ID})
+def ntc(agentic_hil):
+    started = agentic_hil.call("hardci_adapter_session_start", {"adapter_id": ADAPTER_ID})
     assert started["ok"] is True, started["summary"]
-    return hardci  # the plugin stops adapter sessions after each test
+    return agentic_hil  # the plugin stops adapter sessions after each test
 
 
 def test_nominal_temperature_reading(ntc) -> None:

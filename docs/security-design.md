@@ -1,10 +1,10 @@
 # Security Design
 
-HardCI is a local MCP stdio server for agent-driven embedded hardware workflows. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
+Agentic HIL is a local MCP stdio server for agent-driven embedded hardware workflows. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
 
 ## Threat Model
 
-HardCI assumes an agent can request hardware actions, but should not receive arbitrary host shell access, arbitrary debugger access, or unrestricted device access through HardCI. The project-local `.hardci/config.yaml` file is the authority for target configuration, artifact roots, named COM ports, CAN buses, test adapters, and permissions. Whoever can edit that file controls the gate — protect it like CI configuration.
+Agentic HIL assumes an agent can request hardware actions, but should not receive arbitrary host shell access, arbitrary debugger access, or unrestricted device access through Agentic HIL. The project-local `.hardci/config.yaml` file is the authority for target configuration, artifact roots, named COM ports, CAN buses, test adapters, and permissions. Whoever can edit that file controls the gate — protect it like CI configuration.
 
 The primary risks are:
 
@@ -20,7 +20,7 @@ The primary risks are:
 - MCP tools expose named, high-level actions — probe, flash, reset, report retrieval, configured COM/CAN sessions, and configured test-adapter actions — instead of a raw debugger shell or direct host device access.
 - Firmware artifacts must be under configured artifact roots, match configured extensions, and pass format plausibility checks before flashing or upload resolution; path traversal is rejected.
 - Uploaded artifacts are size-limited and identified with SHA-256 metadata.
-- COM, CAN, and adapter access use configured `port_id`/`bus_id`/`adapter_id` values. HardCI never opens host devices or executables from agent-provided paths.
+- COM, CAN, and adapter access use configured `port_id`/`bus_id`/`adapter_id` values. Agentic HIL never opens host devices or executables from agent-provided paths.
 - Test-adapter channel and fault names are explicit allowlists validated before any request reaches the adapter bridge.
 - Serial/CAN writes are size-capped; reads are buffer-capped; debugger calls run with timeouts and with OpenOCD's TCP servers disabled.
 - Flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
@@ -29,7 +29,7 @@ The primary risks are:
 
 ## Cryptography Scope
 
-HardCI does not implement authentication, password storage, encryption protocols, key agreement, or custom cryptographic primitives. It uses the Python standard library (`hashlib`) for SHA-256 artifact metadata. Release integrity is handled by PyPI delivery over HTTPS, GitHub Actions OIDC trusted publishing, and GitHub artifact attestations.
+Agentic HIL does not implement authentication, password storage, encryption protocols, key agreement, or custom cryptographic primitives. It uses the Python standard library (`hashlib`) for SHA-256 artifact metadata. Release integrity is handled by PyPI delivery over HTTPS, GitHub Actions OIDC trusted publishing, and GitHub artifact attestations.
 
 ## Secure Development Practices
 

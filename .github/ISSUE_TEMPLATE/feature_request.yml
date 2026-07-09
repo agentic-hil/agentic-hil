@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a scoped HardCI workflow, backend, safety, docs, or packaging improvement.
+description: Propose a scoped Agentic HIL workflow, backend, safety, docs, or packaging improvement.
 title: "feature: "
 labels:
   - enhancement
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        HardCI should stay local-first, MCP-native, and safe for agent-driven hardware workflows.
+        Agentic HIL should stay local-first, MCP-native, and safe for agent-driven hardware workflows.
   - type: textarea
     id: problem
     attributes:

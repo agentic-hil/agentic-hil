@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible HardCI setup, hardware, CLI, MCP, or COM failure.
+description: Report a reproducible Agentic HIL setup, hardware, CLI, MCP, or COM failure.
 title: "bug: "
 labels:
   - bug
@@ -7,12 +7,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing HardCI. Please include structured details so the issue can be reproduced safely. For common setup failures, check TROUBLESHOOTING.md first.
+        Thanks for testing Agentic HIL. Please include structured details so the issue can be reproduced safely. For common setup failures, check TROUBLESHOOTING.md first.
   - type: input
     id: version
     attributes:
-      label: HardCI version
-      description: Run `hardci --version` if available, or provide the PyPI package version / git commit.
+      label: Agentic HIL version
+      description: Run `agentic-hil --version` if available, or provide the PyPI package version / git commit.
       placeholder: "0.1.0"
     validations:
       required: true
@@ -21,9 +21,9 @@ body:
     attributes:
       label: Installation method
       options:
-        - pip install hardci
-        - pipx install hardci
-        - uv tool install hardci
+        - pip install agentic-hil
+        - pipx install agentic-hil
+        - uv tool install agentic-hil
         - pip install from git checkout
         - other
     validations:
@@ -68,8 +68,8 @@ body:
       label: Reproduction steps
       description: Include exact commands and MCP tool calls if applicable.
       placeholder: |
-        1. hardci init
-        2. hardci doctor
+        1. agentic-hil init
+        2. agentic-hil doctor
         3. Agent called hardci_probe_target
     validations:
       required: true

@@ -17,15 +17,15 @@ cmake --preset Debug
 cmake --build --preset Debug
 ```
 
-This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — inside the `build` artifact root that the HardCI policy allows for flashing.
+This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — inside the `build` artifact root that the Agentic HIL policy allows for flashing.
 
-## Configure HardCI
+## Configure Agentic HIL
 
 ```bash
-pipx install hardci
+pipx install agentic-hil
 mkdir -p .hardci && cp hardci.config.example.yaml .hardci/config.yaml
 # adjust com_ports.dut_uart.device (e.g. /dev/ttyACM0, COM5), then:
-hardci doctor
+agentic-hil doctor
 ```
 
 ## Run the loop from an agent (MCP)

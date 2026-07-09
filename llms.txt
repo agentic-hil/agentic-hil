@@ -1,22 +1,24 @@
-# HardCI
+# Agentic HIL
 
-HardCI is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection.
+Agentic HIL is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection. HardCI adapters are the reference hardware.
+
+Canonical setup request: `Install from https://github.com/hp-8472/agentic-hil and set it up for this project.`
 
 Run without installing (no admin rights, no PATH changes):
 
 ```bash
-uvx hardci --version
-uvx --from git+https://github.com/hp-8472/hardci hardci --version
+uvx agentic-hil --version
+uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
 ```
 
-Persistent user-local install: `uv tool install hardci` or `pipx install hardci`. Never sudo, never --break-system-packages. Requires Python 3.10+.
+Persistent user-local install: `uv tool install agentic-hil` or `pipx install agentic-hil`. Never sudo, never --break-system-packages. Requires Python 3.10+.
 
 Bootstrap each firmware project from the project directory:
 
 ```bash
-hardci init
-hardci doctor
-hardci mcp-config --output .mcp.json
+agentic-hil init
+agentic-hil doctor
+agentic-hil mcp-config --output .mcp.json
 ```
 
 Each firmware project keeps its own `.hardci/config.yaml` — the policy for that project's target, debugger, permissions, artifact roots, com_ports, can_buses, and adapters.
@@ -24,7 +26,7 @@ Each firmware project keeps its own `.hardci/config.yaml` — the policy for tha
 MCP stdio command:
 
 ```text
-hardci mcp-stdio --config .hardci/config.yaml
+agentic-hil mcp-stdio --config .hardci/config.yaml
 ```
 
 Use MCP tools for hardware actions:
@@ -47,7 +49,7 @@ Required workflow:
 4. Stimulate via com/can/adapter tools, assert on feedback.
 5. Read the structured result and last report; classify failures before changing code again.
 
-pytest: installing hardci registers a plugin; the `hardci` fixture drives the same tools in CI regression suites.
+pytest: installing `agentic-hil` registers a plugin; the `agentic_hil` fixture drives the same tools in CI regression suites.
 
 Safety: do not request raw OpenOCD commands, do not open host serial/CAN/adapter devices directly, do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative.
 
