@@ -3,7 +3,7 @@ name: hardci-config-setup
 description: Configure Agentic HIL as the safe local hardware-in-the-loop MCP bridge for an embedded firmware project.
 metadata:
   origin: HardCI
-  hardci_version: "0.2.0"
+  hardci_version: "0.2.1"
 ---
 
 # Agentic HIL Config Setup
