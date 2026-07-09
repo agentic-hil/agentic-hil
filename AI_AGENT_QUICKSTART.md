@@ -16,6 +16,7 @@ If you were given only the Agentic HIL repository URL and asked to set it up: ru
 
 - Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
 - Never use `pip install --break-system-packages`, and do not install into the system Python (PEP 668 environments will refuse, and they are right).
+- Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
 - If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
 
 ## Reference Setup
@@ -32,44 +33,53 @@ Prefer the supported first path unless the firmware project or user clearly says
 Fast path, in order — stop at the first step that works:
 
 1. If `agentic-hil --version` works, do not reinstall.
-2. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+2. Try the normal user-local pip install first:
 
 ```bash
-uvx agentic-hil --version
+python -m pip install --user agentic_hil
+agentic-hil --version
 ```
 
-3. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
+If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, continue with the runner paths below.
+
+3. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+
+```bash
+uvx --from agentic_hil agentic-hil --version
+```
+
+4. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
 
 ```bash
 uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
 ```
 
-4. If `uv` is missing but `pipx` is available, the equivalents are `pipx run agentic-hil --version` and `pipx run --spec git+https://github.com/hp-8472/agentic-hil agentic-hil --version`.
-5. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
+5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic_hil agentic-hil --version` and `pipx run --spec git+https://github.com/hp-8472/agentic-hil agentic-hil --version`.
+6. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-then rerun step 2. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+then rerun step 3. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
 
-For the MCP server entry it is usually better to install the `agentic-hil` command persistently (still user-local, still no admin rights):
+If the `pip --user` command is not reliably on `PATH`, use an isolated persistent install for the MCP server entry (still user-local, still no admin rights):
 
 ```bash
-uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/hp-8472/agentic-hil
+uv tool install agentic_hil        # or from the repository: uv tool install git+https://github.com/hp-8472/agentic-hil
 ```
 
-`pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
+`pipx install agentic_hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
 
 ## Install Agent Skill
 
 Agent-driven Agentic HIL installation includes installing the bundled `hardci-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
-agentic-hil skill-install --agent <agent>          # or: uvx agentic-hil skill-install --agent <agent>
+agentic-hil skill-install --agent <agent>          # or: uvx --from agentic_hil agentic-hil skill-install --agent <agent>
 ```
 
-Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The CLI package is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
+Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The installed `agentic_hil` package is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
 
 ## Configure Each Project
 
@@ -102,7 +112,7 @@ Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "HardCI conf
 }
 ```
 
-If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
+If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["--from", "agentic_hil", "agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
 
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --config .hardci/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
 

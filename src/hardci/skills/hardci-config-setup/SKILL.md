@@ -10,6 +10,8 @@ metadata:
 
 Use Agentic HIL as the project-local hardware gate. The policy file is `.hardci/config.yaml`.
 
+Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+
 Install and initialize from the firmware project directory:
 
 ```bash
