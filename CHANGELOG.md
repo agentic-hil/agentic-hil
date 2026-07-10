@@ -6,22 +6,27 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-### Added
-
-- Debug sessions now classify abnormal target stops: unexpected breakpoints return `unexpected_breakpoint`, Cortex-M exception/fault contexts return `target_exception` with frame, signal, and suggested next actions, and session status picks up asynchronous stop records.
+## [0.2.1] - 2026-07-09
 
 ### Changed
 
-- Public project URLs and CLI/MCP guidance now point at `hp-8472/agentic-hil` and `agentic-hil`; Python package install guidance uses `agentic_hil`.
-- Firmware flashing no longer resets the target by default. Pass `reset_after_flash: true` to `hardci_flash_firmware` to request the previous post-flash reset behavior.
-- Removed the separate `permissions.allow_reset` policy field; reset remains a typed debugger action instead of a separately gated permission class.
+- Python package metadata and install guidance now use `agentic_hil`; the CLI command, MCP server name, and repository URL remain `agentic-hil`.
+- Public project URLs, setup docs, issue templates, and release guidance now point at `hp-8472/agentic-hil`.
+- CLI setup hints and Codex skill-registration text use Agentic HIL naming instead of legacy HardCI command/prose.
+- CI, CodeQL, and Scorecards workflows now run for the `master` default branch.
 
 ## [0.2.0] - 2026-07-06
 
 ### Added
 
+- Debug sessions now classify abnormal target stops: unexpected breakpoints return `unexpected_breakpoint`, Cortex-M exception/fault contexts return `target_exception` with frame, signal, and suggested next actions, and session status picks up asynchronous stop records.
 - Typed GDB/MI debug sessions for the OpenOCD backend: the eleven `hardci_debug_*` tools now run real sessions (start/stop/status, breakpoints by symbol or file:line, continue/halt with structured stop reasons, symbol resolution, Intel-HEX memory dumps) against OpenOCD's gdbserver, gated by `debug.allowed_symbols`, `debug.max_dump_size_bytes`, and the existing permission model (raw-command mode disables typed debugging; `load` mode requires flash permission). The session's gdbserver is pinned to `localhost` on an ephemeral port and torn down with the session.
 - pyOCD debugger backend (`debugger.type: "pyocd"`) with probe/flash/reset support, `target_type` selection, and pyOCD-specific error classification.
+
+### Changed
+
+- Firmware flashing no longer resets the target by default. Pass `reset_after_flash: true` to `hardci_flash_firmware` to request the previous post-flash reset behavior.
+- Removed the separate `permissions.allow_reset` policy field; reset remains a typed debugger action instead of a separately gated permission class.
 
 ### Fixed
 
