@@ -24,7 +24,7 @@ PYOCD_NOT_FOUND: JsonObject = {
     "summary": "pyOCD executable could not be found.",
     "likely_causes": [
         "debugger.executable is not configured",
-        "pyOCD is not installed (install agentic_hil[pyocd] or pip install pyocd)",
+        "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)",
         "pyocd is not in PATH",
     ],
 }
@@ -286,5 +286,5 @@ class PyOCDBackend:
             "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debugger.flash_address is wrong"],
             "reset_failed": ["reset line wiring issue", "target is not responding"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
-            "debugger_not_found": ["debugger.executable is not configured", "pyOCD is not installed (install agentic_hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
+            "debugger_not_found": ["debugger.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])

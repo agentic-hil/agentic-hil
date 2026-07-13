@@ -1,6 +1,6 @@
 # Nucleo-F446RE Demo: Real Firmware in the Agentic HIL Loop
 
-A minimal bare-metal STM32F446RE firmware for the [ST Nucleo-F446RE](https://www.st.com/en/evaluation-tools/nucleo-f446re.html) board that demonstrates the complete Agentic HIL loop on real hardware: build → flash → reset → assert on serial output.
+A minimal bare-metal STM32F446RE firmware for the [ST Nucleo-F446RE](https://www.st.com/en/evaluation-tools/nucleo-f446re.html) board that demonstrates the complete Agentic Hardware-in-the-Loop (Agentic HIL) loop on real hardware: build → flash → reset → assert on serial output.
 
 The firmware prints `Hello World` on USART2 (PA2/PA3, routed to the ST-LINK virtual COM port, 115200 baud) at boot and then blinks the LD2 user LED. No HAL, no external dependencies — the whole program is [Src/main.c](Src/main.c).
 
@@ -21,10 +21,10 @@ This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — insi
 
 ## Configure Agentic HIL
 
-Names: the Python package/install target uses `agentic_hil`; the CLI command uses `agentic-hil`. Python-facing identifiers such as pytest fixtures and Python examples use `agentic_hil`.
+Names: the Python distribution/install target and CLI command use `agentic-hil`. Python-facing identifiers such as pytest fixtures and Python examples use `agentic_hil`.
 
 ```bash
-pipx install agentic_hil
+pipx install agentic-hil
 mkdir -p .agentic-hil && cp agentic-hil.config.example.yaml .agentic-hil/config.yaml
 # adjust com_ports.dut_uart.device (e.g. /dev/ttyACM0, COM5), then:
 agentic-hil doctor

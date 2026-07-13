@@ -1,6 +1,6 @@
 # Agentic HIL Test Adapter Bridges
 
-A test adapter simulates what standard lab equipment cannot: realistic sensors, actuator loads, and fault states (open sensor, short to GND/VCC, contact bounce, blocked motor). Agentic HIL talks to adapters through a small bridge protocol so that hardware adapters and pure-software simulators are interchangeable.
+Agentic Hardware-in-the-Loop (Agentic HIL) talks to test adapters through a small bridge protocol so that hardware adapters and pure-software simulators are interchangeable. A test adapter simulates what standard lab equipment cannot: realistic sensors, actuator loads, and fault states (open sensor, short to GND/VCC, contact bounce, blocked motor).
 
 ## Configure an adapter
 

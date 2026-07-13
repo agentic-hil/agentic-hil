@@ -1,6 +1,6 @@
 # Release Strategy
 
-Agentic HIL publishes through PyPI and GitHub Releases. GitHub Releases trigger publishing and carry release notes; PyPI is the canonical installation channel (`pip install agentic_hil`, `uv tool install agentic_hil`, `pipx install agentic_hil`).
+Agentic Hardware-in-the-Loop (Agentic HIL) publishes through PyPI and GitHub Releases. GitHub Releases trigger publishing and carry release notes; PyPI is the canonical installation channel (`pip install agentic-hil`, `uv tool install agentic-hil`, `pipx install agentic-hil`).
 
 Do not cut the next release for metadata-only or README-only cleanup. Batch hygiene work into the next release that delivers visible user value.
 
@@ -34,7 +34,7 @@ links to relevant docs
 
 PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`) — no long-lived PyPI API tokens. The workflow builds sdist and wheel, validates them with twine, and refuses releases whose tag does not match the `pyproject.toml` version.
 
-Naming is part of the release contract: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+Naming is part of the release contract: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge — add them only when they are reproducible and built by CI.
 
@@ -49,7 +49,7 @@ Before creating a release:
 4. Merge to master and let the CI matrix pass.
 5. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
 6. Let the publish workflow validate the tag, build, check, and publish to PyPI.
-7. Verify: uvx --from agentic_hil agentic-hil --version resolves the new version from PyPI.
+7. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
 8. Start from GitHub auto-generated release notes, then edit for clarity.
 ```
 

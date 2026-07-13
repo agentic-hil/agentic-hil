@@ -1,11 +1,11 @@
-"""Example: temperature-sensor diagnosis loop driven by the Agentic HIL pytest plugin.
+"""Example: temperature-sensor diagnosis loop driven by the Agentic Hardware-in-the-Loop (Agentic HIL) pytest plugin.
 
 Run from a checkout of the agentic-hil repository (or copy this file together with
 examples/adapters/sim_ntc_adapter.py into your firmware project) with a
 .agentic-hil/config.yaml whose adapters section points at the simulator, as shown
 in examples/adapters/README.md:
 
-    pip install agentic_hil
+    pip install agentic-hil
     pytest test_ntc_diagnosis.py
 
 The `agentic_hil` fixture skips these tests when no Agentic HIL configuration file

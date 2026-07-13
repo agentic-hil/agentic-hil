@@ -1,6 +1,6 @@
 # Security Design
 
-Agentic HIL is a local MCP stdio server for agent-driven embedded hardware workflows. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server for agent-driven embedded hardware workflows. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
 
 ## Threat Model
 
