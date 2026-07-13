@@ -9,8 +9,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from hardci.config import display_path
-from hardci.gdbmi import (
+from agentic_hil.config import display_path
+from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
     mi_field,
@@ -18,8 +18,8 @@ from hardci.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from hardci.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
-from hardci.types import HardCIConfig, JsonObject
+from agentic_hil.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEBUG_MODES = ["attach", "reset_halt", "load"]
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
@@ -71,7 +71,7 @@ class GdbDebugSessions:
 
     def __init__(
         self,
-        config: HardCIConfig,
+        config: AgenticHILConfig,
         backend_name: str,
         resolve_server: Callable[[], JsonObject],
         build_server_args: Callable[[str, int, bool], list[str]],
@@ -85,11 +85,11 @@ class GdbDebugSessions:
         self.session: GdbDebugSession | None = None
 
     def start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
-        tool = "hardci_debug_start_session"
+        tool = "debug_start_session"
         if mode not in DEBUG_MODES:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Invalid debug session mode.", "allowed_values": DEBUG_MODES})
         if self.session is not None and self.session.status != "stopped":
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_already_active", "summary": "A debug session is already active. Stop it with hardci_debug_stop_session first.", "session": self._session_status(self.session)})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_already_active", "summary": "A debug session is already active. Stop it with debug_stop_session first.", "session": self._session_status(self.session)})
         permission = self._start_permission(tool, mode)
         if not permission["ok"]:
             return self._report(permission)
@@ -149,7 +149,7 @@ class GdbDebugSessions:
         return self._report(result)
 
     def stop_session(self, timeout_s: float | None = None) -> JsonObject:
-        tool = "hardci_debug_stop_session"
+        tool = "debug_stop_session"
         session = self.session
         if session is None or session.status == "stopped":
             return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
@@ -164,12 +164,12 @@ class GdbDebugSessions:
         if session is not None and session.status not in {"stopped", "error"} and session.gdb is not None:
             self._refresh_session_stop(session)
         active = session is not None and session.status not in {"stopped", "error"}
-        result: JsonObject = {"ok": True, "tool": "hardci_debug_get_session_status", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "session": self._session_status(session) if session else None}
+        result: JsonObject = {"ok": True, "tool": "debug_get_session_status", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "session": self._session_status(session) if session else None}
         result.update(target_stop_fields(session.stop_reason if session else None))
         return result
 
     def set_breakpoint(self, location: JsonObject | str) -> JsonObject:
-        tool = "hardci_debug_set_breakpoint"
+        tool = "debug_set_breakpoint"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -189,10 +189,10 @@ class GdbDebugSessions:
     def list_breakpoints(self) -> JsonObject:
         session = self.session
         active = session is not None and session.status not in {"stopped", "error"}
-        return {"ok": True, "tool": "hardci_debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []}
+        return {"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []}
 
     def clear_breakpoints(self) -> JsonObject:
-        tool = "hardci_debug_clear_breakpoints"
+        tool = "debug_clear_breakpoints"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -208,7 +208,7 @@ class GdbDebugSessions:
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared."})
 
     def continue_execution(self, timeout_s: float | None = None) -> JsonObject:
-        tool = "hardci_debug_continue"
+        tool = "debug_continue"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -240,7 +240,7 @@ class GdbDebugSessions:
         return self._report(result)
 
     def halt(self, timeout_s: float | None = None) -> JsonObject:
-        tool = "hardci_debug_halt"
+        tool = "debug_halt"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -259,20 +259,20 @@ class GdbDebugSessions:
         return self._report(self._stopped_result(tool, session, "Target halted"))
 
     def get_stop_reason(self) -> JsonObject:
-        tool = "hardci_debug_get_stop_reason"
+        tool = "debug_get_stop_reason"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
         self._refresh_session_stop(session)
         if session.stop_reason is None:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run hardci_debug_continue or hardci_debug_halt first."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."}
         result = {"ok": True, "tool": tool, "backend": self.backend_name, "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session)}
         result.update(target_stop_fields(session.stop_reason))
         return result
 
     def symbol_info(self, symbol: str) -> JsonObject:
-        tool = "hardci_debug_symbol_info"
+        tool = "debug_symbol_info"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -283,7 +283,7 @@ class GdbDebugSessions:
         return self._report({**resolved, "tool": tool, "backend": self.backend_name, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol resolved."})
 
     def dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject:
-        tool = "hardci_debug_dump_symbol_ihex"
+        tool = "debug_dump_symbol_ihex"
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)
@@ -314,12 +314,12 @@ class GdbDebugSessions:
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.permissions
         if not permissions.allow_probe:
-            return self._permission_denied(tool, "Debug sessions require allow_probe in .hardci/config.yaml.")
+            return self._permission_denied(tool, "Debug sessions require allow_probe in .agentic-hil/config.yaml.")
         if permissions.allow_raw_debugger_commands:
             return self._permission_denied(tool, "Debug sessions are disabled while raw debugger commands are allowed.")
         if mode == "load":
             if not permissions.allow_flash:
-                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in .hardci/config.yaml.")
+                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in .agentic-hil/config.yaml.")
             if permissions.allow_mass_erase:
                 return self._permission_denied(tool, "Debug session mode 'load' is disabled while mass erase is allowed.")
         return {"ok": True}
@@ -328,13 +328,13 @@ class GdbDebugSessions:
         return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
 
     def _resolve_gdb(self) -> JsonObject:
-        from hardci.backends.common import which
+        from agentic_hil.backends.common import which
 
         configured = self.config.debug.gdb_executable
         if configured:
             has_path_separator = "/" in configured or "\\" in configured
             if Path(configured).is_absolute() or has_path_separator:
-                from hardci.config import resolve_work_path
+                from agentic_hil.config import resolve_work_path
 
                 resolved = Path(resolve_work_path(self.config, configured))
                 if resolved.is_file():
@@ -348,7 +348,7 @@ class GdbDebugSessions:
             found = which(candidate)
             if found is not None:
                 return {"ok": True, "executable": found}
-        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in .hardci/config.yaml"]}
+        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in .agentic-hil/config.yaml"]}
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
         commands = [
@@ -365,13 +365,13 @@ class GdbDebugSessions:
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
-                return self._gdb_failure("hardci_debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out)
+                return self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out)
         return {"ok": True}
 
     def _require_session(self, tool: str) -> JsonObject:
         session = self.session
         if session is None or session.status in {"stopped", "error"} or session.gdb is None or not session.gdb.is_running():
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with hardci_debug_start_session first."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first."}
         return {"ok": True, "session": session}
 
     def _gdb_command(self, session: GdbDebugSession, command: str, timeout_s: float | None = None):
@@ -621,7 +621,7 @@ def suggested_actions_for_stop(stop_reason: str) -> list[str]:
         return [
             "Target is halted; do not continue blindly.",
             "Inspect the returned frame and stop reason first.",
-            "If this was a stale breakpoint, run hardci_debug_clear_breakpoints and set only the expected breakpoints again.",
+            "If this was a stale breakpoint, run debug_clear_breakpoints and set only the expected breakpoints again.",
             "If this was a firmware BKPT/assert, collect logs or memory evidence, then reset or restart the debug session.",
         ]
     if stop_reason in {"exception", "fault"}:
@@ -632,7 +632,7 @@ def suggested_actions_for_stop(stop_reason: str) -> list[str]:
             "After diagnosis, reset or restart the debug session before rerunning the test.",
         ]
     if stop_reason == "debugger_error":
-        return ["Check log_path and hardci_classify_last_error before retrying the debug action."]
+        return ["Check log_path and classify_last_error before retrying the debug action."]
     return []
 
 

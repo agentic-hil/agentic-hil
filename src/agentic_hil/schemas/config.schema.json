@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hardci.local/schemas/config.schema.json",
-  "title": "HardCI project configuration",
-  "description": "Schema for project-local .hardci/config.yaml files.",
+  "$id": "https://agentic-hil.local/schemas/config.schema.json",
+  "title": "Agentic HIL project configuration",
+  "description": "Schema for project-local .agentic-hil/config.yaml files.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -49,7 +49,7 @@
       "additionalProperties": false,
       "properties": {
         "allowed_roots": { "type": "array", "items": { "type": "string" }, "default": ["build"] },
-        "upload_directory": { "type": "string", "default": ".hardci/artifacts" },
+        "upload_directory": { "type": "string", "default": ".agentic-hil/artifacts" },
         "allowed_extensions": { "type": "array", "items": { "type": "string" }, "default": [".elf", ".hex", ".bin"] },
         "max_upload_size_mb": { "type": "integer", "default": 64 },
         "allow_upload": { "type": "boolean", "default": true }
@@ -57,7 +57,7 @@
     },
     "com_ports": {
       "type": "object",
-      "description": "Named serial/COM ports that HardCI may open for stimuli and feedback.",
+      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback.",
       "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
       "additionalProperties": {
         "type": "object",
@@ -77,7 +77,7 @@
     },
     "can_buses": {
       "type": "object",
-      "description": "Named CAN buses that HardCI may open for stimuli and feedback.",
+      "description": "Named CAN buses that Agentic HIL may open for stimuli and feedback.",
       "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
       "additionalProperties": {
         "type": "object",
@@ -104,7 +104,7 @@
     },
     "adapters": {
       "type": "object",
-      "description": "Named test adapters (sensor, actuator, load, and fault-simulation bridges) that HardCI may control.",
+      "description": "Named test adapters (sensor, actuator, load, and fault-simulation bridges) that Agentic HIL may control.",
       "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
       "additionalProperties": {
         "type": "object",
@@ -150,12 +150,12 @@
     "reports": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "directory": { "type": "string", "default": ".hardci/reports" } }
+      "properties": { "directory": { "type": "string", "default": ".agentic-hil/reports" } }
     },
     "logs": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "directory": { "type": "string", "default": ".hardci/logs" } }
+      "properties": { "directory": { "type": "string", "default": ".agentic-hil/logs" } }
     }
   }
 }

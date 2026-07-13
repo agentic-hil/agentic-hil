@@ -4,10 +4,10 @@ import json
 import sys
 from typing import TextIO
 
-from hardci.config import ConfigError, load_config
-from hardci.mcp import handle_mcp_message, oversized_message_response, parse_error_response
-from hardci.tools import HardCIToolService
-from hardci.types import HardCIConfig
+from agentic_hil.config import ConfigError, load_config
+from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
+from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.types import AgenticHILConfig
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
 MESSAGE_OVERHEAD_CHARS = 1024 * 1024
@@ -15,14 +15,14 @@ BASE64_EXPANSION_NUMERATOR = 4
 BASE64_EXPANSION_DENOMINATOR = 3
 
 
-def message_size_limit(config: HardCIConfig) -> int:
+def message_size_limit(config: AgenticHILConfig) -> int:
     """Largest accepted JSON-RPC line: leaves room for a max-size artifact upload as base64."""
     upload_chars = max(0, config.artifacts.max_upload_size_mb) * 1024 * 1024 * BASE64_EXPANSION_NUMERATOR // BASE64_EXPANSION_DENOMINATOR
     return max(DEFAULT_MAX_MESSAGE_CHARS, upload_chars + MESSAGE_OVERHEAD_CHARS)
 
 
 def run_stdio_server(
-    config: HardCIConfig,
+    config: AgenticHILConfig,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
     max_message_chars: int | None = None,
@@ -30,7 +30,7 @@ def run_stdio_server(
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
     limit = max_message_chars or message_size_limit(config)
-    tools = HardCIToolService(config)
+    tools = AgenticHILToolService(config)
     try:
         while True:
             raw_line = input_stream.readline(limit)

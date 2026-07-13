@@ -1,5 +1,5 @@
-# Copy to .hardci/config.yaml inside this demo directory and adjust the
-# serial device for your host. The config is the policy: HardCI only allows
+# Copy to .agentic-hil/config.yaml inside this demo directory and adjust the
+# serial device for your host. The config is the policy: Agentic HIL only allows
 # what is named here.
 target:
   name: "nucleo-f446re-demo"

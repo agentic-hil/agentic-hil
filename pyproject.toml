@@ -24,7 +24,7 @@ keywords = [
   "debugger",
   "agentic-hil",
   "agentic",
-  "hardci",
+  "agentic_hil",
   "stm32"
 ]
 classifiers = [
@@ -70,10 +70,10 @@ agentic_hil = "agentic_hil.pytest_plugin"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hardci = [
+agentic_hil = [
   "schemas/*.json",
   "templates/*.json",
-  "skills/hardci-config-setup/SKILL.md"
+  "skills/agentic-hil-config-setup/SKILL.md"
 ]
 
 [tool.pytest.ini_options]

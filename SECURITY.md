@@ -1,6 +1,6 @@
 # Security Policy
 
-HardCI's purpose is to be a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client bypass the project policy in `.hardci/config.yaml` is a security vulnerability, not just a bug. That includes:
+Agentic HIL's purpose is to be a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client bypass the project policy in `.agentic-hil/config.yaml` is a security vulnerability, not just a bug. That includes:
 
 - flashing or reading artifacts outside `artifacts.allowed_roots`
 - reaching serial devices, CAN channels, or executables that are not named in the config
@@ -26,4 +26,4 @@ You can expect an acknowledgement within 7 days. Please allow time for a fix and
 
 ## Scope Notes
 
-HardCI executes locally configured debugger executables (OpenOCD, STM32CubeProgrammer CLI) and, for `adapter: process` CAN bridges, an executable named in the project config. The config file itself is trusted policy: whoever can edit `.hardci/config.yaml` controls the gate. Protect it like you protect your CI configuration.
+Agentic HIL executes locally configured debugger executables (OpenOCD, STM32CubeProgrammer CLI) and, for `adapter: process` CAN bridges, an executable named in the project config. The config file itself is trusted policy: whoever can edit `.agentic-hil/config.yaml` controls the gate. Protect it like you protect your CI configuration.

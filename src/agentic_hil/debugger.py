@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from hardci.config import ConfigError
-from hardci.types import HardCIConfig, JsonObject
+from agentic_hil.config import ConfigError
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 class DebuggerBackend(Protocol):
+    def reconfigure(self, config: AgenticHILConfig) -> None: ...
+
     def info(self) -> JsonObject: ...
 
     def probe_target(self) -> JsonObject: ...
@@ -42,17 +44,17 @@ class DebuggerBackend(Protocol):
     def close(self) -> None: ...
 
 
-def create_debugger_backend(config: HardCIConfig) -> DebuggerBackend:
+def create_debugger_backend(config: AgenticHILConfig) -> DebuggerBackend:
     if config.debugger.type == "openocd":
-        from hardci.backends.openocd import OpenOCDBackend
+        from agentic_hil.backends.openocd import OpenOCDBackend
 
         return OpenOCDBackend(config)
     if config.debugger.type == "stlink":
-        from hardci.backends.stlink import STLinkBackend
+        from agentic_hil.backends.stlink import STLinkBackend
 
         return STLinkBackend(config)
     if config.debugger.type == "pyocd":
-        from hardci.backends.pyocd import PyOCDBackend
+        from agentic_hil.backends.pyocd import PyOCDBackend
 
         return PyOCDBackend(config)
     raise ConfigError(

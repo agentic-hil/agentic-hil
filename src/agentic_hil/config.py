@@ -9,14 +9,14 @@ from typing import Any
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
-from hardci.types import (
+from agentic_hil.types import (
     AdapterConfig,
+    AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
     ComPortConfig,
     DebuggerConfig,
     DebugInterfaceConfig,
-    HardCIConfig,
     JsonObject,
     LogsConfig,
     PermissionsConfig,
@@ -25,8 +25,8 @@ from hardci.types import (
     ValidationConfig,
 )
 
-DEFAULT_CONFIG_PATH = ".hardci/config.yaml"
-CONFIG_SCHEMA_ID = "https://hardci.local/schemas/config.schema.json"
+DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
+CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
 
 
@@ -42,7 +42,7 @@ class ConfigError(Exception):
 
 
 def config_schema_text() -> str:
-    return resources.files("hardci").joinpath(CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8")
+    return resources.files("agentic_hil").joinpath(CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8")
 
 
 def config_schema() -> JsonObject:
@@ -57,7 +57,7 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
         details: JsonObject = {"schema": CONFIG_SCHEMA_RESOURCE, "schema_error": str(error)}
         if config_path is not None:
             details["path"] = config_path
-        raise ConfigError("config_schema_invalid", "Bundled HardCI configuration schema is invalid.", details) from error
+        raise ConfigError("config_schema_invalid", "Bundled Agentic HIL configuration schema is invalid.", details) from error
 
     errors = sorted(Draft202012Validator(schema).iter_errors(raw), key=lambda item: list(item.absolute_path))
     if errors:
@@ -68,14 +68,14 @@ def resolve_config_path(config_path: str | None = None) -> str:
     return config_path or DEFAULT_CONFIG_PATH
 
 
-def load_config(config_path: str | None = None, work_dir: str | None = None) -> HardCIConfig:
+def load_config(config_path: str | None = None, work_dir: str | None = None) -> AgenticHILConfig:
     resolved_config_path = resolve_config_path(config_path)
     base = Path(work_dir or Path.cwd()).resolve()
     config_file = Path(resolved_config_path)
     if not config_file.exists():
         raise ConfigError(
             "config_file_not_found",
-            "HardCI configuration file could not be found.",
+            "Agentic HIL configuration file could not be found.",
             {"path": resolved_config_path},
         )
 
@@ -84,25 +84,25 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     except OSError as error:
         raise ConfigError(
             "config_unreadable",
-            "HardCI configuration file could not be read.",
+            "Agentic HIL configuration file could not be read.",
             {"path": resolved_config_path, "backend_error": str(error)},
         ) from error
     except UnicodeDecodeError as error:
         raise ConfigError(
             "config_invalid",
-            "HardCI configuration file is not valid UTF-8 text.",
+            "Agentic HIL configuration file is not valid UTF-8 text.",
             {"path": resolved_config_path},
         ) from error
     except yaml.YAMLError as error:
         raise ConfigError(
             "config_invalid",
-            "HardCI configuration file is not valid YAML.",
+            "Agentic HIL configuration file is not valid YAML.",
             {"path": resolved_config_path},
         ) from error
 
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
-        raise ConfigError("config_invalid", "HardCI configuration root must be a mapping.", {"path": resolved_config_path})
+        raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
     validate_config_schema(raw, resolved_config_path)
 
     target_raw = mapping(raw.get("target"), "target")
@@ -125,7 +125,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
 
-    return HardCIConfig(
+    return AgenticHILConfig(
         config_path=resolved_config_path,
         work_dir=str(base),
         target=target_config(target_raw),
@@ -142,13 +142,13 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     )
 
 
-def resolve_work_path(config: HardCIConfig, requested_path: str) -> str:
+def resolve_work_path(config: AgenticHILConfig, requested_path: str) -> str:
     requested = Path(requested_path)
     candidate = requested if requested.is_absolute() else Path(config.work_dir) / requested
     return str(candidate.resolve())
 
 
-def display_path(config: HardCIConfig, requested_path: str) -> str:
+def display_path(config: AgenticHILConfig, requested_path: str) -> str:
     requested = Path(requested_path)
     if not requested.is_absolute():
         return to_posix(str(requested))
@@ -169,7 +169,7 @@ def raise_config_validation_error(error: Any, config_path: str | None = None) ->
 
     if error.validator == "additionalProperties":
         details["allowed_fields"] = sorted((error.schema.get("properties") or {}).keys())
-        raise ConfigError("config_invalid", "Unknown HardCI configuration field.", details) from error
+        raise ConfigError("config_invalid", "Unknown Agentic HIL configuration field.", details) from error
     if error.validator == "enum":
         details["allowed_values"] = error.validator_value
         details["value"] = error.instance
@@ -232,7 +232,7 @@ def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
 def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
     return ArtifactsConfig(
         allowed_roots=string_list(raw.get("allowed_roots"), ["build"]),
-        upload_directory=str(raw.get("upload_directory", ".hardci/artifacts")),
+        upload_directory=str(raw.get("upload_directory", ".agentic-hil/artifacts")),
         allowed_extensions=[item.lower() for item in string_list(raw.get("allowed_extensions"), [".elf", ".hex", ".bin"])],
         max_upload_size_mb=int(raw.get("max_upload_size_mb", 64)),
         allow_upload=bool(raw.get("allow_upload", True)),
@@ -317,11 +317,11 @@ def permissions_config(raw: JsonObject) -> PermissionsConfig:
 
 
 def reports_config(raw: JsonObject) -> ReportsConfig:
-    return ReportsConfig(directory=str(raw.get("directory", ".hardci/reports")))
+    return ReportsConfig(directory=str(raw.get("directory", ".agentic-hil/reports")))
 
 
 def logs_config(raw: JsonObject) -> LogsConfig:
-    return LogsConfig(directory=str(raw.get("directory", ".hardci/logs")))
+    return LogsConfig(directory=str(raw.get("directory", ".agentic-hil/logs")))
 
 
 def mapping(value: Any, field_name: str) -> JsonObject:

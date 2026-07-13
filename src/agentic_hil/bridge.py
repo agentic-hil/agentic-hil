@@ -6,7 +6,7 @@ import subprocess
 import threading
 from contextlib import suppress
 
-from hardci.types import JsonObject
+from agentic_hil.types import JsonObject
 
 CHILD_REAP_TIMEOUT_S = 5.0
 STDERR_TAIL_CHARS = 65536

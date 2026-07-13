@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simulated NTC temperature-sensor test adapter for the HardCI adapter bridge protocol.
+"""Simulated NTC temperature-sensor test adapter for the Agentic HIL adapter bridge protocol.
 
 The bridge speaks JSON per line on stdin/stdout:
 

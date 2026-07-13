@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from hardci.backends.common import (
+from agentic_hil.backends.common import (
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -12,10 +12,10 @@ from hardci.backends.common import (
     spawn_command,
     which,
 )
-from hardci.backends.gdbdebug import GdbDebugSessions
-from hardci.config import display_path, resolve_work_path
-from hardci.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
-from hardci.types import HardCIConfig, JsonObject
+from agentic_hil.backends.gdbdebug import GdbDebugSessions
+from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 OPENOCD_NOT_FOUND: JsonObject = {
     "ok": False,
@@ -35,16 +35,16 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
 OPENOCD_SUCCESS_MARKERS = {
-    "hardci_probe_target": "HARDCI_RESULT:probe_target:ok",
-    "hardci_flash_firmware": "HARDCI_RESULT:flash_firmware:ok",
-    "hardci_reset_target": "HARDCI_RESULT:reset_target:ok",
+    "probe_target": "AGENTIC_HIL_RESULT:probe_target:ok",
+    "flash_firmware": "AGENTIC_HIL_RESULT:flash_firmware:ok",
+    "reset_target": "AGENTIC_HIL_RESULT:reset_target:ok",
 }
 
 
 class OpenOCDBackend:
     backend_name = "openocd"
 
-    def __init__(self, config: HardCIConfig):
+    def __init__(self, config: AgenticHILConfig):
         self.config = config
         self._debug = GdbDebugSessions(
             config,
@@ -54,18 +54,26 @@ class OpenOCDBackend:
             classify_server_output=self._classify_output,
         )
 
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
+        debug_permission_revoked = not config.permissions.allow_probe or config.permissions.allow_raw_debugger_commands
+        if debugger_changed or debug_permission_revoked:
+            self._debug.close()
+        self.config = config
+        self._debug.config = config
+
     def info(self) -> JsonObject:
         resolved = self._resolve_executable()
         if not resolved["ok"]:
-            return {"tool": "hardci_debugger_info", **resolved}
+            return {"tool": "debugger_info", **resolved}
         command = [*invocation(str(resolved["executable_path"])), "--version"]
         completed = spawn_command(command, self.config.work_dir, min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
-            return {"tool": "hardci_debugger_info", **OPENOCD_NOT_FOUND}
+            return {"tool": "debugger_info", **OPENOCD_NOT_FOUND}
         if completed.timed_out:
             return {
                 "ok": False,
-                "tool": "hardci_debugger_info",
+                "tool": "debugger_info",
                 "backend": self.backend_name,
                 "executable": resolved["executable"],
                 "error_type": "timeout",
@@ -77,7 +85,7 @@ class OpenOCDBackend:
             error_type = self._public_error_type(backend_error_type)
             return {
                 "ok": False,
-                "tool": "hardci_debugger_info",
+                "tool": "debugger_info",
                 "backend": self.backend_name,
                 "executable": resolved["executable"],
                 "error_type": error_type,
@@ -86,7 +94,7 @@ class OpenOCDBackend:
             }
         return {
             "ok": True,
-            "tool": "hardci_debugger_info",
+            "tool": "debugger_info",
             "backend": self.backend_name,
             "executable": resolved["executable"],
             "probe_id": self.config.debugger.probe_id,
@@ -96,9 +104,9 @@ class OpenOCDBackend:
 
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("hardci_probe_target", "Probing is disabled by .hardci/config.yaml.")
-        marker = OPENOCD_SUCCESS_MARKERS["hardci_probe_target"]
-        result = self._run_openocd("hardci_probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
+            return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
+        marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
+        result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through OpenOCD."
@@ -106,16 +114,16 @@ class OpenOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("hardci_flash_firmware", "Flashing is disabled by .hardci/config.yaml.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by .agentic-hil/config.yaml.")
         if self.config.permissions.allow_raw_debugger_commands:
-            return self._permission_denied("hardci_flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:
-            return self._permission_denied("hardci_flash_firmware", "Flashing is disabled while mass erase is allowed.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
-        marker = OPENOCD_SUCCESS_MARKERS["hardci_flash_firmware"]
+        marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
-        result = self._run_openocd("hardci_flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -126,9 +134,9 @@ class OpenOCDBackend:
     def reset_target(self, mode: str = "run") -> JsonObject:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
-            return {"ok": False, "tool": "hardci_reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
-        marker = OPENOCD_SUCCESS_MARKERS["hardci_reset_target"]
-        result = self._run_openocd("hardci_reset_target", f'reset {mode}; echo "{marker}"; shutdown', marker)
+            return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
+        marker = OPENOCD_SUCCESS_MARKERS["reset_target"]
+        result = self._run_openocd("reset_target", f'reset {mode}; echo "{marker}"; shutdown', marker)
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = f"Target reset with mode '{mode}'."
@@ -170,15 +178,15 @@ class OpenOCDBackend:
     def classify_last_error(self) -> JsonObject:
         report = read_last_report(self.config)
         if not report.get("ok") and report.get("error_type") == "report_not_found":
-            return {"ok": False, "tool": "hardci_classify_last_error", "error_type": "report_not_found", "summary": "No HardCI report has been written yet."}
+            return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL report has been written yet."}
         if report.get("ok"):
-            return {"ok": True, "tool": "hardci_classify_last_error", "error_type": None, "summary": "Last HardCI report did not contain an error."}
+            return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL report did not contain an error."}
         error_type = str(report.get("error_type", "unknown_debugger_error"))
         result = {
             "ok": True,
-            "tool": "hardci_classify_last_error",
+            "tool": "classify_last_error",
             "error_type": error_type,
-            "summary": report.get("summary", "Last HardCI report contained an error."),
+            "summary": report.get("summary", "Last Agentic HIL report contained an error."),
             "likely_causes": report.get("likely_causes", self._likely_causes(error_type)),
             "report_path": report.get("report_path"),
             "log_path": report.get("log_path"),
@@ -284,7 +292,7 @@ class OpenOCDBackend:
         return None
 
     def _unconfirmed_backend_error_type(self, tool: str) -> str:
-        return {"hardci_probe_target": "target_not_detected", "hardci_flash_firmware": "flash_failed", "hardci_reset_target": "reset_failed"}.get(tool, "unknown_debugger_error")
+        return {"probe_target": "target_not_detected", "flash_firmware": "flash_failed", "reset_target": "reset_failed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
@@ -316,7 +324,7 @@ class OpenOCDBackend:
             return "reset_failed"
         if contains_any(lower, ["can't find", "couldn't find", "couldn't open", "not found"]):
             return "config_file_not_found"
-        if tool == "hardci_flash_firmware" and contains_any(lower, ["failed", "error"]):
+        if tool == "flash_firmware" and contains_any(lower, ["failed", "error"]):
             return "flash_failed"
         return "unknown_debugger_error"
 

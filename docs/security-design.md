@@ -4,7 +4,7 @@ Agentic HIL is a local MCP stdio server for agent-driven embedded hardware workf
 
 ## Threat Model
 
-Agentic HIL assumes an agent can request hardware actions, but should not receive arbitrary host shell access, arbitrary debugger access, or unrestricted device access through Agentic HIL. The project-local `.hardci/config.yaml` file is the authority for target configuration, artifact roots, named COM ports, CAN buses, test adapters, and permissions. Whoever can edit that file controls the gate — protect it like CI configuration.
+Agentic HIL assumes an agent can request hardware actions, but should not receive arbitrary host shell access, arbitrary debugger access, or unrestricted device access through Agentic HIL. The project-local `.agentic-hil/config.yaml` file is the authority for target configuration, artifact roots, named COM ports, CAN buses, test adapters, and permissions. Whoever can edit that file controls the gate — protect it like CI configuration.
 
 The primary risks are:
 
