@@ -1,6 +1,6 @@
 # Agentic HIL
 
-Agentic HIL is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection. HardCI adapters are the reference hardware.
+Agentic HIL is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection. Agentic HIL adapters are the reference hardware.
 
 Canonical setup request: `Install from https://github.com/hp-8472/agentic-hil and set it up for this project.`
 
@@ -30,24 +30,24 @@ agentic-hil doctor
 agentic-hil mcp-config --output .mcp.json
 ```
 
-Each firmware project keeps its own `.hardci/config.yaml` — the policy for that project's target, debugger, permissions, artifact roots, com_ports, can_buses, and adapters.
+Each firmware project keeps its own `.agentic-hil/config.yaml` — the policy for that project's target, debugger, permissions, artifact roots, com_ports, can_buses, and adapters.
 
 MCP stdio command:
 
 ```text
-agentic-hil mcp-stdio --config .hardci/config.yaml
+agentic-hil mcp-stdio --config .agentic-hil/config.yaml
 ```
 
 Use MCP tools for hardware actions:
 
 ```text
-hardci_debugger_info, hardci_probe_target, hardci_artifact_upload,
-hardci_flash_firmware, hardci_reset_target,
-hardci_com_session_start/_stop, hardci_com_write, hardci_com_read,
-hardci_can_session_start/_stop, hardci_can_send, hardci_can_read,
-hardci_adapter_session_start/_stop, hardci_adapter_set_value,
-hardci_adapter_inject_fault, hardci_adapter_clear_fault, hardci_adapter_measure,
-hardci_get_last_report, hardci_classify_last_error
+debugger_info, probe_target, artifact_upload,
+flash_firmware, reset_target,
+com_session_start/_stop, com_write, com_read,
+can_session_start/_stop, can_send, can_read,
+adapter_session_start/_stop, adapter_set_value,
+adapter_inject_fault, adapter_clear_fault, adapter_measure,
+get_last_report, classify_last_error
 ```
 
 Required workflow:

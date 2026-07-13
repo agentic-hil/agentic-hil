@@ -113,7 +113,7 @@ class LogsConfig:
 
 
 @dataclass(frozen=True)
-class HardCIConfig:
+class AgenticHILConfig:
     config_path: str
     work_dir: str
     target: TargetConfig

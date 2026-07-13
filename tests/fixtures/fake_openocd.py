@@ -34,11 +34,11 @@ def main() -> int:
     if "adapter serial" in text:
         print(text)
     if "probe_target" in text:
-        print("HARDCI_RESULT:probe_target:ok")
+        print("AGENTIC_HIL_RESULT:probe_target:ok")
     if "flash_firmware" in text or "program" in text:
-        print("HARDCI_RESULT:flash_firmware:ok")
+        print("AGENTIC_HIL_RESULT:flash_firmware:ok")
     if "reset_target" in text or "reset" in text:
-        print("HARDCI_RESULT:reset_target:ok")
+        print("AGENTIC_HIL_RESULT:reset_target:ok")
     return 0
 
 

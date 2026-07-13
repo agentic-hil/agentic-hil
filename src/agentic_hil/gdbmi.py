@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hardci.types import JsonObject
+from agentic_hil.types import JsonObject
 
 GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2"]
 RESULT_RECORD_PATTERN = re.compile(r"^(\d+)\^(done|running|connected|error|exit)(?:,.*)?$")
@@ -43,7 +43,7 @@ class GdbMiClient:
     """Serialized GDB/MI transport: one in-flight command, token-matched replies, buffered async stops."""
 
     def __init__(self, executable: str, work_dir: str):
-        from hardci.backends.common import invocation
+        from agentic_hil.backends.common import invocation
 
         self.child = subprocess.Popen(
             [*invocation(executable), *GDB_MI_ARGS],

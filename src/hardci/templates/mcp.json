@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "hardci": {
-      "command": "hardci",
-      "args": ["mcp-stdio", "--config", ".hardci/config.yaml"]
-    }
-  }
-}

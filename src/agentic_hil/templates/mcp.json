@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentic-hil": {
+      "command": "agentic-hil",
+      "args": ["mcp-stdio", "--config", ".agentic-hil/config.yaml"]
+    }
+  }
+}

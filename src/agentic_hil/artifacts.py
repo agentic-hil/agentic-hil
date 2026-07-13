@@ -7,12 +7,15 @@ import re
 from contextlib import suppress
 from pathlib import Path
 
-from hardci.config import display_path, resolve_work_path
-from hardci.types import HardCIConfig, JsonObject
+from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 class ArtifactManager:
-    def __init__(self, config: HardCIConfig):
+    def __init__(self, config: AgenticHILConfig):
+        self.config = config
+
+    def reconfigure(self, config: AgenticHILConfig) -> None:
         self.config = config
 
     def upload(self, payload: JsonObject | None = None) -> JsonObject:
@@ -20,9 +23,9 @@ class ArtifactManager:
         if not self.config.artifacts.allow_upload:
             return {
                 "ok": False,
-                "tool": "hardci_artifact_upload",
+                "tool": "artifact_upload",
                 "error_type": "permission_denied",
-                "summary": "Artifact upload is disabled by .hardci/config.yaml.",
+                "summary": "Artifact upload is disabled by .agentic-hil/config.yaml.",
             }
 
         has_image_path = payload.get("image_path") is not None
@@ -30,7 +33,7 @@ class ArtifactManager:
         if has_image_path == has_data_base64:
             return {
                 "ok": False,
-                "tool": "hardci_artifact_upload",
+                "tool": "artifact_upload",
                 "error_type": "invalid_argument",
                 "summary": "Provide exactly one of image_path or data_base64.",
             }
@@ -94,13 +97,13 @@ class ArtifactManager:
             "validation": validation,
         }
 
-    def resolve_artifact_id(self, artifact_id: str, tool: str = "hardci_flash_firmware") -> JsonObject:
+    def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
             return {
                 "ok": False,
                 "tool": tool,
                 "error_type": "permission_denied",
-                "summary": "Using uploaded artifacts is disabled by .hardci/config.yaml.",
+                "summary": "Using uploaded artifacts is disabled by .agentic-hil/config.yaml.",
                 "artifact_id": artifact_id,
             }
         if not is_safe_artifact_id(artifact_id):
@@ -155,7 +158,7 @@ class ArtifactManager:
     def _upload_local_path(self, image_path: str) -> JsonObject:
         source = self.validate_local_path(image_path)
         if not source["ok"]:
-            source["tool"] = "hardci_artifact_upload"
+            source["tool"] = "artifact_upload"
             return source
         size_bytes = int(source["artifact"].get("size_bytes") or 0)
         if size_bytes > self._max_upload_bytes():
@@ -165,7 +168,7 @@ class ArtifactManager:
         except OSError as error:
             return {
                 "ok": False,
-                "tool": "hardci_artifact_upload",
+                "tool": "artifact_upload",
                 "error_type": "artifact_not_found",
                 "summary": "Firmware artifact could not be read.",
                 "backend_error": str(error),
@@ -187,7 +190,7 @@ class ArtifactManager:
         if not validation["ok"]:
             with suppress(OSError):
                 stored_path.unlink()
-            validation["tool"] = "hardci_artifact_upload"
+            validation["tool"] = "artifact_upload"
             validation["artifact_id"] = artifact_id
             return validation
 
@@ -197,7 +200,7 @@ class ArtifactManager:
             artifact["source_path"] = source_path
         return {
             "ok": True,
-            "tool": "hardci_artifact_upload",
+            "tool": "artifact_upload",
             "artifact_id": artifact_id,
             "artifact": artifact,
             "validation": validation["validation"],
@@ -210,7 +213,7 @@ class ArtifactManager:
     def _artifact_too_large(self, size_bytes: int) -> JsonObject:
         return {
             "ok": False,
-            "tool": "hardci_artifact_upload",
+            "tool": "artifact_upload",
             "error_type": "artifact_too_large",
             "summary": "Uploaded artifact exceeds configured max_upload_size_mb.",
             "bytes": size_bytes,
@@ -218,7 +221,7 @@ class ArtifactManager:
         }
 
     def _validation_error(self, summary: str, validation: JsonObject, error_type: str = "artifact_validation_failed") -> JsonObject:
-        return {"ok": False, "tool": "hardci_flash_firmware", "error_type": error_type, "summary": summary, "validation": validation}
+        return {"ok": False, "tool": "flash_firmware", "error_type": error_type, "summary": summary, "validation": validation}
 
     def _output_validation_error(self, tool: str, summary: str, validation: JsonObject) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "output_validation_failed", "summary": summary, "validation": validation}
@@ -260,12 +263,12 @@ def sha256_file(file_path: Path) -> str:
 
 def upload_filename(value: object) -> JsonObject:
     if not isinstance(value, str) or not value.strip():
-        return {"ok": False, "tool": "hardci_artifact_upload", "error_type": "invalid_argument", "summary": "filename must be a non-empty string."}
+        return {"ok": False, "tool": "artifact_upload", "error_type": "invalid_argument", "summary": "filename must be a non-empty string."}
     filename = value.strip()
     if "/" in filename or "\\" in filename or "\0" in filename or has_traversal_segment(filename):
         return {
             "ok": False,
-            "tool": "hardci_artifact_upload",
+            "tool": "artifact_upload",
             "error_type": "invalid_argument",
             "summary": "filename must not contain path separators or traversal segments.",
         }
@@ -274,16 +277,16 @@ def upload_filename(value: object) -> JsonObject:
 
 def decode_base64_payload(value: object) -> JsonObject:
     if not isinstance(value, str) or not value.strip():
-        return {"ok": False, "tool": "hardci_artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must be a non-empty base64 string."}
+        return {"ok": False, "tool": "artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must be a non-empty base64 string."}
     compact = re.sub(r"\s+", "", value)
     if not re.fullmatch(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", compact):
-        return {"ok": False, "tool": "hardci_artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must contain valid padded base64 data."}
+        return {"ok": False, "tool": "artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must contain valid padded base64 data."}
     try:
         data = base64.b64decode(compact, validate=True)
     except binascii.Error:
-        return {"ok": False, "tool": "hardci_artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must contain valid padded base64 data."}
+        return {"ok": False, "tool": "artifact_upload", "error_type": "invalid_argument", "summary": "data_base64 must contain valid padded base64 data."}
     if not data:
-        return {"ok": False, "tool": "hardci_artifact_upload", "error_type": "invalid_argument", "summary": "Uploaded artifact must not be empty."}
+        return {"ok": False, "tool": "artifact_upload", "error_type": "invalid_argument", "summary": "Uploaded artifact must not be empty."}
     return {"ok": True, "data": data}
 
 

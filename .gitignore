@@ -9,6 +9,6 @@ htmlcov/
 build/
 dist/
 .venv/
-.hardci/
+.agentic-hil/
 .mcp.json
 uv.lock

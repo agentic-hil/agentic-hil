@@ -32,7 +32,7 @@ def write_config(
     if debugger_executable is None:
         fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD}
         debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
-    config_path = directory / ".hardci" / "config.yaml"
+    config_path = directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         f"""target:
@@ -55,13 +55,13 @@ debug:
 artifacts:
   allowed_roots: ["build"]
   allowed_extensions: [".elf", ".hex", ".bin"]
-  upload_directory: ".hardci/artifacts"
+  upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
 {com_ports_yaml}{can_buses_yaml}{adapters_yaml}{permissions_yaml}reports:
-  directory: ".hardci/reports"
+  directory: ".agentic-hil/reports"
 logs:
-  directory: ".hardci/logs"
+  directory: ".agentic-hil/logs"
 """,
         encoding="utf-8",
     )

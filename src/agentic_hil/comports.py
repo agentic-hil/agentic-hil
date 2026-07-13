@@ -6,12 +6,19 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from hardci.config import display_path
-from hardci.report import append_jsonl, logs_directory, safe_filename, timestamp_for_filename, utc_now_iso, write_report
-from hardci.types import ComPortConfig, HardCIConfig, JsonObject
+from agentic_hil.config import display_path
+from agentic_hil.report import (
+    append_jsonl,
+    logs_directory,
+    safe_filename,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
+from agentic_hil.types import AgenticHILConfig, ComPortConfig, JsonObject
 
 
-def list_available_com_ports(tool: str = "hardci_com_ports_available") -> JsonObject:
+def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
     try:
         from serial.tools import list_ports
     except ImportError:
@@ -20,7 +27,7 @@ def list_available_com_ports(tool: str = "hardci_com_ports_available") -> JsonOb
             "tool": tool,
             "error_type": "serial_backend_not_available",
             "summary": "pyserial is not installed or could not be imported.",
-            "likely_causes": ["install HardCI with its runtime dependencies", "pyserial installation is broken"],
+            "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"],
         }
     try:
         ports = [available_port_info(port) for port in list_ports.comports()]
@@ -79,9 +86,16 @@ class ComPortSession:
 
 
 class ComPortService:
-    def __init__(self, config: HardCIConfig):
+    def __init__(self, config: AgenticHILConfig):
         self.config = config
         self.sessions: dict[str, ComPortSession] = {}
+
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        for port_id, session in list(self.sessions.items()):
+            if not config.permissions.allow_com_read or config.com_ports.get(port_id) != session.port_config:
+                self.sessions.pop(port_id, None)
+                self._stop_session(session, "config_reloaded")
+        self.config = config
 
     def list_ports(self) -> JsonObject:
         ports: JsonObject = {}
@@ -92,32 +106,32 @@ class ComPortService:
         else:
             available = {
                 "ok": False,
-                "tool": "hardci_com_ports_available",
+                "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by .hardci/config.yaml (allow_com_read).",
+                "summary": "Host COM port discovery is disabled by .agentic-hil/config.yaml (allow_com_read).",
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
             "ok": True,
-            "tool": "hardci_com_ports_list",
+            "tool": "com_ports_list",
             "ports": ports,
             "available_com_ports": available,
             "summary": f"{len(ports)} configured COM port(s), {available_count} available host COM port(s).",
         }
 
     def session_start(self, port_id: str, clear_buffer: bool = True) -> JsonObject:
-        port = self._configured_port(port_id, "hardci_com_session_start")
+        port = self._configured_port(port_id, "com_session_start")
         if not port["ok"]:
             return self._write_report(port)
         if not self.config.permissions.allow_com_read:
-            return self._write_report(self._permission_denied("hardci_com_session_start", "COM port reading is disabled by .hardci/config.yaml.", port_id))
+            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by .agentic-hil/config.yaml.", port_id))
 
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
             if clear_buffer:
                 with existing.lock:
                     existing.buffer.clear()
-            return self._write_report({"ok": True, "tool": "hardci_com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
+            return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
         if existing:
             self.sessions.pop(port_id, None)
 
@@ -127,31 +141,31 @@ class ComPortService:
         session = opened["session"]
         self.sessions[port_id] = session
         append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
-        return self._write_report({"ok": True, "tool": "hardci_com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
+        return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
 
     def session_stop(self, port_id: str) -> JsonObject:
-        port = self._configured_port(port_id, "hardci_com_session_stop")
+        port = self._configured_port(port_id, "com_session_stop")
         if not port["ok"]:
             return self._write_report(port)
         session = self.sessions.pop(port_id, None)
         if session is None:
-            return self._write_report({"ok": True, "tool": "hardci_com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
+            return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
         self._stop_session(session, "requested")
-        return self._write_report({"ok": True, "tool": "hardci_com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
+        return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
-        port = self._configured_port(port_id, "hardci_com_write")
+        port = self._configured_port(port_id, "com_write")
         if not port["ok"]:
             return self._write_report(port)
         encoded = payload_bytes(port["port_config"], payload)
         if not encoded["ok"]:
             encoded["port_id"] = port_id
             return self._write_report(encoded)
-        return self._write_report(self.write_bytes(port_id, encoded["data"], "hardci_com_write"))
+        return self._write_report(self.write_bytes(port_id, encoded["data"], "com_write"))
 
-    def write_bytes(self, port_id: str, data: bytes, tool: str = "hardci_com_write") -> JsonObject:
+    def write_bytes(self, port_id: str, data: bytes, tool: str = "com_write") -> JsonObject:
         if not self.config.permissions.allow_com_write:
-            return self._permission_denied(tool, "COM port writing is disabled by .hardci/config.yaml.", port_id)
+            return self._permission_denied(tool, "COM port writing is disabled by .agentic-hil/config.yaml.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -171,11 +185,11 @@ class ComPortService:
         return {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
 
     def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
-        return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "hardci_com_read"))
+        return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
 
-    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "hardci_com_read") -> JsonObject:
+    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
         if not self.config.permissions.allow_com_read:
-            return self._permission_denied(tool, "COM port reading is disabled by .hardci/config.yaml.", port_id)
+            return self._permission_denied(tool, "COM port reading is disabled by .agentic-hil/config.yaml.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -214,20 +228,20 @@ class ComPortService:
         try:
             import serial
         except ImportError:
-            return {"ok": False, "tool": "hardci_com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install HardCI with its runtime dependencies", "pyserial installation is broken"]}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"]}
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
             log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
             return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path)}
         except Exception as error:
-            return {"ok": False, "tool": "hardci_com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
 
     def _configured_port(self, port_id: str, tool: str) -> JsonObject:
         if not port_id:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "port_id is required."}
         port_config = self.config.com_ports.get(port_id)
         if port_config is None:
-            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not configured in .hardci/config.yaml.", "configured_ports": sorted(self.config.com_ports.keys())}
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not configured in .agentic-hil/config.yaml.", "configured_ports": sorted(self.config.com_ports.keys())}
         return {"ok": True, "port_config": port_config}
 
     def _active_session(self, port_id: str, tool: str) -> JsonObject:
@@ -236,10 +250,10 @@ class ComPortService:
             return port
         session = self.sessions.get(port_id)
         if session is None or not self._session_is_active(session):
-            result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with hardci_com_session_start first."}
+            result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
             if session is not None and session.reader_error:
                 result["reader_error"] = session.reader_error
-                result["summary"] = "COM port session failed and is no longer active. Start it again with hardci_com_session_start."
+                result["summary"] = "COM port session failed and is no longer active. Start it again with com_session_start."
             return result
         return {"ok": True, "session": session}
 
@@ -280,21 +294,21 @@ def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject
     has_text = payload.get("text") is not None
     has_hex = payload.get("hex") is not None
     if has_text == has_hex:
-        return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "Provide exactly one of text or hex."}
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "Provide exactly one of text or hex."}
     if has_text:
         if not isinstance(payload.get("text"), str):
-            return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "text must be a string."}
+            return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "text must be a string."}
         try:
             return {"ok": True, "data": payload["text"].encode(port_config.encoding)}
         except LookupError:
-            return {"ok": False, "tool": "hardci_com_write", "error_type": "config_invalid", "summary": "COM port encoding is not supported by Python.", "encoding": port_config.encoding}
+            return {"ok": False, "tool": "com_write", "error_type": "config_invalid", "summary": "COM port encoding is not supported by Python.", "encoding": port_config.encoding}
         except UnicodeEncodeError:
-            return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "text cannot be encoded with the configured COM port encoding.", "encoding": port_config.encoding}
+            return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "text cannot be encoded with the configured COM port encoding.", "encoding": port_config.encoding}
     if not isinstance(payload.get("hex"), str):
-        return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "hex must be a string."}
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "hex must be a string."}
     cleaned = re.sub(r"\s+", "", payload["hex"])
     if len(cleaned) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]*", cleaned) is None:
-        return {"ok": False, "tool": "hardci_com_write", "error_type": "invalid_argument", "summary": "hex must contain valid hexadecimal bytes."}
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "hex must contain valid hexadecimal bytes."}
     return {"ok": True, "data": bytes.fromhex(cleaned)}
 
 

@@ -1,14 +1,14 @@
 ---
-name: hardci-config-setup
+name: agentic-hil-config-setup
 description: Configure Agentic HIL as the safe local hardware-in-the-loop MCP bridge for an embedded firmware project.
 metadata:
-  origin: HardCI
-  hardci_version: "0.2.1"
+  origin: Agentic HIL
+  agentic_hil_version: "0.2.1"
 ---
 
 # Agentic HIL Config Setup
 
-Use Agentic HIL as the project-local hardware gate. The policy file is `.hardci/config.yaml`.
+Use Agentic HIL as the project-local hardware gate. The policy file is `.agentic-hil/config.yaml`.
 
 Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
 

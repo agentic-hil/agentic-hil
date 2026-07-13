@@ -5,8 +5,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hardci.config import display_path, resolve_work_path
-from hardci.types import HardCIConfig, JsonObject
+from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 def utc_now_iso() -> str:
@@ -17,13 +17,13 @@ def timestamp_for_filename() -> str:
     return utc_now_iso().replace("-", "").replace(":", "").replace(".", "")
 
 
-def reports_directory(config: HardCIConfig) -> str:
+def reports_directory(config: AgenticHILConfig) -> str:
     directory = Path(resolve_work_path(config, config.reports.directory))
     directory.mkdir(parents=True, exist_ok=True)
     return str(directory)
 
 
-def logs_directory(config: HardCIConfig) -> str:
+def logs_directory(config: AgenticHILConfig) -> str:
     directory = Path(resolve_work_path(config, config.logs.directory))
     directory.mkdir(parents=True, exist_ok=True)
     return str(directory)
@@ -40,11 +40,11 @@ def safe_filename(value: str, fallback: str = "item") -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or fallback
 
 
-def last_report_path(config: HardCIConfig) -> str:
+def last_report_path(config: AgenticHILConfig) -> str:
     return str(Path(reports_directory(config)) / "last-report.json")
 
 
-def write_report(config: HardCIConfig, report: JsonObject) -> JsonObject:
+def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     report_path = last_report_path(config)
     enriched = dict(report)
     enriched.setdefault("report_path", display_path(config, report_path))
@@ -52,23 +52,23 @@ def write_report(config: HardCIConfig, report: JsonObject) -> JsonObject:
     return enriched
 
 
-def read_last_report(config: HardCIConfig) -> JsonObject:
+def read_last_report(config: AgenticHILConfig) -> JsonObject:
     report_path = last_report_path(config)
     path = Path(report_path)
     if not path.exists():
         return {
             "ok": False,
-            "tool": "hardci_get_last_report",
+            "tool": "get_last_report",
             "error_type": "report_not_found",
-            "summary": "No HardCI report has been written yet.",
+            "summary": "No Agentic HIL report has been written yet.",
         }
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {
             "ok": False,
-            "tool": "hardci_get_last_report",
+            "tool": "get_last_report",
             "error_type": "config_invalid",
-            "summary": "Last HardCI report is not valid JSON.",
+            "summary": "Last Agentic HIL report is not valid JSON.",
             "report_path": display_path(config, report_path),
         }

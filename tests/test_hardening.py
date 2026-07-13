@@ -10,21 +10,21 @@ from types import SimpleNamespace
 import pytest
 from conftest import write_config
 
-from hardci.adapters import AdapterService, AdapterSession
-from hardci.bridge import ProcessBridgeSession
-from hardci.can import parse_can_id, payload_frame
-from hardci.comports import ComPortService, ComPortSession
-from hardci.comstdio import run_com_stdio
-from hardci.config import load_config
-from hardci.mcp import handle_mcp_message
-from hardci.stdio import run_stdio_server
-from hardci.tools import HardCIToolService
-from hardci.types import AdapterConfig, CanBusConfig
+from agentic_hil.adapters import AdapterService, AdapterSession
+from agentic_hil.bridge import ProcessBridgeSession
+from agentic_hil.can import parse_can_id, payload_frame
+from agentic_hil.comports import ComPortService, ComPortSession
+from agentic_hil.comstdio import run_com_stdio
+from agentic_hil.config import load_config
+from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.stdio import run_stdio_server
+from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.types import AdapterConfig, CanBusConfig
 
 WAIT_TIMEOUT_S = 5.0
 POLL_INTERVAL_S = 0.01
 
-COM_PORT_YAML = 'com_ports:\n  dut:\n    device: "/dev/ttyHARDCITEST"\n'
+COM_PORT_YAML = 'com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n'
 CAN_BUS_YAML = 'can_buses:\n  bench:\n    adapter: "process"\n    channel: "vcan0"\n    executable: "python"\n'
 ADAPTER_YAML = 'adapters:\n  ntc:\n    executable: "python"\n    channels: ["temp"]\n    faults: ["open"]\n'
 
@@ -64,7 +64,7 @@ def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> No
 
 
 def test_empty_jsonrpc_batch_returns_invalid_request(tmp_path: Path) -> None:
-    service = HardCIToolService(load_test_config(tmp_path))
+    service = AgenticHILToolService(load_test_config(tmp_path))
 
     response = handle_mcp_message([], service)
 
@@ -88,7 +88,7 @@ class FailingSerialHandle:
 def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
-    log_path = tmp_path / ".hardci" / "logs" / "test-com.jsonl"
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     session = ComPortSession("dut", config.com_ports["dut"], FailingSerialHandle(), str(log_path))
     service.sessions["dut"] = session
@@ -140,7 +140,7 @@ class StubComPortService:
 
 def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
-    monkeypatch.setattr("hardci.comstdio.ComPortService", StubComPortService)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", StubComPortService)
     stdin = BlockingStdin()
     output = StringIO()
     worker = threading.Thread(
@@ -174,7 +174,7 @@ def test_adapter_service_close_stops_all_sessions_despite_bridge_failure(tmp_pat
     config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
     service = AdapterService(config)
     adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
-    log_dir = tmp_path / ".hardci" / "logs"
+    log_dir = tmp_path / ".agentic-hil" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     first = AdapterSession("a1", adapter_config, ExplodingBridge(), str(log_dir / "a1.jsonl"))
     second = AdapterSession("a2", adapter_config, ExplodingBridge(), str(log_dir / "a2.jsonl"))
@@ -192,9 +192,9 @@ def test_artifact_upload_rejects_oversized_local_file(tmp_path: Path) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     oversized = build_dir / "big.bin"
     oversized.write_bytes(b"\0" * (config.artifacts.max_upload_size_mb * 1024 * 1024 + 1))
-    service = HardCIToolService(config)
+    service = AgenticHILToolService(config)
 
-    result = service.call("hardci_artifact_upload", {"image_path": "build/big.bin"})
+    result = service.call("artifact_upload", {"image_path": "build/big.bin"})
 
     assert result["ok"] is False
     assert result["error_type"] == "artifact_too_large"
@@ -250,31 +250,31 @@ def test_bridge_stderr_is_capped_and_surfaced_in_errors() -> None:
 
 
 def test_debug_set_breakpoint_requires_location(tmp_path: Path) -> None:
-    service = HardCIToolService(load_test_config(tmp_path))
+    service = AgenticHILToolService(load_test_config(tmp_path))
 
-    result = service.call("hardci_debug_set_breakpoint", {})
+    result = service.call("debug_set_breakpoint", {})
 
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
 
 
 def test_flash_rejects_non_boolean_reset_after_flash(tmp_path: Path) -> None:
-    service = HardCIToolService(load_test_config(tmp_path))
+    service = AgenticHILToolService(load_test_config(tmp_path))
 
-    result = service.call("hardci_flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": "false"})
+    result = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": "false"})
 
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
 
 
 PERMISSION_GATE_CASES = [
-    ("allow_probe", "hardci_probe_target", {}),
-    ("allow_flash", "hardci_flash_firmware", {"image_path": "build/app.elf"}),
-    ("allow_com_read", "hardci_com_session_start", {"port_id": "dut"}),
-    ("allow_com_write", "hardci_com_write", {"port_id": "dut", "text": "hi"}),
-    ("allow_can_read", "hardci_can_read", {"bus_id": "bench"}),
-    ("allow_can_write", "hardci_can_send", {"bus_id": "bench", "frame_id": 1, "data_hex": "00"}),
-    ("allow_adapter_read", "hardci_adapter_measure", {"adapter_id": "ntc", "channel": "temp"}),
+    ("allow_probe", "probe_target", {}),
+    ("allow_flash", "flash_firmware", {"image_path": "build/app.elf"}),
+    ("allow_com_read", "com_session_start", {"port_id": "dut"}),
+    ("allow_com_write", "com_write", {"port_id": "dut", "text": "hi"}),
+    ("allow_can_read", "can_read", {"bus_id": "bench"}),
+    ("allow_can_write", "can_send", {"bus_id": "bench", "frame_id": 1, "data_hex": "00"}),
+    ("allow_adapter_read", "adapter_measure", {"adapter_id": "ntc", "channel": "temp"}),
 ]
 
 
@@ -287,7 +287,7 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
         adapters_yaml=ADAPTER_YAML,
         permissions_yaml=f"permissions:\n  {flag}: false\n",
     )
-    service = HardCIToolService(config)
+    service = AgenticHILToolService(config)
 
     result = service.call(tool, arguments)
 

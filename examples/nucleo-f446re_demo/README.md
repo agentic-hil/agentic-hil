@@ -1,6 +1,6 @@
-# Nucleo-F446RE Demo: Real Firmware in the HardCI Loop
+# Nucleo-F446RE Demo: Real Firmware in the Agentic HIL Loop
 
-A minimal bare-metal STM32F446RE firmware for the [ST Nucleo-F446RE](https://www.st.com/en/evaluation-tools/nucleo-f446re.html) board that demonstrates the complete HardCI loop on real hardware: build → flash → reset → assert on serial output.
+A minimal bare-metal STM32F446RE firmware for the [ST Nucleo-F446RE](https://www.st.com/en/evaluation-tools/nucleo-f446re.html) board that demonstrates the complete Agentic HIL loop on real hardware: build → flash → reset → assert on serial output.
 
 The firmware prints `Hello World` on USART2 (PA2/PA3, routed to the ST-LINK virtual COM port, 115200 baud) at boot and then blinks the LD2 user LED. No HAL, no external dependencies — the whole program is [Src/main.c](Src/main.c).
 
@@ -25,7 +25,7 @@ Names: the Python package/install target uses `agentic_hil`; the CLI command use
 
 ```bash
 pipx install agentic_hil
-mkdir -p .hardci && cp hardci.config.example.yaml .hardci/config.yaml
+mkdir -p .agentic-hil && cp agentic-hil.config.example.yaml .agentic-hil/config.yaml
 # adjust com_ports.dut_uart.device (e.g. /dev/ttyACM0, COM5), then:
 agentic-hil doctor
 ```
@@ -35,10 +35,10 @@ agentic-hil doctor
 With the project-local `.mcp.json` from the [top-level README](../../README.md), an agent drives:
 
 ```text
-hardci_flash_firmware     {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
-hardci_com_session_start  {"port_id": "dut_uart"}
-hardci_reset_target       {"mode": "run"}
-hardci_com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
+flash_firmware     {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
+com_session_start  {"port_id": "dut_uart"}
+reset_target       {"mode": "run"}
+com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
 → feedback contains "Hello World"
 ```
 
@@ -48,7 +48,7 @@ hardci_com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
 pytest tests/
 ```
 
-[tests/test_firmware.py](tests/test_firmware.py) flashes the ELF, resets the target, and asserts the boot banner on the UART. Without a `.hardci/config.yaml` the test skips; with a configuration but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
+[tests/test_firmware.py](tests/test_firmware.py) flashes the ELF, resets the target, and asserts the boot banner on the UART. Without a `.agentic-hil/config.yaml` the test skips; with a configuration but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
 
 ## Adapting to another board
 

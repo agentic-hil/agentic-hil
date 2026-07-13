@@ -70,7 +70,7 @@ body:
       placeholder: |
         1. agentic-hil init
         2. agentic-hil doctor
-        3. Agent called hardci_probe_target
+        3. Agent called probe_target
     validations:
       required: true
   - type: textarea
@@ -89,14 +89,14 @@ body:
   - type: textarea
     id: config
     attributes:
-      label: Sanitized `.hardci/config.yaml`
+      label: Sanitized `.agentic-hil/config.yaml`
       description: Remove local usernames, secrets, private paths, and unrelated COM devices.
       render: yaml
   - type: textarea
     id: report
     attributes:
       label: Last report JSON
-      description: Paste sanitized `.hardci/reports/last-report.json` if available.
+      description: Paste sanitized `.agentic-hil/reports/last-report.json` if available.
       render: json
   - type: textarea
     id: logs
@@ -109,7 +109,7 @@ body:
     attributes:
       label: Safety checks
       options:
-        - label: I did not run raw debugger commands to work around HardCI.
+        - label: I did not run raw debugger commands to work around Agentic HIL.
         - label: I did not mass erase the target.
         - label: I stopped after `permission_denied` if it occurred.
         - label: I checked TROUBLESHOOTING.md for this failure mode.

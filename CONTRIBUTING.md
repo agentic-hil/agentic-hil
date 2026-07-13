@@ -1,6 +1,6 @@
-# Contributing to HardCI
+# Contributing to Agentic HIL
 
-Thanks for helping improve HardCI. This project is a local MCP stdio server for safe, structured hardware-in-the-loop access, so changes should keep safety boundaries explicit and easy to audit.
+Thanks for helping improve Agentic HIL. This project is a local MCP stdio server for safe, structured hardware-in-the-loop access, so changes should keep safety boundaries explicit and easy to audit.
 
 ## Development Setup
 
@@ -20,7 +20,7 @@ Names: the Python package/install target and Python-facing identifiers such as i
 - Run `ruff check src tests examples` and `pytest` before opening a pull request.
 - Run `python -m build` and inspect the sdist/wheel when package contents, bundled data files (schemas, templates, skills), or release files change.
 - Add or update tests when changing behavior.
-- Do not bypass HardCI safety boundaries with raw debugger, flashing, reset, COM-port, CAN, or test-adapter access.
+- Do not bypass Agentic HIL safety boundaries with raw debugger, flashing, reset, COM-port, CAN, or test-adapter access.
 - Keep generated artifacts (`build/`, `dist/`, lockfiles) out of commits unless they are intentionally published source artifacts.
 - If README onboarding or demo behavior changes, update the affected examples and docs in the same pull request.
 - If a change affects Windows setup, confirm the docs still work for explicit OpenOCD paths and COM ports.
@@ -39,16 +39,16 @@ Use the bug report issue template when possible. Include enough information for 
 - Board, debug probe, debugger backend, and serial/CAN/adapter hardware if relevant.
 - Minimal command sequence that triggered the failure.
 - Expected behavior and actual behavior.
-- Sanitized `.hardci/config.yaml` with local paths, usernames, and secrets removed.
-- Relevant `.hardci/reports/last-report.json` content.
+- Sanitized `.agentic-hil/config.yaml` with local paths, usernames, and secrets removed.
+- Relevant `.agentic-hil/reports/last-report.json` content.
 - Relevant debugger, COM, CAN, or adapter `log_path` output, sanitized if needed.
 - Whether the failure is reproducible after reconnecting the board and rerunning `agentic-hil doctor`.
 
 ## Hardware Safety
 
-HardCI is designed to let agents perform hardware actions through configured, narrow tools. Contributions should preserve these principles:
+Agentic HIL is designed to let agents perform hardware actions through configured, narrow tools. Contributions should preserve these principles:
 
-- Project-local `.hardci/config.yaml` is the authority for permissions, artifact roots, and named devices.
+- Project-local `.agentic-hil/config.yaml` is the authority for permissions, artifact roots, and named devices.
 - Raw debugger commands and mass erase behavior must remain disabled unless a future design explicitly documents a safe policy.
 - Test-adapter channels and faults stay explicit allowlists; never widen them implicitly.
 - Hardware reports and structured errors should stay machine-readable so agents can reason about failures safely.

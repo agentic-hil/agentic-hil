@@ -1,6 +1,6 @@
 # AI Agent Quickstart
 
-Use Agentic HIL as the local MCP server for embedded firmware development and embedded hardware actions. HardCI adapters are the reference hardware.
+Use Agentic HIL as the local MCP server for embedded firmware development and embedded hardware actions. Agentic HIL adapters are the reference hardware.
 
 This file is for agents. Humans should start with `README.md` and use `TROUBLESHOOTING.md` for operator-facing diagnostics.
 
@@ -73,7 +73,7 @@ uv tool install agentic_hil        # or from the repository: uv tool install git
 
 ## Install Agent Skill
 
-Agent-driven Agentic HIL installation includes installing the bundled `hardci-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
+Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
 agentic-hil skill-install --agent <agent>          # or: uvx --from agentic_hil agentic-hil skill-install --agent <agent>
@@ -86,16 +86,16 @@ Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude
 In every firmware project that should use Agentic HIL:
 
 ```bash
-agentic-hil init            # writes the starter .hardci/config.yaml
-# edit .hardci/config.yaml: target, debugger configs, allowed artifact roots,
+agentic-hil init            # writes the starter .agentic-hil/config.yaml
+# edit .agentic-hil/config.yaml: target, debugger configs, allowed artifact roots,
 # named com_ports / can_buses / adapters — keep the safety policy restrictive
 agentic-hil doctor          # validates config and checks the debugger
 agentic-hil mcp-config --output .mcp.json
 ```
 
-Keep `.hardci/` with the project: it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall Agentic HIL inside every project.
+Keep `.agentic-hil/` with the project: it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall Agentic HIL inside every project.
 
-Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "HardCI configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
+Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "Agentic HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
 
 ## Configure MCP
 
@@ -106,28 +106,28 @@ Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "HardCI conf
   "mcpServers": {
     "agentic-hil": {
       "command": "agentic-hil",
-      "args": ["mcp-stdio", "--config", ".hardci/config.yaml"]
+      "args": ["mcp-stdio", "--config", ".agentic-hil/config.yaml"]
     }
   }
 }
 ```
 
-If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["--from", "agentic_hil", "agentic-hil", "mcp-stdio", "--config", ".hardci/config.yaml"]`.
+If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["--from", "agentic_hil", "agentic-hil", "mcp-stdio", "--config", ".agentic-hil/config.yaml"]`.
 
-`mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --config .hardci/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
+`mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --config .agentic-hil/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
 
 ## Use The Tools
 
 Use `tools/list` to discover available MCP tools, then follow this loop:
 
 1. Build firmware.
-2. Check debugger availability with `hardci_debugger_info` if setup is unclear.
-3. Probe with `hardci_probe_target`.
-4. Flash with `hardci_flash_firmware` using `image_path` (usually `build/firmware.elf`), or first call `hardci_artifact_upload` and flash the returned `artifact_id`. Pass `reset_after_flash: true` only when a post-flash reset is explicitly needed.
-5. For serial feedback: `hardci_com_session_start`, stimulate with `hardci_com_write`, read with `hardci_com_read`, stop with `hardci_com_session_stop`.
-6. For CAN: `hardci_can_session_start`, `hardci_can_send`, `hardci_can_read`, `hardci_can_session_stop`.
-7. For simulated sensors, loads, and fault states: `hardci_adapter_session_start`, `hardci_adapter_set_value`, `hardci_adapter_inject_fault`, `hardci_adapter_measure`, `hardci_adapter_clear_fault`, `hardci_adapter_session_stop`.
-8. Read the tool result and `hardci_get_last_report`; diagnose failures with `hardci_classify_last_error`.
+2. Check debugger availability with `debugger_info` if setup is unclear.
+3. Probe with `probe_target`.
+4. Flash with `flash_firmware` using `image_path` (usually `build/firmware.elf`), or first call `artifact_upload` and flash the returned `artifact_id`. Pass `reset_after_flash: true` only when a post-flash reset is explicitly needed.
+5. For serial feedback: `com_session_start`, stimulate with `com_write`, read with `com_read`, stop with `com_session_stop`.
+6. For CAN: `can_session_start`, `can_send`, `can_read`, `can_session_stop`.
+7. For simulated sensors, loads, and fault states: `adapter_session_start`, `adapter_set_value`, `adapter_inject_fault`, `adapter_measure`, `adapter_clear_fault`, `adapter_session_stop`.
+8. Read the tool result and `get_last_report`; diagnose failures with `classify_last_error`.
 
 Healthy probe and flash signals: `target_detected: true`, `success_confirmed: true`, `verify: true`, an intentional `reset_after_flash` value, plus `report_path` and `log_path` for auditability.
 
@@ -135,4 +135,4 @@ Do not use raw OpenOCD commands, arbitrary COM-port shell tools, direct CAN adap
 
 ## pytest Suites
 
-For CI regression suites the installed package registers a pytest plugin: the `agentic_hil` fixture drives the same tools via `agentic_hil.call(name, arguments)`. Tests skip when no `.hardci/config.yaml` exists and fail loudly when the config is invalid. See `examples/pytest/` and `examples/nucleo-f446re_demo/tests/`.
+For CI regression suites the installed package registers a pytest plugin: the `agentic_hil` fixture drives the same tools via `agentic_hil.call(name, arguments)`. Tests skip when no `.agentic-hil/config.yaml` exists and fail loudly when the config is invalid. See `examples/pytest/` and `examples/nucleo-f446re_demo/tests/`.
