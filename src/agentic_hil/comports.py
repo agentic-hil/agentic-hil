@@ -108,7 +108,7 @@ class ComPortService:
                 "ok": False,
                 "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by .agentic-hil/config.yaml (allow_com_read).",
+                "summary": "Host COM port discovery is disabled by the effective policy (allow_com_read).",
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
@@ -124,7 +124,7 @@ class ComPortService:
         if not port["ok"]:
             return self._write_report(port)
         if not self.config.permissions.allow_com_read:
-            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by .agentic-hil/config.yaml.", port_id))
+            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by the effective policy.", port_id))
 
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
@@ -165,7 +165,7 @@ class ComPortService:
 
     def write_bytes(self, port_id: str, data: bytes, tool: str = "com_write") -> JsonObject:
         if not self.config.permissions.allow_com_write:
-            return self._permission_denied(tool, "COM port writing is disabled by .agentic-hil/config.yaml.", port_id)
+            return self._permission_denied(tool, "COM port writing is disabled by the effective policy.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -189,7 +189,7 @@ class ComPortService:
 
     def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
         if not self.config.permissions.allow_com_read:
-            return self._permission_denied(tool, "COM port reading is disabled by .agentic-hil/config.yaml.", port_id)
+            return self._permission_denied(tool, "COM port reading is disabled by the effective policy.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -241,7 +241,7 @@ class ComPortService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "port_id is required."}
         port_config = self.config.com_ports.get(port_id)
         if port_config is None:
-            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not configured in .agentic-hil/config.yaml.", "configured_ports": sorted(self.config.com_ports.keys())}
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the effective policy.", "configured_ports": sorted(self.config.com_ports.keys())}
         return {"ok": True, "port_config": port_config}
 
     def _active_session(self, port_id: str, tool: str) -> JsonObject:

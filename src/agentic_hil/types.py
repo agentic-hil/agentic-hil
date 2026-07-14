@@ -29,6 +29,7 @@ class DebuggerConfig:
 class DebugInterfaceConfig:
     gdb_executable: str | None
     allowed_symbols: list[str]
+    allow_all_symbols: bool
     max_dump_size_bytes: int
 
 
@@ -92,6 +93,7 @@ class ValidationConfig:
 class PermissionsConfig:
     allow_probe: bool
     allow_flash: bool
+    allow_reset: bool
     allow_com_read: bool
     allow_com_write: bool
     allow_can_read: bool

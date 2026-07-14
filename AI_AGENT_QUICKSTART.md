@@ -88,18 +88,26 @@ In every firmware project that should use Agentic HIL:
 ```bash
 agentic-hil init            # writes the starter .agentic-hil/config.yaml
 # edit .agentic-hil/config.yaml: target, debugger configs, allowed artifact roots,
-# named com_ports / can_buses / adapters — keep the safety policy restrictive
-agentic-hil doctor          # validates config and checks the debugger
-agentic-hil mcp-config --output .mcp.json
+# named com_ports / can_buses / adapters - this file may only narrow host policy
 ```
 
-Keep `.agentic-hil/` with the project: it defines that project's hardware policy, reports, logs, and allowed artifact locations. Do not reinstall Agentic HIL inside every project.
+Keep `.agentic-hil/` with the project: it requests project resources and defines report/log locations. It is not the authorization boundary because the agent can edit it. Do not reinstall Agentic HIL inside every project.
+
+Stop here and ask the human operator to create the trusted ceiling from the project directory:
+
+```bash
+agentic-hil policy-init --output /absolute/path/outside/project/project-policy.yaml
+```
+
+The generated trusted policy starts with all hardware permissions and uploads disabled. The operator must review it, add only approved resources, and set `AGENTIC_HIL_POLICY` to its absolute path in the host/user-level MCP environment. Enabled debugger and process-bridge entries must use host-owned files outside the workspace; enabled OpenOCD entries require absolute external interface/target script paths. Empty symbol allowlists deny all symbols, while unrestricted access requires `debug.allow_all_symbols: true` in both files. Never create, edit, move, or replace the trusted policy, environment setting, or host MCP registration on the operator's behalf.
+
+After the operator has established that boundary, `agentic-hil doctor` validates the effective policy and checks the debugger only when `allow_probe` permits execution.
 
 Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "Agentic HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
 
 ## Configure MCP
 
-`.mcp.json` is only the MCP launch entry. The default written by `agentic-hil mcp-config` assumes `agentic-hil` is on `PATH`:
+`.mcp.json` is only an untrusted MCP discovery entry. The default written by `agentic-hil mcp-config` assumes `agentic-hil` is on `PATH`:
 
 ```json
 {
@@ -113,6 +121,8 @@ Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "Agentic HIL
 ```
 
 If `agentic-hil` is not on `PATH`, use the runner form instead: `"command": "uvx", "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio", "--config", ".agentic-hil/config.yaml"]`.
+
+`mcp-stdio` refuses to start without a valid `AGENTIC_HIL_POLICY` outside the workspace. The trusted policy is loaded once; project changes can revoke but cannot grant access. A repository `.mcp.json` is not a root of trust and must not set or override the policy environment variable. For unattended benches, the operator should use host/user-level MCP registration that the agent cannot edit.
 
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, CAN tool calls pass `bus_id`, and test-adapter tool calls pass `adapter_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --config .agentic-hil/config.yaml --port <port_id>` process — never mix plain text into `mcp-stdio`.
 
@@ -131,7 +141,7 @@ Use `tools/list` to discover available MCP tools, then follow this loop:
 
 Healthy probe and flash signals: `target_detected: true`, `success_confirmed: true`, `verify: true`, an intentional `reset_after_flash` value, plus `report_path` and `log_path` for auditability.
 
-Do not use raw OpenOCD commands, arbitrary COM-port shell tools, direct CAN adapter tools, or direct test-adapter access when an Agentic HIL MCP tool is available. Treat `permission_denied` as authoritative and stop.
+Do not use raw OpenOCD commands, arbitrary COM-port shell tools, direct CAN adapter tools, or direct test-adapter access when an Agentic HIL MCP tool is available. Treat `permission_denied` as authoritative and stop; modifying project config cannot and must not widen the trusted ceiling.
 
 ## pytest Suites
 

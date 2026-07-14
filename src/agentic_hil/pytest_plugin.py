@@ -44,7 +44,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def resolve_plugin_config_path(config: pytest.Config) -> str:
     option = config.getoption("--agentic-hil-config")
     if option:
-        return str(option)  # command-line paths stay relative to the invocation cwd
+        return str(Path(str(option)).resolve())  # command-line paths stay relative to the invocation cwd
     ini_value = config.getini("agentic_hil_config")
     if ini_value:
         return rootdir_anchored(config, str(ini_value))

@@ -48,7 +48,7 @@ Use the bug report issue template when possible. Include enough information for 
 
 Agentic HIL is designed to let agents perform hardware actions through configured, narrow tools. Contributions should preserve these principles:
 
-- Project-local `.agentic-hil/config.yaml` is the authority for permissions, artifact roots, and named devices.
+- Project-local `.agentic-hil/config.yaml` is untrusted project input. MCP authorization is capped by a host-managed `AGENTIC_HIL_POLICY` outside the workspace; project changes may only narrow it.
 - Raw debugger commands and mass erase behavior must remain disabled unless a future design explicitly documents a safe policy.
 - Test-adapter channels and faults stay explicit allowlists; never widen them implicitly.
 - Hardware reports and structured errors should stay machine-readable so agents can reason about failures safely.

@@ -1,6 +1,6 @@
 # Copy to .agentic-hil/config.yaml inside this demo directory and adjust the
-# serial device for your host. The config is the policy: Agentic HIL only allows
-# what is named here.
+# serial device for your host. This project request is capped by the separate,
+# host-managed AGENTIC_HIL_POLICY outside the workspace.
 target:
   name: "nucleo-f446re-demo"
   controller: "stm32f446ret6"

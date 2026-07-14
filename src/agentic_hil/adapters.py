@@ -56,7 +56,7 @@ class AdapterService:
         if not adapter["ok"]:
             return self._write_report(adapter)
         if not self.config.permissions.allow_adapter_read and not self.config.permissions.allow_adapter_write:
-            return self._write_report(self._permission_denied("adapter_session_start", "Test adapter reading and writing are disabled by .agentic-hil/config.yaml.", adapter_id))
+            return self._write_report(self._permission_denied("adapter_session_start", "Test adapter reading and writing are disabled by the effective policy.", adapter_id))
         existing = self.sessions.get(adapter_id)
         if existing and self._session_is_active(existing):
             return self._write_report({"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": True, "session": self._session_status(existing), "summary": "Test adapter session is already active."})
@@ -141,7 +141,7 @@ class AdapterService:
     def measure(self, adapter_id: str, payload: JsonObject) -> JsonObject:
         tool = "adapter_measure"
         if not self.config.permissions.allow_adapter_read:
-            return self._write_report(self._permission_denied(tool, "Test adapter reading is disabled by .agentic-hil/config.yaml.", adapter_id))
+            return self._write_report(self._permission_denied(tool, "Test adapter reading is disabled by the effective policy.", adapter_id))
         session_result = self._active_session(adapter_id, tool)
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -178,7 +178,7 @@ class AdapterService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "adapter_id is required."}
         adapter_config = self.config.adapters.get(adapter_id)
         if adapter_config is None:
-            return {"ok": False, "tool": tool, "adapter_id": adapter_id, "error_type": "adapter_not_configured", "summary": "Test adapter is not configured in .agentic-hil/config.yaml.", "configured_adapters": sorted(self.config.adapters.keys())}
+            return {"ok": False, "tool": tool, "adapter_id": adapter_id, "error_type": "adapter_not_configured", "summary": "Test adapter is not available in the effective policy.", "configured_adapters": sorted(self.config.adapters.keys())}
         return {"ok": True, "adapter_config": adapter_config}
 
     def _active_session(self, adapter_id: str, tool: str) -> JsonObject:
@@ -192,14 +192,14 @@ class AdapterService:
 
     def _writable_session(self, adapter_id: str, tool: str) -> JsonObject:
         if not self.config.permissions.allow_adapter_write:
-            return self._permission_denied(tool, "Test adapter writing is disabled by .agentic-hil/config.yaml.", adapter_id)
+            return self._permission_denied(tool, "Test adapter writing is disabled by the effective policy.", adapter_id)
         return self._active_session(adapter_id, tool)
 
     def _allowed_channel(self, session: AdapterSession, tool: str, channel: object) -> JsonObject:
         if not isinstance(channel, str) or not channel:
             return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "error_type": "invalid_argument", "summary": "channel must be a non-empty string."}
         if channel not in session.adapter_config.channels:
-            return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "channel": channel, "error_type": "channel_not_configured", "summary": "Channel is not configured for this test adapter in .agentic-hil/config.yaml.", "configured_channels": session.adapter_config.channels}
+            return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "channel": channel, "error_type": "channel_not_configured", "summary": "Channel is not available for this test adapter in the effective policy.", "configured_channels": session.adapter_config.channels}
         return {"ok": True, "channel": channel}
 
     def _optional_channel(self, session: AdapterSession, tool: str, channel: object) -> JsonObject:
@@ -212,7 +212,7 @@ class AdapterService:
             summary = "fault must be a non-empty string." if required else "fault must be a non-empty string when provided."
             return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "error_type": "invalid_argument", "summary": summary}
         if fault not in session.adapter_config.faults:
-            return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "fault": fault, "error_type": "fault_not_configured", "summary": "Fault is not configured for this test adapter in .agentic-hil/config.yaml.", "configured_faults": session.adapter_config.faults}
+            return {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "fault": fault, "error_type": "fault_not_configured", "summary": "Fault is not available for this test adapter in the effective policy.", "configured_faults": session.adapter_config.faults}
         return {"ok": True, "fault": fault}
 
     def _adapter_status(self, adapter_config: AdapterConfig, session: AdapterSession | None) -> JsonObject:
@@ -249,7 +249,7 @@ def open_adapter_bridge(config: AgenticHILConfig, adapter_id: str, adapter_confi
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_not_found", "summary": "Test adapter bridge executable could not be found.", "executable": adapter_config.executable}
     command = [*invocation(executable), *adapter_config.args]
     try:
-        child = subprocess.Popen(command, cwd=config.work_dir, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_process_start_failed", "summary": "Test adapter bridge process could not be started.", "backend_error": str(error)}
     session = AdapterBridgeSession(child)

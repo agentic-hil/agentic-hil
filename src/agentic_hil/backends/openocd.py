@@ -13,7 +13,7 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
-from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.config import display_path, resolve_work_path, safe_write_text
 from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -67,7 +67,7 @@ class OpenOCDBackend:
         if not resolved["ok"]:
             return {"tool": "debugger_info", **resolved}
         command = [*invocation(str(resolved["executable_path"])), "--version"]
-        completed = spawn_command(command, self.config.work_dir, min(self.config.debugger.timeout_s, 10))
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **OPENOCD_NOT_FOUND}
         if completed.timed_out:
@@ -104,7 +104,7 @@ class OpenOCDBackend:
 
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("probe_target", "Probing is disabled by the effective policy.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
@@ -114,7 +114,7 @@ class OpenOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the effective policy.")
         if self.config.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:
@@ -256,7 +256,7 @@ class OpenOCDBackend:
             openocd_command,
         ]
         log_path = str(Path(logs_directory(self.config)) / f"openocd-{timestamp_for_filename()}-{tool}.log")
-        completed = spawn_command(args, self.config.work_dir, self.config.debugger.timeout_s)
+        completed = spawn_command(args, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         finished_at = utc_now_iso()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
@@ -298,7 +298,7 @@ class OpenOCDBackend:
         return write_report(self.config, result)
 
     def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+        safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

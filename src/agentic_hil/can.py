@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -77,7 +78,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_read and not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by .agentic-hil/config.yaml.", bus_id))
+            return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by the effective policy.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
@@ -111,7 +112,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_send", "CAN writing is disabled by .agentic-hil/config.yaml.", bus_id))
+            return self._write_report(self._permission_denied("can_send", "CAN writing is disabled by the effective policy.", bus_id))
         session_result = self._active_session(bus_id, "can_send")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -135,7 +136,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_read:
-            return self._write_report(self._permission_denied("can_read", "CAN reading is disabled by .agentic-hil/config.yaml.", bus_id))
+            return self._write_report(self._permission_denied("can_read", "CAN reading is disabled by the effective policy.", bus_id))
         session_result = self._active_session(bus_id, "can_read")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -147,7 +148,9 @@ class CanBusService:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "max_frames must be an integer and wait_timeout_s must be a number."})
         if parsed_max_frames < 1 or parsed_max_frames > session.bus_config.max_buffer_frames:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "max_frames must be between 1 and configured max_buffer_frames.", "max_buffer_frames": session.bus_config.max_buffer_frames})
-        read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, 60.0)))
+        if not math.isfinite(parsed_wait_timeout_s):
+            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."})
+        read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, session.bus_config.timeout_s, 60.0)))
         if not read["ok"]:
             result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
             append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
@@ -168,7 +171,7 @@ class CanBusService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "bus_id is required."}
         bus_config = self.config.can_buses.get(bus_id)
         if bus_config is None:
-            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not configured in .agentic-hil/config.yaml.", "configured_buses": sorted(self.config.can_buses.keys())}
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the effective policy.", "configured_buses": sorted(self.config.can_buses.keys())}
         return {"ok": True, "bus_config": bus_config}
 
     def _active_session(self, bus_id: str, tool: str) -> JsonObject:
@@ -215,9 +218,10 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
 
 
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object):
+    def __init__(self, adapter_name: str, bus: object, timeout_s: float):
         self.adapter_name = adapter_name
         self.bus = bus
+        self.timeout_s = timeout_s
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
@@ -225,7 +229,7 @@ class PythonCanAdapterSession:
             import can
 
             message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data)
-            self.bus.send(message)
+            self.bus.send(message, timeout=self.timeout_s)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
             return {"ok": False, "error_type": "can_send_failed", "summary": "CAN adapter failed to send a frame.", "backend_error": str(error)}
@@ -269,7 +273,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
-        session = PythonCanAdapterSession(bus_config.adapter, bus)
+        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
         return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
@@ -280,11 +284,15 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
     error_prefix = "can_adapter"
     bridge_label = "CAN adapter bridge"
 
+    def __init__(self, child: subprocess.Popen[str], timeout_s: float = 10.0):
+        super().__init__(child)
+        self.timeout_s = timeout_s
+
     def send(self, frame: CanFrame) -> JsonObject:
-        return self.request("send", {"frame": bridge_frame(frame)}, 10)
+        return self.request("send", {"frame": bridge_frame(frame)}, self.timeout_s)
 
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
-        return self.request("read", {"max_frames": max_frames, "wait_timeout_s": wait_timeout_s}, max(10, wait_timeout_s + 1))
+        return self.request("read", {"max_frames": max_frames, "wait_timeout_s": wait_timeout_s}, self.timeout_s)
 
 
 def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
@@ -295,10 +303,10 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found."}
     command = [*invocation(executable), *bus_config.args]
     try:
-        child = subprocess.Popen(command, cwd=config.work_dir, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error)}
-    session = ProcessCanAdapterSession(child)
+    session = ProcessCanAdapterSession(child, bus_config.timeout_s)
     opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
     if not opened.get("ok"):
         session.close()

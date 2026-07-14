@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import display_path
+from agentic_hil.config import display_path, safe_write_text
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -100,14 +100,23 @@ class GdbDebugSessions:
         if not resolved_gdb["ok"]:
             return self._report({"tool": tool, **resolved_gdb})
 
-        timeout = self.config.debugger.timeout_s if timeout_s is None else max(0.1, timeout_s)
+        timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         started_at = utc_now_iso()
         start = time.perf_counter()
         gdb_port = reserve_tcp_port()
         server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
         log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
         try:
-            server = subprocess.Popen(server_args, cwd=self.config.work_dir, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            server = subprocess.Popen(
+                server_args,
+                cwd=str(Path(str(resolved_server["executable_path"])).parent),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         except OSError as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
 
@@ -121,7 +130,7 @@ class GdbDebugSessions:
             session.status = "error"
             return self._report(failure)
 
-        session.gdb = GdbMiClient(str(resolved_gdb["executable"]), self.config.work_dir)
+        session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
             self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
@@ -153,7 +162,9 @@ class GdbDebugSessions:
         session = self.session
         if session is None or session.status == "stopped":
             return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
-        timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S) if timeout_s is None else max(0.1, timeout_s)
+        timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S)
+        if timeout_s is not None:
+            timeout = min(timeout, max(0.1, timeout_s))
         self._cleanup_session(session, timeout)
         session.status = "stopped"
         self.session = None
@@ -216,7 +227,7 @@ class GdbDebugSessions:
         self._refresh_session_stop(session)
         if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) in {"debugger_error", "exception", "fault"}:
             return self._report(self._stopped_result(tool, session, "Target is already stopped"))
-        timeout = self.config.debugger.timeout_s if timeout_s is None else max(0.1, timeout_s)
+        timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         session.status = "running"
         session.stop_reason = None
         response = self._gdb_command(session, "-exec-continue", min(timeout, CONTINUE_COMMAND_TIMEOUT_CAP_S))
@@ -247,7 +258,9 @@ class GdbDebugSessions:
         session = session_result["session"]
         if self._refresh_session_stop(session) is not None:
             return self._report(self._stopped_result(tool, session, "Target was already stopped"))
-        timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S) if timeout_s is None else max(0.1, timeout_s)
+        timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S)
+        if timeout_s is not None:
+            timeout = min(timeout, max(0.1, timeout_s))
         response = self._gdb_command(session, "-exec-interrupt --all", timeout)
         if not response.ok:
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
@@ -314,12 +327,14 @@ class GdbDebugSessions:
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.permissions
         if not permissions.allow_probe:
-            return self._permission_denied(tool, "Debug sessions require allow_probe in .agentic-hil/config.yaml.")
+            return self._permission_denied(tool, "Debug sessions require allow_probe in the effective policy.")
+        if mode != "attach" and not permissions.allow_reset:
+            return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the effective policy.")
         if permissions.allow_raw_debugger_commands:
             return self._permission_denied(tool, "Debug sessions are disabled while raw debugger commands are allowed.")
         if mode == "load":
             if not permissions.allow_flash:
-                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in .agentic-hil/config.yaml.")
+                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the effective policy.")
             if permissions.allow_mass_erase:
                 return self._permission_denied(tool, "Debug session mode 'load' is disabled while mass erase is allowed.")
         return {"ok": True}
@@ -498,7 +513,7 @@ class GdbDebugSessions:
         if not isinstance(symbol, str) or DEBUG_SYMBOL_PATTERN.match(symbol) is None:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "symbol must be a valid C/C++ identifier."}
         allowed = self.config.debug.allowed_symbols
-        if allowed and symbol not in allowed:
+        if not self.config.debug.allow_all_symbols and symbol not in allowed:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol is not allowed by debug.allowed_symbols.", "symbol": symbol}
         return {"ok": True}
 
@@ -593,7 +608,7 @@ class GdbDebugSessions:
             "gdb_commands": session.gdb.history() if session.gdb else [],
         }
         with suppress(OSError):
-            Path(session.log_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            safe_write_text(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
 
     def _report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

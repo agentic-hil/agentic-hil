@@ -14,7 +14,8 @@ ASYNC_STOP_DELAY_S = 0.02
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
-BEHAVIOR_FILE = "fake_gdb_behavior.txt"
+BEHAVIOR_MARKER = b"FAKE_GDB_BEHAVIOR="
+behavior_override = ""
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
 HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
@@ -26,10 +27,7 @@ def emit(line: str) -> None:
 
 
 def behavior() -> str:
-    try:
-        return Path(BEHAVIOR_FILE).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    return behavior_override
 
 
 def emit_delayed_stop(stop_line: str) -> None:
@@ -65,6 +63,8 @@ def read_memory(token: str, address_text: str, length_text: str) -> None:
 
 
 def main() -> int:
+    global behavior_override
+
     emit('=thread-group-added,id="i1"')
     emit("(gdb)")
     next_breakpoint = 1
@@ -80,7 +80,16 @@ def main() -> int:
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
-        elif command.startswith(("-gdb-set", "-file-exec-and-symbols", "-interpreter-exec", "-target-download", "-break-delete")):
+        elif command.startswith("-file-exec-and-symbols"):
+            artifact_path = command[len("-file-exec-and-symbols") :].strip().strip('"').replace("\\\\", "\\")
+            try:
+                artifact_data = Path(artifact_path).read_bytes()
+                if BEHAVIOR_MARKER in artifact_data:
+                    behavior_override = artifact_data.split(BEHAVIOR_MARKER, 1)[1].splitlines()[0].decode()
+            except OSError:
+                pass
+            emit(f"{token}^done")
+        elif command.startswith(("-gdb-set", "-interpreter-exec", "-target-download", "-break-delete")):
             emit(f"{token}^done")
         elif command.startswith("-break-insert"):
             emit(f'{token}^done,bkpt={{number="{next_breakpoint}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}')

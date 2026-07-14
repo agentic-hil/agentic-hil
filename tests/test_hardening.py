@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from io import StringIO
@@ -8,14 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import write_config
+from conftest import FAKE_OPENOCD, write_config
 
 from agentic_hil.adapters import AdapterService, AdapterSession
+from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bridge import ProcessBridgeSession
 from agentic_hil.can import parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, apply_trusted_policy, load_config, load_trusted_policy
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
@@ -49,6 +51,7 @@ def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> No
     output = StringIO()
 
     exit_code = run_stdio_server(
+        config,
         config,
         input_stream=StringIO(oversized + "\n" + ping + "\n"),
         output_stream=output,
@@ -267,9 +270,23 @@ def test_flash_rejects_non_boolean_reset_after_flash(tmp_path: Path) -> None:
     assert result["error_type"] == "invalid_argument"
 
 
+@pytest.mark.parametrize("reset_after_flash", [False, True])
+def test_flash_requires_reset_permission(tmp_path: Path, reset_after_flash: bool) -> None:
+    service = AgenticHILToolService(
+        load_test_config(tmp_path, permissions_yaml="permissions:\n  allow_flash: true\n  allow_reset: false\n")
+    )
+
+    result = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": reset_after_flash})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+
+
 PERMISSION_GATE_CASES = [
     ("allow_probe", "probe_target", {}),
+    ("allow_probe", "debugger_info", {}),
     ("allow_flash", "flash_firmware", {"image_path": "build/app.elf"}),
+    ("allow_reset", "reset_target", {"mode": "run"}),
     ("allow_com_read", "com_session_start", {"port_id": "dut"}),
     ("allow_com_write", "com_write", {"port_id": "dut", "text": "hi"}),
     ("allow_can_read", "can_read", {"bus_id": "bench"}),
@@ -293,3 +310,253 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
 
     assert result["ok"] is False, f"{tool} must be blocked when {flag} is false"
     assert result["error_type"] == "permission_denied"
+
+
+def test_live_reload_cannot_enable_startup_denied_permission(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path, permissions_yaml="permissions:\n  allow_probe: false\n")
+    service = AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+        config_path.write_text(config_text.replace("allow_probe: false", "allow_probe: true"), encoding="utf-8")
+
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+
+
+def test_live_reload_cannot_add_new_hardware_resource(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    service = AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+        config_path.write_text(config_text.replace("com_ports: {}", COM_PORT_YAML.rstrip()), encoding="utf-8")
+
+        result = service.call("com_ports_list")
+    finally:
+        service.close()
+
+    assert result["ok"] is True
+    assert "dut" not in result["ports"]
+
+
+def test_trusted_policy_is_required_and_must_be_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy_path = write_config(workspace)
+
+    with pytest.raises(ConfigError) as missing:
+        load_trusted_policy(None, str(workspace))
+    assert missing.value.error_type == "trusted_policy_required"
+
+    with pytest.raises(ConfigError) as inside:
+        load_trusted_policy(str(policy_path.resolve()), str(workspace))
+    assert inside.value.error_type == "trusted_policy_invalid"
+
+
+def test_host_policy_caps_workspace_permissions_resources_and_validation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    project_path = write_config(
+        workspace,
+        com_ports_yaml=COM_PORT_YAML,
+        permissions_yaml="permissions:\n  allow_probe: true\n  allow_com_read: true\n",
+    )
+    policy_path = write_config(
+        host,
+        permissions_yaml="permissions:\n  allow_probe: false\n  allow_com_read: true\n",
+    )
+    project = load_config(str(project_path), str(workspace))
+    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    effective = apply_trusted_policy(project, policy)
+
+    assert effective.permissions.allow_probe is False
+    assert effective.permissions.allow_com_read is True
+    assert effective.com_ports == {}
+    assert effective.validation.require_allowed_root is True
+
+
+def test_trusted_policy_missing_permissions_uses_deny_defaults(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    project_path = write_config(workspace)
+    policy_path = host / "policy.yaml"
+    policy_path.parent.mkdir()
+    policy_path.write_text("target: {}\n", encoding="utf-8")
+    project = load_config(str(project_path), str(workspace))
+    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    effective = apply_trusted_policy(project, policy)
+
+    assert effective.permissions.allow_probe is False
+    assert effective.permissions.allow_flash is False
+    assert effective.permissions.allow_reset is False
+    assert effective.artifacts.allow_upload is False
+
+
+def test_trusted_policy_rejects_workspace_bridge_executable(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    bridge = workspace / "bridge.py"
+    bridge.parent.mkdir()
+    bridge.write_text("print('untrusted')\n", encoding="utf-8")
+    policy_path = write_config(
+        host,
+        adapters_yaml=f'adapters:\n  injected:\n    executable: "{bridge.as_posix()}"\n    channels: ["value"]\n',
+        permissions_yaml="permissions: {}\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    assert rejected.value.error_type == "trusted_policy_invalid"
+    assert rejected.value.details["field"] == "adapters.injected.executable"
+
+
+def test_disjoint_symbol_allowlists_deny_all_symbols(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    project = load_config(str(write_config(workspace, allowed_symbols=["project_symbol"])), str(workspace))
+    policy_path = write_config(host, allowed_symbols=["trusted_symbol"], permissions_yaml="permissions: {}\n")
+    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    effective = apply_trusted_policy(project, policy)
+
+    assert effective.debug.allow_all_symbols is False
+    assert effective.debug.allowed_symbols == []
+
+
+def test_trusted_policy_pins_debugger_and_openocd_scripts(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    interface_cfg = host / "trusted-interface.cfg"
+    target_cfg = host / "trusted-target.cfg"
+    interface_cfg.parent.mkdir(parents=True)
+    interface_cfg.write_text("# trusted interface\n", encoding="utf-8")
+    target_cfg.write_text("# trusted target\n", encoding="utf-8")
+    policy_path = write_config(
+        host,
+        debugger_executable=FAKE_OPENOCD,
+        permissions_yaml="permissions:\n  allow_probe: true\n",
+    )
+    policy_text = policy_path.read_text(encoding="utf-8")
+    policy_path.write_text(
+        policy_text.replace("interface/stlink.cfg", interface_cfg.as_posix()).replace("target/stm32f4x.cfg", target_cfg.as_posix()),
+        encoding="utf-8",
+    )
+
+    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    assert policy.debugger.executable == str(FAKE_OPENOCD.resolve())
+    assert policy.debugger.interface_cfg == str(interface_cfg.resolve())
+    assert policy.debugger.target_cfg == str(target_cfg.resolve())
+
+
+def test_trusted_policy_rejects_relative_openocd_scripts_when_debugger_enabled(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    policy_path = write_config(
+        host,
+        debugger_executable=FAKE_OPENOCD,
+        permissions_yaml="permissions:\n  allow_probe: true\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_trusted_policy(str(policy_path.resolve()), str(workspace))
+
+    assert rejected.value.error_type == "trusted_policy_invalid"
+    assert rejected.value.details["field"] == "debugger.interface_cfg"
+
+
+def test_artifact_root_symlink_cannot_pivot_after_startup(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config)
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    (outside / "firmware.elf").write_bytes(b"\x7fELFfake")
+    try:
+        (tmp_path / "build").symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        service.close()
+        pytest.skip(f"directory symlinks unavailable: {error}")
+
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "artifact_validation_failed"
+    assert result["validation"]["allowed_root"] is False
+
+
+def test_report_directory_symlink_is_rejected(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config)
+    outside = tmp_path / "outside-reports"
+    outside.mkdir()
+    try:
+        (tmp_path / ".agentic-hil" / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        service.close()
+        pytest.skip(f"directory symlinks unavailable: {error}")
+
+    try:
+        result = service.call("get_last_report")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_configured_path"
+
+
+def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    outside = tmp_path / "outside" / "firmware.elf"
+    outside.parent.mkdir()
+    outside.write_bytes(b"\x7fELFoutside")
+    linked = tmp_path / "build" / "firmware.elf"
+    linked.parent.mkdir()
+    try:
+        os.link(outside, linked)
+    except OSError as error:
+        pytest.skip(f"hard links unavailable: {error}")
+
+    manager = ArtifactManager(config)
+    try:
+        result = manager.validate_local_path("build/firmware.elf")
+    finally:
+        manager.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "artifact_validation_failed"
+    assert result["validation"]["single_link"] is False
+
+
+def test_artifact_is_rechecked_and_staged_before_backend_use(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELForiginal")
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.elf")
+        assert validation["ok"] is True
+        firmware.write_bytes(b"\x7fELFchanged")
+
+        changed = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+
+        assert changed["ok"] is False
+        assert changed["error_type"] == "artifact_changed"
+
+        validation = manager.validate_local_path("build/firmware.elf")
+        staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+        assert staged["ok"] is True
+        staged_path = Path(staged["artifact"]["resolved_path"])
+        assert not staged_path.is_relative_to(tmp_path)
+        assert staged_path.read_bytes() == firmware.read_bytes()
+    finally:
+        manager.close()

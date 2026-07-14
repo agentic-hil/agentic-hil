@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from conftest import FAKE_GDB, write_config
 
 from agentic_hil.config import load_config
@@ -17,9 +18,10 @@ def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, **config
     config_path = write_config(tmp_path, gdb_executable=FAKE_GDB, **config_kwargs)
     elf_path = tmp_path / "build" / "app.elf"
     elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    elf_data = b"\x7fELF" + b"\x00" * 12
     if fake_gdb_behavior is not None:
-        (tmp_path / "fake_gdb_behavior.txt").write_text(fake_gdb_behavior, encoding="utf-8")
+        elf_data += f"\nFAKE_GDB_BEHAVIOR={fake_gdb_behavior}\n".encode()
+    elf_path.write_bytes(elf_data)
     return AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
 
 
@@ -210,7 +212,7 @@ def test_debug_dump_rejects_output_outside_allowed_roots(tmp_path: Path) -> None
         service.close()
 
 
-def test_debug_dump_reloads_allowed_roots_without_restarting_session(tmp_path: Path) -> None:
+def test_debug_dump_live_reload_cannot_expand_allowed_roots(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:
         assert start_debug_session(service)["ok"] is True
@@ -222,10 +224,10 @@ def test_debug_dump_reloads_allowed_roots_without_restarting_session(tmp_path: P
         config_text = config_path.read_text(encoding="utf-8")
         config_path.write_text(config_text.replace('allowed_roots: ["build"]', 'allowed_roots: ["build", "_CTCPP"]'), encoding="utf-8")
 
-        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "_CTCPP/memory.hex"})
-        assert dumped["ok"] is True, dumped
-        assert dumped["session"]["status"] == "halted"
-        assert (tmp_path / "_CTCPP" / "memory.hex").is_file()
+        still_rejected = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "_CTCPP/memory.hex"})
+        assert still_rejected["ok"] is False
+        assert still_rejected["validation"]["allowed_root"] is False
+        assert not (tmp_path / "_CTCPP" / "memory.hex").exists()
     finally:
         service.close()
 
@@ -246,6 +248,57 @@ def test_debug_load_mode_requires_flash_permission(tmp_path: Path) -> None:
         result = start_debug_session(service, mode="load")
         assert result["ok"] is False
         assert result["error_type"] == "permission_denied"
+    finally:
+        service.close()
+
+
+def test_empty_symbol_allowlist_denies_all_symbols(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, allowed_symbols=[])
+    try:
+        assert start_debug_session(service)["ok"] is True
+        result = service.call("debug_symbol_info", {"symbol": "CTC_array"})
+        assert result["ok"] is False
+        assert result["error_type"] == "permission_denied"
+    finally:
+        service.close()
+
+
+def test_active_debug_log_symlink_is_rejected(tmp_path: Path) -> None:
+    service = debug_service(tmp_path)
+    log_path: Path | None = None
+    try:
+        started = start_debug_session(service)
+        assert started["ok"] is True
+        log_path = tmp_path / started["log_path"]
+        outside = tmp_path / "outside-debug-log.json"
+        outside.write_text("unchanged\n", encoding="utf-8")
+        log_path.unlink()
+        try:
+            log_path.symlink_to(outside)
+        except OSError as error:
+            pytest.skip(f"file symlinks unavailable: {error}")
+
+        result = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
+
+        assert result["ok"] is False
+        assert result["error_type"] == "unsafe_configured_path"
+        assert outside.read_text(encoding="utf-8") == "unchanged\n"
+    finally:
+        if log_path is not None and log_path.is_symlink():
+            log_path.unlink()
+        service.close()
+
+
+def test_debug_reset_modes_require_reset_permission(tmp_path: Path) -> None:
+    service = debug_service(
+        tmp_path,
+        permissions_yaml="permissions:\n  allow_probe: true\n  allow_flash: true\n  allow_reset: false\n",
+    )
+    try:
+        for mode in ["reset_halt", "load"]:
+            result = start_debug_session(service, mode=mode)
+            assert result["ok"] is False
+            assert result["error_type"] == "permission_denied"
     finally:
         service.close()
 

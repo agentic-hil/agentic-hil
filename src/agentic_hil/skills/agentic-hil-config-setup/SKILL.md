@@ -8,7 +8,7 @@ metadata:
 
 # Agentic HIL Config Setup
 
-Use Agentic HIL as the project-local hardware gate. The policy file is `.agentic-hil/config.yaml`.
+Use Agentic HIL as the hardware gate. `.agentic-hil/config.yaml` is an agent-writable project request; the authorization ceiling is a human-managed `AGENTIC_HIL_POLICY` outside the workspace.
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
@@ -19,6 +19,6 @@ agentic-hil init
 agentic-hil doctor
 ```
 
-Never bypass Agentic HIL policy with raw debugger commands, direct serial device access, or direct CAN adapter access when an Agentic HIL MCP tool is available.
+Never create, edit, move, or replace the trusted policy, `AGENTIC_HIL_POLICY`, or host MCP registration. Ask the human operator to configure that boundary. Never bypass Agentic HIL policy with raw debugger commands, direct serial device access, or direct CAN adapter access when an Agentic HIL MCP tool is available.
 
 If any Agentic HIL tool returns `permission_denied`, stop and ask the user before changing policy.

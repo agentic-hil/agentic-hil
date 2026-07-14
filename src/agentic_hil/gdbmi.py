@@ -7,9 +7,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agentic_hil.config import atomic_write_text
 from agentic_hil.types import JsonObject
 
-GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2"]
+GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2", "--init-eval-command=set auto-load off"]
 RESULT_RECORD_PATTERN = re.compile(r"^(\d+)\^(done|running|connected|error|exit)(?:,.*)?$")
 MI_FIELD_ESCAPE_PATTERN = re.compile(r"\\(.)")
 STOP_RECORD_PREFIX = "*stopped,"
@@ -256,7 +257,7 @@ def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> No
             upper_address = chunk_upper
         lines.append(intel_hex_record(absolute & 0xFFFF, 0x00, data[offset : offset + INTEL_HEX_BYTES_PER_RECORD]))
     lines.append(INTEL_HEX_EOF_RECORD)
-    file_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii")
 
 
 def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:

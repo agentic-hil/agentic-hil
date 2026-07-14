@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import ConfigError, apply_trusted_policy, load_config
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.report import read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -21,15 +22,19 @@ class AgenticHILToolService:
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
         adapters: AdapterService | None = None,
+        trusted_policy: AgenticHILConfig | None = None,
     ):
-        self.config = config
-        self.backend = backend or create_debugger_backend(config)
-        self.artifacts = artifacts or ArtifactManager(config)
-        self.com_ports = com_ports or ComPortService(config)
-        self.can_buses = can_buses or CanBusService(config)
-        self.adapters = adapters or AdapterService(config)
+        self.trusted_policy = apply_trusted_policy(config, trusted_policy or config)
+        self.config = self.trusted_policy
+        self.backend = backend or create_debugger_backend(self.config)
+        self.artifacts = artifacts or ArtifactManager(self.config)
+        self.com_ports = com_ports or ComPortService(self.config)
+        self.can_buses = can_buses or CanBusService(self.config)
+        self.adapters = adapters or AdapterService(self.config)
 
     def debugger_info(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the trusted policy.")
         return self.backend.info()
 
     def probe_target(self) -> JsonObject:
@@ -38,7 +43,9 @@ class AgenticHILToolService:
     def flash_firmware(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
         if not self.config.permissions.allow_flash:
-            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by .agentic-hil/config.yaml.")
+            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the effective policy.")
+        if not self.config.permissions.allow_reset:
+            return tool_error("flash_firmware", "permission_denied", "Flashing requires allow_reset because supported flash backends reset the target.")
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -49,12 +56,17 @@ class AgenticHILToolService:
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
-        return self.backend.flash_firmware(validation["artifact"], reset_after_flash)
+        staged = self.artifacts.stage_for_backend(validation["artifact"], "flash_firmware")
+        if not staged["ok"]:
+            return staged
+        return self.backend.flash_firmware(staged["artifact"], reset_after_flash)
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
+        if not self.config.permissions.allow_reset:
+            return tool_error("reset_target", "permission_denied", "Target reset is disabled by the trusted policy.")
         return self.backend.reset_target(mode)
 
     def debug_start_session(self, payload: JsonObject | None = None) -> JsonObject:
@@ -70,7 +82,10 @@ class AgenticHILToolService:
         artifact = validation["artifact"]
         if Path(str(artifact["resolved_path"])).suffix.lower() != ".elf":
             return tool_error("debug_start_session", "artifact_validation_failed", "Debug sessions require an ELF artifact with debug symbols.")
-        return self.backend.debug_start_session(artifact, str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
+        staged = self.artifacts.stage_for_backend(artifact, "debug_start_session")
+        if not staged["ok"]:
+            return staged
+        return self.backend.debug_start_session(staged["artifact"], str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
 
     def debug_stop_session(self, payload: JsonObject | None = None) -> JsonObject:
         return self.backend.debug_stop_session(number_argument((payload or {}).get("timeout_s")))
@@ -172,12 +187,16 @@ class AgenticHILToolService:
             "adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
         }
         if name in dispatch:
-            return dispatch[name]()
+            try:
+                return dispatch[name]()
+            except ConfigError as error:
+                return {"tool": name, **error.to_dict()}
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
     def _reload_config(self, tool: str) -> JsonObject | None:
         try:
-            config = load_config(self.config.config_path, self.config.work_dir)
+            project_config = load_config(self.config.config_path, self.config.work_dir)
+            config = apply_trusted_policy(project_config, self.trusted_policy)
         except ConfigError as error:
             return {"tool": tool, **error.to_dict()}
         if config == self.config:
@@ -198,6 +217,7 @@ class AgenticHILToolService:
 
     def close(self) -> None:
         self.backend.close()
+        self.artifacts.close()
         self.com_ports.close()
         self.can_buses.close()
         self.adapters.close()
@@ -211,9 +231,10 @@ def number_argument(value: object) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:

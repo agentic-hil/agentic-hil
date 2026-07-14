@@ -10,45 +10,13 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
 
-from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import init_config, install_skill, mcp_config, schema
+from agentic_hil.cli import doctor, entrypoint, init_config, init_policy, install_skill, mcp_config, schema
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
-
-
-def test_release_metadata_uses_canonical_name_and_version() -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    metadata = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
-    skill = (repository_root / "src" / "agentic_hil" / "skills" / "agentic-hil-config-setup" / "SKILL.md").read_text(encoding="utf-8")
-    readme = (repository_root / "README.md").read_text(encoding="utf-8")
-    registry = json.loads((repository_root / "server.json").read_text(encoding="utf-8"))
-
-    assert '\nname = "agentic-hil"\n' in metadata
-    assert f'\nversion = "{__version__}"\n' in metadata
-    assert f'agentic_hil_version: "{__version__}"' in skill
-    assert "<!-- mcp-name: io.github.agentic-hil/agentic-hil -->" in readme
-    assert registry["name"] == "io.github.agentic-hil/agentic-hil"
-    assert registry["version"] == __version__
-    assert registry["repository"] == {
-        "url": "https://github.com/agentic-hil/agentic-hil",
-        "source": "github",
-        "id": "1278450589",
-    }
-    assert registry["packages"] == [
-        {
-            "registryType": "pypi",
-            "registryBaseUrl": "https://pypi.org",
-            "identifier": "agentic-hil",
-            "version": __version__,
-            "runtimeHint": "uvx",
-            "transport": {"type": "stdio"},
-            "packageArguments": [{"type": "positional", "value": "mcp-stdio"}],
-        }
-    ]
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
@@ -67,11 +35,24 @@ def test_init_config_writes_starter_config(tmp_path: Path) -> None:
     assert "target:" in config_path.read_text(encoding="utf-8")
 
 
+def test_init_policy_requires_absolute_path_and_writes_policy(tmp_path: Path) -> None:
+    rejected = init_policy("relative-policy.yaml")
+    policy_path = tmp_path / "host" / "policy.yaml"
+    written = init_policy(str(policy_path.resolve()))
+
+    assert rejected["ok"] is False
+    assert rejected["error_type"] == "trusted_policy_invalid"
+    assert written["ok"] is True
+    policy_text = policy_path.read_text(encoding="utf-8")
+    assert "allow_reset: false" in policy_text
+    assert "allow_upload: false" in policy_text
+
+
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "config.schema.json"
     result = schema(str(schema_path))
     assert result["ok"] is True
-    assert "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration" in schema_path.read_text(encoding="utf-8")
+    assert "Agentic HIL configuration" in schema_path.read_text(encoding="utf-8")
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
@@ -91,6 +72,59 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert result["error_type"] == "mcp_config_exists"
     result_forced = mcp_config(str(output_path), force=True)
     assert result_forced["ok"] is True
+
+
+def test_mcp_stdio_requires_external_host_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    config_path = write_config(workspace)
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("AGENTIC_HIL_POLICY", raising=False)
+
+    exit_code = entrypoint(["mcp-stdio", "--config", str(config_path)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "trusted_policy_required"
+
+
+def test_mcp_stdio_passes_external_policy_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    config_path = write_config(workspace)
+    policy_path = write_config(host, permissions_yaml="permissions:\n  allow_probe: false\n")
+    received: dict = {}
+
+    def fake_server(config, trusted_policy):
+        received["config"] = config
+        received["policy"] = trusted_policy
+        return 0
+
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("AGENTIC_HIL_POLICY", str(policy_path.resolve()))
+    monkeypatch.setattr("agentic_hil.cli.run_stdio_server", fake_server)
+
+    exit_code = entrypoint(["mcp-stdio", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert received["policy"].permissions.allow_probe is False
+
+
+def test_doctor_succeeds_when_debugger_check_is_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    host = tmp_path / "host"
+    config_path = write_config(workspace)
+    policy_path = write_config(host, permissions_yaml="permissions: {}\n")
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("AGENTIC_HIL_POLICY", str(policy_path.resolve()))
+
+    result = doctor(str(config_path))
+
+    assert result["ok"] is True
+    assert result["debugger"]["skipped"] is True
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
@@ -491,6 +525,7 @@ def test_adapter_write_permission_denied(tmp_path: Path) -> None:
                 tmp_path,
                 adapters_yaml=NTC_ADAPTER_YAML,
                 permissions_yaml='''permissions:
+  allow_adapter_read: true
   allow_adapter_write: false
 ''',
             )

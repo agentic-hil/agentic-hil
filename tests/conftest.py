@@ -23,15 +23,32 @@ def write_config(
     flash_address: str | None = None,
     gdb_executable: Path | None = None,
     allowed_symbols: list[str] | None = None,
+    allow_all_symbols: bool | None = None,
     max_dump_size_bytes: int = 1048576,
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
     adapters_yaml: str = "adapters: {}\n",
-    permissions_yaml: str = "",
+    permissions_yaml: str | None = None,
 ) -> Path:
     if debugger_executable is None:
         fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD}
         debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
+    if allow_all_symbols is None:
+        allow_all_symbols = allowed_symbols is None
+    if permissions_yaml is None:
+        permissions_yaml = """permissions:
+  allow_probe: true
+  allow_flash: true
+  allow_reset: true
+  allow_com_read: true
+  allow_com_write: true
+  allow_can_read: true
+  allow_can_write: true
+  allow_adapter_read: true
+  allow_adapter_write: true
+  allow_raw_debugger_commands: false
+  allow_mass_erase: false
+"""
     config_path = directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -51,6 +68,7 @@ debugger:
 debug:
   gdb_executable: {('null' if gdb_executable is None else repr(gdb_executable.as_posix()))}
   allowed_symbols: {(allowed_symbols if allowed_symbols is not None else [])}
+  allow_all_symbols: {str(allow_all_symbols).lower()}
   max_dump_size_bytes: {max_dump_size_bytes}
 artifacts:
   allowed_roots: ["build"]

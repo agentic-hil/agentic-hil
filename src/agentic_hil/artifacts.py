@@ -3,20 +3,34 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import os
 import re
+import stat
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.config import (
+    atomic_write_bytes,
+    configured_work_path,
+    display_path,
+    is_path_within_frozen,
+    resolve_work_path,
+    safe_configured_directory,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 class ArtifactManager:
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        self._staging = tempfile.TemporaryDirectory(prefix="agentic-hil-artifacts-")
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         self.config = config
+
+    def close(self) -> None:
+        self._staging.cleanup()
 
     def upload(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
@@ -25,7 +39,7 @@ class ArtifactManager:
                 "ok": False,
                 "tool": "artifact_upload",
                 "error_type": "permission_denied",
-                "summary": "Artifact upload is disabled by .agentic-hil/config.yaml.",
+                "summary": "Artifact upload is disabled by the effective policy.",
             }
 
         has_image_path = payload.get("image_path") is not None
@@ -57,6 +71,9 @@ class ArtifactManager:
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
             "sha256_computed": False,
         }
+        if validation["exists"]:
+            validation["regular_file"] = resolved.is_file()
+            validation["single_link"] = os.lstat(resolved).st_nlink == 1
         validation["require_allowed_root"] = self.config.validation.require_allowed_root
 
         if not validation["path_traversal_safe"]:
@@ -67,6 +84,8 @@ class ArtifactManager:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
+        if validation.get("regular_file") is False or validation.get("single_link") is False:
+            return self._validation_error("Firmware artifact must be a regular file with exactly one filesystem link.", validation)
 
         sha256: str | None = None
         size_bytes: int | None = None
@@ -97,13 +116,54 @@ class ArtifactManager:
             "validation": validation,
         }
 
+    def stage_for_backend(self, artifact: JsonObject, tool: str) -> JsonObject:
+        source = Path(str(artifact["resolved_path"]))
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(source, flags)
+        except OSError as error:
+            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error)}
+
+        temporary_path: Path | None = None
+        try:
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
+            digest = hashlib.sha256()
+            suffix = source.suffix.lower()
+            with os.fdopen(descriptor, "rb") as source_file:
+                descriptor = -1
+                with tempfile.NamedTemporaryFile(dir=self._staging.name, prefix="stage-", suffix=suffix, delete=False) as staged_file:
+                    temporary_path = Path(staged_file.name)
+                    for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
+                        digest.update(chunk)
+                        staged_file.write(chunk)
+                    staged_file.flush()
+                    os.fsync(staged_file.fileno())
+            actual_sha256 = digest.hexdigest()
+            expected_sha256 = artifact.get("sha256")
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation."}
+            staged_path = Path(self._staging.name) / f"{actual_sha256}-{source.name}"
+            os.replace(temporary_path, staged_path)
+            temporary_path = None
+            staged_artifact = dict(artifact)
+            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "size_bytes": source_stat.st_size, "staged": True})
+            return {"ok": True, "artifact": staged_artifact}
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary_path is not None:
+                with suppress(OSError):
+                    temporary_path.unlink()
+
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
             return {
                 "ok": False,
                 "tool": tool,
                 "error_type": "permission_denied",
-                "summary": "Using uploaded artifacts is disabled by .agentic-hil/config.yaml.",
+                "summary": "Using uploaded artifacts is disabled by the effective policy.",
                 "artifact_id": artifact_id,
             }
         if not is_safe_artifact_id(artifact_id):
@@ -114,7 +174,7 @@ class ArtifactManager:
                 "summary": "artifact_id must be a safe uploaded artifact id.",
                 "artifact_id": artifact_id,
             }
-        resolved = Path(resolve_work_path(self.config, self.config.artifacts.upload_directory)) / artifact_id
+        resolved = Path(safe_configured_directory(self.config, self.config.artifacts.upload_directory, "artifacts.upload_directory")) / artifact_id
         if not resolved.exists():
             return {
                 "ok": False,
@@ -181,10 +241,16 @@ class ArtifactManager:
 
         digest = hashlib.sha256(data).hexdigest()
         artifact_id = f"{digest}{Path(filename).suffix.lower()}"
-        upload_directory = Path(resolve_work_path(self.config, self.config.artifacts.upload_directory))
-        upload_directory.mkdir(parents=True, exist_ok=True)
+        upload_directory = Path(safe_configured_directory(self.config, self.config.artifacts.upload_directory, "artifacts.upload_directory"))
         stored_path = upload_directory / artifact_id
-        stored_path.write_bytes(data)
+        if stored_path.is_symlink():
+            return {
+                "ok": False,
+                "tool": "artifact_upload",
+                "error_type": "unsafe_configured_path",
+                "summary": "Uploaded artifact destination must not be a symlink.",
+            }
+        atomic_write_bytes(stored_path, data, workspace=self.config.work_dir)
 
         validation = self.validate_local_path(str(stored_path))
         if not validation["ok"]:
@@ -227,10 +293,10 @@ class ArtifactManager:
         return {"ok": False, "tool": tool, "error_type": "output_validation_failed", "summary": summary, "validation": validation}
 
     def _is_under_allowed_roots(self, resolved_path: Path) -> bool:
-        roots = [Path(resolve_work_path(self.config, root)) for root in self.config.artifacts.allowed_roots]
+        roots = [configured_work_path(self.config, root) for root in self.config.artifacts.allowed_roots]
         if self.config.artifacts.allow_upload:
-            roots.append(Path(resolve_work_path(self.config, self.config.artifacts.upload_directory)))
-        return any(is_relative_to(resolved_path, root) for root in roots)
+            roots.append(configured_work_path(self.config, self.config.artifacts.upload_directory))
+        return any(is_path_within_frozen(resolved_path, root) for root in roots)
 
     def _inspect_format(self, file_path: Path) -> JsonObject:
         suffix = file_path.suffix.lower()
@@ -317,14 +383,6 @@ def looks_like_intel_hex(file_path: Path) -> bool:
     except (OSError, UnicodeDecodeError):
         return False
     return saw_record
-
-
-def is_relative_to(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
 
 
 def has_traversal_segment(value: str) -> bool:

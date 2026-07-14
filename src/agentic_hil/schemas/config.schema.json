@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
-  "title": "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration",
-  "description": "Schema for project-local .agentic-hil/config.yaml files.",
+  "title": "Agentic HIL configuration",
+  "description": "Schema shared by project requests and host-managed trusted policies.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -40,6 +40,7 @@
           "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
           "default": []
         },
+        "allow_all_symbols": { "type": "boolean", "default": false },
         "max_dump_size_bytes": { "type": "integer", "minimum": 1, "default": 1048576 }
       },
       "default": {}
@@ -52,7 +53,7 @@
         "upload_directory": { "type": "string", "default": ".agentic-hil/artifacts" },
         "allowed_extensions": { "type": "array", "items": { "type": "string" }, "default": [".elf", ".hex", ".bin"] },
         "max_upload_size_mb": { "type": "integer", "default": 64 },
-        "allow_upload": { "type": "boolean", "default": true }
+        "allow_upload": { "type": "boolean", "default": false }
       }
     },
     "com_ports": {
@@ -135,14 +136,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "allow_probe": { "type": "boolean", "default": true },
-        "allow_flash": { "type": "boolean", "default": true },
-        "allow_com_read": { "type": "boolean", "default": true },
-        "allow_com_write": { "type": "boolean", "default": true },
-        "allow_can_read": { "type": "boolean", "default": true },
-        "allow_can_write": { "type": "boolean", "default": true },
-        "allow_adapter_read": { "type": "boolean", "default": true },
-        "allow_adapter_write": { "type": "boolean", "default": true },
+        "allow_probe": { "type": "boolean", "default": false },
+        "allow_flash": { "type": "boolean", "default": false },
+        "allow_reset": { "type": "boolean", "default": false },
+        "allow_com_read": { "type": "boolean", "default": false },
+        "allow_com_write": { "type": "boolean", "default": false },
+        "allow_can_read": { "type": "boolean", "default": false },
+        "allow_can_write": { "type": "boolean", "default": false },
+        "allow_adapter_read": { "type": "boolean", "default": false },
+        "allow_adapter_write": { "type": "boolean", "default": false },
         "allow_raw_debugger_commands": { "type": "boolean", "default": false },
         "allow_mass_erase": { "type": "boolean", "default": false }
       }

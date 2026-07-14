@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import TextIO
 
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import TRUSTED_POLICY_ENV, ConfigError, load_config, load_trusted_policy
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig
@@ -23,14 +24,15 @@ def message_size_limit(config: AgenticHILConfig) -> int:
 
 def run_stdio_server(
     config: AgenticHILConfig,
+    trusted_policy: AgenticHILConfig,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
     max_message_chars: int | None = None,
 ) -> int:
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
-    limit = max_message_chars or message_size_limit(config)
-    tools = AgenticHILToolService(config)
+    tools = AgenticHILToolService(config, trusted_policy=trusted_policy)
+    limit = max_message_chars or message_size_limit(tools.config)
     try:
         while True:
             raw_line = input_stream.readline(limit)
@@ -63,9 +65,11 @@ def drain_oversized_line(input_stream: TextIO, limit: int) -> None:
             return
 
 
-def mcp_stdio(config_path: str | None = None) -> int:
+def mcp_stdio(config_path: str | None = None, policy_path: str | None = None) -> int:
     try:
-        return run_stdio_server(load_config(config_path))
+        config = load_config(config_path)
+        policy = load_trusted_policy(policy_path or os.environ.get(TRUSTED_POLICY_ENV), config.work_dir)
+        return run_stdio_server(config, policy)
     except ConfigError as error:
         sys.stderr.write(json.dumps(error.to_dict(), indent=2) + "\n")
         return 2
