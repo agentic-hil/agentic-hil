@@ -36,7 +36,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--agentic-hil-config",
         action="store",
         default=None,
-        help=f"Path to the Agentic HIL project configuration (default: {DEFAULT_CONFIG_PATH}).",
+        help=f"Path to the Agentic Hardware-in-the-Loop (Agentic HIL) project configuration (default: {DEFAULT_CONFIG_PATH}).",
     )
     parser.addini("agentic_hil_config", help="Path to the Agentic HIL project configuration.", default=None)
 

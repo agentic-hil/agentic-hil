@@ -1,6 +1,6 @@
 # Contributing to Agentic HIL
 
-Thanks for helping improve Agentic HIL. This project is a local MCP stdio server for safe, structured hardware-in-the-loop access, so changes should keep safety boundaries explicit and easy to audit.
+Thanks for helping improve Agentic Hardware-in-the-Loop (Agentic HIL). This project is a local MCP stdio server for safe, structured hardware-in-the-loop access, so changes should keep safety boundaries explicit and easy to audit.
 
 ## Development Setup
 
@@ -12,7 +12,7 @@ ruff check src tests examples
 pytest
 ```
 
-Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 ## Pull Requests
 

@@ -94,7 +94,7 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "adapter_measure", "description": "Measure a configured test adapter channel and return the structured value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
 ]
 
-AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic HIL as the safe gate to the configured embedded hardware.
+AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) as the safe gate to the configured embedded hardware.
 
 Workflow:
 1. Build the firmware first.

@@ -265,7 +265,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         import can
     except ImportError:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic_hil[can] to use direct CAN adapters."}
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters."}
     try:
         interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)

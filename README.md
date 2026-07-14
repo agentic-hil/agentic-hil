@@ -1,6 +1,6 @@
 # Agentic HIL
 
-**Your AI agent can develop firmware on its own — because Agentic HIL closes the loop with real hardware.**
+**Your AI agent can develop firmware on its own — because Agentic Hardware-in-the-Loop (Agentic HIL) closes the loop with real hardware.**
 
 ```
 +--> build --> flash --> stimulate --> observe --+
@@ -12,9 +12,9 @@
 
 Agentic HIL is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, test adapters, reports, and logs — without giving an agent arbitrary host or debugger access. A project-local policy file (`.agentic-hil/config.yaml`) defines exactly which devices, actions, paths, and limits are allowed. That policy gate is what makes unattended hardware access workable in the first place.
 
-Agentic HIL adapters are the reference hardware for Agentic HIL: physical pytest fixtures for sensor simulation, loads, and fault injection.
+HardCI adapters are the reference hardware for Agentic HIL: physical pytest fixtures for sensor simulation, loads, and fault injection.
 
-Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, MCP server name, and docs prose use `agentic-hil`.
+Names: the Python distribution/install target, CLI command, repository URL, MCP server name, and docs prose use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 ## Install
 
@@ -29,7 +29,7 @@ Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything in
 If you want to install it yourself anyway, install the Python package with pip and then use the `agentic-hil` command:
 
 ```bash
-pip install agentic_hil
+pip install agentic-hil
 agentic-hil --version
 ```
 
@@ -38,20 +38,20 @@ If that fails because Python is externally managed, `agentic-hil` is not on `PAT
 Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
 
 ```bash
-uvx --from agentic_hil agentic-hil --version
+uvx --from agentic-hil agentic-hil --version
 uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
 ```
 
 Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):
 
 ```bash
-uv tool install agentic_hil      # or: pipx install agentic_hil
+uv tool install agentic-hil      # or: pipx install agentic-hil
 agentic-hil init
 agentic-hil doctor
 agentic-hil mcp-config --output .mcp.json
 ```
 
-For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic_hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
+For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
 
 ## Why
 
@@ -163,7 +163,7 @@ Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_nt
 
 ## pytest Plugin
 
-Installing `agentic_hil` registers the `agentic_hil` pytest plugin, so CI regression suites can drive the same policy-gated tools without an MCP client:
+Installing `agentic-hil` registers the `agentic_hil` pytest plugin, so CI regression suites can drive the same policy-gated tools without an MCP client:
 
 ```python
 def test_open_sensor_diagnosis(agentic_hil):
@@ -191,7 +191,7 @@ agentic-hil skill-install --agent opencode
 
 ## Platform Support
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic_hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic_hil[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
+Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); any other adapter can be attached through the `process` bridge protocol.
 
 ## Development
 

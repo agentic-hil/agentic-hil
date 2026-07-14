@@ -1,6 +1,6 @@
 # Security Policy
 
-Agentic HIL's purpose is to be a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client bypass the project policy in `.agentic-hil/config.yaml` is a security vulnerability, not just a bug. That includes:
+Agentic Hardware-in-the-Loop (Agentic HIL) is a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client bypass the project policy in `.agentic-hil/config.yaml` is a security vulnerability, not just a bug. That includes:
 
 - flashing or reading artifacts outside `artifacts.allowed_roots`
 - reaching serial devices, CAN channels, or executables that are not named in the config

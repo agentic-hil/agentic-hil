@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
 
+from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import init_config, install_skill, mcp_config, schema
@@ -17,6 +18,16 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
+
+
+def test_release_metadata_uses_canonical_name_and_version() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    metadata = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
+    skill = (repository_root / "src" / "agentic_hil" / "skills" / "agentic-hil-config-setup" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert '\nname = "agentic-hil"\n' in metadata
+    assert f'\nversion = "{__version__}"\n' in metadata
+    assert f'agentic_hil_version: "{__version__}"' in skill
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
@@ -39,7 +50,7 @@ def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "config.schema.json"
     result = schema(str(schema_path))
     assert result["ok"] is True
-    assert "Agentic HIL project configuration" in schema_path.read_text(encoding="utf-8")
+    assert "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration" in schema_path.read_text(encoding="utf-8")
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:

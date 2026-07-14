@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Agentic HIL setup, hardware, CLI, MCP, or COM failure.
+description: Report a reproducible Agentic Hardware-in-the-Loop (Agentic HIL) setup, hardware, CLI, MCP, or COM failure.
 title: "bug: "
 labels:
   - bug
@@ -21,9 +21,9 @@ body:
     attributes:
       label: Installation method
       options:
-        - pip install agentic_hil
-        - pipx install agentic_hil
-        - uv tool install agentic_hil
+        - pip install agentic-hil
+        - pipx install agentic-hil
+        - uv tool install agentic-hil
         - pip install from git checkout
         - other
     validations:

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
-  "title": "Agentic HIL project configuration",
+  "title": "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration",
   "description": "Schema for project-local .agentic-hil/config.yaml files.",
   "type": "object",
   "additionalProperties": false,

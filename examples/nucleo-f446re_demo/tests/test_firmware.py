@@ -6,7 +6,7 @@ Build the firmware first, then run pytest from this demo directory with a
     cmake --preset Debug && cmake --build --preset Debug
     pytest tests/
 
-Without a Agentic HIL configuration the test is skipped; with a configuration but
+Without an Agentic HIL configuration the test is skipped; with a configuration but
 no board attached it fails — that is the point of a hardware-in-the-loop test.
 """
 from __future__ import annotations
