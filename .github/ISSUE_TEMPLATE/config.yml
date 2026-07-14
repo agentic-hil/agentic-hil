@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Troubleshooting guide
-    url: https://github.com/hp-8472/agentic-hil/blob/master/TROUBLESHOOTING.md
+    url: https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md
     about: Start here for debugger, target detection, artifact validation, and COM-port setup failures.
   - name: Security policy
-    url: https://github.com/hp-8472/agentic-hil/security/policy
+    url: https://github.com/agentic-hil/agentic-hil/security/policy
     about: Report security issues and hardware-safety concerns through the documented security process.
