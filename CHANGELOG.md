@@ -6,9 +6,12 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-14
+
 ### Changed
 
 - Updated canonical repository URLs after the transfer to `agentic-hil/agentic-hil`.
+- Added official MCP Registry metadata, validation, and OIDC publishing after each successful PyPI release while retaining the host-independent local setup path.
 
 ## [0.2.2] - 2026-07-14
 

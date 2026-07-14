@@ -34,6 +34,10 @@ links to relevant docs
 
 PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`) — no long-lived PyPI API tokens. The workflow builds sdist and wheel, validates them with twine, and refuses releases whose tag does not match the `pyproject.toml` version.
 
+After PyPI accepts a release, the same workflow verifies the package's `mcp-name` ownership marker and publishes `server.json` to the preview MCP Registry through GitHub Actions OIDC. No MCP Registry secret is stored. The release tag, Python package version, top-level server version, and package version in `server.json` must match exactly. The registry is an additional discovery channel; the documented local CLI and MCP configuration path remains authoritative and host-independent.
+
+If MCP Registry publication fails after PyPI succeeds, re-run only the failed job or manually dispatch the release workflow from the protected default branch. Manual dispatch from any other ref is skipped; the valid recovery path skips PyPI and republishes only the already released, synchronized registry metadata.
+
 Naming is part of the release contract: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge — add them only when they are reproducible and built by CI.
@@ -43,14 +47,16 @@ Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge — ad
 Before creating a release:
 
 ```text
-1. Update pyproject.toml version and CHANGELOG.md together.
+1. Update pyproject.toml, `src/agentic_hil/__init__.py`, the bundled skill, `server.json`, and CHANGELOG.md together.
 2. Run ruff check src tests examples and pytest.
 3. Run python -m build (or uv build) and inspect the packaged files.
 4. Merge to master and let the CI matrix pass.
 5. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
 6. Let the publish workflow validate the tag, build, check, and publish to PyPI.
-7. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
-8. Start from GitHub auto-generated release notes, then edit for clarity.
+7. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
+8. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
+9. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
+10. Start from GitHub auto-generated release notes, then edit for clarity.
 ```
 
 ## Repository Protection

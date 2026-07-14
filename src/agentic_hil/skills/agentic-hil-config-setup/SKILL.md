@@ -3,7 +3,7 @@ name: agentic-hil-config-setup
 description: Configure Agentic Hardware-in-the-Loop (Agentic HIL) as the safe local MCP bridge for an embedded firmware project.
 metadata:
   origin: Agentic HIL
-  agentic_hil_version: "0.2.2"
+  agentic_hil_version: "0.2.3"
 ---
 
 # Agentic HIL Config Setup

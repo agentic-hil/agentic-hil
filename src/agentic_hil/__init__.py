@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 if TYPE_CHECKING:
     from agentic_hil.artifacts import ArtifactManager

@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -50,6 +51,109 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs: publish
+    if: ${{ always() && ((github.event_name == 'release' && needs.publish.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Verify release metadata versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import tomllib
+
+          package_version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          registry = json.loads(pathlib.Path("server.json").read_text(encoding="utf-8"))
+          versions = {
+              package_version,
+              registry["version"],
+              registry["packages"][0]["version"],
+          }
+          release_tag = os.environ.get("RELEASE_TAG")
+          if release_tag:
+              versions.add(release_tag.removeprefix("v"))
+          if len(versions) != 1:
+              raise SystemExit(f"release, package, and registry versions differ: {sorted(versions)}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"MCP_RELEASE_VERSION={package_version}\n")
+          PY
+
+      - name: Wait for verifiable PyPI metadata
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          version = os.environ["MCP_RELEASE_VERSION"]
+          url = f"https://pypi.org/pypi/agentic-hil/{version}/json"
+          marker = "<!-- mcp-name: io.github.agentic-hil/agentic-hil -->"
+          for attempt in range(12):
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as response:
+                      metadata = json.load(response)
+                  if marker in metadata["info"]["description"]:
+                      break
+              except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+                  pass
+              if attempt == 11:
+                  raise SystemExit(f"PyPI metadata for agentic-hil {version} is not registry-verifiable")
+              time.sleep(10)
+          PY
+
+      - name: Install pinned MCP publisher
+        run: |
+          echo "MCP_PUBLISHER=$RUNNER_TEMP/mcp-publisher" >> "$GITHUB_ENV"
+          bash .github/scripts/install-mcp-publisher.sh "$RUNNER_TEMP/mcp-publisher"
+
+      - name: Validate server metadata
+        run: |
+          "$MCP_PUBLISHER" validate server.json
+
+      - name: Authenticate to MCP Registry
+        run: |
+          "$MCP_PUBLISHER" login github-oidc
+
+      - name: Publish to MCP Registry
+        run: |
+          for attempt in 1 2 3 4; do
+            if "$MCP_PUBLISHER" publish server.json; then
+              exit 0
+            fi
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.agentic-hil%2Fagentic-hil/versions/$MCP_RELEASE_VERSION" || true)"
+            if [[ "$status" == "200" ]]; then
+              echo "MCP Registry already contains io.github.agentic-hil/agentic-hil $MCP_RELEASE_VERSION"
+              exit 0
+            fi
+            if [[ "$attempt" == "4" ]]; then
+              echo "MCP Registry publication failed after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
 
   release-assets:
     name: Attach SBOM and attestations
