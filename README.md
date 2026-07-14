@@ -1,5 +1,7 @@
 # Agentic HIL
 
+<!-- mcp-name: io.github.agentic-hil/agentic-hil -->
+
 **Your AI agent can develop firmware on its own — because Agentic Hardware-in-the-Loop (Agentic HIL) closes the loop with real hardware.**
 
 ```
@@ -81,6 +83,17 @@ Project-local `.mcp.json`:
   }
 }
 ```
+
+Agentic HIL releases are published to the preview official MCP Registry as `io.github.agentic-hil/agentic-hil`, pointing to the same public PyPI package and `mcp-stdio` command. The registry is a discovery channel, not a substitute for project setup or policy review. The host-independent manual path remains supported:
+
+```bash
+uv tool install agentic-hil
+agentic-hil init
+agentic-hil doctor
+agentic-hil mcp-config --output .mcp.json
+```
+
+Registry installation never grants additional hardware access. Every action is still constrained by the project-local `.agentic-hil/config.yaml`; review [SECURITY.md](SECURITY.md) before enabling unattended hardware access.
 
 ## Configuration
 

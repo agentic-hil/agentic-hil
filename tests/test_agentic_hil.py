@@ -24,10 +24,31 @@ def test_release_metadata_uses_canonical_name_and_version() -> None:
     repository_root = Path(__file__).resolve().parents[1]
     metadata = (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     skill = (repository_root / "src" / "agentic_hil" / "skills" / "agentic-hil-config-setup" / "SKILL.md").read_text(encoding="utf-8")
+    readme = (repository_root / "README.md").read_text(encoding="utf-8")
+    registry = json.loads((repository_root / "server.json").read_text(encoding="utf-8"))
 
     assert '\nname = "agentic-hil"\n' in metadata
     assert f'\nversion = "{__version__}"\n' in metadata
     assert f'agentic_hil_version: "{__version__}"' in skill
+    assert "<!-- mcp-name: io.github.agentic-hil/agentic-hil -->" in readme
+    assert registry["name"] == "io.github.agentic-hil/agentic-hil"
+    assert registry["version"] == __version__
+    assert registry["repository"] == {
+        "url": "https://github.com/agentic-hil/agentic-hil",
+        "source": "github",
+        "id": "1278450589",
+    }
+    assert registry["packages"] == [
+        {
+            "registryType": "pypi",
+            "registryBaseUrl": "https://pypi.org",
+            "identifier": "agentic-hil",
+            "version": __version__,
+            "runtimeHint": "uvx",
+            "transport": {"type": "stdio"},
+            "packageArguments": [{"type": "positional", "value": "mcp-stdio"}],
+        }
+    ]
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
