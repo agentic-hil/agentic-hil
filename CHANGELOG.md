@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- Updated canonical repository URLs after the transfer to `agentic-hil/agentic-hil`.
+
 ## [0.2.2] - 2026-07-14
 
 ### Changed

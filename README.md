@@ -21,7 +21,7 @@ Names: the Python distribution/install target, CLI command, repository URL, MCP 
 The easiest path: copy/paste this prompt to your AI agent:
 
 ```text
-Install from https://github.com/hp-8472/agentic-hil and set it up for this project.
+Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.
 ```
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
@@ -39,7 +39,7 @@ Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.s
 
 ```bash
 uvx --from agentic-hil agentic-hil --version
-uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
 Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):

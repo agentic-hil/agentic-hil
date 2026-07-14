@@ -31,7 +31,7 @@ If that fails, use `uv` or `pipx` instead:
 
 ```bash
 uvx --from agentic-hil agentic-hil --version                                  # run without installing
-uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version    # repository as package source
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version    # repository as package source
 uv tool install agentic-hil                                                    # isolated user-local install
 ```
 
