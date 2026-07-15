@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,15 +13,17 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
+from yaml.constructor import ConstructorError
+from yaml.resolver import BaseResolver
 
 from agentic_hil.types import (
-    AdapterConfig,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
     ComPortConfig,
     DebuggerConfig,
     DebugInterfaceConfig,
+    DeviceConfig,
     JsonObject,
     LogsConfig,
     PermissionsConfig,
@@ -29,10 +32,9 @@ from agentic_hil.types import (
     ValidationConfig,
 )
 
-DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
+CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
-TRUSTED_POLICY_ENV = "AGENTIC_HIL_POLICY"
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
 
 
@@ -45,6 +47,28 @@ class ConfigError(Exception):
 
     def to_dict(self) -> JsonObject:
         return {"ok": False, "error_type": self.error_type, "summary": self.summary, **self.details}
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> JsonObject:
+    loader.flatten_mapping(node)
+    result: JsonObject = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in result
+        except TypeError as error:
+            raise ConstructorError("while constructing a mapping", node.start_mark, "found an unhashable key", key_node.start_mark) from error
+        if duplicate:
+            raise ConstructorError("while constructing a mapping", node.start_mark, f"found duplicate key {key!r}", key_node.start_mark)
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping)
 
 
 def config_schema_text() -> str:
@@ -70,20 +94,9 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
         raise_config_validation_error(errors[0], config_path)
 
 
-def resolve_config_path(config_path: str | None = None) -> str:
-    return config_path or DEFAULT_CONFIG_PATH
-
-
-def load_config(
-    config_path: str | None = None,
-    work_dir: str | None = None,
-) -> AgenticHILConfig:
-    resolved_config_path = resolve_config_path(config_path)
-    base = Path(work_dir or Path.cwd()).resolve()
-    config_file = Path(resolved_config_path)
-    if not config_file.is_absolute():
-        config_file = base / config_file
-    config_file = config_file.resolve()
+def load_config(config_path: str) -> AgenticHILConfig:
+    """Parse one config file. Production entrypoints must use load_authoritative_config."""
+    config_file = Path(config_path).expanduser().resolve()
     resolved_config_path = str(config_file)
     if not config_file.exists():
         raise ConfigError(
@@ -93,7 +106,7 @@ def load_config(
         )
 
     try:
-        loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        loaded = yaml.load(config_file.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
     except OSError as error:
         raise ConfigError(
             "config_unreadable",
@@ -118,13 +131,29 @@ def load_config(
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
     validate_config_schema(raw, resolved_config_path)
 
+    workspace_value = str(raw["workspace_root"])
+    workspace_requested = Path(workspace_value).expanduser()
+    if not workspace_requested.is_absolute():
+        raise ConfigError(
+            "config_invalid",
+            "workspace_root must be an absolute path.",
+            {"path": resolved_config_path, "field": "workspace_root", "value": workspace_value},
+        )
+    workspace = workspace_requested.resolve()
+    if not workspace.is_dir():
+        raise ConfigError(
+            "config_invalid",
+            "workspace_root must be an existing directory.",
+            {"path": resolved_config_path, "field": "workspace_root", "value": workspace_value},
+        )
+
     target_raw = mapping(raw.get("target"), "target")
+    devices_raw = mapping(raw.get("devices"), "devices")
     debugger_raw = mapping(raw.get("debugger"), "debugger")
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
     com_ports_raw = mapping(raw.get("com_ports"), "com_ports")
     can_buses_raw = mapping(raw.get("can_buses"), "can_buses")
-    adapters_raw = mapping(raw.get("adapters"), "adapters")
     validation_raw = mapping(raw.get("validation"), "validation")
     permissions_raw = mapping(raw.get("permissions"), "permissions")
     reports_raw = mapping(raw.get("reports"), "reports")
@@ -138,16 +167,21 @@ def load_config(
             {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
 
+    com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
+    devices = {name: device_config(name, value) for name, value in devices_raw.items()}
+    validate_devices(devices, com_ports)
+
     return AgenticHILConfig(
         config_path=resolved_config_path,
-        work_dir=str(base),
+        work_dir=str(workspace),
+        workspace_root=str(workspace),
         target=target_config(target_raw),
+        devices=devices,
         debugger=debugger_config(debugger_raw, debugger_type),
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
-        com_ports={name: com_port_config(name, value) for name, value in com_ports_raw.items()},
+        com_ports=com_ports,
         can_buses={name: can_bus_config(name, value) for name, value in can_buses_raw.items()},
-        adapters={name: adapter_config(name, value) for name, value in adapters_raw.items()},
         validation=validation_config(validation_raw),
         permissions=permissions_config(permissions_raw),
         reports=reports_config(reports_raw),
@@ -155,135 +189,147 @@ def load_config(
     )
 
 
-def load_trusted_policy(policy_path: str | None, work_dir: str | None = None) -> AgenticHILConfig:
-    base = Path(work_dir or Path.cwd()).resolve()
-    if not policy_path:
-        raise ConfigError(
-            "trusted_policy_required",
-            "MCP hardware access requires a host-managed trusted policy.",
-            {"environment_variable": TRUSTED_POLICY_ENV},
-        )
-    requested = Path(policy_path)
-    if not requested.is_absolute():
-        raise ConfigError(
-            "trusted_policy_invalid",
-            "The trusted policy path must be absolute.",
-            {"path": policy_path},
-        )
+def load_authoritative_config(expected_workspace: str | Path | None = None) -> AgenticHILConfig:
+    expected = Path(expected_workspace or Path.cwd()).resolve()
+    config_path = os.environ.get(CONFIG_ENV)
+    if config_path:
+        requested = Path(config_path).expanduser()
+        if not requested.is_absolute():
+            raise ConfigError(
+                "config_invalid",
+                f"{CONFIG_ENV} must contain an absolute path.",
+                {"path": config_path, "environment_variable": CONFIG_ENV},
+            )
+    else:
+        requested = project_config_path(expected)
     resolved = requested.resolve()
-    if is_path_within(resolved, base):
+    config = load_config(str(resolved))
+    workspace = Path(config.work_dir)
+    if is_path_within_frozen(requested, workspace) or is_path_within(resolved, workspace):
         raise ConfigError(
-            "trusted_policy_invalid",
-            "The trusted policy must be stored outside the agent-writable workspace.",
-            {"path": str(resolved), "work_dir": str(base)},
+            "config_invalid",
+            "The authoritative config must be stored outside the workspace.",
+            {"path": str(resolved), "workspace_root": config.workspace_root},
         )
-    policy = load_config(str(resolved), str(base))
-    return pin_trusted_paths(pin_trusted_executables(policy))
+    if workspace != expected:
+        raise ConfigError(
+            "config_invalid",
+            "The authoritative config is bound to a different workspace.",
+            {"path": str(resolved), "workspace_root": config.workspace_root, "expected_workspace": str(expected)},
+        )
+    if not config_path and resolved != project_config_path(workspace):
+        raise ConfigError(
+            "config_invalid",
+            "The automatically discovered config is not canonical for this workspace.",
+            {"path": str(resolved), "expected_path": str(project_config_path(workspace)), "workspace_root": config.workspace_root},
+        )
+    return pin_configured_paths(pin_configured_executables(config))
 
 
-def pin_trusted_paths(policy: AgenticHILConfig) -> AgenticHILConfig:
-    allowed_roots = [trusted_workspace_path(policy, root, f"artifacts.allowed_roots[{index}]") for index, root in enumerate(policy.artifacts.allowed_roots)]
-    upload_directory = trusted_workspace_path(policy, policy.artifacts.upload_directory, "artifacts.upload_directory")
-    reports_directory = trusted_workspace_path(policy, policy.reports.directory, "reports.directory")
-    logs_directory = trusted_workspace_path(policy, policy.logs.directory, "logs.directory")
+def project_config_directory() -> Path:
+    if os.name == "nt":
+        config_root = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    else:
+        config_root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return (config_root / "agentic-hil" / "projects").resolve()
+
+
+def project_config_path(workspace: str | Path) -> Path:
+    resolved = Path(workspace).resolve()
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name).strip(".-") or "workspace"
+    identity = os.path.normcase(str(resolved))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+    return project_config_directory() / f"{safe_name}-{digest}" / "config.yaml"
+
+
+def pin_configured_paths(config: AgenticHILConfig) -> AgenticHILConfig:
+    allowed_roots = [configured_workspace_path(config, root, f"artifacts.allowed_roots[{index}]") for index, root in enumerate(config.artifacts.allowed_roots)]
+    upload_directory = configured_workspace_path(config, config.artifacts.upload_directory, "artifacts.upload_directory")
+    reports_directory = configured_workspace_path(config, config.reports.directory, "reports.directory")
+    logs_directory = configured_workspace_path(config, config.logs.directory, "logs.directory")
     return replace(
-        policy,
-        artifacts=replace(policy.artifacts, allowed_roots=allowed_roots, upload_directory=upload_directory),
-        reports=replace(policy.reports, directory=reports_directory),
-        logs=replace(policy.logs, directory=logs_directory),
+        config,
+        artifacts=replace(config.artifacts, allowed_roots=allowed_roots, upload_directory=upload_directory),
+        reports=replace(config.reports, directory=reports_directory),
+        logs=replace(config.logs, directory=logs_directory),
     )
 
 
-def trusted_workspace_path(policy: AgenticHILConfig, value: str, field: str) -> str:
-    workspace = Path(policy.work_dir)
+def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) -> str:
+    workspace = Path(config.work_dir)
     requested = Path(value)
     lexical = absolute_without_symlinks(requested if requested.is_absolute() else workspace / requested)
     resolved = lexical.resolve()
     if not is_path_within_frozen(lexical, workspace) or not is_path_within(resolved, workspace):
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted artifact and output paths must remain inside the workspace.",
-            {"field": field, "path": str(lexical), "work_dir": policy.work_dir},
+            "config_invalid",
+            "Configured artifact and output paths must remain inside the workspace.",
+            {"field": field, "path": str(lexical), "workspace_root": config.workspace_root},
         )
     return str(lexical)
 
 
-def pin_trusted_executables(policy: AgenticHILConfig) -> AgenticHILConfig:
+def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     debugger_enabled = any(
         [
-            policy.permissions.allow_probe,
-            policy.permissions.allow_flash,
-            policy.permissions.allow_reset,
+            config.permissions.allow_probe,
+            config.permissions.allow_flash,
+            config.permissions.allow_reset,
         ]
     )
     debugger_candidates = {
         "openocd": ["openocd"],
         "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
         "pyocd": ["pyocd"],
-    }[policy.debugger.type]
-    configured_debugger = policy.debugger.executable
-    if configured_debugger is None and policy.debugger.type == "stlink":
+    }[config.debugger.type]
+    configured_debugger = config.debugger.executable
+    if configured_debugger is None and config.debugger.type == "stlink":
         from agentic_hil.backends.common import find_stm32_programmer_cli
 
         configured_debugger = find_stm32_programmer_cli()
-    debugger_executable = trusted_executable(
-        policy,
+    debugger_executable = configured_executable(
+        config,
         configured_debugger,
         "debugger.executable",
         candidates=debugger_candidates,
         required=debugger_enabled,
     )
-    gdb_executable = trusted_executable(
-        policy,
-        policy.debug.gdb_executable,
+    gdb_executable = configured_executable(
+        config,
+        config.debug.gdb_executable,
         "debug.gdb_executable",
         candidates=GDB_AUTODETECT_CANDIDATES,
     )
     can_buses = {
         name: replace(
             bus,
-            executable=trusted_executable(
-                policy,
+            executable=configured_executable(
+                config,
                 bus.executable,
                 f"can_buses.{name}.executable",
                 workspace_relative=True,
                 required=bus.adapter == "process",
             ),
         )
-        for name, bus in policy.can_buses.items()
+        for name, bus in config.can_buses.items()
     }
-    adapters = {
-        name: replace(
-            adapter,
-            executable=trusted_executable(
-                policy,
-                adapter.executable,
-                f"adapters.{name}.executable",
-                workspace_relative=True,
-                required=True,
-            )
-            or adapter.executable,
-        )
-        for name, adapter in policy.adapters.items()
-    }
-    debugger = replace(policy.debugger, executable=debugger_executable)
+    debugger = replace(config.debugger, executable=debugger_executable)
     if debugger_enabled and debugger.type == "openocd":
         debugger = replace(
             debugger,
-            interface_cfg=trusted_regular_file(policy, debugger.interface_cfg, "debugger.interface_cfg"),
-            target_cfg=trusted_regular_file(policy, debugger.target_cfg, "debugger.target_cfg"),
+            interface_cfg=configured_external_file(config, debugger.interface_cfg, "debugger.interface_cfg"),
+            target_cfg=configured_external_file(config, debugger.target_cfg, "debugger.target_cfg"),
         )
     return replace(
-        policy,
+        config,
         debugger=debugger,
-        debug=replace(policy.debug, gdb_executable=gdb_executable),
+        debug=replace(config.debug, gdb_executable=gdb_executable),
         can_buses=can_buses,
-        adapters=adapters,
     )
 
 
-def trusted_executable(
-    policy: AgenticHILConfig,
+def configured_executable(
+    config: AgenticHILConfig,
     executable: str | None,
     field: str,
     *,
@@ -300,184 +346,66 @@ def trusted_executable(
         if executable is None:
             if required:
                 raise ConfigError(
-                    "trusted_policy_invalid",
-                    "Trusted policy enables hardware access but its executable could not be resolved at startup.",
+                    "config_invalid",
+                    "The config enables hardware access but its executable could not be resolved at startup.",
                     {"field": field},
                 )
-            return disabled_executable_path(policy, field)
+            return disabled_executable_path(config, field)
     requested = Path(executable)
     has_path_separator = "/" in executable or "\\" in executable
     if requested.is_absolute() or has_path_separator or workspace_relative:
-        resolved = Path(resolve_work_path(policy, executable))
+        resolved = Path(resolve_work_path(config, executable))
     else:
         found = shutil.which(executable)
         if found is None:
             raise ConfigError(
-                "trusted_policy_invalid",
-                "Trusted executable could not be resolved at startup.",
+                "config_invalid",
+                "Configured executable could not be resolved at startup.",
                 {"field": field, "value": executable},
             )
         resolved = Path(found).resolve()
-    if is_path_within(resolved, Path(policy.work_dir)):
+    if is_path_within(resolved, Path(config.work_dir)):
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted executables must be stored outside the agent-writable workspace.",
-            {"field": field, "path": str(resolved), "work_dir": policy.work_dir},
+            "config_invalid",
+            "Configured executables must be stored outside the workspace.",
+            {"field": field, "path": str(resolved), "workspace_root": config.workspace_root},
         )
     if not resolved.is_file():
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted executable must be an existing regular file.",
+            "config_invalid",
+            "Configured executable must be an existing regular file.",
             {"field": field, "path": str(resolved)},
         )
     return str(resolved)
 
 
-def disabled_executable_path(policy: AgenticHILConfig, field: str) -> str:
+def disabled_executable_path(config: AgenticHILConfig, field: str) -> str:
     safe_field = re.sub(r"[^A-Za-z0-9_.-]", "_", field)
-    return str(Path(policy.config_path).parent / f".agentic-hil-disabled-{safe_field}")
+    return str(Path(config.config_path).parent / f".agentic-hil-disabled-{safe_field}")
 
 
-def trusted_regular_file(policy: AgenticHILConfig, value: str, field: str) -> str:
+def configured_external_file(config: AgenticHILConfig, value: str, field: str) -> str:
     requested = Path(value)
     if not requested.is_absolute():
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted debugger configuration files must use absolute paths.",
+            "config_invalid",
+            "Configured debugger files must use absolute paths.",
             {"field": field, "value": value},
         )
     resolved = requested.resolve()
-    if is_path_within(resolved, Path(policy.work_dir)):
+    if is_path_within(resolved, Path(config.work_dir)):
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted debugger configuration files must be stored outside the agent-writable workspace.",
-            {"field": field, "path": str(resolved), "work_dir": policy.work_dir},
+            "config_invalid",
+            "Configured debugger files must be stored outside the workspace.",
+            {"field": field, "path": str(resolved), "workspace_root": config.workspace_root},
         )
     if not resolved.is_file():
         raise ConfigError(
-            "trusted_policy_invalid",
-            "Trusted debugger configuration file must be an existing regular file.",
+            "config_invalid",
+            "Configured debugger file must be an existing regular file.",
             {"field": field, "path": str(resolved)},
         )
     return str(resolved)
-
-
-def apply_trusted_policy(config: AgenticHILConfig, policy: AgenticHILConfig) -> AgenticHILConfig:
-    if Path(config.work_dir).resolve() != Path(policy.work_dir).resolve():
-        raise ConfigError(
-            "trusted_policy_invalid",
-            "Project configuration and trusted policy must use the same workspace.",
-        )
-
-    allow_all_symbols, allowed_symbols = restrict_symbols(config.debug, policy.debug)
-    return AgenticHILConfig(
-        config_path=config.config_path,
-        work_dir=config.work_dir,
-        target=config.target,
-        debugger=replace(policy.debugger, timeout_s=min(config.debugger.timeout_s, policy.debugger.timeout_s)),
-        debug=DebugInterfaceConfig(
-            gdb_executable=policy.debug.gdb_executable,
-            allowed_symbols=allowed_symbols,
-            allow_all_symbols=allow_all_symbols,
-            max_dump_size_bytes=min(config.debug.max_dump_size_bytes, policy.debug.max_dump_size_bytes),
-        ),
-        artifacts=ArtifactsConfig(
-            allowed_roots=intersect_allowed_roots(config, policy),
-            upload_directory=policy.artifacts.upload_directory,
-            allowed_extensions=intersect_list(config.artifacts.allowed_extensions, policy.artifacts.allowed_extensions),
-            max_upload_size_mb=min(config.artifacts.max_upload_size_mb, policy.artifacts.max_upload_size_mb),
-            allow_upload=config.artifacts.allow_upload and policy.artifacts.allow_upload,
-        ),
-        com_ports={name: restrict_com_port(config.com_ports[name], policy.com_ports[name]) for name in config.com_ports if name in policy.com_ports},
-        can_buses={name: restrict_can_bus(config.can_buses[name], policy.can_buses[name]) for name in config.can_buses if name in policy.can_buses},
-        adapters={
-            name: replace(
-                policy.adapters[name],
-                timeout_s=min(config.adapters[name].timeout_s, policy.adapters[name].timeout_s),
-                channels=intersect_list(config.adapters[name].channels, policy.adapters[name].channels),
-                faults=intersect_list(config.adapters[name].faults, policy.adapters[name].faults),
-            )
-            for name in config.adapters
-            if name in policy.adapters
-        },
-        validation=ValidationConfig(
-            require_existing_file=config.validation.require_existing_file or policy.validation.require_existing_file,
-            require_allowed_root=config.validation.require_allowed_root or policy.validation.require_allowed_root,
-            require_allowed_extension=config.validation.require_allowed_extension or policy.validation.require_allowed_extension,
-            compute_sha256=config.validation.compute_sha256 or policy.validation.compute_sha256,
-            inspect_known_formats=config.validation.inspect_known_formats or policy.validation.inspect_known_formats,
-        ),
-        permissions=PermissionsConfig(
-            allow_probe=config.permissions.allow_probe and policy.permissions.allow_probe,
-            allow_flash=config.permissions.allow_flash and policy.permissions.allow_flash,
-            allow_reset=config.permissions.allow_reset and policy.permissions.allow_reset,
-            allow_com_read=config.permissions.allow_com_read and policy.permissions.allow_com_read,
-            allow_com_write=config.permissions.allow_com_write and policy.permissions.allow_com_write,
-            allow_can_read=config.permissions.allow_can_read and policy.permissions.allow_can_read,
-            allow_can_write=config.permissions.allow_can_write and policy.permissions.allow_can_write,
-            allow_adapter_read=config.permissions.allow_adapter_read and policy.permissions.allow_adapter_read,
-            allow_adapter_write=config.permissions.allow_adapter_write and policy.permissions.allow_adapter_write,
-            allow_raw_debugger_commands=config.permissions.allow_raw_debugger_commands and policy.permissions.allow_raw_debugger_commands,
-            allow_mass_erase=config.permissions.allow_mass_erase and policy.permissions.allow_mass_erase,
-        ),
-        reports=policy.reports,
-        logs=policy.logs,
-    )
-
-
-def intersect_allowed_roots(config: AgenticHILConfig, policy: AgenticHILConfig) -> list[str]:
-    roots: list[str] = []
-    for configured_root in config.artifacts.allowed_roots:
-        configured = Path(resolve_work_path(config, configured_root))
-        for policy_root in policy.artifacts.allowed_roots:
-            trusted = configured_work_path(policy, policy_root)
-            if is_path_within_frozen(configured, trusted):
-                restricted = configured
-            elif is_path_within_frozen(trusted, configured):
-                restricted = trusted
-            else:
-                continue
-            value = str(restricted)
-            if value not in roots:
-                roots.append(value)
-    return roots
-
-
-def restrict_symbols(configured: DebugInterfaceConfig, trusted: DebugInterfaceConfig) -> tuple[bool, list[str]]:
-    if configured.allow_all_symbols and trusted.allow_all_symbols:
-        return True, []
-    if configured.allow_all_symbols:
-        return False, list(trusted.allowed_symbols)
-    if trusted.allow_all_symbols:
-        return False, list(configured.allowed_symbols)
-    return False, intersect_list(configured.allowed_symbols, trusted.allowed_symbols)
-
-
-def restrict_com_port(configured: ComPortConfig, trusted: ComPortConfig) -> ComPortConfig:
-    return replace(
-        trusted,
-        timeout_s=min(configured.timeout_s, trusted.timeout_s),
-        write_timeout_s=min(configured.write_timeout_s, trusted.write_timeout_s),
-        max_buffer_bytes=min(configured.max_buffer_bytes, trusted.max_buffer_bytes),
-        max_write_bytes=min(configured.max_write_bytes, trusted.max_write_bytes),
-    )
-
-
-def restrict_can_bus(configured: CanBusConfig, trusted: CanBusConfig) -> CanBusConfig:
-    return replace(
-        trusted,
-        timeout_s=min(configured.timeout_s, trusted.timeout_s),
-        poll_interval_ms=max(configured.poll_interval_ms, trusted.poll_interval_ms),
-        receive_own_messages=configured.receive_own_messages and trusted.receive_own_messages,
-        listen_only=configured.listen_only or trusted.listen_only,
-        max_buffer_frames=min(configured.max_buffer_frames, trusted.max_buffer_frames),
-        max_frame_data_bytes=min(configured.max_frame_data_bytes, trusted.max_frame_data_bytes),
-    )
-
-
-def intersect_list(configured: list[str], trusted: list[str]) -> list[str]:
-    allowed = set(trusted)
-    return [value for value in configured if value in allowed]
 
 
 def is_path_within(path: Path, root: Path) -> bool:
@@ -653,6 +581,28 @@ def target_config(raw: JsonObject) -> TargetConfig:
     return TargetConfig(name=str(raw.get("name", "unknown-target")), controller=str(raw.get("controller", "unknown-controller")))
 
 
+def device_config(name: str, value: Any) -> DeviceConfig:
+    raw = mapping(value, f"devices.{name}")
+    return DeviceConfig(debugger=bool(raw.get("debugger", False)), uart=optional_string(raw.get("uart")))
+
+
+def validate_devices(devices: dict[str, DeviceConfig], com_ports: dict[str, ComPortConfig]) -> None:
+    debugger_devices = [name for name, device in devices.items() if device.debugger]
+    if len(debugger_devices) > 1:
+        raise ConfigError(
+            "config_invalid",
+            "Only one device may use the globally configured debugger.",
+            {"field": "devices", "debugger_devices": debugger_devices},
+        )
+    for name, device in devices.items():
+        if device.uart is not None and device.uart not in com_ports:
+            raise ConfigError(
+                "config_invalid",
+                "Device references an unknown UART from com_ports.",
+                {"field": f"devices.{name}.uart", "value": device.uart},
+            )
+
+
 def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
     return DebuggerConfig(
         type=debugger_type,  # type: ignore[arg-type]
@@ -727,17 +677,6 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
     )
 
 
-def adapter_config(name: str, value: Any) -> AdapterConfig:
-    raw = mapping(value, f"adapters.{name}")
-    return AdapterConfig(
-        executable=str(raw["executable"]),
-        args=string_list(raw.get("args"), []),
-        timeout_s=float(raw.get("timeout_s", 10.0)),
-        channels=string_list(raw.get("channels"), []),
-        faults=string_list(raw.get("faults"), []),
-    )
-
-
 def validation_config(raw: JsonObject) -> ValidationConfig:
     return ValidationConfig(
         require_existing_file=bool(raw.get("require_existing_file", True)),
@@ -758,8 +697,6 @@ def permissions_config(raw: JsonObject) -> PermissionsConfig:
         allow_com_write=bool(raw.get("allow_com_write", default)),
         allow_can_read=bool(raw.get("allow_can_read", default)),
         allow_can_write=bool(raw.get("allow_can_write", default)),
-        allow_adapter_read=bool(raw.get("allow_adapter_read", default)),
-        allow_adapter_write=bool(raw.get("allow_adapter_write", default)),
         allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
         allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
     )

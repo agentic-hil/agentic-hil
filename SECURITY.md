@@ -1,6 +1,6 @@
 # Security Policy
 
-Agentic HIL's purpose is to be a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client exceed the host-managed trusted policy selected by `AGENTIC_HIL_POLICY` is a security vulnerability, not just a bug. That includes:
+Agentic Hardware-in-the-Loop (Agentic HIL) is a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client exceed the discovered authoritative project configuration or its explicit `AGENTIC_HIL_CONFIG` override is a security vulnerability, not just a bug. That includes:
 
 - flashing or reading artifacts outside `artifacts.allowed_roots`
 - reaching serial devices, CAN channels, or executables that are not named in the config
@@ -26,6 +26,6 @@ You can expect an acknowledgement within 7 days. Please allow time for a fix and
 
 ## Scope Notes
 
-The project-local `.agentic-hil/config.yaml` and `.mcp.json` are assumed agent-writable and are not trusted authorization inputs. MCP hardware access requires an absolute `AGENTIC_HIL_POLICY` path outside the workspace. Keep that file and the host/user-level MCP registration non-writable by the agent. Agentic HIL intersects project requests with the policy snapshot loaded at process startup; workspace edits cannot widen it. Debugger/GDB/process-bridge executables and OpenOCD scripts authorized by the policy must also live outside the workspace. Configured artifact/output directories must remain non-symlink paths inside the workspace.
+Each project has exactly one automatically discovered authoritative config, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. `AGENTIC_HIL_CONFIG` may select another absolute path, but either file must remain outside the workspace and mandatory `workspace_root` must bind it to the exact project root. Keep that file and any override operator-controlled. Debugger/GDB/CAN process-bridge executables and OpenOCD scripts named by the config must also live outside the workspace. Repository `.agentic-hil/testconfig.yaml` files are test plans only and carry no hardware authority.
 
-This boundary assumes the agent cannot modify the trusted policy, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an in-process YAML policy cannot sandbox an already equivalent host principal.
+This boundary assumes the agent cannot modify the authoritative config, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an external YAML config cannot sandbox an already equivalent host principal.

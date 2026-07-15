@@ -22,7 +22,7 @@ def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, **config
     if fake_gdb_behavior is not None:
         elf_data += f"\nFAKE_GDB_BEHAVIOR={fake_gdb_behavior}\n".encode()
     elf_path.write_bytes(elf_data)
-    return AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    return AgenticHILToolService(load_config(str(config_path)))
 
 
 def start_debug_session(service: AgenticHILToolService, mode: str = "load") -> dict:
@@ -212,7 +212,7 @@ def test_debug_dump_rejects_output_outside_allowed_roots(tmp_path: Path) -> None
         service.close()
 
 
-def test_debug_dump_live_reload_cannot_expand_allowed_roots(tmp_path: Path) -> None:
+def test_debug_dump_startup_config_cannot_expand_allowed_roots(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:
         assert start_debug_session(service)["ok"] is True
@@ -317,6 +317,55 @@ def test_debug_tools_require_active_session(tmp_path: Path) -> None:
             assert result["error_type"] == "session_not_active", tool
     finally:
         service.close()
+
+
+def test_debug_stop_reports_cleanup_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path)
+    assert start_debug_session(service, mode="attach")["ok"] is True
+    session = service.backend._debug.session
+    assert session is not None
+    assert session.gdb is not None
+    original_close = session.gdb.close
+
+    def fail_close(timeout_s: float) -> None:
+        raise RuntimeError(f"close failed after {timeout_s}")
+
+    try:
+        monkeypatch.setattr(session.gdb, "close", fail_close)
+        result = service.call("debug_stop_session")
+
+        assert result["ok"] is False
+        assert result["error_type"] == "cleanup_failed"
+        assert "close failed" in result["cleanup_error"]
+        assert result["active"] is False
+        assert service._debug_artifact is not None
+
+        monkeypatch.setattr(session.gdb, "close", original_close)
+        retried = service.call("debug_stop_session")
+        assert retried["ok"] is True
+        assert service._debug_artifact is None
+    finally:
+        monkeypatch.setattr(session.gdb, "close", original_close)
+        service.close()
+
+
+def test_service_close_reports_debug_cleanup_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path)
+    assert start_debug_session(service, mode="attach")["ok"] is True
+    session = service.backend._debug.session
+    assert session is not None
+    assert session.gdb is not None
+    original_close = session.gdb.close
+
+    def fail_close(timeout_s: float) -> None:
+        raise RuntimeError(f"close failed after {timeout_s}")
+
+    monkeypatch.setattr(session.gdb, "close", fail_close)
+    with pytest.raises(RuntimeError, match="Debug session cleanup failed"):
+        service.close()
+
+    monkeypatch.setattr(session.gdb, "close", original_close)
+    service.close()
 
 
 def test_intel_hex_record_matches_reference_vectors() -> None:

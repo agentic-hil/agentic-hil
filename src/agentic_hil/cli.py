@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -13,23 +14,26 @@ from agentic_hil import __version__
 from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
-    DEFAULT_CONFIG_PATH,
-    TRUSTED_POLICY_ENV,
+    CONFIG_ENV,
     ConfigError,
-    apply_trusted_policy,
     config_schema_text,
-    display_path,
-    is_path_within,
-    load_config,
-    load_trusted_policy,
+    load_authoritative_config,
+    project_config_path,
 )
 from agentic_hil.debugger import create_debugger_backend
 from agentic_hil.stdio import run_stdio_server
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
+from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
   controller: "unknown-controller"
+
+devices:
+  dut:
+    debugger: true
+    uart: null
 
 debugger:
   type: "openocd"
@@ -43,7 +47,7 @@ debugger:
 debug:
   gdb_executable: null
   allowed_symbols: []
-  allow_all_symbols: true
+  allow_all_symbols: false
   max_dump_size_bytes: 1048576
 
 artifacts:
@@ -55,13 +59,11 @@ artifacts:
     - ".hex"
     - ".bin"
   max_upload_size_mb: 64
-  allow_upload: true
+  allow_upload: false
 
 com_ports: {}
 
 can_buses: {}
-
-adapters: {}
 
 validation:
   require_existing_file: true
@@ -71,15 +73,13 @@ validation:
   inspect_known_formats: true
 
 permissions:
-  allow_probe: true
-  allow_flash: true
-  allow_reset: true
-  allow_com_read: true
-  allow_com_write: true
-  allow_can_read: true
-  allow_can_write: true
-  allow_adapter_read: true
-  allow_adapter_write: true
+  allow_probe: false
+  allow_flash: false
+  allow_reset: false
+  allow_com_read: false
+  allow_com_write: false
+  allow_can_read: false
+  allow_can_write: false
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 
@@ -138,28 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="write starter .agentic-hil/config.yaml")
-    init_parser.add_argument("--config", default=None)
+    init_parser = subparsers.add_parser("init", help="write a deny-by-default authoritative config for the current workspace")
     init_parser.add_argument("--force", action="store_true")
 
-    doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
-    doctor_parser.add_argument("--config", default=None)
+    subparsers.add_parser("doctor", help="validate config and check debugger availability")
+
+    subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
 
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
-    mcp_parser = subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
-    mcp_parser.add_argument("--config", default=None)
-
-    policy_parser = subparsers.add_parser("policy-init", help="write a host-managed trusted policy outside the workspace")
-    policy_parser.add_argument("--output", required=True)
-    policy_parser.add_argument("--force", action="store_true")
+    subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
 
     com_stdio_parser = subparsers.add_parser("com-stdio", help="bind stdin/stdout to a configured COM port")
-    com_stdio_parser.add_argument("--config", default=None)
     com_stdio_parser.add_argument("--port", required=True)
     com_stdio_parser.add_argument("--max-read-bytes", type=int, default=None)
     com_stdio_parser.add_argument("--read-wait-timeout-s", type=float, default=0.05)
     com_stdio_parser.add_argument("--eof-idle-timeout-s", type=float, default=0.5)
+
+    reactor_parser = subparsers.add_parser("test-reactor", help="run a validated hardware test sequence")
+    reactor_parser.add_argument("--test-config", default=DEFAULT_TEST_CONFIG_PATH)
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
@@ -179,20 +176,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "init":
-        return init_config(args.config, args.force)
+        return init_config(args.force)
     if args.command == "doctor":
-        return doctor(args.config)
+        return doctor()
+    if args.command == "debugger-probes":
+        return debugger_probes()
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
-        config = load_config(args.config)
-        policy = load_trusted_policy(os.environ.get(TRUSTED_POLICY_ENV), config.work_dir)
-        return run_stdio_server(config, trusted_policy=policy)
-    if args.command == "policy-init":
-        return init_policy(args.output, args.force)
+        return run_stdio_server(load_authoritative_config(Path.cwd()))
     if args.command == "com-stdio":
-        config = load_config(args.config)
+        config = load_authoritative_config(Path.cwd())
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
+    if args.command == "test-reactor":
+        return run_test_reactor(args.test_config)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "mcp-config":
@@ -202,65 +199,80 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
 
 
-def init_config(config_path: str | None = None, force: bool = False) -> JsonObject:
-    target_path = Path(config_path or DEFAULT_CONFIG_PATH)
+def init_config(force: bool = False) -> JsonObject:
+    workspace = Path.cwd().resolve()
+    target_path = initialized_config_path(workspace)
     if target_path.exists() and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(DEFAULT_CONFIG_TEMPLATE, encoding="utf-8")
+    target_path.write_text(f"workspace_root: {json.dumps(str(workspace))}\n\n{DEFAULT_CONFIG_TEMPLATE}", encoding="utf-8")
+    previous = os.environ.pop(CONFIG_ENV, None)
     try:
-        load_config(str(target_path))
+        load_authoritative_config(workspace)
     except ConfigError as error:
         result = error.to_dict()
         result["summary"] = "Agentic HIL starter configuration was written but failed validation."
         result["path"] = str(target_path)
         return result
+    finally:
+        if previous is not None:
+            os.environ[CONFIG_ENV] = previous
     available_com_ports = list_available_com_ports()
-    return {"ok": True, "summary": "Agentic HIL starter configuration written.", "path": str(target_path), "available_com_ports": available_com_ports, "next_steps": init_next_steps(available_com_ports)}
-
-
-def init_policy(output: str, force: bool = False) -> JsonObject:
-    target_path = Path(output).expanduser()
-    if not target_path.is_absolute():
-        return {"ok": False, "error_type": "trusted_policy_invalid", "summary": "The trusted policy path must be absolute.", "path": output}
-    target_path = target_path.resolve()
-    if is_path_within(target_path, Path.cwd()):
-        return {"ok": False, "error_type": "trusted_policy_invalid", "summary": "The trusted policy must be stored outside the current workspace.", "path": str(target_path)}
-    if target_path.exists() and not force:
-        return {"ok": False, "error_type": "policy_exists", "summary": "Trusted policy already exists. Use --force to overwrite it.", "path": str(target_path)}
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(default_trusted_policy_template(), encoding="utf-8")
     return {
         "ok": True,
-        "summary": "Host-managed trusted policy written. Review it, keep it outside the workspace, and set AGENTIC_HIL_POLICY in the MCP host environment.",
+        "summary": "Deny-by-default Agentic HIL project configuration written.",
         "path": str(target_path),
+        "optional_override": f'{CONFIG_ENV}={target_path}',
+        "available_com_ports": available_com_ports,
+        "next_steps": init_next_steps(available_com_ports, target_path),
     }
 
 
-def default_trusted_policy_template() -> str:
-    text = DEFAULT_CONFIG_TEMPLATE.replace("  allow_upload: true", "  allow_upload: false")
-    text = text.replace("  allow_all_symbols: true", "  allow_all_symbols: false")
-    for field in [
-        "allow_probe",
-        "allow_flash",
-        "allow_reset",
-        "allow_com_read",
-        "allow_com_write",
-        "allow_can_read",
-        "allow_can_write",
-        "allow_adapter_read",
-        "allow_adapter_write",
-    ]:
-        text = text.replace(f"  {field}: true", f"  {field}: false")
-    return text
+def initialized_config_path(workspace: Path) -> Path:
+    return project_config_path(workspace)
 
 
-def init_next_steps(available_com_ports: JsonObject) -> list[str]:
+def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
+    config = load_authoritative_config(Path.cwd())
+    test_config = load_test_config(test_config_path, config.work_dir)
+    service = AgenticHILToolService(config)
+    try:
+        result = TestReactor(service.config, service).run(test_config)
+    except Exception:
+        with suppress(Exception):
+            service.close()
+        raise
+    try:
+        service.close()
+    except Exception as error:
+        cleanup_error = {
+            "device": "service",
+            "action": "close",
+            "result": {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "cleanup_exception",
+                "summary": "Agentic HIL service cleanup raised an exception.",
+                "exception_type": type(error).__name__,
+                "backend_error": str(error),
+            },
+        }
+        result["ok"] = False
+        result["cleanup_ok"] = False
+        result.setdefault("cleanup", []).append(cleanup_error)
+        result.setdefault("cleanup_errors", []).append(cleanup_error)
+        result.setdefault("step_error_type", result.get("error_type"))
+        result["error_type"] = "cleanup_failed"
+        result["summary"] = "Test reactor sequence failed during cleanup."
+    return result
+
+
+def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
     next_steps = [
-        "Keep this .agentic-hil/config.yaml with the firmware project; install Agentic HIL once with pipx or python -m pip --user.",
-        "Ask the human operator to create and review a trusted policy outside the project with agentic-hil policy-init.",
+        f"Review the deny-by-default config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
+        "Configure devices with the debugger and optional UART used by test-reactor sequences.",
         "If multiple debug probes are connected, set debugger.probe_id to the intended probe serial number.",
     ]
     if available_com_ports.get("ok"):
@@ -276,7 +288,6 @@ def init_next_steps(available_com_ports: JsonObject) -> list[str]:
     next_steps.extend(
         [
             "For CAN access, add a named bus under can_buses.",
-            "For sensor/actuator/fault simulation, add a named test adapter under adapters.",
             "Run: agentic-hil doctor",
             "Create or update .mcp.json if your MCP client needs project discovery.",
         ]
@@ -314,11 +325,9 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": output}
 
 
-def doctor(config_path: str | None = None) -> JsonObject:
+def doctor() -> JsonObject:
     try:
-        config = load_config(config_path)
-        policy = load_trusted_policy(os.environ.get(TRUSTED_POLICY_ENV), config.work_dir)
-        config = apply_trusted_policy(config, policy)
+        config = load_authoritative_config(Path.cwd())
     except ConfigError as error:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
@@ -334,22 +343,28 @@ def doctor(config_path: str | None = None) -> JsonObject:
             "ok": True,
             "tool": "debugger_info",
             "skipped": True,
-            "summary": "Debugger check skipped because allow_probe is disabled by the effective policy.",
+            "summary": "Debugger check skipped because allow_probe is disabled by the authoritative config.",
         }
-    config_display_path = display_path(config, config.config_path)
     return {
         "ok": debugger_info.get("ok") is True,
         "tool": "agentic_hil_doctor",
-        "summary": "Agentic HIL configuration and trusted policy loaded; debugger check skipped." if debugger_info.get("skipped") else ("Agentic HIL configuration loaded and debugger checked." if debugger_info.get("ok") else "Agentic HIL configuration loaded, but debugger check failed."),
+        "summary": "Agentic HIL authoritative configuration loaded; debugger check skipped." if debugger_info.get("skipped") else ("Agentic HIL configuration loaded and debugger checked." if debugger_info.get("ok") else "Agentic HIL configuration loaded, but debugger check failed."),
         "config_path": config.config_path,
-        "trusted_policy": "loaded",
-        "mcp": {"transport": "stdio", "command": "agentic-hil", "args": ["mcp-stdio", "--config", config_display_path]},
+        "mcp": {"transport": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]},
         "target": {"name": config.target.name, "controller": config.target.controller},
+        "devices": {device_id: {"debugger": device.debugger, "uart": device.uart} for device_id, device in config.devices.items()},
         "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding} for port_id, port in config.com_ports.items()},
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd} for bus_id, bus in config.can_buses.items()},
-        "adapters": {adapter_id: {"executable": adapter.executable, "channels": adapter.channels, "faults": adapter.faults} for adapter_id, adapter in config.adapters.items()},
         "debugger": debugger_info,
     }
+
+
+def debugger_probes() -> JsonObject:
+    service = AgenticHILToolService(load_authoritative_config(Path.cwd()))
+    try:
+        return service.call("debugger_probes_list")
+    finally:
+        service.close()
 
 
 def install_skill(agent: str | None = None, target: str | None = None, force: bool = False) -> JsonObject:

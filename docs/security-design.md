@@ -4,38 +4,37 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server for agent
 
 ## Threat Model
 
-Agentic HIL assumes an agent can request hardware actions and edit every file in the project workspace, including `.agentic-hil/config.yaml` and `.mcp.json`. Those files are therefore untrusted input, not an authorization boundary. The authority is a human-reviewed policy selected through `AGENTIC_HIL_POLICY`, stored outside the workspace, and loaded once when the MCP process starts. The project configuration may narrow that startup ceiling but cannot widen it.
+Agentic HIL assumes an agent can request hardware actions and edit every file in the project workspace, including `.mcp.json` and test plans. The one authoritative project configuration is therefore stored outside the workspace, discovered from the canonical project path or selected through an absolute `AGENTIC_HIL_CONFIG` override, bound to the exact workspace path by mandatory `workspace_root`, and controlled by the operator.
 
 The primary risks are:
 
-- Arbitrary command execution through debugger, COM-port, CAN, or adapter-bridge escape hatches.
+- Arbitrary command execution through debugger, COM-port, or CAN escape hatches.
 - Self-granting permissions or adding resources by editing project configuration.
 - Flashing unintended firmware artifacts or files outside approved project roots.
-- Performing destructive hardware actions such as mass erase without an explicit safe policy.
-- Driving stimulus channels or fault states that the effective policy did not allow.
+- Performing destructive hardware actions such as mass erase without explicit authorization.
 - Confusing MCP JSON-RPC control output with plain serial text output.
 - Leaking host paths, serial logs, hardware identifiers, or local configuration details in reports.
 
 ## Mitigations
 
-- MCP startup fails unless `AGENTIC_HIL_POLICY` names an absolute policy path outside the workspace.
-- The trusted policy is an immutable per-process ceiling. Permission booleans are ANDed, validation requirements are ORed, allowlists and named resources are intersected, numeric limits use the stricter value, and physical endpoints/executables come from the trusted policy.
-- Project configuration is reloaded before each tool call only after the trusted ceiling is fixed. Invalid edits fail closed; valid edits can revoke but never grant access.
-- MCP tools expose named, high-level actions — probe, flash, reset, report retrieval, configured COM/CAN sessions, and configured test-adapter actions — instead of a raw debugger shell or direct host device access.
+- MCP startup fails unless the discovered config or absolute-path override is outside the workspace and its `workspace_root` exactly matches the current project.
+- The authoritative config contains hardware resources, permissions, validation requirements, allowlists, and limits. It is the only project/hardware configuration used by MCP, `doctor`, `com-stdio`, pytest, and the test reactor.
+- `agentic-hil init` creates this external config deny-by-default from the project root and prints the environment setting for the operator to install.
+- MCP tools expose named, high-level actions — probe, flash, reset, report retrieval, and configured COM/CAN sessions — instead of a raw debugger shell or direct host device access.
 - Firmware artifacts must be under configured artifact roots, match configured extensions, and pass format plausibility checks before flashing or upload resolution; path traversal is rejected.
 - Before backend use, artifacts are reopened without following links, checked for replacement and multiple links, and copied to a private process staging directory. Debuggers never reopen the agent-controlled source path.
 - Uploaded artifacts are size-limited and identified with SHA-256 metadata.
-- COM, CAN, and adapter access use `port_id`/`bus_id`/`adapter_id` values present in both configurations. Physical device and executable settings are taken from the trusted policy.
-- Trusted debugger, GDB, process-bridge executables, and OpenOCD scripts are resolved and pinned at startup; missing, relative OpenOCD-script, and workspace-resident paths are rejected.
+- COM and CAN access use only `port_id`/`bus_id` values present in the authoritative config.
+- Configured debugger, GDB, CAN process-bridge executables, and OpenOCD scripts are resolved and pinned at startup; missing, relative OpenOCD-script, and workspace-resident paths are rejected.
 - Artifact roots and report/log/upload directories are frozen to lexical workspace paths. Symlink pivots and symlinked output files fail closed.
-- Test-adapter channel and fault names are intersected explicit allowlists validated before any request reaches the adapter bridge.
-- Empty symbol allowlists mean deny-all. Unrestricted symbol access requires `debug.allow_all_symbols: true` in both project and trusted configurations.
-- Debugger discovery/execution requires `allow_probe`; target reset requires the separate `allow_reset` permission.
-- Flashing requires both `allow_flash` and `allow_reset` because supported flash backends perform reset sequences internally.
+- Empty symbol allowlists mean deny-all. Unrestricted symbol access requires `debug.allow_all_symbols: true` in the authoritative config.
+- Debugger discovery/execution requires `allow_probe`; this includes listing every probe serial visible to the configured backend through `debugger_probes_list`. Target reset requires the separate `allow_reset` permission.
+- Flashing requires `allow_flash`; an explicit post-flash reset additionally requires `allow_reset`.
 - Serial/CAN writes are size-capped; reads are buffer-capped; debugger calls run with timeouts and with OpenOCD's TCP servers disabled.
 - Flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
 - `mcp-stdio` is reserved for JSON-RPC. Plain serial text uses the separate `com-stdio` path only when explicitly requested.
-- Reports and structured errors include `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` so failures can be audited without bypassing policy.
+- `.agentic-hil/testconfig.yaml` and `--test-config` select test steps only. A test plan cannot select hardware, grant permissions, or replace the discovered config or its override.
+- Reports and structured errors include `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` so failures can be audited without bypassing configured controls.
 
 ## Cryptography Scope
 
@@ -43,4 +42,8 @@ Agentic HIL does not implement authentication, password storage, encryption prot
 
 ## Secure Development Practices
 
-The project uses type-annotated Python with schema-validated configuration, pytest end-to-end tests against fake debugger/bridge fixtures, ruff linting in CI, a 3-OS × 4-Python-version CI matrix, and Dependabot for dependency monitoring. Major behavior changes should include or update automated tests and preserve the configured safety boundaries documented in `CONTRIBUTING.md` and `SECURITY.md`. Policy bypasses are treated as vulnerabilities — see `SECURITY.md` for reporting.
+The project uses type-annotated Python with schema-validated configuration, pytest end-to-end tests against fake backend fixtures, ruff linting in CI, a 3-OS × 4-Python-version CI matrix, and Dependabot for dependency monitoring. Major behavior changes should include or update automated tests and preserve the configured safety boundaries documented in `CONTRIBUTING.md` and `SECURITY.md`. Configuration bypasses are treated as vulnerabilities — see `SECURITY.md` for reporting.
+
+## Same-Identity Limitation
+
+The external config and operator-controlled environment prevent repository edits from silently selecting another hardware configuration, but they are not an OS sandbox. An agent with arbitrary shell access as the same OS identity can modify that user's config or process environment. For that threat model, run Agentic HIL under a separate service account or isolated process and restrict the IPC boundary.

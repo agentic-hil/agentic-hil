@@ -102,9 +102,20 @@ class OpenOCDBackend:
             "summary": "OpenOCD is available.",
         }
 
+    def list_probes(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
+        return {
+            "ok": False,
+            "tool": "debugger_probes_list",
+            "backend": self.backend_name,
+            "error_type": "not_supported",
+            "summary": "OpenOCD cannot enumerate all connected probe IDs through a backend-independent command.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("probe_target", "Probing is disabled by the effective policy.")
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
@@ -114,7 +125,7 @@ class OpenOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by the effective policy.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
         if self.config.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:

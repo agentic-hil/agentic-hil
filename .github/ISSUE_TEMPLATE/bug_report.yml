@@ -89,8 +89,8 @@ body:
   - type: textarea
     id: config
     attributes:
-      label: Sanitized `.agentic-hil/config.yaml`
-      description: Remove local usernames, secrets, private paths, and unrelated COM devices.
+      label: Sanitized authoritative config
+      description: Paste the discovered config or `AGENTIC_HIL_CONFIG` override after removing local usernames, secrets, private paths, and unrelated COM devices.
       render: yaml
   - type: textarea
     id: report

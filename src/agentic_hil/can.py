@@ -78,7 +78,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_read and not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by the effective policy.", bus_id))
+            return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by the authoritative config.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
@@ -112,7 +112,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_send", "CAN writing is disabled by the effective policy.", bus_id))
+            return self._write_report(self._permission_denied("can_send", "CAN writing is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_send")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -136,7 +136,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_read:
-            return self._write_report(self._permission_denied("can_read", "CAN reading is disabled by the effective policy.", bus_id))
+            return self._write_report(self._permission_denied("can_read", "CAN reading is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_read")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -171,7 +171,7 @@ class CanBusService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "bus_id is required."}
         bus_config = self.config.can_buses.get(bus_id)
         if bus_config is None:
-            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the effective policy.", "configured_buses": sorted(self.config.can_buses.keys())}
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the authoritative config.", "configured_buses": sorted(self.config.can_buses.keys())}
         return {"ok": True, "bus_config": bus_config}
 
     def _active_session(self, bus_id: str, tool: str) -> JsonObject:
@@ -292,7 +292,8 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
         return self.request("send", {"frame": bridge_frame(frame)}, self.timeout_s)
 
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
-        return self.request("read", {"max_frames": max_frames, "wait_timeout_s": wait_timeout_s}, self.timeout_s)
+        request_timeout_s = min(wait_timeout_s, self.timeout_s) + 1.0
+        return self.request("read", {"max_frames": max_frames, "wait_timeout_s": wait_timeout_s}, request_timeout_s)
 
 
 def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:

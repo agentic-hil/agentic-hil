@@ -1,7 +1,8 @@
 """End-to-end HIL regression test for the Nucleo-F446RE demo firmware.
 
-Build the firmware first, then run pytest from this demo directory with a
-.agentic-hil/config.yaml (see agentic-hil.config.example.yaml) and the board connected:
+Build the firmware first, then run pytest from this demo directory with
+AGENTIC_HIL_CONFIG selecting the external authoritative config (see
+agentic-hil.config.example.yaml) and the board connected:
 
     cmake --preset Debug && cmake --build --preset Debug
     pytest tests/

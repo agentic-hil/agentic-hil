@@ -9,30 +9,28 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FAKE_OPENOCD, write_config
+from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 
-from agentic_hil.adapters import AdapterService, AdapterSession
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bridge import ProcessBridgeSession
 from agentic_hil.can import parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
-from agentic_hil.config import ConfigError, apply_trusted_policy, load_config, load_trusted_policy
+from agentic_hil.config import ConfigError, load_authoritative_config, load_config
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import AdapterConfig, CanBusConfig
+from agentic_hil.types import CanBusConfig
 
 WAIT_TIMEOUT_S = 5.0
 POLL_INTERVAL_S = 0.01
 
 COM_PORT_YAML = 'com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n'
 CAN_BUS_YAML = 'can_buses:\n  bench:\n    adapter: "process"\n    channel: "vcan0"\n    executable: "python"\n'
-ADAPTER_YAML = 'adapters:\n  ntc:\n    executable: "python"\n    channels: ["temp"]\n    faults: ["open"]\n'
 
 
 def load_test_config(tmp_path: Path, **kwargs):
-    return load_config(str(write_config(tmp_path, **kwargs)), str(tmp_path))
+    return load_config(str(write_config(tmp_path, **kwargs)))
 
 
 def wait_until(predicate, timeout_s: float = WAIT_TIMEOUT_S) -> bool:
@@ -51,7 +49,6 @@ def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> No
     output = StringIO()
 
     exit_code = run_stdio_server(
-        config,
         config,
         input_stream=StringIO(oversized + "\n" + ping + "\n"),
         output_stream=output,
@@ -88,6 +85,23 @@ class FailingSerialHandle:
         pass
 
 
+class RetryCloseSerialHandle:
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.close_attempts = 0
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_attempts == 1:
+            raise OSError("port busy during close")
+        self.is_open = False
+
+
 def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
@@ -103,6 +117,25 @@ def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None
     assert result["error_type"] == "session_not_active"
     assert result["reader_error"]["error_type"] == "serial_read_failed"
     assert service._session_is_active(session) is False
+
+
+def test_com_session_stop_retains_session_when_close_fails_for_retry(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-close.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = RetryCloseSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+
+    first = service.session_stop("dut")
+    second = service.session_stop("dut")
+
+    assert first["ok"] is False
+    assert first["error_type"] == "com_port_close_failed"
+    assert second["ok"] is True
+    assert handle.close_attempts == 2
+    assert "dut" not in service.sessions
 
 
 class BlockingStdin:
@@ -159,34 +192,6 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
-
-
-class ExplodingBridge:
-    def __init__(self) -> None:
-        self.close_attempted = False
-
-    def status(self) -> dict:
-        return {"active": True}
-
-    def close(self) -> None:
-        self.close_attempted = True
-        raise RuntimeError("bridge already gone")
-
-
-def test_adapter_service_close_stops_all_sessions_despite_bridge_failure(tmp_path: Path) -> None:
-    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
-    service = AdapterService(config)
-    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
-    log_dir = tmp_path / ".agentic-hil" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    first = AdapterSession("a1", adapter_config, ExplodingBridge(), str(log_dir / "a1.jsonl"))
-    second = AdapterSession("a2", adapter_config, ExplodingBridge(), str(log_dir / "a2.jsonl"))
-    service.sessions.update({"a1": first, "a2": second})
-
-    service.close()
-
-    assert first.bridge.close_attempted and second.bridge.close_attempted
-    assert first.active is False and second.active is False
 
 
 def test_artifact_upload_rejects_oversized_local_file(tmp_path: Path) -> None:
@@ -270,16 +275,16 @@ def test_flash_rejects_non_boolean_reset_after_flash(tmp_path: Path) -> None:
     assert result["error_type"] == "invalid_argument"
 
 
-@pytest.mark.parametrize("reset_after_flash", [False, True])
-def test_flash_requires_reset_permission(tmp_path: Path, reset_after_flash: bool) -> None:
+def test_flash_requires_reset_permission_only_when_requested(tmp_path: Path) -> None:
     service = AgenticHILToolService(
         load_test_config(tmp_path, permissions_yaml="permissions:\n  allow_flash: true\n  allow_reset: false\n")
     )
 
-    result = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": reset_after_flash})
+    without_reset = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": False})
+    with_reset = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": True})
 
-    assert result["ok"] is False
-    assert result["error_type"] == "permission_denied"
+    assert without_reset["error_type"] != "permission_denied"
+    assert with_reset["error_type"] == "permission_denied"
 
 
 PERMISSION_GATE_CASES = [
@@ -291,7 +296,6 @@ PERMISSION_GATE_CASES = [
     ("allow_com_write", "com_write", {"port_id": "dut", "text": "hi"}),
     ("allow_can_read", "can_read", {"bus_id": "bench"}),
     ("allow_can_write", "can_send", {"bus_id": "bench", "frame_id": 1, "data_hex": "00"}),
-    ("allow_adapter_read", "adapter_measure", {"adapter_id": "ntc", "channel": "temp"}),
 ]
 
 
@@ -301,7 +305,6 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
         tmp_path,
         com_ports_yaml=COM_PORT_YAML,
         can_buses_yaml=CAN_BUS_YAML,
-        adapters_yaml=ADAPTER_YAML,
         permissions_yaml=f"permissions:\n  {flag}: false\n",
     )
     service = AgenticHILToolService(config)
@@ -312,9 +315,9 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
     assert result["error_type"] == "permission_denied"
 
 
-def test_live_reload_cannot_enable_startup_denied_permission(tmp_path: Path) -> None:
+def test_startup_config_is_frozen_when_file_permissions_change(tmp_path: Path) -> None:
     config_path = write_config(tmp_path, permissions_yaml="permissions:\n  allow_probe: false\n")
-    service = AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    service = AgenticHILToolService(load_config(str(config_path)))
     try:
         config_text = config_path.read_text(encoding="utf-8")
         config_path.write_text(config_text.replace("allow_probe: false", "allow_probe: true"), encoding="utf-8")
@@ -327,9 +330,9 @@ def test_live_reload_cannot_enable_startup_denied_permission(tmp_path: Path) -> 
     assert result["error_type"] == "permission_denied"
 
 
-def test_live_reload_cannot_add_new_hardware_resource(tmp_path: Path) -> None:
+def test_startup_config_is_frozen_when_file_resources_change(tmp_path: Path) -> None:
     config_path = write_config(tmp_path)
-    service = AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    service = AgenticHILToolService(load_config(str(config_path)))
     try:
         config_text = config_path.read_text(encoding="utf-8")
         config_path.write_text(config_text.replace("com_ports: {}", COM_PORT_YAML.rstrip()), encoding="utf-8")
@@ -342,132 +345,195 @@ def test_live_reload_cannot_add_new_hardware_resource(tmp_path: Path) -> None:
     assert "dut" not in result["ports"]
 
 
-def test_trusted_policy_is_required_and_must_be_outside_workspace(tmp_path: Path) -> None:
+def test_authoritative_config_falls_back_to_canonical_project_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    policy_path = write_config(workspace)
+    config_path = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG")
 
-    with pytest.raises(ConfigError) as missing:
-        load_trusted_policy(None, str(workspace))
-    assert missing.value.error_type == "trusted_policy_required"
+    config = load_authoritative_config(workspace)
 
-    with pytest.raises(ConfigError) as inside:
-        load_trusted_policy(str(policy_path.resolve()), str(workspace))
-    assert inside.value.error_type == "trusted_policy_invalid"
+    assert config.config_path == str(config_path)
 
 
-def test_host_policy_caps_workspace_permissions_resources_and_validation(tmp_path: Path) -> None:
+def test_authoritative_config_env_must_be_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", "relative/config.yaml")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(tmp_path)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["environment_variable"] == "AGENTIC_HIL_CONFIG"
+
+
+def test_authoritative_config_accepts_absolute_external_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    project_path = write_config(
+    config_path = write_config(
         workspace,
-        com_ports_yaml=COM_PORT_YAML,
-        permissions_yaml="permissions:\n  allow_probe: true\n  allow_com_read: true\n",
+        config_path=tmp_path / "managed" / "bench.yaml",
+        permissions_yaml="permissions: {}\n",
     )
-    policy_path = write_config(
-        host,
-        permissions_yaml="permissions:\n  allow_probe: false\n  allow_com_read: true\n",
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path.resolve()))
+
+    config = load_authoritative_config(workspace)
+
+    assert config.config_path == str(config_path.resolve())
+
+
+def test_authoritative_config_must_be_outside_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_root = tmp_path / "user-config"
+    monkeypatch.setenv("APPDATA", str(config_root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    workspace = config_root / "agentic-hil" / "projects" / "inside" / "workspace"
+    config_path = write_config(workspace, config_path=workspace / "config.yaml")
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path.resolve()))
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["workspace_root"] == str(workspace.resolve())
+
+
+def test_authoritative_config_requires_exact_workspace_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    other = tmp_path / "other"
+    other.mkdir()
+    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(other)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["workspace_root"] == str(workspace.resolve())
+    assert rejected.value.details["expected_workspace"] == str(other.resolve())
+
+
+def test_authoritative_config_override_need_not_use_canonical_workspace_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    canonical = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    alternate = canonical.parent.parent / "alternate" / "config.yaml"
+    alternate.parent.mkdir()
+    alternate.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(alternate))
+
+    config = load_authoritative_config(workspace)
+
+    assert config.config_path == str(alternate.resolve())
+
+
+def test_raw_config_requires_workspace_root(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("target: {}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_config(str(config_path))
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "$"
+
+
+def test_raw_config_rejects_duplicate_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"workspace_root: {str(tmp_path.resolve())!r}\npermissions: {{}}\npermissions: {{}}\n",
+        encoding="utf-8",
     )
-    project = load_config(str(project_path), str(workspace))
-    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
 
-    effective = apply_trusted_policy(project, policy)
+    with pytest.raises(ConfigError) as rejected:
+        load_config(str(config_path))
 
-    assert effective.permissions.allow_probe is False
-    assert effective.permissions.allow_com_read is True
-    assert effective.com_ports == {}
-    assert effective.validation.require_allowed_root is True
+    assert rejected.value.error_type == "config_invalid"
+    assert "valid YAML" in rejected.value.summary
 
 
-def test_trusted_policy_missing_permissions_uses_deny_defaults(tmp_path: Path) -> None:
+def test_authoritative_config_pins_external_can_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    project_path = write_config(workspace)
-    policy_path = host / "policy.yaml"
-    policy_path.parent.mkdir()
-    policy_path.write_text("target: {}\n", encoding="utf-8")
-    project = load_config(str(project_path), str(workspace))
-    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        can_buses_yaml=(
+            'can_buses:\n  bench:\n    adapter: "process"\n    channel: "test"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
+        ),
+        permissions_yaml="permissions: {}\n",
+    )
 
-    effective = apply_trusted_policy(project, policy)
+    config = load_authoritative_config(workspace)
 
-    assert effective.permissions.allow_probe is False
-    assert effective.permissions.allow_flash is False
-    assert effective.permissions.allow_reset is False
-    assert effective.artifacts.allow_upload is False
+    assert config.can_buses["bench"].executable == str(FAKE_OPENOCD.resolve())
 
 
-def test_trusted_policy_rejects_workspace_bridge_executable(tmp_path: Path) -> None:
+def test_authoritative_config_rejects_workspace_can_bridge_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
     bridge = workspace / "bridge.py"
-    bridge.parent.mkdir()
+    bridge.parent.mkdir(parents=True)
     bridge.write_text("print('untrusted')\n", encoding="utf-8")
-    policy_path = write_config(
-        host,
-        adapters_yaml=f'adapters:\n  injected:\n    executable: "{bridge.as_posix()}"\n    channels: ["value"]\n',
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        can_buses_yaml=f'can_buses:\n  injected:\n    adapter: "process"\n    channel: "test"\n    executable: "{bridge.as_posix()}"\n',
         permissions_yaml="permissions: {}\n",
     )
 
     with pytest.raises(ConfigError) as rejected:
-        load_trusted_policy(str(policy_path.resolve()), str(workspace))
+        load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "trusted_policy_invalid"
-    assert rejected.value.details["field"] == "adapters.injected.executable"
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "can_buses.injected.executable"
 
 
-def test_disjoint_symbol_allowlists_deny_all_symbols(tmp_path: Path) -> None:
+def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    project = load_config(str(write_config(workspace, allowed_symbols=["project_symbol"])), str(workspace))
-    policy_path = write_config(host, allowed_symbols=["trusted_symbol"], permissions_yaml="permissions: {}\n")
-    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
-
-    effective = apply_trusted_policy(project, policy)
-
-    assert effective.debug.allow_all_symbols is False
-    assert effective.debug.allowed_symbols == []
-
-
-def test_trusted_policy_pins_debugger_and_openocd_scripts(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
+    host = tmp_path / "tools"
     interface_cfg = host / "trusted-interface.cfg"
     target_cfg = host / "trusted-target.cfg"
     interface_cfg.parent.mkdir(parents=True)
     interface_cfg.write_text("# trusted interface\n", encoding="utf-8")
     target_cfg.write_text("# trusted target\n", encoding="utf-8")
-    policy_path = write_config(
-        host,
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
         debugger_executable=FAKE_OPENOCD,
         permissions_yaml="permissions:\n  allow_probe: true\n",
     )
-    policy_text = policy_path.read_text(encoding="utf-8")
-    policy_path.write_text(
-        policy_text.replace("interface/stlink.cfg", interface_cfg.as_posix()).replace("target/stm32f4x.cfg", target_cfg.as_posix()),
+    config_text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        config_text.replace((config_path.parent / "interface.cfg").as_posix(), interface_cfg.as_posix()).replace(
+            (config_path.parent / "target.cfg").as_posix(), target_cfg.as_posix()
+        ),
         encoding="utf-8",
     )
 
-    policy = load_trusted_policy(str(policy_path.resolve()), str(workspace))
+    config = load_authoritative_config(workspace)
 
-    assert policy.debugger.executable == str(FAKE_OPENOCD.resolve())
-    assert policy.debugger.interface_cfg == str(interface_cfg.resolve())
-    assert policy.debugger.target_cfg == str(target_cfg.resolve())
+    assert config.debugger.executable == str(FAKE_OPENOCD.resolve())
+    assert config.debugger.interface_cfg == str(interface_cfg.resolve())
+    assert config.debugger.target_cfg == str(target_cfg.resolve())
 
 
-def test_trusted_policy_rejects_relative_openocd_scripts_when_debugger_enabled(tmp_path: Path) -> None:
+def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    policy_path = write_config(
-        host,
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
         debugger_executable=FAKE_OPENOCD,
         permissions_yaml="permissions:\n  allow_probe: true\n",
     )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace((config_path.parent / "interface.cfg").as_posix(), "interface/stlink.cfg"), encoding="utf-8"
+    )
 
     with pytest.raises(ConfigError) as rejected:
-        load_trusted_policy(str(policy_path.resolve()), str(workspace))
+        load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "trusted_policy_invalid"
+    assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "debugger.interface_cfg"
 
 
@@ -551,6 +617,7 @@ def test_artifact_is_rechecked_and_staged_before_backend_use(tmp_path: Path) -> 
 
         assert changed["ok"] is False
         assert changed["error_type"] == "artifact_changed"
+        assert list(Path(manager._staging.name).iterdir()) == []
 
         validation = manager.validate_local_path("build/firmware.elf")
         staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
@@ -560,3 +627,87 @@ def test_artifact_is_rechecked_and_staged_before_backend_use(tmp_path: Path) -> 
         assert staged_path.read_bytes() == firmware.read_bytes()
     finally:
         manager.close()
+
+
+def test_local_artifact_upload_rechecks_source_before_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"approved")
+    manager = ArtifactManager(config)
+    validate = manager.validate_local_path
+
+    def replace_after_validation(path: str):
+        result = validate(path)
+        firmware.write_bytes(b"replacement")
+        return result
+
+    monkeypatch.setattr(manager, "validate_local_path", replace_after_validation)
+    try:
+        result = manager._upload_local_path("build/firmware.bin")
+    finally:
+        manager.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "artifact_changed"
+
+
+def test_upload_does_not_remove_existing_backend_stage(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"approved")
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.bin")
+        staged = manager.stage_for_backend(validation["artifact"], "debug_start_session")
+        staged_path = Path(staged["artifact"]["resolved_path"])
+
+        uploaded = manager._upload_local_path("build/firmware.bin")
+
+        assert uploaded["ok"] is True
+        assert staged_path.read_bytes() == b"approved"
+    finally:
+        manager.close()
+
+
+def test_artifact_stage_rejects_ancestor_symlink_pivot(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFsame-content")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / firmware.name).write_bytes(firmware.read_bytes())
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.elf")
+        original_build = tmp_path / "original-build"
+        firmware.parent.rename(original_build)
+        try:
+            (tmp_path / "build").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"directory symlinks unavailable: {error}")
+
+        staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+
+        assert staged["ok"] is False
+        assert staged["error_type"] == "artifact_changed"
+    finally:
+        manager.close()
+
+
+def test_flash_releases_private_backend_stage(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFfake")
+    service = AgenticHILToolService(config)
+    staging_root = Path(service.artifacts._staging.name)
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+
+        assert result["ok"] is True
+        assert list(staging_root.iterdir()) == []
+    finally:
+        service.close()

@@ -1,0 +1,32 @@
+# Test plan only. Hardware resources and permissions always come from the
+# discovered external authoritative file or AGENTIC_HIL_CONFIG override.
+version: 1
+name: capture-state
+steps:
+  - device: dut
+    action: flash
+    image_path: build/app.elf
+
+  - device: dut
+    action: uart_open
+
+  - device: dut
+    action: debug_start
+    image_path: build/app.elf
+    mode: attach
+
+  - device: dut
+    action: run_until_breakpoint
+    location: capture_done
+    timeout_s: 5
+
+  - device: dut
+    action: dump_memory
+    symbol: capture_buffer
+    output_path: build/capture.hex
+
+  - device: dut
+    action: debug_stop
+
+  - device: dut
+    action: uart_close

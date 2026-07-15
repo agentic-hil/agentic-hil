@@ -8,11 +8,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
+from conftest import FAKE_STLINK_UNCONFIRMED, write_authoritative_config, write_config
 
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.pyocd import parse_pyocd_probes
+from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import doctor, entrypoint, init_config, init_policy, install_skill, mcp_config, schema
+from agentic_hil.cli import doctor, entrypoint, init_config, initialized_config_path, install_skill, mcp_config, schema
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
@@ -28,24 +30,24 @@ def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | N
     return response["result"]["structuredContent"]
 
 
-def test_init_config_writes_starter_config(tmp_path: Path) -> None:
-    config_path = tmp_path / ".agentic-hil" / "config.yaml"
-    result = init_config(str(config_path))
+def test_init_config_writes_deterministic_deny_by_default_external_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    config_path = initialized_config_path(workspace)
+
+    result = init_config()
+
     assert result["ok"] is True
-    assert "target:" in config_path.read_text(encoding="utf-8")
-
-
-def test_init_policy_requires_absolute_path_and_writes_policy(tmp_path: Path) -> None:
-    rejected = init_policy("relative-policy.yaml")
-    policy_path = tmp_path / "host" / "policy.yaml"
-    written = init_policy(str(policy_path.resolve()))
-
-    assert rejected["ok"] is False
-    assert rejected["error_type"] == "trusted_policy_invalid"
-    assert written["ok"] is True
-    policy_text = policy_path.read_text(encoding="utf-8")
-    assert "allow_reset: false" in policy_text
-    assert "allow_upload: false" in policy_text
+    assert result["path"] == str(config_path)
+    config_text = config_path.read_text(encoding="utf-8")
+    assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
+    assert "allow_probe: false" in config_text
+    assert "allow_reset: false" in config_text
+    assert "allow_upload: false" in config_text
+    assert initialized_config_path(workspace) == config_path
 
 
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
@@ -74,61 +76,82 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert result_forced["ok"] is True
 
 
-def test_mcp_stdio_requires_external_host_policy(
+def test_mcp_stdio_reports_missing_discovered_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     workspace = tmp_path / "workspace"
-    config_path = write_config(workspace)
+    workspace.mkdir()
     monkeypatch.chdir(workspace)
-    monkeypatch.delenv("AGENTIC_HIL_POLICY", raising=False)
 
-    exit_code = entrypoint(["mcp-stdio", "--config", str(config_path)])
+    exit_code = entrypoint(["mcp-stdio"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 1
-    assert result["error_type"] == "trusted_policy_required"
+    assert result["error_type"] == "config_file_not_found"
 
 
-def test_mcp_stdio_passes_external_policy_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_stdio_passes_authoritative_config_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    config_path = write_config(workspace)
-    policy_path = write_config(host, permissions_yaml="permissions:\n  allow_probe: false\n")
+    config_path = write_authoritative_config(
+        workspace, monkeypatch, permissions_yaml="permissions:\n  allow_probe: false\n"
+    )
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG")
     received: dict = {}
 
-    def fake_server(config, trusted_policy):
+    def fake_server(config):
         received["config"] = config
-        received["policy"] = trusted_policy
         return 0
 
     monkeypatch.chdir(workspace)
-    monkeypatch.setenv("AGENTIC_HIL_POLICY", str(policy_path.resolve()))
     monkeypatch.setattr("agentic_hil.cli.run_stdio_server", fake_server)
 
-    exit_code = entrypoint(["mcp-stdio", "--config", str(config_path)])
+    exit_code = entrypoint(["mcp-stdio"])
 
     assert exit_code == 0
-    assert received["policy"].permissions.allow_probe is False
+    assert received["config"].config_path == str(config_path.resolve())
+    assert received["config"].permissions.allow_probe is False
 
 
 def test_doctor_succeeds_when_debugger_check_is_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    host = tmp_path / "host"
-    config_path = write_config(workspace)
-    policy_path = write_config(host, permissions_yaml="permissions: {}\n")
+    config_path = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
     monkeypatch.chdir(workspace)
-    monkeypatch.setenv("AGENTIC_HIL_POLICY", str(policy_path.resolve()))
 
-    result = doctor(str(config_path))
+    result = doctor()
 
     assert result["ok"] is True
     assert result["debugger"]["skipped"] is True
+    assert result["config_path"] == str(config_path.resolve())
+
+
+def test_com_stdio_uses_authoritative_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n',
+    )
+    received: dict = {}
+
+    def fake_com_stdio(config, port_id, **kwargs):
+        received["config"] = config
+        received["port_id"] = port_id
+        return 0
+
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("agentic_hil.cli.run_com_stdio", fake_com_stdio)
+
+    exit_code = entrypoint(["com-stdio", "--port", "dut_uart"])
+
+    assert exit_code == 0
+    assert received["config"].config_path == str(config_path.resolve())
+    assert received["port_id"] == "dut_uart"
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     assert config.target.name == "example-target"
     assert config.debugger.probe_id is None
     assert config.artifacts.allowed_extensions == [".elf", ".hex", ".bin"]
@@ -136,18 +159,16 @@ def test_config_loads_defaults(tmp_path: Path) -> None:
     assert config.permissions.allow_can_read is True
 
 
-def test_tool_call_fails_closed_when_reloaded_config_is_invalid(tmp_path: Path) -> None:
+def test_tool_service_keeps_startup_config_when_file_becomes_invalid(tmp_path: Path) -> None:
     config_path = write_config(tmp_path)
-    service = AgenticHILToolService(load_config(str(config_path), str(tmp_path)))
+    service = AgenticHILToolService(load_config(str(config_path)))
     try:
         config_path.write_text("permissions: [invalid\n", encoding="utf-8")
         result = service.call("probe_target")
     finally:
         service.close()
 
-    assert result["ok"] is False
-    assert result["tool"] == "probe_target"
-    assert result["error_type"] == "config_invalid"
+    assert result["ok"] is True
 
 
 def test_mcp_lists_configured_socketcan_buses_without_opening_hardware(tmp_path: Path) -> None:
@@ -163,7 +184,6 @@ def test_mcp_lists_configured_socketcan_buses_without_opening_hardware(tmp_path:
 ''',
             )
         ),
-        str(tmp_path),
     )
     service = AgenticHILToolService(config)
     try:
@@ -176,7 +196,7 @@ def test_mcp_lists_configured_socketcan_buses_without_opening_hardware(tmp_path:
 
 
 def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path, probe_id="STLINK123")), str(tmp_path))
+    config = load_config(str(write_config(tmp_path, probe_id="STLINK123")))
     service = AgenticHILToolService(config)
     try:
         probe = mcp_tool_call(service, "probe_target")
@@ -187,11 +207,78 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
     assert "adapter serial STLINK123" in log_text
 
 
+def test_openocd_probe_listing_reports_not_supported(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+
+
+def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
+def test_pyocd_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "PYOCD123"}, {"probe_id": "PYOCD456"}]
+
+
+def test_probe_listing_requires_probe_permission(tmp_path: Path) -> None:
+    config = load_config(
+        str(write_config(tmp_path, debugger_type="stlink", permissions_yaml="permissions:\n  allow_probe: false\n")),
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+
+
+def test_probe_listing_parsers_fail_closed() -> None:
+    assert stlink_probe_ids("ST-LINK SN  : 001\nSTLink SN: 002\n") == ["001", "002"]
+    assert stlink_empty_result("No ST-LINK detected") is True
+    assert parse_pyocd_probes("not-json")["error_type"] == "probe_discovery_failed"
+    assert parse_pyocd_probes('{"status": 1, "boards": []}')["error_type"] == "probe_discovery_failed"
+
+
+def test_debugger_probes_cli_uses_authoritative_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_authoritative_config(tmp_path, monkeypatch, debugger_type="stlink")
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = entrypoint(["debugger-probes"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x7fELFfake")
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     service = AgenticHILToolService(config)
     try:
         no_reset = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
@@ -213,7 +300,7 @@ def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x7fELFfake")
-    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123")), str(tmp_path))
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123")))
     service = AgenticHILToolService(config)
     try:
         info = mcp_tool_call(service, "debugger_info")
@@ -240,7 +327,6 @@ def test_pyocd_backend_probes_flashes_and_resets_with_probe_and_target(tmp_path:
     firmware.write_bytes(b"\x7fELFfake")
     config = load_config(
         str(write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re")),
-        str(tmp_path),
     )
     service = AgenticHILToolService(config)
     try:
@@ -261,6 +347,7 @@ def test_pyocd_backend_probes_flashes_and_resets_with_probe_and_target(tmp_path:
     assert flash["reset_after_flash"] is True
     flash_log = (tmp_path / flash["log_path"]).read_text(encoding="utf-8")
     assert "flash" in flash_log
+    assert "--no-reset" in flash_log
     assert "firmware.elf" in flash_log
     assert reset["ok"] is True
     reset_log = (tmp_path / reset["log_path"]).read_text(encoding="utf-8")
@@ -271,7 +358,7 @@ def test_pyocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
     firmware = tmp_path / "build" / "firmware.bin"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x01\x02\x03\x04")
-    config = load_config(str(write_config(tmp_path, debugger_type="pyocd")), str(tmp_path))
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd")))
     service = AgenticHILToolService(config)
     try:
         result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
@@ -285,7 +372,6 @@ def test_pyocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
 def test_stlink_rejects_unconfirmed_successful_exit(tmp_path: Path) -> None:
     config = load_config(
         str(write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_UNCONFIRMED)),
-        str(tmp_path),
     )
     service = AgenticHILToolService(config)
     try:
@@ -301,7 +387,7 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
     firmware = tmp_path / "build" / "firmware.bin"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x01\x02\x03\x04")
-    config = load_config(str(write_config(tmp_path, debugger_type="stlink")), str(tmp_path))
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink")))
     service = AgenticHILToolService(config)
     try:
         result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
@@ -313,7 +399,7 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
 
 
 def test_artifact_validation_computes_sha256(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
     data = b"\x7fELFfake"
@@ -325,7 +411,7 @@ def test_artifact_validation_computes_sha256(tmp_path: Path) -> None:
 
 
 def test_artifact_validation_blocks_outside_root(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     firmware = tmp_path / "other" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x7fELF")
@@ -346,7 +432,7 @@ def test_load_config_reports_unreadable_path_as_config_error(tmp_path: Path) -> 
     config_path = tmp_path / ".agentic-hil" / "config.yaml"
     config_path.mkdir(parents=True)  # a directory passes exists() but cannot be read
     with pytest.raises(ConfigError) as excinfo:
-        load_config(str(config_path), str(tmp_path))
+        load_config(str(config_path))
     assert excinfo.value.error_type == "config_unreadable"
 
 
@@ -354,16 +440,16 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(b"\xff\xfe\x00 broken")
     with pytest.raises(ConfigError) as excinfo:
-        load_config(str(config_path), str(tmp_path))
+        load_config(str(config_path))
     assert excinfo.value.error_type == "config_invalid"
 
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 35
-    assert len(set(MCP_TOOL_NAMES)) == 35
+    assert len(MCP_TOOL_NAMES) == 29
+    assert len(set(MCP_TOOL_NAMES)) == 29
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     service = AgenticHILToolService(config)
     try:
         for name in MCP_TOOL_NAMES:
@@ -374,7 +460,7 @@ def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
 
 
 def test_mcp_initialize_rejects_unsupported_protocol_version(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    config = load_config(str(write_config(tmp_path)))
     service = AgenticHILToolService(config)
     try:
         response = handle_mcp_message(
@@ -399,7 +485,6 @@ def test_com_write_rejects_unencodable_text(tmp_path: Path) -> None:
 ''',
             )
         ),
-        str(tmp_path),
     )
     service = ComPortService(config)
     try:
@@ -435,114 +520,21 @@ def test_process_can_adapter_request_after_exit_returns_error() -> None:
     assert result["ok"] is False
 
 
-NTC_ADAPTER_YAML = f'''adapters:
-  ntc_sim:
-    executable: "{SIM_NTC_ADAPTER.as_posix()}"
-    channels: ["temperature", "resistance"]
-    faults: ["open", "short_to_gnd", "short_to_vcc"]
-'''
+def test_process_can_adapter_read_allows_bridge_response_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = object.__new__(ProcessCanAdapterSession)
+    session.timeout_s = 5.0
+    captured: dict[str, object] = {}
 
+    def fake_request(method: str, params: dict, timeout_s: float) -> dict:
+        captured.update({"method": method, "params": params, "timeout_s": timeout_s})
+        return {"ok": True, "frames": []}
 
-def test_adapter_config_loads(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
-    assert config.adapters["ntc_sim"].channels == ["temperature", "resistance"]
-    assert config.adapters["ntc_sim"].faults == ["open", "short_to_gnd", "short_to_vcc"]
-    assert config.permissions.allow_adapter_read is True
-    assert config.permissions.allow_adapter_write is True
+    monkeypatch.setattr(session, "request", fake_request)
 
+    result = session.read(max_frames=8, wait_timeout_s=5.0)
 
-def test_adapter_set_value_measure_and_fault_roundtrip(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
-    service = AgenticHILToolService(config)
-    try:
-        listed = mcp_tool_call(service, "adapters_list")
-        assert listed["ok"] is True
-        assert listed["adapters"]["ntc_sim"]["session_active"] is False
-
-        started = mcp_tool_call(service, "adapter_session_start", {"adapter_id": "ntc_sim"})
-        assert started["ok"] is True
-
-        set_result = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 85})
-        assert set_result["ok"] is True
-
-        measured = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
-        assert measured["ok"] is True
-        assert measured["value"] == 85.0
-
-        injected = mcp_tool_call(service, "adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})
-        assert injected["ok"] is True
-        open_resistance = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "resistance"})
-        assert open_resistance["value"] >= 1e9
-
-        cleared = mcp_tool_call(service, "adapter_clear_fault", {"adapter_id": "ntc_sim"})
-        assert cleared["ok"] is True
-        hot_resistance = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "resistance"})
-        assert 500 < hot_resistance["value"] < 5000  # 10k NTC (B=3950) at 85 degC
-
-        stopped = mcp_tool_call(service, "adapter_session_stop", {"adapter_id": "ntc_sim"})
-        assert stopped["ok"] is True
-    finally:
-        service.close()
-
-
-def test_adapter_rejects_unconfigured_channel_fault_and_bad_value(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
-    service = AgenticHILToolService(config)
-    try:
-        started = mcp_tool_call(service, "adapter_session_start", {"adapter_id": "ntc_sim"})
-        assert started["ok"] is True
-
-        bad_channel = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "voltage", "value": 3.3})
-        assert bad_channel["ok"] is False
-        assert bad_channel["error_type"] == "channel_not_configured"
-
-        bad_fault = mcp_tool_call(service, "adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "stuck"})
-        assert bad_fault["ok"] is False
-        assert bad_fault["error_type"] == "fault_not_configured"
-
-        bad_value = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": True})
-        assert bad_value["ok"] is False
-        assert bad_value["error_type"] == "invalid_argument"
-    finally:
-        service.close()
-
-
-def test_adapter_requires_active_session(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML)), str(tmp_path))
-    service = AgenticHILToolService(config)
-    try:
-        result = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 25})
-    finally:
-        service.close()
-    assert result["ok"] is False
-    assert result["error_type"] == "session_not_active"
-
-
-def test_adapter_write_permission_denied(tmp_path: Path) -> None:
-    config = load_config(
-        str(
-            write_config(
-                tmp_path,
-                adapters_yaml=NTC_ADAPTER_YAML,
-                permissions_yaml='''permissions:
-  allow_adapter_read: true
-  allow_adapter_write: false
-''',
-            )
-        ),
-        str(tmp_path),
-    )
-    service = AgenticHILToolService(config)
-    try:
-        started = mcp_tool_call(service, "adapter_session_start", {"adapter_id": "ntc_sim"})
-        assert started["ok"] is True
-        denied = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 25})
-        assert denied["ok"] is False
-        assert denied["error_type"] == "permission_denied"
-        measured = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
-        assert measured["ok"] is True
-    finally:
-        service.close()
+    assert result["ok"] is True
+    assert captured["timeout_s"] == 6.0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX-only PEAK channel validation")
@@ -558,7 +550,6 @@ def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> Non
 ''',
             )
         ),
-        str(tmp_path),
     )
     result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
     assert result["ok"] is False

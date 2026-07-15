@@ -1,36 +1,31 @@
 from __future__ import annotations
 
 import pytest
-from conftest import SIM_NTC_ADAPTER, write_config
-
-NTC_ADAPTER_YAML = f'''adapters:
-  ntc_sim:
-    executable: "{SIM_NTC_ADAPTER.as_posix()}"
-    channels: ["temperature", "resistance"]
-    faults: ["open", "short_to_gnd", "short_to_vcc"]
-'''
+from conftest import write_authoritative_config
 
 PLUGIN_ARGS = ("-p", "no:agentic_hil", "-p", "agentic_hil.pytest_plugin")
 
-ADAPTER_LOOP_TEST = """
-def test_adapter_loop(agentic_hil):
-    started = agentic_hil.call("adapter_session_start", {"adapter_id": "ntc_sim"})
-    assert started["ok"] is True
-    set_result = agentic_hil.call("adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 85})
-    assert set_result["ok"] is True
-    measured = agentic_hil.call("adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
-    assert measured["value"] == 85.0
+SERVICE_TEST = """
+def test_service(agentic_hil):
+    result = agentic_hil.call("debugger_info")
+    assert result["ok"] is True
 """
 
 
-def test_agentic_hil_fixture_runs_adapter_loop(pytester: pytest.Pytester) -> None:
-    write_config(pytester.path, adapters_yaml=NTC_ADAPTER_YAML)
-    pytester.makepyfile(ADAPTER_LOOP_TEST)
+def test_agentic_hil_fixture_runs_with_external_config_bound_to_root(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_authoritative_config(pytester.path, monkeypatch)
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG")
+    pytester.makepyfile(SERVICE_TEST)
     result = pytester.runpytest(*PLUGIN_ARGS)
     result.assert_outcomes(passed=1)
 
 
-def test_agentic_hil_fixture_skips_without_config(pytester: pytest.Pytester) -> None:
+def test_agentic_hil_fixture_skips_without_config(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
     pytester.makepyfile("""
 def test_needs_hardware(agentic_hil):
     raise AssertionError("must not run without an Agentic HIL configuration")
@@ -39,10 +34,14 @@ def test_needs_hardware(agentic_hil):
     result.assert_outcomes(skipped=1)
 
 
-def test_agentic_hil_fixture_fails_loudly_on_invalid_config(pytester: pytest.Pytester) -> None:
-    config_path = pytester.path / ".agentic-hil" / "config.yaml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text('target:\n  controler: "typo"\n', encoding="utf-8")
+def test_agentic_hil_fixture_fails_loudly_on_invalid_set_config(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = write_authoritative_config(pytester.path, monkeypatch)
+    config_path.write_text(
+        f"workspace_root: {str(pytester.path.resolve())!r}\ntarget:\n  controler: \"typo\"\n",
+        encoding="utf-8",
+    )
     pytester.makepyfile("""
 def test_needs_hardware(agentic_hil):
     raise AssertionError("must not run with an invalid Agentic HIL configuration")
@@ -54,34 +53,13 @@ def test_needs_hardware(agentic_hil):
     assert outcomes.get("errors", 0) == 1 or outcomes.get("failed", 0) == 1
 
 
-def test_agentic_hil_config_option_points_to_custom_path(pytester: pytest.Pytester) -> None:
-    config_path = write_config(pytester.path / "elsewhere", adapters_yaml=NTC_ADAPTER_YAML)
-    pytester.makepyfile(ADAPTER_LOOP_TEST)
-    result = pytester.runpytest(*PLUGIN_ARGS, "--agentic-hil-config", str(config_path))
-    result.assert_outcomes(passed=1)
-
-
-def test_relative_config_resolves_against_rootdir(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
-    write_config(pytester.path, adapters_yaml=NTC_ADAPTER_YAML)
-    pytester.makeini("[pytest]\n")
-    test_file = pytester.makepyfile(ADAPTER_LOOP_TEST)
-    subdir = pytester.mkdir("sub")
-    monkeypatch.chdir(subdir)
-    result = pytester.runpytest(*PLUGIN_ARGS, str(test_file))
-    result.assert_outcomes(passed=1)
-
-
-def test_adapter_state_does_not_leak_between_tests(pytester: pytest.Pytester) -> None:
-    write_config(pytester.path, adapters_yaml=NTC_ADAPTER_YAML)
-    pytester.makepyfile("""
-def test_a_injects_fault_without_cleanup(agentic_hil):
-    assert agentic_hil.call("adapter_session_start", {"adapter_id": "ntc_sim"})["ok"] is True
-    assert agentic_hil.call("adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})["ok"] is True
-
-def test_b_sees_fresh_adapter_state(agentic_hil):
-    assert agentic_hil.call("adapter_session_start", {"adapter_id": "ntc_sim"})["ok"] is True
-    measured = agentic_hil.call("adapter_measure", {"adapter_id": "ntc_sim", "channel": "resistance"})
-    assert 9000 < measured["value"] < 11000  # 10k NTC at default 25 degC, no fault
-""")
+def test_agentic_hil_fixture_fails_for_different_workspace(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other_workspace = pytester.path.parent / "other-workspace"
+    write_authoritative_config(other_workspace, monkeypatch)
+    pytester.makepyfile(SERVICE_TEST)
     result = pytester.runpytest(*PLUGIN_ARGS)
-    result.assert_outcomes(passed=2)
+    outcomes = result.parseoutcomes()
+    assert outcomes.get("passed", 0) == 0
+    assert outcomes.get("errors", 0) == 1 or outcomes.get("failed", 0) == 1

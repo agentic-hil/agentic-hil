@@ -20,6 +20,7 @@ EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "addition
 
 MCP_TOOL_NAMES = [
     "debugger_info",
+    "debugger_probes_list",
     "probe_target",
     "artifact_upload",
     "flash_firmware",
@@ -47,17 +48,11 @@ MCP_TOOL_NAMES = [
     "can_session_stop",
     "can_send",
     "can_read",
-    "adapters_list",
-    "adapter_session_start",
-    "adapter_session_stop",
-    "adapter_set_value",
-    "adapter_inject_fault",
-    "adapter_clear_fault",
-    "adapter_measure",
 ]
 
 MCP_TOOLS: list[JsonObject] = [
     {"name": "debugger_info", "description": "Check whether the configured debugger backend is available.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "debugger_probes_list", "description": "List every connected probe ID visible to the configured debugger backend.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "probe_target", "description": "Probe the configured embedded target through the configured debugger.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "artifact_upload", "description": "Upload a local or base64-encoded firmware artifact into the configured Agentic HIL artifact store.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "filename": {"type": "string"}, "data_base64": {"type": "string"}}, "oneOf": [{"required": ["image_path"]}, {"required": ["filename", "data_base64"]}], "additionalProperties": False}},
     {"name": "flash_firmware", "description": "Flash a validated firmware artifact. Provide exactly one of image_path or artifact_id. The target is not reset unless reset_after_flash is true.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "artifact_id": {"type": "string"}, "reset_after_flash": {"type": "boolean", "default": False}}, "oneOf": [{"required": ["image_path"]}, {"required": ["artifact_id"]}], "additionalProperties": False}},
@@ -85,13 +80,6 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}}, "required": ["bus_id"], "additionalProperties": False}},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, "required": ["bus_id", "frame_id"], "additionalProperties": False}},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": {"type": "number", "minimum": 0, "default": 0}}, "required": ["bus_id"], "additionalProperties": False}},
-    {"name": "adapters_list", "description": "List configured test adapters (sensor/actuator/fault simulation) and session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "adapter_session_start", "description": "Start a session with a configured test adapter bridge.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_session_stop", "description": "Stop a configured test adapter session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_set_value", "description": "Set a configured test adapter channel to a value (e.g. simulated sensor temperature).", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}}, "required": ["adapter_id", "channel", "value"], "additionalProperties": False}},
-    {"name": "adapter_inject_fault", "description": "Inject a configured fault state (e.g. open sensor, short to GND) on a test adapter.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "fault"], "additionalProperties": False}},
-    {"name": "adapter_clear_fault", "description": "Clear an injected fault (or all faults) on a test adapter.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_measure", "description": "Measure a configured test adapter channel and return the structured value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
 ]
 
 AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) as the safe gate to the configured embedded hardware.
@@ -99,11 +87,12 @@ AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) 
 Workflow:
 1. Build the firmware first.
 2. Check debugger availability with debugger_info if setup is unclear.
-3. Probe the target before flashing.
-4. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
-5. Read structured results after every hardware action.
-6. Use configured COM port ids, CAN bus ids, adapter ids, channel names, and fault names only.
-7. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
+3. If multiple probes are attached, discover their IDs with debugger_probes_list before selecting one in the authoritative config.
+4. Probe the target before flashing.
+5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
+6. Read structured results after every hardware action.
+7. Use configured COM port and CAN bus ids only.
+8. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.

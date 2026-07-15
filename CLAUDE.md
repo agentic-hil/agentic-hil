@@ -6,9 +6,9 @@ Canonical agent instructions live in `AGENTS.md` and `AI_AGENT_QUICKSTART.md`. H
 
 ## Project Overview
 
-Agentic HIL is a Python MCP stdio server for safe embedded firmware development with local hardware-in-the-loop targets. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, configured CAN bus stimulus/feedback, policy-gated test adapters, and reading structured reports from a configured local embedded target.
+Agentic HIL is a Python MCP stdio server for safe embedded firmware development with local hardware-in-the-loop targets. It exposes narrow tools for probing, flashing, resetting, configured COM port stimulus/feedback, configured CAN bus stimulus/feedback, and reading structured reports from a configured local embedded target.
 
-The project-local `.agentic-hil/config.yaml` is agent-writable project input, not the policy authority. MCP authorization is capped by the host-managed policy selected through `AGENTIC_HIL_POLICY`. If an Agentic HIL tool returns `permission_denied`, stop and ask the user; never edit or create the trusted policy or MCP host environment.
+Agentic HIL discovers the project's one authoritative configuration outside the repository; `AGENTIC_HIL_CONFIG` is an optional absolute-path override. Mandatory `workspace_root` binds either file to the exact project root. If an Agentic HIL tool returns `permission_denied`, stop and ask the user; never bypass the config.
 
 Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Python 3.10 or newer as the supported first path unless project files or the user clearly identify another setup.
 

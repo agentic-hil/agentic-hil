@@ -3,11 +3,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
-from agentic_hil.config import ConfigError, apply_trusted_policy, load_config
+from agentic_hil.config import ConfigError
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.report import read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -21,21 +20,23 @@ class AgenticHILToolService:
         artifacts: ArtifactManager | None = None,
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
-        adapters: AdapterService | None = None,
-        trusted_policy: AgenticHILConfig | None = None,
     ):
-        self.trusted_policy = apply_trusted_policy(config, trusted_policy or config)
-        self.config = self.trusted_policy
+        self.config = config
         self.backend = backend or create_debugger_backend(self.config)
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config)
         self.can_buses = can_buses or CanBusService(self.config)
-        self.adapters = adapters or AdapterService(self.config)
+        self._debug_artifact: JsonObject | None = None
 
     def debugger_info(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the trusted policy.")
+            return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
         return self.backend.info()
+
+    def debugger_probes_list(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.")
+        return self.backend.list_probes()
 
     def probe_target(self) -> JsonObject:
         return self.backend.probe_target()
@@ -43,9 +44,7 @@ class AgenticHILToolService:
     def flash_firmware(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
         if not self.config.permissions.allow_flash:
-            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the effective policy.")
-        if not self.config.permissions.allow_reset:
-            return tool_error("flash_firmware", "permission_denied", "Flashing requires allow_reset because supported flash backends reset the target.")
+            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.")
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -53,20 +52,25 @@ class AgenticHILToolService:
         reset_after_flash = payload.get("reset_after_flash", False)
         if not isinstance(reset_after_flash, bool):
             return tool_error("flash_firmware", "invalid_argument", "reset_after_flash must be a boolean.")
+        if reset_after_flash and not self.config.permissions.allow_reset:
+            return tool_error("flash_firmware", "permission_denied", "Post-flash reset is disabled by the authoritative config.")
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
         staged = self.artifacts.stage_for_backend(validation["artifact"], "flash_firmware")
         if not staged["ok"]:
             return staged
-        return self.backend.flash_firmware(staged["artifact"], reset_after_flash)
+        try:
+            return self.backend.flash_firmware(staged["artifact"], reset_after_flash)
+        finally:
+            self.artifacts.release_stage(staged["artifact"])
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
         if not self.config.permissions.allow_reset:
-            return tool_error("reset_target", "permission_denied", "Target reset is disabled by the trusted policy.")
+            return tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.")
         return self.backend.reset_target(mode)
 
     def debug_start_session(self, payload: JsonObject | None = None) -> JsonObject:
@@ -85,10 +89,23 @@ class AgenticHILToolService:
         staged = self.artifacts.stage_for_backend(artifact, "debug_start_session")
         if not staged["ok"]:
             return staged
-        return self.backend.debug_start_session(staged["artifact"], str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
+        try:
+            result = self.backend.debug_start_session(staged["artifact"], str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
+        except Exception:
+            self.artifacts.release_stage(staged["artifact"])
+            raise
+        if result.get("ok"):
+            self._debug_artifact = staged["artifact"]
+        else:
+            self.artifacts.release_stage(staged["artifact"])
+        return result
 
     def debug_stop_session(self, payload: JsonObject | None = None) -> JsonObject:
-        return self.backend.debug_stop_session(number_argument((payload or {}).get("timeout_s")))
+        result = self.backend.debug_stop_session(number_argument((payload or {}).get("timeout_s")))
+        if result.get("ok") and self._debug_artifact is not None:
+            self.artifacts.release_stage(self._debug_artifact)
+            self._debug_artifact = None
+        return result
 
     def debug_get_session_status(self) -> JsonObject:
         return self.backend.debug_get_session_status()
@@ -145,12 +162,10 @@ class AgenticHILToolService:
         return self.backend.classify_last_error()
 
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
-        reload_error = self._reload_config(name)
-        if reload_error is not None:
-            return reload_error
         args = arguments or {}
         dispatch = {
             "debugger_info": lambda: self.debugger_info(),
+            "debugger_probes_list": lambda: self.debugger_probes_list(),
             "probe_target": lambda: self.probe_target(),
             "flash_firmware": lambda: self.flash_firmware(args),
             "artifact_upload": lambda: self.artifact_upload(args),
@@ -178,13 +193,6 @@ class AgenticHILToolService:
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
             "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
-            "adapters_list": lambda: self.adapters.list_adapters(),
-            "adapter_session_start": lambda: self.adapters.session_start(str(args.get("adapter_id", ""))),
-            "adapter_session_stop": lambda: self.adapters.session_stop(str(args.get("adapter_id", ""))),
-            "adapter_set_value": lambda: self.adapters.set_value(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_inject_fault": lambda: self.adapters.inject_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_clear_fault": lambda: self.adapters.clear_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
         }
         if name in dispatch:
             try:
@@ -193,38 +201,21 @@ class AgenticHILToolService:
                 return {"tool": name, **error.to_dict()}
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
-    def _reload_config(self, tool: str) -> JsonObject | None:
-        try:
-            project_config = load_config(self.config.config_path, self.config.work_dir)
-            config = apply_trusted_policy(project_config, self.trusted_policy)
-        except ConfigError as error:
-            return {"tool": tool, **error.to_dict()}
-        if config == self.config:
-            return None
-
-        if config.debugger.type == self.config.debugger.type:
-            self.backend.reconfigure(config)
-        else:
-            backend = create_debugger_backend(config)
-            self.backend.close()
-            self.backend = backend
-        self.artifacts.reconfigure(config)
-        self.com_ports.reconfigure(config)
-        self.can_buses.reconfigure(config)
-        self.adapters.reconfigure(config)
-        self.config = config
-        return None
-
     def close(self) -> None:
-        self.backend.close()
-        self.artifacts.close()
-        self.com_ports.close()
-        self.can_buses.close()
-        self.adapters.close()
-
-
-def adapter_payload(args: JsonObject) -> JsonObject:
-    return {key: value for key, value in args.items() if key != "adapter_id"}
+        errors: list[tuple[str, Exception]] = []
+        for name, resource in [
+            ("backend", self.backend),
+            ("artifacts", self.artifacts),
+            ("com_ports", self.com_ports),
+            ("can_buses", self.can_buses),
+        ]:
+            try:
+                resource.close()
+            except Exception as error:
+                errors.append((name, error))
+        if errors:
+            details = "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
+            raise RuntimeError(f"Agentic HIL service cleanup failed: {details}") from errors[0][1]
 
 
 def number_argument(value: object) -> float | None:

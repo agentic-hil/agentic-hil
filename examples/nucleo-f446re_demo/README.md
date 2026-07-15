@@ -17,7 +17,7 @@ cmake --preset Debug
 cmake --build --preset Debug
 ```
 
-This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — inside the `build` artifact root that the Agentic HIL policy allows for flashing.
+This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — inside the `build` artifact root that the Agentic HIL config allows for flashing.
 
 ## Configure Agentic HIL
 
@@ -25,14 +25,18 @@ Names: the Python distribution/install target and CLI command use `agentic-hil`.
 
 ```bash
 pipx install agentic-hil
-mkdir -p .agentic-hil && cp agentic-hil.config.example.yaml .agentic-hil/config.yaml
-# adjust com_ports.dut_uart.device (e.g. /dev/ttyACM0, COM5), then:
+agentic-hil init
+# Copy agentic-hil.config.example.yaml's contents into that external file.
+# Replace workspace_root with this directory's absolute path and adjust
+# com_ports.dut_uart.device (for example /dev/ttyACM0 or COM5), then:
 agentic-hil doctor
 ```
 
+The authoritative file belongs outside the repository at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Do not commit a machine-specific copy. The included template enables only the probe, flash, reset, and UART-read permissions required by this demo; review it before use.
+
 ## Run the loop from an agent (MCP)
 
-With the project-local `.mcp.json` from the [top-level README](../../README.md), an agent drives:
+With the MCP host started from this project root as described in the [top-level README](../../README.md), `agentic-hil mcp-stdio` lets an agent drive:
 
 ```text
 flash_firmware     {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
@@ -48,7 +52,7 @@ com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
 pytest tests/
 ```
 
-[tests/test_firmware.py](tests/test_firmware.py) flashes the ELF, resets the target, and asserts the boot banner on the UART. Without a `.agentic-hil/config.yaml` the test skips; with a configuration but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
+[tests/test_firmware.py](tests/test_firmware.py) flashes the ELF, resets the target, and asserts the boot banner on the UART. The pytest plugin uses the same discovered config or `AGENTIC_HIL_CONFIG` override as `doctor` and MCP. Without an available config the test skips; with a config but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
 
 ## Adapting to another board
 

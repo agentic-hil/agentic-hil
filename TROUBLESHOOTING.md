@@ -1,8 +1,8 @@
 # Troubleshooting
 
-This page covers the most common Agentic HIL setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Python 3.10 or newer.
+This page covers the most common Agentic Hardware-in-the-Loop (Agentic HIL) setup and hardware-loop failures. Start with the supported first path from the README: STM32 Nucleo-F446RE, ST-Link, OpenOCD, and Python 3.10 or newer.
 
-Names: the Python package/install target and Python-facing identifiers such as imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`. The CLI command, repository URL, and MCP server name use `agentic-hil`.
+Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
 
@@ -23,47 +23,47 @@ Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or 
 Fix — all user-local, never with admin rights. Start with the PyPI/pip package:
 
 ```bash
-python -m pip install --user agentic_hil
+python -m pip install --user agentic-hil
 agentic-hil --version
 ```
 
 If that fails, use `uv` or `pipx` instead:
 
 ```bash
-uvx --from agentic_hil agentic-hil --version                                  # run without installing
-uvx --from git+https://github.com/hp-8472/agentic-hil agentic-hil --version    # repository as package source
-uv tool install agentic_hil                                                    # isolated user-local install
+uvx --from agentic-hil agentic-hil --version                                  # run without installing
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version # repository as package source
+uv tool install agentic-hil                                                    # isolated user-local install
 ```
 
-`pipx run --spec agentic_hil agentic-hil` / `pipx install agentic_hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+`pipx run --spec agentic-hil agentic-hil` / `pipx install agentic-hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
-In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["--from", "agentic_hil", "agentic-hil", "mcp-stdio", "--config", ".agentic-hil/config.yaml"]`.
+In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]`.
 
-The MCP host must separately provide `AGENTIC_HIL_POLICY` as an absolute path to a human-reviewed file outside the project. Do not add that environment variable to repository-controlled `.mcp.json`.
+The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
 Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
-Likely cause: `.agentic-hil/config.yaml` is missing, the command runs from the wrong directory, the YAML is invalid or not UTF-8, or the file contains an unknown field or unsupported value.
+Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
-Fix: run `agentic-hil init` from the firmware project directory, edit only project-specific fields, then run `agentic-hil doctor` again. Use the structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init` from the firmware project root. Review the deny-by-default file it creates outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
-## 3. `trusted_policy_required` / `trusted_policy_invalid`
+## 3. `config_required` / Workspace Binding Failure
 
 Symptom: `mcp-stdio` exits before serving tools with one of these `error_type` values.
 
-Likely cause: the MCP host did not set `AGENTIC_HIL_POLICY`, the path is relative or inside the workspace, or the policy authorizes a debugger/process-bridge executable inside the workspace.
+Likely cause: the MCP host started from the wrong project directory, `workspace_root` does not match the project root, or the config authorizes a debugger/process-bridge executable inside the workspace.
 
-Fix: stop and ask the human operator. The operator creates and reviews an external policy with `agentic-hil policy-init --output <absolute-external-path>`, configures the absolute path in the host/user-level MCP environment, and restarts the MCP process. The agent must not perform this step or modify the host registration.
+Fix: stop and ask the human operator. The operator reviews the external config created by `agentic-hil init`, configures the MCP host's project working directory, and restarts the MCP process. If an absolute-path override is needed, set `AGENTIC_HIL_CONFIG` outside repository configuration. Never replace it with a repository path.
 
 ## 4. `debugger_not_found`
 
 Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
 
-Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the effective trusted `debugger.executable` could not be pinned.
+Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or configured `debugger.executable` could not be pinned.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic_hil[pyocd]` extra), then have the operator set `debugger.executable` in the trusted policy to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debugger.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
 
 ## 5. `debugger_config_not_found`
 
@@ -71,7 +71,7 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
-Fix: verify OpenOCD's script directory. In the trusted policy, use absolute paths to host-owned interface and target scripts outside the workspace.
+Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
 
 ## 6. `adapter_not_found`
 
@@ -93,9 +93,9 @@ Fix: confirm board power, keep `target/stm32f4x.cfg` for Nucleo-F446RE, disconne
 
 Symptom: an MCP tool returns `error_type: "permission_denied"`.
 
-Likely cause: the project request or host-managed trusted policy disables that action, or the resource is absent from their intersection.
+Likely cause: the authoritative config disables that action or does not name the resource.
 
-Fix: stop and ask the human operator. Do not edit the trusted policy, environment, or host MCP registration, and do not work around the result with raw OpenOCD, direct COM-port tools, direct CAN or test-adapter access, or shell commands.
+Fix: stop and ask the human operator to review the authoritative config. Do not work around the result with raw OpenOCD, direct COM-port tools, direct CAN access, or shell commands.
 
 ## 9. Artifact Not Found Or Fails Validation
 
@@ -119,7 +119,7 @@ Symptom: COM tools cannot start a session, return permission errors, or read no 
 
 Likely cause: the port is not configured under `com_ports`, the device name is wrong, the baud rate is wrong, another program owns the port, or serial access permissions are missing.
 
-Fix: run `agentic-hil com-ports`, add only the approved project port to `.agentic-hil/config.yaml`, close other serial monitors, and use MCP COM tools with the configured `port_id`.
+Fix: run `agentic-hil com-ports`, have the operator add only the approved project port to the authoritative config, close other serial monitors, and use MCP COM tools with the configured `port_id`.
 
 Linux permission note: if opening the device fails with a permission error, the user typically needs membership in the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or a udev rule for the adapter. This is the one setup step that may genuinely need an administrator once; Agentic HIL itself never needs admin rights.
 
@@ -127,14 +127,6 @@ Linux permission note: if opening the device fails with a permission error, the 
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
 
-Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic_hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
-Fix: add only the approved project bus to `.agentic-hil/config.yaml` and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
-
-## 13. Test Adapter Does Not Work
-
-Symptom: adapter tools return `adapter_not_configured`, `session_not_active`, `channel_not_configured`, `fault_not_configured`, or `adapter_bridge_*` errors.
-
-Likely cause: the adapter is not configured under `adapters`, the session was not started, the channel or fault name is not in the config allowlist, or the bridge executable is missing or crashed.
-
-Fix: configure the adapter with explicit `channels` and `faults` allowlists, start with `adapter_session_start`, and use only allowlisted names. For `adapter_bridge_process_exited`/`adapter_bridge_timeout`, check the bridge executable path and test it standalone — the bundled simulator `examples/adapters/sim_ntc_adapter.py` is a working reference for the bridge protocol.
+Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.

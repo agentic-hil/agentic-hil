@@ -126,16 +126,21 @@ class GdbDebugSessions:
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
             failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
-            self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if cleanup_error is not None:
+                failure["cleanup_error"] = cleanup_error
             session.status = "error"
             return self._report(failure)
 
         session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
-            self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             session.status = "error"
-            return self._report({"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)})
+            result = {"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)}
+            if cleanup_error is not None:
+                result["cleanup_error"] = cleanup_error
+            return self._report(result)
 
         session.status = "halted"
         self._refresh_session_stop(session, INITIAL_STOP_POLL_TIMEOUT_S)
@@ -165,8 +170,10 @@ class GdbDebugSessions:
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
-        self._cleanup_session(session, timeout)
-        session.status = "stopped"
+        cleanup_error = self._cleanup_session(session, timeout)
+        session.status = "error" if cleanup_error is not None else "stopped"
+        if cleanup_error is not None:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "error", "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed."})
         self.session = None
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
 
@@ -320,21 +327,24 @@ class GdbDebugSessions:
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
-            self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            if cleanup_error is not None:
+                session.status = "error"
+                raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
             session.status = "stopped"
         self.session = None
 
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.permissions
         if not permissions.allow_probe:
-            return self._permission_denied(tool, "Debug sessions require allow_probe in the effective policy.")
+            return self._permission_denied(tool, "Debug sessions require allow_probe in the authoritative config.")
         if mode != "attach" and not permissions.allow_reset:
-            return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the effective policy.")
+            return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the authoritative config.")
         if permissions.allow_raw_debugger_commands:
             return self._permission_denied(tool, "Debug sessions are disabled while raw debugger commands are allowed.")
         if mode == "load":
             if not permissions.allow_flash:
-                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the effective policy.")
+                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the authoritative config.")
             if permissions.allow_mass_erase:
                 return self._permission_denied(tool, "Debug session mode 'load' is disabled while mass erase is allowed.")
         return {"ok": True}
@@ -363,7 +373,7 @@ class GdbDebugSessions:
             found = which(candidate)
             if found is not None:
                 return {"ok": True, "executable": found}
-        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in .agentic-hil/config.yaml"]}
+        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"]}
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
         commands = [
@@ -547,19 +557,33 @@ class GdbDebugSessions:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data)}
         return {"ok": True, "data": bytes(data)}
 
-    def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> None:
+    def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
+        errors: list[tuple[str, Exception]] = []
         if session.gdb is not None:
-            with suppress(Exception):
+            try:
                 session.gdb.close(timeout_s)
+            except Exception as error:
+                errors.append(("gdb", error))
         if session.server.poll() is None:
-            session.server.terminate()
-            with suppress(subprocess.TimeoutExpired):
-                session.server.wait(timeout=timeout_s)
-            if session.server.poll() is None:
-                session.server.kill()
+            try:
+                session.server.terminate()
                 with suppress(subprocess.TimeoutExpired):
                     session.server.wait(timeout=timeout_s)
-        self._write_session_log(session)
+                if session.server.poll() is None:
+                    session.server.kill()
+                    with suppress(subprocess.TimeoutExpired):
+                        session.server.wait(timeout=timeout_s)
+                if session.server.poll() is None:
+                    raise RuntimeError("Debug server remained active after kill.")
+            except Exception as error:
+                errors.append(("debug_server", error))
+        try:
+            self._write_session_log(session)
+        except Exception as error:
+            errors.append(("session_log", error))
+        if errors:
+            return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
+        return None
 
     def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
         output = f"{session.server_stdout}{session.server_stderr}"

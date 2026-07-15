@@ -1,19 +1,18 @@
 """pytest plugin exposing Agentic HIL fixtures for hardware-in-the-loop test suites.
 
-Usage in a firmware project with a `.agentic-hil/config.yaml`:
+Usage in a configured firmware project:
 
-    def test_open_sensor_diagnosis(agentic_hil):
-        started = agentic_hil.call("adapter_session_start", {"adapter_id": "ntc_sim"})
-        assert started["ok"] is True
+    def test_target_is_available(agentic_hil):
+        result = agentic_hil.call("probe_target")
+        assert result["ok"] is True
 
-Tests using the fixtures are skipped when no Agentic HIL configuration file exists,
-so suites stay green on machines without a hardware setup. An existing but
-invalid configuration fails loudly instead — a typo must not silently disable
-the hardware suite in CI.
+Tests using the fixtures are skipped when neither the canonical external config nor
+an ``AGENTIC_HIL_CONFIG`` override exists. An invalid configuration fails loudly
+instead, so a typo cannot silently disable the hardware suite in CI.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,54 +23,25 @@ if TYPE_CHECKING:
     from agentic_hil.tools import AgenticHILToolService
     from agentic_hil.types import AgenticHILConfig
 
-# Mirrors agentic_hil.config.DEFAULT_CONFIG_PATH; kept as a literal so this module
-# stays import-light — pytest imports every installed pytest11 entry point on
-# startup, and agentic_hil.config would pull in yaml + jsonschema for unrelated runs.
-DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("agentic_hil")
-    group.addoption(
-        "--agentic-hil-config",
-        action="store",
-        default=None,
-        help=f"Path to the Agentic Hardware-in-the-Loop (Agentic HIL) project configuration (default: {DEFAULT_CONFIG_PATH}).",
-    )
-    parser.addini("agentic_hil_config", help="Path to the Agentic HIL project configuration.", default=None)
-
-
-def resolve_plugin_config_path(config: pytest.Config) -> str:
-    option = config.getoption("--agentic-hil-config")
-    if option:
-        return str(Path(str(option)).resolve())  # command-line paths stay relative to the invocation cwd
-    ini_value = config.getini("agentic_hil_config")
-    if ini_value:
-        return rootdir_anchored(config, str(ini_value))
-    return rootdir_anchored(config, DEFAULT_CONFIG_PATH)
-
-
-def rootdir_anchored(config: pytest.Config, path: str) -> str:
-    return path if Path(path).is_absolute() else str(config.rootpath / path)
+CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 
 
 @pytest.fixture(scope="session")
 def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
     """The validated Agentic HIL project configuration.
 
-    Skips when the configuration file does not exist; fails when it exists but
-    is unreadable or invalid.
+    Skips when no config exists; fails when an available config is invalid.
     """
-    from agentic_hil.config import ConfigError, load_config
+    from agentic_hil.config import ConfigError, load_authoritative_config, project_config_path
 
-    config_path = resolve_plugin_config_path(request.config)
+    if not os.environ.get(CONFIG_ENV) and not project_config_path(request.config.rootpath).is_file():
+        pytest.skip("Agentic HIL configuration unavailable: canonical external config does not exist")
+
     try:
-        return load_config(config_path, work_dir=str(request.config.rootpath))
+        return load_authoritative_config(request.config.rootpath)
     except ConfigError as error:
-        if error.error_type == "config_file_not_found":
-            pytest.skip(f"Agentic HIL configuration unavailable: {error.summary} [path: {config_path}]")
         pytest.fail(
-            f"Agentic HIL configuration invalid ({error.error_type}): {error.summary} [path: {config_path}]",
+            f"Agentic HIL configuration invalid ({error.error_type}): {error.summary}",
             pytrace=False,
         )
 
@@ -92,12 +62,21 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
     """A ready AgenticHILToolService; call tools by name exactly like an MCP agent would.
 
     The service (config, debugger backend) is shared across the session, but
-    adapter, COM, and CAN sessions opened during a test are stopped afterwards
-    so injected faults and stimulus state cannot leak between tests.
+    Debug, COM, and CAN sessions opened during a test are stopped afterwards so
+    state cannot leak between tests.
     """
     try:
         yield _agentic_hil_service
     finally:
-        _agentic_hil_service.adapters.close()
-        _agentic_hil_service.com_ports.close()
-        _agentic_hil_service.can_buses.close()
+        errors: list[str] = []
+        if _agentic_hil_service._debug_artifact is not None:
+            stopped = _agentic_hil_service.debug_stop_session()
+            if not stopped.get("ok"):
+                errors.append(f"debug: {stopped.get('summary', stopped.get('error_type'))}")
+        for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses)]:
+            try:
+                resource.close()
+            except Exception as error:
+                errors.append(f"{name}: {type(error).__name__}: {error}")
+        if errors:
+            pytest.fail("Agentic HIL fixture cleanup failed: " + "; ".join(errors), pytrace=False)

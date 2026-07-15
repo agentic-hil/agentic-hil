@@ -1,23 +1,45 @@
 # Changelog
 
-All notable changes to Agentic HIL will be documented in this file.
+All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-15
+
+### Added
+
+- Added a permission-gated test reactor with configured `Device` bindings, semantic preflight, duplicate-key rejection, and YAML/JSON sequences for flashing, UART lifecycle, run-to-breakpoint, and Intel HEX symbol dumps with exception-safe cleanup.
+- Added `debugger_probes_list` and `agentic-hil debugger-probes` for permission-gated enumeration of connected probe IDs through STM32CubeProgrammer or pyOCD.
+
 ### Security
 
-- Replaced the agent-writable project policy as the MCP root of trust with a required host-managed `AGENTIC_HIL_POLICY` outside the workspace. Project configuration is now intersected with an immutable startup ceiling and cannot grant permissions, add resources, weaken validation, expand paths/allowlists, or replace trusted executables.
-- Added explicit gates for debugger execution and target reset (`allow_reset`), deny-by-default trusted-policy generation, startup pinning for debugger/GDB/bridge executables and OpenOCD scripts, deny-all empty symbol allowlists, and symlink-safe artifact/output paths.
+- Replaced the project-local/two-file configuration model with one deny-by-default authoritative config outside the repository, discovered from the project root with an optional absolute-path `AGENTIC_HIL_CONFIG` override and bound to the project by mandatory `workspace_root`.
+- Added explicit gates for debugger execution and target reset (`allow_reset`), deny-by-default config generation, startup pinning for debugger/GDB/bridge executables and OpenOCD scripts, deny-all empty symbol allowlists, and symlink-safe artifact/output paths.
 - Revalidated firmware artifacts into private process staging before backend use, rejected multiply-linked inputs/outputs, switched structured writes to atomic replacement, disabled GDB auto-loading, and moved trusted subprocess working directories outside the workspace.
+
+## [0.2.3] - 2026-07-14
+
+### Changed
+
+- Updated canonical repository URLs after the transfer to `agentic-hil/agentic-hil`.
+- Added official MCP Registry metadata, validation, and OIDC publishing after each successful PyPI release while retaining the host-independent local setup path.
+
+## [0.2.2] - 2026-07-14
+
+### Changed
+
+- Canonicalized the Python distribution metadata spelling and all installation guidance to `agentic-hil`; Python imports, the pytest plugin, and the fixture remain `agentic_hil`.
+- Renamed the CLI, MCP server, policy directory, package modules, examples, and documentation from the historical software name to Agentic HIL.
+- Clarified that HardCI adapters are the reference hardware for Agentic HIL.
 
 ## [0.2.1] - 2026-07-09
 
 ### Changed
 
-- Python package metadata and install guidance now use `agentic_hil`; the CLI command, MCP server name, and repository URL remain `agentic-hil`.
-- Public project URLs, setup docs, issue templates, and release guidance now point at `hp-8472/agentic-hil`.
+- Python package metadata and install guidance were prepared for the Agentic HIL migration; the CLI command, MCP server name, and repository URL use `agentic-hil`.
+- Public project URLs, setup docs, issue templates, and release guidance were prepared for the canonical Agentic HIL repository.
 - CLI setup hints and Codex skill-registration text use Agentic HIL naming instead of legacy Agentic HIL command/prose.
 - CI, CodeQL, and Scorecards workflows now run for the `master` default branch.
 
@@ -44,9 +66,8 @@ First public release on PyPI.
 
 ### Added
 
-- MCP stdio server exposing 35 bounded tools for probing, flashing, resetting, artifact validation, serial and CAN stimuli/feedback, structured reports, and error classification, gated by a project-local `.agentic-hil/config.yaml` policy.
+- MCP stdio server exposing bounded tools for probing, flashing, resetting, artifact validation, serial and CAN stimuli/feedback, structured reports, and error classification, gated by a project-local `.agentic-hil/config.yaml` policy.
 - OpenOCD and STM32CubeProgrammer CLI (`stlink`) debugger backends with success-marker confirmation, structured error classification, and per-action logs.
-- Test-adapter layer for sensor/actuator/fault simulation: an `adapters:` config section with channel and fault allowlists enforced before anything reaches the adapter, seven `adapter_*` MCP tools, a JSON-over-stdio bridge protocol for physical adapters and simulators, and a bundled NTC simulator (`examples/adapters/sim_ntc_adapter.py`).
 - pytest plugin: installing `agentic_hil` registers the session-scoped `agentic_hil` fixture that drives the same policy-gated tools in CI regression suites, with per-test stimulus-session cleanup, rootdir-anchored config resolution, and skip-when-absent / fail-when-invalid config semantics.
 - CLI commands: `init`, `doctor`, `com-ports`, `mcp-stdio`, `com-stdio`, `schema`, `mcp-config`, and `skill-install` for opencode, Claude Code, and Codex.
 - Agent-first, no-admin installation flow: `AI_AGENT_QUICKSTART.md`, `llms.txt`, and `TROUBLESHOOTING.md`, built around `agentic_hil` package installs, the `agentic-hil` CLI command, and a repository-URL fallback.

@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import threading
 import time
-from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.config import display_path
@@ -93,8 +92,8 @@ class ComPortService:
     def reconfigure(self, config: AgenticHILConfig) -> None:
         for port_id, session in list(self.sessions.items()):
             if not config.permissions.allow_com_read or config.com_ports.get(port_id) != session.port_config:
-                self.sessions.pop(port_id, None)
                 self._stop_session(session, "config_reloaded")
+                self.sessions.pop(port_id, None)
         self.config = config
 
     def list_ports(self) -> JsonObject:
@@ -108,7 +107,7 @@ class ComPortService:
                 "ok": False,
                 "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by the effective policy (allow_com_read).",
+                "summary": "Host COM port discovery is disabled by the authoritative config (allow_com_read).",
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
@@ -124,7 +123,7 @@ class ComPortService:
         if not port["ok"]:
             return self._write_report(port)
         if not self.config.permissions.allow_com_read:
-            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by the effective policy.", port_id))
+            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by the authoritative config.", port_id))
 
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
@@ -133,6 +132,10 @@ class ComPortService:
                     existing.buffer.clear()
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
         if existing:
+            try:
+                self._stop_session(existing, "replaced")
+            except Exception as error:
+                return self._write_report(self._close_failure("com_session_start", port_id, error))
             self.sessions.pop(port_id, None)
 
         opened = self._open_serial(port_id, port["port_config"])
@@ -147,10 +150,14 @@ class ComPortService:
         port = self._configured_port(port_id, "com_session_stop")
         if not port["ok"]:
             return self._write_report(port)
-        session = self.sessions.pop(port_id, None)
+        session = self.sessions.get(port_id)
         if session is None:
             return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
-        self._stop_session(session, "requested")
+        try:
+            self._stop_session(session, "requested")
+        except Exception as error:
+            return self._write_report(self._close_failure("com_session_stop", port_id, error))
+        self.sessions.pop(port_id, None)
         return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
@@ -165,7 +172,7 @@ class ComPortService:
 
     def write_bytes(self, port_id: str, data: bytes, tool: str = "com_write") -> JsonObject:
         if not self.config.permissions.allow_com_write:
-            return self._permission_denied(tool, "COM port writing is disabled by the effective policy.", port_id)
+            return self._permission_denied(tool, "COM port writing is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -189,7 +196,7 @@ class ComPortService:
 
     def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
         if not self.config.permissions.allow_com_read:
-            return self._permission_denied(tool, "COM port reading is disabled by the effective policy.", port_id)
+            return self._permission_denied(tool, "COM port reading is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -219,10 +226,17 @@ class ComPortService:
         return result
 
     def close(self) -> None:
-        sessions = list(self.sessions.values())
-        self.sessions.clear()
-        for session in sessions:
-            self._stop_session(session, "shutdown")
+        errors: list[tuple[str, Exception]] = []
+        for port_id, session in list(self.sessions.items()):
+            try:
+                self._stop_session(session, "shutdown")
+            except Exception as error:
+                errors.append((port_id, error))
+            else:
+                self.sessions.pop(port_id, None)
+        if errors:
+            details = "; ".join(f"{port_id}: {type(error).__name__}: {error}" for port_id, error in errors)
+            raise RuntimeError(f"COM port cleanup failed: {details}") from errors[0][1]
 
     def _open_serial(self, port_id: str, port_config: ComPortConfig) -> JsonObject:
         try:
@@ -241,7 +255,7 @@ class ComPortService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "port_id is required."}
         port_config = self.config.com_ports.get(port_id)
         if port_config is None:
-            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the effective policy.", "configured_ports": sorted(self.config.com_ports.keys())}
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the authoritative config.", "configured_ports": sorted(self.config.com_ports.keys())}
         return {"ok": True, "port_config": port_config}
 
     def _active_session(self, port_id: str, tool: str) -> JsonObject:
@@ -276,9 +290,18 @@ class ComPortService:
 
     def _stop_session(self, session: ComPortSession, reason: str) -> None:
         session.active = False
-        with suppress(Exception):
-            session.serial_handle.close()
+        session.serial_handle.close()
         append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+
+    def _close_failure(self, tool: str, port_id: str, error: Exception) -> JsonObject:
+        return {
+            "ok": False,
+            "tool": tool,
+            "port_id": port_id,
+            "error_type": "com_port_close_failed",
+            "summary": "COM port session could not be closed and remains registered for cleanup retry.",
+            "backend_error": str(error),
+        }
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

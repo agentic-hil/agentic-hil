@@ -32,6 +32,18 @@ class ArtifactManager:
     def close(self) -> None:
         self._staging.cleanup()
 
+    def release_stage(self, artifact: JsonObject) -> None:
+        if artifact.get("staged") is not True:
+            return
+        path = Path(str(artifact.get("resolved_path", "")))
+        staging_root = Path(self._staging.name)
+        if not is_path_within_frozen(path, staging_root):
+            return
+        with suppress(OSError):
+            path.unlink()
+        with suppress(OSError):
+            path.parent.rmdir()
+
     def upload(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
         if not self.config.artifacts.allow_upload:
@@ -39,7 +51,7 @@ class ArtifactManager:
                 "ok": False,
                 "tool": "artifact_upload",
                 "error_type": "permission_denied",
-                "summary": "Artifact upload is disabled by the effective policy.",
+                "summary": "Artifact upload is disabled by the authoritative config.",
             }
 
         has_image_path = payload.get("image_path") is not None
@@ -125,15 +137,24 @@ class ArtifactManager:
             return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error)}
 
         temporary_path: Path | None = None
+        staging_directory: Path | None = None
         try:
             source_stat = os.fstat(descriptor)
             if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
+            try:
+                current_path = source.resolve(strict=True)
+                current_stat = os.stat(source, follow_symlinks=False)
+            except OSError:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after it was opened."}
+            if current_path != source or not os.path.samestat(source_stat, current_stat):
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact path changed after validation."}
             digest = hashlib.sha256()
             suffix = source.suffix.lower()
+            staging_directory = Path(tempfile.mkdtemp(dir=self._staging.name, prefix="stage-"))
             with os.fdopen(descriptor, "rb") as source_file:
                 descriptor = -1
-                with tempfile.NamedTemporaryFile(dir=self._staging.name, prefix="stage-", suffix=suffix, delete=False) as staged_file:
+                with tempfile.NamedTemporaryFile(dir=staging_directory, prefix=".tmp-", suffix=suffix, delete=False) as staged_file:
                     temporary_path = Path(staged_file.name)
                     for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
                         digest.update(chunk)
@@ -144,7 +165,7 @@ class ArtifactManager:
             expected_sha256 = artifact.get("sha256")
             if expected_sha256 is not None and actual_sha256 != expected_sha256:
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation."}
-            staged_path = Path(self._staging.name) / f"{actual_sha256}-{source.name}"
+            staged_path = staging_directory / source.name
             os.replace(temporary_path, staged_path)
             temporary_path = None
             staged_artifact = dict(artifact)
@@ -156,6 +177,9 @@ class ArtifactManager:
             if temporary_path is not None:
                 with suppress(OSError):
                     temporary_path.unlink()
+            if staging_directory is not None:
+                with suppress(OSError):
+                    staging_directory.rmdir()
 
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
@@ -163,7 +187,7 @@ class ArtifactManager:
                 "ok": False,
                 "tool": tool,
                 "error_type": "permission_denied",
-                "summary": "Using uploaded artifacts is disabled by the effective policy.",
+                "summary": "Using uploaded artifacts is disabled by the authoritative config.",
                 "artifact_id": artifact_id,
             }
         if not is_safe_artifact_id(artifact_id):
@@ -223,8 +247,12 @@ class ArtifactManager:
         size_bytes = int(source["artifact"].get("size_bytes") or 0)
         if size_bytes > self._max_upload_bytes():
             return self._artifact_too_large(size_bytes)
+        staged = self.stage_for_backend(source["artifact"], "artifact_upload")
+        if not staged["ok"]:
+            return staged
+        staged_path = Path(staged["artifact"]["resolved_path"])
         try:
-            data = Path(source["artifact"]["resolved_path"]).read_bytes()
+            data = staged_path.read_bytes()
         except OSError as error:
             return {
                 "ok": False,
@@ -233,6 +261,9 @@ class ArtifactManager:
                 "summary": "Firmware artifact could not be read.",
                 "backend_error": str(error),
             }
+        finally:
+            with suppress(OSError):
+                staged_path.unlink()
         return self._store_uploaded_data(data, Path(image_path).name, display_path(self.config, image_path))
 
     def _store_uploaded_data(self, data: bytes, filename: str, source_path: str | None = None) -> JsonObject:
