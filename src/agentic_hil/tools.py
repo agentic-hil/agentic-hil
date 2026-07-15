@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from agentic_hil.adapters import AdapterService
@@ -21,8 +22,10 @@ class AgenticHILToolService:
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
         adapters: AdapterService | None = None,
+        reload_config: bool = True,
     ):
         self.config = config
+        self.reload_config = reload_config
         self.backend = backend or create_debugger_backend(config)
         self.artifacts = artifacts or ArtifactManager(config)
         self.com_ports = com_ports or ComPortService(config)
@@ -31,6 +34,24 @@ class AgenticHILToolService:
 
     def debugger_info(self) -> JsonObject:
         return self.backend.info()
+
+    def debugger_probes_list(self, debugger_name: str = "default") -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by .agentic-hil/config.yaml.")
+        if debugger_name == "default":
+            return self.backend.list_probes()
+        debugger = self.config.debuggers.get(debugger_name)
+        if debugger is None:
+            result = tool_error("debugger_probes_list", "invalid_argument", "Unknown configured debugger name.")
+            result["debugger"] = debugger_name
+            return result
+        backend = create_debugger_backend(replace(self.config, debugger=debugger))
+        try:
+            result = backend.list_probes()
+            result["debugger"] = debugger_name
+            return result
+        finally:
+            backend.close()
 
     def probe_target(self) -> JsonObject:
         return self.backend.probe_target()
@@ -136,6 +157,7 @@ class AgenticHILToolService:
         args = arguments or {}
         dispatch = {
             "debugger_info": lambda: self.debugger_info(),
+            "debugger_probes_list": lambda: self.debugger_probes_list(str(args.get("debugger", "default"))),
             "probe_target": lambda: self.probe_target(),
             "flash_firmware": lambda: self.flash_firmware(args),
             "artifact_upload": lambda: self.artifact_upload(args),
@@ -176,6 +198,8 @@ class AgenticHILToolService:
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
     def _reload_config(self, tool: str) -> JsonObject | None:
+        if not self.reload_config:
+            return None
         try:
             config = load_config(self.config.config_path, self.config.work_dir)
         except ConfigError as error:

@@ -14,6 +14,8 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import DEFAULT_CONFIG_PATH, ConfigError, config_schema_text, display_path, load_config
 from agentic_hil.debugger import create_debugger_backend
 from agentic_hil.stdio import run_stdio_server
+from agentic_hil.test_reactor import TestReactor, load_test_config, test_config_schema_text
+from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
@@ -28,6 +30,13 @@ debugger:
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60
+
+debuggers: {}
+
+devices:
+  dut:
+    debugger: "default"
+    uart: null
 
 debug:
   gdb_executable: null
@@ -132,6 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
     doctor_parser.add_argument("--config", default=None)
 
+    debugger_probes_parser = subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
+    debugger_probes_parser.add_argument("--config", default=None)
+    debugger_probes_parser.add_argument("--debugger", default="default", help="named debugger from config, or default")
+
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
     mcp_parser = subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
@@ -144,9 +157,17 @@ def build_parser() -> argparse.ArgumentParser:
     com_stdio_parser.add_argument("--read-wait-timeout-s", type=float, default=0.05)
     com_stdio_parser.add_argument("--eof-idle-timeout-s", type=float, default=0.5)
 
+    reactor_parser = subparsers.add_parser("test-reactor", help="run validated hardware tests across configured devices")
+    reactor_parser.add_argument("--config", default=None)
+    reactor_parser.add_argument("--test-config", required=True, help="explicit test configuration path; ~ expands to the user home directory")
+
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
     schema_parser.add_argument("--force", action="store_true")
+
+    test_schema_parser = subparsers.add_parser("test-schema", help="print or write bundled test configuration schema")
+    test_schema_parser.add_argument("--output", default=None)
+    test_schema_parser.add_argument("--force", action="store_true")
 
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
@@ -165,6 +186,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return init_config(args.config, args.force)
     if args.command == "doctor":
         return doctor(args.config)
+    if args.command == "debugger-probes":
+        return debugger_probes(args.config, args.debugger)
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
@@ -173,8 +196,12 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "com-stdio":
         config = load_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
+    if args.command == "test-reactor":
+        return run_test_reactor(args.config, args.test_config)
     if args.command == "schema":
         return schema(args.output, args.force)
+    if args.command == "test-schema":
+        return test_schema(args.output, args.force)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -227,6 +254,20 @@ def init_next_steps(available_com_ports: JsonObject) -> list[str]:
     return next_steps
 
 
+def debugger_probes(config_path: str | None = None, debugger_name: str = "default") -> JsonObject:
+    service = AgenticHILToolService(load_config(config_path))
+    try:
+        return service.call("debugger_probes_list", {"debugger": debugger_name})
+    finally:
+        service.close()
+
+
+def run_test_reactor(config_path: str | None, test_config_path: str) -> JsonObject:
+    config = load_config(config_path)
+    plan = load_test_config(test_config_path, config.work_dir)
+    return TestReactor(config).run(plan)
+
+
 def schema(output: str | None = None, force: bool = False) -> JsonObject:
     text = config_schema_text()
     if output is None:
@@ -238,6 +279,19 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
+
+
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+    text = test_config_schema_text()
+    if output is None:
+        sys.stdout.write(text)
+        return {"ok": True}
+    output_path = Path(output).expanduser()
+    if output_path.exists() and not force:
+        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    return {"ok": True, "summary": "Agentic HIL test configuration schema written.", "path": str(output_path)}
 
 
 def mcp_config_text() -> str:

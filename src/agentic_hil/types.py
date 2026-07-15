@@ -26,6 +26,13 @@ class DebuggerConfig:
 
 
 @dataclass(frozen=True)
+class DeviceConfig:
+    debugger: str
+    uart: str | None
+    target: TargetConfig
+
+
+@dataclass(frozen=True)
 class DebugInterfaceConfig:
     gdb_executable: str | None
     allowed_symbols: list[str]
@@ -118,6 +125,8 @@ class AgenticHILConfig:
     work_dir: str
     target: TargetConfig
     debugger: DebuggerConfig
+    debuggers: dict[str, DebuggerConfig]
+    devices: dict[str, DeviceConfig]
     debug: DebugInterfaceConfig
     artifacts: ArtifactsConfig
     com_ports: dict[str, ComPortConfig]

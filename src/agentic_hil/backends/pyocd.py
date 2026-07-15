@@ -62,6 +62,27 @@ class PyOCDBackend:
         version = output.splitlines()[0] if output else "pyOCD version output was empty."
         return {"ok": True, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "probe_id": self.config.debugger.probe_id, "target_type": self.config.debugger.target_type, "version": version, "summary": "pyOCD is available."}
 
+    def list_probes(self) -> JsonObject:
+        tool = "debugger_probes_list"
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by .agentic-hil/config.yaml.")
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return {"tool": tool, **resolved}
+        command = [*invocation(str(resolved["executable_path"])), "json", "--probes", "--no-config"]
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
+        if completed.not_found:
+            return {"tool": tool, **PYOCD_NOT_FOUND}
+        if completed.timed_out:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+        if completed.returncode != 0:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "pyOCD probe discovery command failed."}
+        parsed = parse_pyocd_probes(completed.stdout)
+        if not parsed["ok"]:
+            return {"tool": tool, "backend": self.backend_name, **parsed}
+        probes = parsed["probes"]
+        return {"ok": True, "tool": tool, "backend": self.backend_name, "probes": probes, "summary": f"{len(probes)} connected debugger probe(s) detected."}
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
@@ -288,3 +309,19 @@ class PyOCDBackend:
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debugger.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])
+
+
+def parse_pyocd_probes(output: str) -> JsonObject:
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD returned invalid probe-discovery JSON."}
+    if not isinstance(payload, dict) or payload.get("status") != 0 or not isinstance(payload.get("boards"), list):
+        return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD reported a probe-discovery failure."}
+    probe_ids: list[str] = []
+    for board in payload["boards"]:
+        if not isinstance(board, dict) or not isinstance(board.get("unique_id"), str) or not board["unique_id"]:
+            return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD returned an invalid probe record."}
+        if board["unique_id"] not in probe_ids:
+            probe_ids.append(board["unique_id"])
+    return {"ok": True, "probes": [{"probe_id": probe_id} for probe_id in probe_ids]}

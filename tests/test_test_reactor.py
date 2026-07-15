@@ -1,0 +1,454 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+from conftest import FAKE_GDB, FAKE_OPENOCD, write_config
+
+from agentic_hil.cli import entrypoint
+from agentic_hil.config import ConfigError, load_config
+from agentic_hil.test_reactor import (
+    ProjectTestLock,
+    load_test_config,
+)
+from agentic_hil.test_reactor import (
+    TestReactor as Reactor,
+)
+
+
+class ConcurrencyTracker:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    def run_action(self) -> None:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        time.sleep(0.01)
+        self.active -= 1
+
+
+class FakeArtifacts:
+    def validate_local_path(self, image_path: str) -> dict:
+        return {"ok": True, "artifact": {"path": image_path, "resolved_path": image_path}}
+
+    def validate_output_path(self, output_path: str, tool: str) -> dict:
+        return {"ok": True, "output": {"path": output_path, "resolved_path": output_path}}
+
+
+class RecordingService:
+    def __init__(self, tracker: ConcurrencyTracker) -> None:
+        self.tracker = tracker
+        self.artifacts = FakeArtifacts()
+        self.calls: list[str] = []
+        self.closed = False
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        self.calls.append(name)
+        if name == "flash_firmware":
+            self.tracker.run_action()
+        return {"ok": True, "tool": name}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class CleanupFailureService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "debug_stop_session":
+            return {"ok": False, "tool": name, "error_type": "cleanup_failed"}
+        return result
+
+
+class StepAndCleanupFailureService(CleanupFailureService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        if name == "debug_set_breakpoint":
+            return {"ok": True, "breakpoint": {"id": "1"}}
+        if name == "debug_continue":
+            return {"ok": False, "tool": name, "error_type": "target_exception"}
+        return super().call(name, arguments)
+
+
+class ResolvedBinArtifacts(FakeArtifacts):
+    def validate_local_path(self, image_path: str) -> dict:
+        return {"ok": True, "artifact": {"path": image_path, "resolved_path": "build/app.bin"}}
+
+
+class ResolvedBinService(RecordingService):
+    def __init__(self, tracker: ConcurrencyTracker) -> None:
+        super().__init__(tracker)
+        self.artifacts = ResolvedBinArtifacts()
+
+
+class ExplodingArtifacts(FakeArtifacts):
+    def validate_local_path(self, image_path: str) -> dict:
+        raise RuntimeError("preflight exploded")
+
+
+class ExplodingPreflightService(RecordingService):
+    def __init__(self, tracker: ConcurrencyTracker) -> None:
+        super().__init__(tracker)
+        self.artifacts = ExplodingArtifacts()
+
+
+def write_plan(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / ".agentic-hil" / "testconfig.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def multi_device_config(tmp_path: Path, shared_debugger: bool = False) -> Path:
+    second_debugger = "probe_a" if shared_debugger else "probe_b"
+    return write_config(
+        tmp_path,
+        debuggers_yaml=f'''debuggers:
+  probe_a:
+    type: "openocd"
+    executable: "{FAKE_OPENOCD.as_posix()}"
+    probe_id: "PROBE_A"
+  probe_b:
+    type: "openocd"
+    executable: "{FAKE_OPENOCD.as_posix()}"
+    probe_id: "PROBE_B"
+''',
+        devices_yaml=f'''devices:
+  controller_a:
+    debugger: "probe_a"
+    target:
+      name: "controller-a"
+      controller: "stm32f4"
+  controller_b:
+    debugger: "{second_debugger}"
+    target:
+      name: "controller-b"
+      controller: "stm32f4"
+''',
+    )
+
+
+def serial_plan(tmp_path: Path) -> Path:
+    return write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: test-a
+    device: controller_a
+    steps:
+      - {action: flash, image_path: build/a.elf}
+  - name: test-b
+    device: controller_b
+    steps:
+      - {action: flash, image_path: build/b.elf}
+""",
+    )
+
+
+def test_config_loads_named_debuggers_and_devices(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+
+    assert config.devices["controller_a"].debugger == "probe_a"
+    assert config.devices["controller_b"].target.name == "controller-b"
+    assert config.debuggers["probe_a"].probe_id == "PROBE_A"
+
+
+def test_device_target_override_inherits_unspecified_project_fields(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        devices_yaml='''devices:
+  controller:
+    debugger: "default"
+    target:
+      name: "renamed-controller"
+''',
+    )
+
+    config = load_config(str(config_path), str(tmp_path))
+
+    assert config.devices["controller"].target.name == "renamed-controller"
+    assert config.devices["controller"].target.controller == config.target.controller
+
+
+def test_test_config_expands_user_home_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    plan_path = home / "user-test.yaml"
+    plan_path.write_text(
+        """version: 1
+tests:
+  - name: user-test
+    device: dut
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    plan = load_test_config("~/user-test.yaml", str(tmp_path))
+
+    assert plan.path == str(plan_path.resolve())
+
+
+def test_tests_run_serially_even_with_different_devices_and_probes(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    tracker = ConcurrencyTracker()
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(tracker)).run(plan)
+
+    assert result["ok"] is True, result
+    assert tracker.max_active == 1
+
+
+def test_shared_probe_also_runs_serially(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path, shared_debugger=True)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    tracker = ConcurrencyTracker()
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(tracker)).run(plan)
+
+    assert result["ok"] is True, result
+    assert tracker.max_active == 1
+
+
+def test_project_lock_rejects_a_concurrent_reactor_run(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    held_lock = ProjectTestLock(config.config_path)
+    assert held_lock.acquire() is True
+    try:
+        result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+    finally:
+        held_lock.release()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_reactor_busy"
+    assert result["tests"] == []
+
+
+def test_preflight_exception_closes_services_and_releases_project_lock(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    services: list[ExplodingPreflightService] = []
+
+    def service_factory(_: object) -> ExplodingPreflightService:
+        service = ExplodingPreflightService(ConcurrencyTracker())
+        services.append(service)
+        return service
+
+    result = Reactor(config, service_factory=service_factory).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "preflight_exception"
+    assert all(service.closed for service in services)
+    lock = ProjectTestLock(config.config_path)
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_cleanup_failure_aborts_remaining_tests(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: leaves-debugger-dirty
+    device: controller_a
+    steps:
+      - {action: debug_start, image_path: build/app.elf}
+  - name: must-not-run
+    device: controller_b
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+    tracker = ConcurrencyTracker()
+
+    result = Reactor(config, service_factory=lambda _: CleanupFailureService(tracker)).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["tests"][0]["error_type"] == "cleanup_failed"
+    assert result["aborted_tests"] == ["must-not-run"]
+    assert result["error_type"] == "unsafe_test_state"
+    assert tracker.max_active == 0
+
+
+def test_step_failure_cannot_mask_cleanup_failure(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: unsafe-failure
+    device: controller_a
+    steps:
+      - {action: debug_start, image_path: build/app.elf}
+      - {action: run_until_breakpoint, location: test_done}
+  - name: must-not-run
+    device: controller_b
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+
+    result = Reactor(config, service_factory=lambda _: StepAndCleanupFailureService(ConcurrencyTracker())).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["tests"][0]["error_type"] == "cleanup_failed"
+    assert result["tests"][0]["step_error_type"] == "target_exception"
+    assert result["aborted_tests"] == ["must-not-run"]
+
+
+def test_bin_flash_without_backend_address_fails_preflight(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", devices_yaml='''devices:\n  dut:\n    debugger: "default"\n''')), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: binary
+    device: dut
+    steps:
+      - {action: flash, image_path: build/app.bin}
+""",
+    )
+    tracker = ConcurrencyTracker()
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(tracker)).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert "flash_address" in result["validation_errors"][0]["summary"]
+    assert tracker.max_active == 0
+
+
+def test_preflight_checks_resolved_artifact_extension(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, devices_yaml='''devices:\n  dut:\n    debugger: "default"\n''')), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: disguised-binary
+    device: dut
+    steps:
+      - {action: debug_start, image_path: build/app.elf}
+""",
+    )
+
+    result = Reactor(config, service_factory=lambda _: ResolvedBinService(ConcurrencyTracker())).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert "ELF" in result["validation_errors"][0]["summary"]
+
+
+def test_preflight_rejects_unknown_device_before_any_test_runs(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: typo
+    device: missing
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+    tracker = ConcurrencyTracker()
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(tracker)).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    assert tracker.max_active == 0
+
+
+def test_reactor_runs_debug_breakpoint_and_ihex_dump(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        gdb_executable=FAKE_GDB,
+        devices_yaml='''devices:
+  dut:
+    debugger: "default"
+''',
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: capture
+    device: dut
+    steps:
+      - {action: debug_start, image_path: build/app.elf, mode: attach}
+      - {action: run_until_breakpoint, location: test_done, timeout_s: 5}
+      - {action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}
+      - {action: debug_stop}
+""",
+    )
+
+    result = Reactor(load_config(str(config_path), str(tmp_path))).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is True, result
+    lines = (tmp_path / "build" / "memory.hex").read_text(encoding="ascii").splitlines()
+    assert lines[0] == ":020000042000DA"
+    assert lines[-1] == ":00000001FF"
+
+
+def test_reactor_cli_runs_explicit_test_configuration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config_path = write_config(
+        tmp_path,
+        gdb_executable=FAKE_GDB,
+        devices_yaml='''devices:
+  dut:
+    debugger: "default"
+''',
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: cli-capture
+    device: dut
+    steps:
+      - {action: debug_start, image_path: build/app.elf, mode: attach}
+      - {action: run_until_breakpoint, location: test_done, timeout_s: 5}
+      - {action: dump_memory, symbol: CTC_array, output_path: build/cli-memory.hex}
+      - {action: debug_stop}
+""",
+    )
+
+    exit_code = entrypoint(["test-reactor", "--config", str(config_path), "--test-config", str(plan_path)])
+
+    response = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert response["ok"] is True
+    assert response["tests"][0]["name"] == "cli-capture"
+    assert (tmp_path / "build" / "cli-memory.hex").is_file()
+
+
+def test_test_config_rejects_duplicate_keys(tmp_path: Path) -> None:
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: duplicate
+    device: dut
+    device: other
+    steps:
+      - {action: uart_open}
+""",
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_test_config(str(path), str(tmp_path))
+
+    assert excinfo.value.error_type == "test_config_invalid"
+    assert "duplicate key 'device'" in excinfo.value.details["backend_error"]

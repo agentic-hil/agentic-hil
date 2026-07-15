@@ -20,6 +20,7 @@ EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "addition
 
 MCP_TOOL_NAMES = [
     "debugger_info",
+    "debugger_probes_list",
     "probe_target",
     "artifact_upload",
     "flash_firmware",
@@ -58,6 +59,7 @@ MCP_TOOL_NAMES = [
 
 MCP_TOOLS: list[JsonObject] = [
     {"name": "debugger_info", "description": "Check whether the configured debugger backend is available.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "debugger_probes_list", "description": "List every connected probe ID visible to the default or a named configured debugger backend.", "inputSchema": {"type": "object", "properties": {"debugger": {"type": "string", "default": "default"}}, "additionalProperties": False}},
     {"name": "probe_target", "description": "Probe the configured embedded target through the configured debugger.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "artifact_upload", "description": "Upload a local or base64-encoded firmware artifact into the configured Agentic HIL artifact store.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "filename": {"type": "string"}, "data_base64": {"type": "string"}}, "oneOf": [{"required": ["image_path"]}, {"required": ["filename", "data_base64"]}], "additionalProperties": False}},
     {"name": "flash_firmware", "description": "Flash a validated firmware artifact. Provide exactly one of image_path or artifact_id. The target is not reset unless reset_after_flash is true.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "artifact_id": {"type": "string"}, "reset_after_flash": {"type": "boolean", "default": False}}, "oneOf": [{"required": ["image_path"]}, {"required": ["artifact_id"]}], "additionalProperties": False}},

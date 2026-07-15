@@ -1,0 +1,15 @@
+version: 1
+tests:
+  - name: capture-diagnostic-buffer
+    device: controller
+    steps:
+      - action: debug_start
+        image_path: build/firmware.elf
+        mode: attach
+      - action: run_until_breakpoint
+        location: test_done
+        timeout_s: 10
+      - action: dump_memory
+        symbol: diagnostic_buffer
+        output_path: build/diagnostic-buffer.hex
+      - action: debug_stop

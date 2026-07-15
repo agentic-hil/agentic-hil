@@ -102,6 +102,17 @@ class OpenOCDBackend:
             "summary": "OpenOCD is available.",
         }
 
+    def list_probes(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by .agentic-hil/config.yaml.")
+        return {
+            "ok": False,
+            "tool": "debugger_probes_list",
+            "backend": self.backend_name,
+            "error_type": "not_supported",
+            "summary": "OpenOCD cannot enumerate all connected probe IDs through a backend-independent command.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
@@ -120,10 +131,14 @@ class OpenOCDBackend:
         if self.config.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
-        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
+        artifact_path = str(artifact["resolved_path"])
+        if Path(artifact_path).suffix.lower() == ".bin" and self.config.debugger.flash_address is None:
+            return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with OpenOCD requires debugger.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(artifact_path))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
-        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        address = f" {self.config.debugger.flash_address}" if Path(artifact_path).suffix.lower() == ".bin" else ""
+        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}{address}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash

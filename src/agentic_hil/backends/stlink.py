@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -39,6 +40,8 @@ STLINK_SUCCESS_CONFIRMATION = {
     "flash_firmware": ["Download verified successfully"],
     "reset_target": ["MCU Reset", "reset is performed"],
 }
+STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link detected", "0 stlink detected"]
 
 
 class STLinkBackend:
@@ -66,6 +69,26 @@ class STLinkBackend:
             error_type = self._public_error_type(backend_error_type)
             return {"ok": False, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type)}
         return {"ok": True, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "probe_id": self.config.debugger.probe_id, "interface": self.config.debugger.interface, "version": version_line(output), "summary": "STM32CubeProgrammer CLI is available."}
+
+    def list_probes(self) -> JsonObject:
+        tool = "debugger_probes_list"
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by .agentic-hil/config.yaml.")
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return {"tool": tool, **resolved}
+        command = [*invocation(str(resolved["executable_path"])), "-q", "-l", "st-link-only"]
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
+        if completed.not_found:
+            return {"tool": tool, **STLINK_NOT_FOUND}
+        if completed.timed_out:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+        output = f"{completed.stdout}{completed.stderr}"
+        probe_ids = stlink_probe_ids(output)
+        if completed.returncode == 0 and (probe_ids or stlink_empty_result(output)):
+            probes = [{"probe_id": probe_id} for probe_id in probe_ids]
+            return {"ok": True, "tool": tool, "backend": self.backend_name, "probes": probes, "summary": f"{len(probes)} connected debugger probe(s) detected."}
+        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "STM32CubeProgrammer did not return a recognized non-intrusive probe listing."}
 
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
@@ -282,3 +305,12 @@ def version_line(output: str) -> str:
         if "STM32CubeProgrammer version:" in line:
             return f"STM32CubeProgrammer {line.split(':', 1)[1].strip()}"
     return next((line.strip() for line in output.splitlines() if line.strip()), "STM32CubeProgrammer version output was empty.")
+
+
+def stlink_probe_ids(output: str) -> list[str]:
+    return list(dict.fromkeys(STLINK_SERIAL_PATTERN.findall(output)))
+
+
+def stlink_empty_result(output: str) -> bool:
+    lower = output.lower()
+    return any(marker in lower for marker in STLINK_EMPTY_MARKERS)

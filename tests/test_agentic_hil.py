@@ -12,8 +12,11 @@ from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.pyocd import parse_pyocd_probes
+from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import init_config, install_skill, mcp_config, schema
+from agentic_hil.cli import entrypoint, init_config, install_skill, mcp_config, schema
+from agentic_hil.cli import test_schema as export_test_schema
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
@@ -72,6 +75,16 @@ def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     result = schema(str(schema_path))
     assert result["ok"] is True
     assert "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration" in schema_path.read_text(encoding="utf-8")
+
+
+def test_schema_exports_bundled_test_config_schema(tmp_path: Path) -> None:
+    schema_path = tmp_path / "testconfig.schema.json"
+
+    result = export_test_schema(str(schema_path))
+
+    assert result["ok"] is True
+    document = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert document["$id"] == "https://agentic-hil.local/schemas/testconfig.schema.json"
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
@@ -153,6 +166,119 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
     assert "adapter serial STLINK123" in log_text
 
 
+def test_openocd_probe_listing_reports_not_supported(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path)), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+
+
+def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, debugger_type="stlink")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
+def test_pyocd_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, debugger_type="pyocd")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "PYOCD123"}, {"probe_id": "PYOCD456"}]
+
+
+def test_probe_listing_can_select_named_debugger(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml=f'''debuggers:
+  discovery:
+    type: "stlink"
+    executable: "{(Path(__file__).parent / "fixtures" / "fake_stlink.py").as_posix()}"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list", {"debugger": "discovery"})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["debugger"] == "discovery"
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
+def test_named_debugger_cannot_use_reserved_default_name(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        debuggers_yaml='''debuggers:
+  default:
+    type: "stlink"
+''',
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+
+    assert excinfo.value.error_type == "config_invalid"
+
+
+def test_config_path_defines_project_root_across_working_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = write_config(tmp_path)
+    subdirectory = tmp_path / "firmware" / "src"
+    subdirectory.mkdir(parents=True)
+    monkeypatch.chdir(subdirectory)
+
+    config = load_config(str(config_path))
+
+    assert config.config_path == str(config_path.resolve())
+    assert config.work_dir == str(tmp_path.resolve())
+
+
+def test_probe_listing_requires_probe_permission(tmp_path: Path) -> None:
+    service = AgenticHILToolService(
+        load_config(
+            str(write_config(tmp_path, debugger_type="stlink", permissions_yaml="permissions:\n  allow_probe: false\n")),
+            str(tmp_path),
+        )
+    )
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+
+
+def test_probe_listing_parsers_fail_closed() -> None:
+    assert stlink_probe_ids("ST-LINK SN  : 001\nSTLink SN: 002\n") == ["001", "002"]
+    assert stlink_empty_result("No ST-LINK detected") is True
+    assert parse_pyocd_probes("not-json")["error_type"] == "probe_discovery_failed"
+    assert parse_pyocd_probes('{"status": 1, "boards": []}')["error_type"] == "probe_discovery_failed"
+
+
+def test_debugger_probes_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config_path = write_config(tmp_path, debugger_type="stlink")
+
+    exit_code = entrypoint(["debugger-probes", "--config", str(config_path)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
@@ -173,6 +299,34 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert with_reset["reset_after_flash"] is True
     reset_log = (tmp_path / with_reset["log_path"]).read_text(encoding="utf-8")
     assert "verify reset" in reset_log
+
+
+def test_openocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path)), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert "debugger.flash_address" in result["summary"]
+
+
+def test_openocd_passes_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, flash_address="0x08000000")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    log_text = (tmp_path / result["log_path"]).read_text(encoding="utf-8")
+    assert "verify 0x08000000" in log_text
 
 
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:
@@ -326,8 +480,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 35
-    assert len(set(MCP_TOOL_NAMES)) == 35
+    assert len(MCP_TOOL_NAMES) == 36
+    assert len(set(MCP_TOOL_NAMES)) == 36
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     config = load_config(str(write_config(tmp_path)), str(tmp_path))
     service = AgenticHILToolService(config)

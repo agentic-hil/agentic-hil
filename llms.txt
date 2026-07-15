@@ -32,6 +32,8 @@ agentic-hil mcp-config --output .mcp.json
 
 Each firmware project keeps its own `.agentic-hil/config.yaml` — the policy for that project's target, debugger, permissions, artifact roots, com_ports, can_buses, and adapters.
 
+Test reactor: a project may keep any number of test configuration files in the project or under the user's home directory. Select one with an explicit path using `agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config <path>`; `~` expands to the user home. Tests run strictly serially, and concurrent reactor runs for one project are rejected.
+
 MCP stdio command:
 
 ```text

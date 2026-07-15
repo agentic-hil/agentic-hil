@@ -142,13 +142,32 @@ permissions:
 
 The MCP server reloads and validates this policy before every tool call, so configuration changes take effect without restarting the client. Invalid edits fail closed instead of continuing with the previously loaded policy.
 
+For a project with more than one DUT or probe, keep the single project policy and add named debuggers and logical devices. The existing `debugger:` remains the default debugger used by MCP tools and can be selected with `debugger: "default"`:
+
+```yaml
+debuggers:
+  controller_probe:
+    type: "openocd"
+    probe_id: "066DFF575051717867013749"
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
+
+devices:
+  controller:
+    debugger: "controller_probe"
+    uart: "dut_uart"
+    target:
+      name: "controller-board"
+      controller: "stm32f4"
+```
+
 Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
 ## MCP Tools
 
 | Group | Tools | Notes |
 |-------|-------|-------|
-| Debugger | `debugger_info`, `probe_target`, `reset_target` | OpenOCD, pyOCD, or STM32CubeProgrammer CLI |
+| Debugger | `debugger_info`, `debugger_probes_list`, `probe_target`, `reset_target` | Probe discovery with pyOCD or STM32CubeProgrammer; target access with OpenOCD, pyOCD, or STM32CubeProgrammer CLI |
 | Firmware | `flash_firmware`, `artifact_upload` | artifacts are validated (path, extension, format, SHA-256) before flashing; post-flash reset requires `reset_after_flash: true` |
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
@@ -163,6 +182,39 @@ A typical loop: build firmware → `flash_firmware` with `reset_after_flash: tru
 Real-world firmware bugs show up under electrical conditions that standard lab tools cannot reproduce on demand: an open or shorted sensor, a drifting NTC, a missing load, a bouncing contact. The `adapters:` section connects Agentic HIL to test adapters that simulate exactly these states — physical adapter hardware or pure-software simulators, both speaking the same [JSON bridge protocol](examples/adapters/README.md).
 
 Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_ntc_adapter.py`): flash the firmware, set the simulated sensor to 25 °C and assert nominal behavior, inject an `open` fault and assert the firmware reports the sensor failure, clear the fault and assert recovery — every step automated, reproducible, and policy-gated.
+
+## Test Reactor
+
+The test reactor executes validated hardware workflows against the logical `devices:` in the one project-local `.agentic-hil/config.yaml`. A project can have any number of separate test configuration files. Pass the selected file explicitly; it may be inside the project, elsewhere on the machine, or below the user home directory via `~`:
+
+```bash
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/hardware/boot.yaml
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config ~/agentic-hil-tests/controller/diagnostics.yaml
+```
+
+Relative test-configuration paths are resolved from the project working directory. No directory is searched automatically and no project/user precedence rule applies. Tests in the selected file run strictly one at a time, and a project-wide process lock rejects a concurrent reactor run for the same project.
+
+```yaml
+version: 1
+tests:
+  - name: capture-diagnostic-buffer
+    device: controller
+    steps:
+      - action: debug_start
+        image_path: build/firmware.elf
+        mode: attach
+      - action: run_until_breakpoint
+        location: test_done
+        timeout_s: 10
+      - action: dump_memory
+        symbol: diagnostic_buffer
+        output_path: build/diagnostic-buffer.hex
+      - action: debug_stop
+```
+
+Supported steps are `flash`, `uart_open`, `uart_close`, `debug_start`, `run_until_breakpoint`, `dump_memory`, and `debug_stop`. The complete file is schema-validated and preflighted against device capabilities, artifacts, permissions, symbol allowlists, and step ordering before the first hardware action. Sessions opened by a failed test are cleaned up automatically.
+
+Export the editor/validation schema with `agentic-hil test-schema --output agentic-hil-test.schema.json`. A complete starting point is available at [`examples/test-reactor/diagnostic.yaml`](examples/test-reactor/diagnostic.yaml).
 
 ## Safety Model
 
@@ -194,11 +246,14 @@ The `agentic_hil` fixture loads `.agentic-hil/config.yaml` relative to the pytes
 ```text
 agentic-hil init
 agentic-hil doctor
+agentic-hil debugger-probes --config .agentic-hil/config.yaml --debugger controller_probe
 agentic-hil com-ports
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/hardware/boot.yaml
 agentic-hil mcp-config --output .mcp.json
 agentic-hil mcp-stdio --config .agentic-hil/config.yaml
 agentic-hil com-stdio --config .agentic-hil/config.yaml --port dut_uart
 agentic-hil schema --output agentic-hil-config.schema.json
+agentic-hil test-schema --output agentic-hil-test.schema.json
 agentic-hil skill-install --agent opencode
 ```
 

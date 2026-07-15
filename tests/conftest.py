@@ -24,6 +24,8 @@ def write_config(
     gdb_executable: Path | None = None,
     allowed_symbols: list[str] | None = None,
     max_dump_size_bytes: int = 1048576,
+    debuggers_yaml: str = "debuggers: {}\n",
+    devices_yaml: str = "devices: {}\n",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
     adapters_yaml: str = "adapters: {}\n",
@@ -48,7 +50,7 @@ debugger:
   target_cfg: "target/stm32f4x.cfg"
   flash_address: {('null' if flash_address is None else repr(flash_address))}
   timeout_s: 5
-debug:
+{debuggers_yaml}{devices_yaml}debug:
   gdb_executable: {('null' if gdb_executable is None else repr(gdb_executable.as_posix()))}
   allowed_symbols: {(allowed_symbols if allowed_symbols is not None else [])}
   max_dump_size_bytes: {max_dump_size_bytes}
