@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib import resources
@@ -13,37 +11,16 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
-from yaml.constructor import ConstructorError
-from yaml.resolver import BaseResolver
 
-from agentic_hil.config import ConfigError
+from agentic_hil.config import ConfigError, UniqueKeyLoader, load_config
+from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+from agentic_hil.report import write_report
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
 
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
 DEBUG_ACTIONS = {"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"}
-
-
-class UniqueKeyLoader(yaml.SafeLoader):
-    pass
-
-
-def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> JsonObject:
-    loader.flatten_mapping(node)
-    mapping: JsonObject = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in mapping
-        except TypeError as error:
-            raise ConstructorError("while constructing a mapping", node.start_mark, "found an unhashable key", key_node.start_mark) from error
-        if duplicate:
-            raise ConstructorError("while constructing a mapping", node.start_mark, f"found duplicate key {key!r}", key_node.start_mark)
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping)
+ProjectTestLock = ProjectHardwareLock
 
 
 @dataclass(frozen=True)
@@ -63,54 +40,6 @@ class TestCase:
 class TestPlan:
     path: str
     tests: list[TestCase]
-
-
-class ProjectTestLock:
-    def __init__(self, project_root: str):
-        project_key = hashlib.sha256(os.path.normcase(str(Path(project_root).resolve())).encode("utf-8")).hexdigest()
-        self.path = Path(tempfile.gettempdir()) / "agentic-hil" / f"test-reactor-{project_key}.lock"
-        self.handle: Any = None
-
-    def acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                self.handle.seek(0)
-                if self.handle.read(1) == b"":
-                    self.handle.seek(0)
-                    self.handle.write(b"0")
-                    self.handle.flush()
-                self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.handle.close()
-            self.handle = None
-            return False
-        return True
-
-    def release(self) -> None:
-        if self.handle is None:
-            return
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self.handle.close()
-        self.handle = None
 
 
 def test_config_schema_text() -> str:
@@ -205,12 +134,15 @@ class Device:
         binding: DeviceConfig,
         root_config: AgenticHILConfig,
         service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None,
+        policy_guard: Callable[[], JsonObject | None] | None = None,
+        hardware_owner: str | None = None,
     ):
         self.id = device_id
         self.binding = binding
         self.debugger = root_config.debugger if binding.debugger == "default" else root_config.debuggers[binding.debugger]
         self.config = replace(root_config, target=binding.target, debugger=self.debugger)
-        self.service = service_factory(self.config) if service_factory else AgenticHILToolService(self.config, reload_config=False)
+        self.service = service_factory(self.config) if service_factory else AgenticHILToolService(self.config, reload_config=False, hardware_owner=hardware_owner)
+        self.policy_guard = policy_guard
         self._owns_debug = False
         self._owns_uart = False
 
@@ -218,33 +150,33 @@ class Device:
         action = step.action
         arguments = step.arguments
         if action == "flash":
-            return self.service.call("flash_firmware", arguments)
+            return self._call("flash_firmware", arguments)
         if action == "uart_open":
             if self.binding.uart is None:
                 return capability_error(self.id, action, "uart")
             self._owns_uart = True
-            result = self.service.call("com_session_start", {"port_id": self.binding.uart, "clear_buffer": arguments.get("clear_buffer", True)})
+            result = self._call("com_session_start", {"port_id": self.binding.uart, "clear_buffer": arguments.get("clear_buffer", True)})
             self._owns_uart = result.get("ok") is True and not result.get("already_active", False)
             return result
         if action == "uart_close":
             if self.binding.uart is None:
                 return capability_error(self.id, action, "uart")
-            result = self.service.call("com_session_stop", {"port_id": self.binding.uart})
+            result = self._call("com_session_stop", {"port_id": self.binding.uart})
             if result.get("ok") is True:
                 self._owns_uart = False
             return result
         if action == "debug_start":
             self._owns_debug = True
-            result = self.service.call("debug_start_session", arguments)
+            result = self._call("debug_start_session", arguments)
             if result.get("ok") is not True:
                 self._owns_debug = False
             return result
         if action == "run_until_breakpoint":
             return self._run_until_breakpoint(arguments)
         if action == "dump_memory":
-            return self.service.call("debug_dump_symbol_ihex", arguments)
+            return self._call("debug_dump_symbol_ihex", arguments)
         if action == "debug_stop":
-            result = self.service.call("debug_stop_session", arguments)
+            result = self._call("debug_stop_session", arguments)
             if result.get("ok") is True:
                 self._owns_debug = False
             return result
@@ -272,11 +204,11 @@ class Device:
         return {"ok": True}
 
     def _run_until_breakpoint(self, arguments: JsonObject) -> JsonObject:
-        breakpoint_result = self.service.call("debug_set_breakpoint", {"location": arguments["location"]})
+        breakpoint_result = self._call("debug_set_breakpoint", {"location": arguments["location"]})
         if breakpoint_result.get("ok") is not True:
             return breakpoint_result
-        continued = self.service.call("debug_continue", {"timeout_s": arguments.get("timeout_s")})
-        cleared = self.service.call("debug_clear_breakpoints")
+        continued = self._call("debug_continue", {"timeout_s": arguments.get("timeout_s")})
+        cleared = self._cleanup_call("debug_clear_breakpoints")
         if cleared.get("ok") is not True:
             return {"ok": False, "tool": "test_reactor", "error_type": "breakpoint_cleanup_failed", "summary": "Reactor breakpoint could not be removed.", "breakpoint_cleanup": cleared}
         if continued.get("ok") is not True:
@@ -293,6 +225,13 @@ class Device:
         except Exception as error:
             return exception_result("cleanup_exception", "Cleanup action raised an exception.", error)
 
+    def _call(self, tool: str, arguments: JsonObject | None = None) -> JsonObject:
+        if self.policy_guard is not None:
+            policy_error = self.policy_guard()
+            if policy_error is not None:
+                return policy_error
+        return self.service.call(tool, arguments)
+
 
 class TestReactor:
     def __init__(
@@ -301,28 +240,113 @@ class TestReactor:
         service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None,
     ):
         self.config = config
-        self.devices = {
-            device_id: Device(device_id, binding, config, service_factory)
-            for device_id, binding in config.devices.items()
-        }
+        self.service_factory = service_factory
+        self.devices: dict[str, Device] = {}
+        self._loaded_policy_digest = read_policy_digest(config.config_path)
+        self._policy_digest: str | None = None
 
     def run(self, plan: TestPlan) -> JsonObject:
         project_lock = ProjectTestLock(self.config.config_path)
-        if not project_lock.acquire():
-            close_results = self.close()
+        try:
+            acquired = project_lock.acquire()
+        except HardwareLockError as error:
+            return {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "test_reactor_lock_failed",
+                "test_config_path": plan.path,
+                "tests": [],
+                "cleanup": [],
+                "backend_error": str(error),
+                "summary": "Project hardware lease could not be acquired.",
+            }
+        if not acquired:
             return {
                 "ok": False,
                 "tool": "test_reactor",
                 "error_type": "test_reactor_busy",
                 "test_config_path": plan.path,
                 "tests": [],
-                "cleanup": close_results,
-                "summary": "Another test reactor run is already active for this project.",
+                "cleanup": [],
+                "summary": "Project hardware is in use by another Agentic HIL process.",
             }
         try:
-            return self._run_plan(plan)
+            policy_error = self._establish_policy_baseline(plan.path)
+            if policy_error is not None:
+                return self._finalize(policy_error)
+            initialization_error = self._initialize_devices(plan.path, project_lock.owner_token)
+            if initialization_error is not None:
+                return self._finalize(initialization_error)
+            return self._finalize(self._run_plan(plan))
         finally:
             project_lock.release()
+
+    def _initialize_devices(self, test_config_path: str, hardware_owner: str) -> JsonObject | None:
+        try:
+            for device_id, binding in self.config.devices.items():
+                self.devices[device_id] = Device(
+                    device_id,
+                    binding,
+                    self.config,
+                    self.service_factory,
+                    policy_guard=self._check_policy,
+                    hardware_owner=hardware_owner,
+                )
+        except Exception as error:
+            close_results = self.close()
+            return {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "device_initialization_failed",
+                "test_config_path": test_config_path,
+                "tests": [],
+                "cleanup": close_results,
+                "exception": exception_result("device_initialization_failed", "Device service initialization raised an exception.", error),
+                "summary": "Test reactor device initialization failed; no tests were executed.",
+            }
+        return None
+
+    def _establish_policy_baseline(self, test_config_path: str) -> JsonObject | None:
+        current_digest = read_policy_digest(self.config.config_path)
+        try:
+            current_config = load_config(self.config.config_path, self.config.work_dir)
+        except ConfigError as error:
+            return policy_changed_result(test_config_path, "Project policy became invalid before test execution.", error.to_dict())
+        verified_digest = read_policy_digest(self.config.config_path)
+        if current_digest is None or verified_digest is None or current_digest != verified_digest:
+            return policy_changed_result(test_config_path, "Project policy could not be read consistently before test execution.")
+        if current_config != self.config or (self._loaded_policy_digest is not None and verified_digest != self._loaded_policy_digest):
+            return policy_changed_result(test_config_path, "Project policy changed before test execution.")
+        self._policy_digest = verified_digest
+        return None
+
+    def _check_policy(self) -> JsonObject | None:
+        current_digest = read_policy_digest(self.config.config_path)
+        if current_digest is not None and current_digest == self._policy_digest:
+            return None
+        return {
+            "ok": False,
+            "tool": "test_reactor",
+            "error_type": "policy_changed",
+            "summary": "Project policy changed during the test reactor run; remaining hardware actions were blocked.",
+        }
+
+    def _finalize(self, response: JsonObject) -> JsonObject:
+        try:
+            return write_report(self.config, response)
+        except Exception as error:
+            failed = dict(response)
+            if "error_type" in failed:
+                failed["reactor_error_type"] = failed["error_type"]
+            failed.update(
+                {
+                    "ok": False,
+                    "error_type": "test_reactor_report_failed",
+                    "report_error": exception_result("test_reactor_report_failed", "Test reactor result report could not be written.", error),
+                    "summary": "Test reactor completed, but its authoritative result report could not be written.",
+                }
+            )
+            return failed
 
     def _run_plan(self, plan: TestPlan) -> JsonObject:
         try:
@@ -355,6 +379,7 @@ class TestReactor:
         results: list[JsonObject] = []
         aborted_tests: list[str] = []
         unsafe_state = False
+        policy_changed = False
         try:
             for test_index, test in enumerate(plan.tests):
                 device = self.devices[test.device]
@@ -372,17 +397,24 @@ class TestReactor:
                 results.append(result)
                 if result.get("error_type") in {"cleanup_failed", "test_exception"}:
                     unsafe_state = True
+                    policy_changed = result.get("step_error_type") == "policy_changed"
+                    aborted_tests = [remaining.name for remaining in plan.tests[test_index + 1 :]]
+                    break
+                if result.get("error_type") == "policy_changed":
+                    policy_changed = True
                     aborted_tests = [remaining.name for remaining in plan.tests[test_index + 1 :]]
                     break
         finally:
             close_results = self.close()
         cleanup_ok = all(item["result"].get("ok") is True for item in close_results)
         ok = len(results) == len(plan.tests) and all(result.get("ok") is True for result in results) and cleanup_ok
+        failed_tests = [str(result["name"]) for result in results if result.get("ok") is not True]
         response: JsonObject = {
             "ok": ok,
             "tool": "test_reactor",
             "test_config_path": plan.path,
             "tests": results,
+            "failed_tests": failed_tests,
             "aborted_tests": aborted_tests,
             "cleanup": close_results,
             "summary": "All test reactor tests completed successfully." if ok else "One or more test reactor tests failed.",
@@ -390,6 +422,11 @@ class TestReactor:
         if unsafe_state:
             response["error_type"] = "unsafe_test_state"
             response["summary"] = "Test reactor stopped because cleanup could not establish a safe state."
+        elif policy_changed:
+            response["error_type"] = "policy_changed"
+            response["summary"] = "Test reactor stopped because project policy changed during execution."
+        elif not ok:
+            response["error_type"] = "test_failed"
         return response
 
     def preflight(self, test: TestCase) -> JsonObject | None:
@@ -526,3 +563,25 @@ def capability_error(device: str, action: str, capability: str) -> JsonObject:
 
 def exception_result(error_type: str, summary: str, error: Exception) -> JsonObject:
     return {"ok": False, "tool": "test_reactor", "error_type": error_type, "summary": summary, "exception_type": type(error).__name__, "backend_error": str(error)}
+
+
+def read_policy_digest(config_path: str) -> str | None:
+    try:
+        return hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def policy_changed_result(test_config_path: str, summary: str, policy_error: JsonObject | None = None) -> JsonObject:
+    result: JsonObject = {
+        "ok": False,
+        "tool": "test_reactor",
+        "error_type": "policy_changed",
+        "test_config_path": test_config_path,
+        "tests": [],
+        "cleanup": [],
+        "summary": summary,
+    }
+    if policy_error is not None:
+        result["policy_error"] = policy_error
+    return result

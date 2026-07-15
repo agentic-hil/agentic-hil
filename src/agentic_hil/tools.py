@@ -9,8 +9,53 @@ from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
+from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
 from agentic_hil.report import read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
+
+HARDWARE_TOOLS = {
+    "debugger_probes_list",
+    "probe_target",
+    "flash_firmware",
+    "reset_target",
+    "debug_start_session",
+    "debug_stop_session",
+    "debug_get_session_status",
+    "debug_set_breakpoint",
+    "debug_list_breakpoints",
+    "debug_clear_breakpoints",
+    "debug_continue",
+    "debug_halt",
+    "debug_get_stop_reason",
+    "debug_symbol_info",
+    "debug_dump_symbol_ihex",
+    "com_session_start",
+    "com_session_stop",
+    "com_write",
+    "com_read",
+    "can_session_start",
+    "can_session_stop",
+    "can_send",
+    "can_read",
+    "adapter_session_start",
+    "adapter_session_stop",
+    "adapter_set_value",
+    "adapter_inject_fault",
+    "adapter_clear_fault",
+    "adapter_measure",
+}
+SESSION_START_TOOLS = {
+    "debug_start_session": ("debug", None),
+    "com_session_start": ("com", "port_id"),
+    "can_session_start": ("can", "bus_id"),
+    "adapter_session_start": ("adapter", "adapter_id"),
+}
+SESSION_STOP_TOOLS = {
+    "debug_stop_session": ("debug", None),
+    "com_session_stop": ("com", "port_id"),
+    "can_session_stop": ("can", "bus_id"),
+    "adapter_session_stop": ("adapter", "adapter_id"),
+}
 
 
 class AgenticHILToolService:
@@ -23,9 +68,13 @@ class AgenticHILToolService:
         can_buses: CanBusService | None = None,
         adapters: AdapterService | None = None,
         reload_config: bool = True,
+        hardware_owner: str | None = None,
     ):
         self.config = config
         self.reload_config = reload_config
+        self.hardware_owner = hardware_owner
+        self._hardware_lock = ProjectHardwareLock(config.config_path)
+        self._active_hardware_sessions: set[str] = set()
         self.backend = backend or create_debugger_backend(config)
         self.artifacts = artifacts or ArtifactManager(config)
         self.com_ports = com_ports or ComPortService(config)
@@ -151,10 +200,22 @@ class AgenticHILToolService:
         return self.backend.classify_last_error()
 
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
-        reload_error = self._reload_config(name)
-        if reload_error is not None:
-            return reload_error
         args = arguments or {}
+        hardware_error = self._acquire_hardware(name)
+        if hardware_error is not None:
+            return hardware_error
+        result: JsonObject | None = None
+        try:
+            reload_error = self._reload_config(name)
+            if reload_error is not None:
+                result = reload_error
+                return result
+            result = self._dispatch(name, args)
+            return result
+        finally:
+            self._finish_hardware_call(name, args, result)
+
+    def _dispatch(self, name: str, args: JsonObject) -> JsonObject:
         dispatch = {
             "debugger_info": lambda: self.debugger_info(),
             "debugger_probes_list": lambda: self.debugger_probes_list(str(args.get("debugger", "default"))),
@@ -197,6 +258,36 @@ class AgenticHILToolService:
             return dispatch[name]()
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
+    def _acquire_hardware(self, tool: str) -> JsonObject | None:
+        if tool not in HARDWARE_TOOLS:
+            return None
+        if self.hardware_owner is not None:
+            if ProjectHardwareLock.owner_is_active(self.config.config_path, self.hardware_owner):
+                return None
+            return tool_error(tool, "hardware_owner_invalid", "Hardware lease owner is no longer active.")
+        if self._hardware_lock.handle is not None:
+            return None
+        try:
+            acquired = self._hardware_lock.acquire()
+        except HardwareLockError as error:
+            result = tool_error(tool, "hardware_lock_failed", "Project hardware lease could not be acquired.")
+            result["backend_error"] = str(error)
+            return result
+        if acquired:
+            return None
+        return tool_error(tool, "hardware_busy", "Project hardware is in use by another Agentic HIL process.")
+
+    def _finish_hardware_call(self, tool: str, arguments: JsonObject, result: JsonObject | None) -> None:
+        if tool not in HARDWARE_TOOLS or self.hardware_owner is not None:
+            return
+        if result is not None and result.get("ok") is True:
+            if tool in SESSION_START_TOOLS:
+                self._active_hardware_sessions.add(session_key(SESSION_START_TOOLS[tool], arguments))
+            elif tool in SESSION_STOP_TOOLS:
+                self._active_hardware_sessions.discard(session_key(SESSION_STOP_TOOLS[tool], arguments))
+        if not self._active_hardware_sessions:
+            self._hardware_lock.release()
+
     def _reload_config(self, tool: str) -> JsonObject | None:
         if not self.reload_config:
             return None
@@ -221,14 +312,23 @@ class AgenticHILToolService:
         return None
 
     def close(self) -> None:
-        self.backend.close()
-        self.com_ports.close()
-        self.can_buses.close()
-        self.adapters.close()
+        try:
+            self.backend.close()
+            self.com_ports.close()
+            self.can_buses.close()
+            self.adapters.close()
+        finally:
+            self._active_hardware_sessions.clear()
+            self._hardware_lock.release()
 
 
 def adapter_payload(args: JsonObject) -> JsonObject:
     return {key: value for key, value in args.items() if key != "adapter_id"}
+
+
+def session_key(spec: tuple[str, str | None], arguments: JsonObject) -> str:
+    prefix, argument_name = spec
+    return prefix if argument_name is None else f"{prefix}:{arguments.get(argument_name, '')}"
 
 
 def number_argument(value: object) -> float | None:

@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
+from yaml.constructor import ConstructorError
+from yaml.resolver import BaseResolver
 
 from agentic_hil.types import (
     AdapterConfig,
@@ -29,6 +31,28 @@ from agentic_hil.types import (
 DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> JsonObject:
+    loader.flatten_mapping(node)
+    mapping_value: JsonObject = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping_value
+        except TypeError as error:
+            raise ConstructorError("while constructing a mapping", node.start_mark, "found an unhashable key", key_node.start_mark) from error
+        if duplicate:
+            raise ConstructorError("while constructing a mapping", node.start_mark, f"found duplicate key {key!r}", key_node.start_mark)
+        mapping_value[key] = loader.construct_object(value_node, deep=deep)
+    return mapping_value
+
+
+UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping)
 
 
 class ConfigError(Exception):
@@ -84,7 +108,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         )
 
     try:
-        loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        loaded = yaml.load(config_file.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
     except OSError as error:
         raise ConfigError(
             "config_unreadable",
@@ -98,10 +122,14 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"path": str(config_file)},
         ) from error
     except yaml.YAMLError as error:
+        details: JsonObject = {"path": str(config_file), "backend_error": str(error)}
+        mark = getattr(error, "problem_mark", None)
+        if mark is not None:
+            details.update({"line": mark.line + 1, "column": mark.column + 1})
         raise ConfigError(
             "config_invalid",
             "Agentic HIL configuration file is not valid YAML.",
-            {"path": str(config_file)},
+            details,
         ) from error
 
     raw: Any = loaded or {}

@@ -268,11 +268,11 @@ def run_test_reactor(config_path: str | None, test_config_path: str) -> JsonObje
     return TestReactor(config).run(plan)
 
 
-def schema(output: str | None = None, force: bool = False) -> JsonObject:
+def schema(output: str | None = None, force: bool = False) -> JsonObject | None:
     text = config_schema_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return None
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -281,11 +281,11 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
 
 
-def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject | None:
     text = test_config_schema_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return None
     output_path = Path(output).expanduser()
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -298,11 +298,11 @@ def mcp_config_text() -> str:
     return resources.files("agentic_hil").joinpath("templates", "mcp.json").read_text(encoding="utf-8")
 
 
-def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
+def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | None:
     text = mcp_config_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return None
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "mcp_config_exists", "summary": "MCP configuration already exists. Use --force to overwrite it.", "path": output}

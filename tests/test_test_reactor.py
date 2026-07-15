@@ -16,6 +16,7 @@ from agentic_hil.test_reactor import (
 from agentic_hil.test_reactor import (
     TestReactor as Reactor,
 )
+from agentic_hil.tools import AgenticHILToolService
 
 
 class ConcurrencyTracker:
@@ -70,6 +71,28 @@ class StepAndCleanupFailureService(CleanupFailureService):
         if name == "debug_continue":
             return {"ok": False, "tool": name, "error_type": "target_exception"}
         return super().call(name, arguments)
+
+
+class FailingFlashService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "flash_firmware":
+            return {"ok": False, "tool": name, "error_type": "flash_failed", "summary": "Flash failed."}
+        return result
+
+
+class PolicyChangingService(RecordingService):
+    def __init__(self, tracker: ConcurrencyTracker, config_path: str) -> None:
+        super().__init__(tracker)
+        self.config_path = Path(config_path)
+        self.changed = False
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "flash_firmware" and not self.changed:
+            self.changed = True
+            self.config_path.write_text(self.config_path.read_text(encoding="utf-8") + "\npermissions:\n  allow_flash: false\n", encoding="utf-8")
+        return result
 
 
 class ResolvedBinArtifacts(FakeArtifacts):
@@ -231,6 +254,95 @@ def test_project_lock_rejects_a_concurrent_reactor_run(tmp_path: Path) -> None:
     assert result["tests"] == []
 
 
+def test_project_lock_blocks_regular_tool_service_hardware_calls(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    held_lock = ProjectTestLock(config.config_path)
+    assert held_lock.acquire() is True
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+        held_lock.release()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "hardware_busy"
+
+
+def test_active_tool_service_debug_session_blocks_reactor(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        gdb_executable=FAKE_GDB,
+        devices_yaml='''devices:
+  dut:
+    debugger: "default"
+''',
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: blocked
+    device: dut
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+    config = load_config(str(config_path), str(tmp_path))
+    service = AgenticHILToolService(config)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach"})
+        assert started["ok"] is True, started
+        result = Reactor(config).run(load_test_config(str(plan_path), str(tmp_path)))
+        stopped = service.call("debug_stop_session")
+        assert stopped["ok"] is True, stopped
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_reactor_busy"
+
+
+def test_device_services_are_created_only_after_lock_and_partial_initialization_is_closed(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    services: list[RecordingService] = []
+
+    def service_factory(_: object) -> RecordingService:
+        if services:
+            raise RuntimeError("second device failed")
+        service = RecordingService(ConcurrencyTracker())
+        services.append(service)
+        return service
+
+    reactor = Reactor(config, service_factory=service_factory)
+    assert services == []
+    result = reactor.run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "device_initialization_failed"
+    assert services[0].closed is True
+    lock = ProjectTestLock(config.config_path)
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_lock_io_failure_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    invalid_temp_root = tmp_path / "not-a-directory"
+    invalid_temp_root.write_text("file", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.hardware_lock.tempfile.gettempdir", lambda: str(invalid_temp_root))
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_reactor_lock_failed"
+
+
 def test_preflight_exception_closes_services_and_releases_project_lock(tmp_path: Path) -> None:
     config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
     plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
@@ -302,6 +414,69 @@ tests:
     assert result["tests"][0]["error_type"] == "cleanup_failed"
     assert result["tests"][0]["step_error_type"] == "target_exception"
     assert result["aborted_tests"] == ["must-not-run"]
+
+
+def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: policy-change
+    device: controller_a
+    steps:
+      - {action: flash, image_path: build/app.elf}
+      - {action: flash, image_path: build/app.elf}
+  - name: must-not-run
+    device: controller_b
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+    services: list[PolicyChangingService] = []
+
+    def service_factory(device_config: object) -> PolicyChangingService:
+        service = PolicyChangingService(ConcurrencyTracker(), config.config_path)
+        services.append(service)
+        return service
+
+    result = Reactor(config, service_factory=service_factory).run(load_test_config(str(path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "policy_changed"
+    assert result["failed_tests"] == ["policy-change"]
+    assert result["aborted_tests"] == ["must-not-run"]
+    assert services[0].calls.count("flash_firmware") == 1
+
+
+def test_failed_reactor_result_is_authoritative_last_report(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: failing-flash
+    device: controller_a
+    steps:
+      - {action: flash, image_path: build/app.elf}
+""",
+    )
+
+    result = Reactor(config, service_factory=lambda _: FailingFlashService(ConcurrencyTracker())).run(load_test_config(str(path), str(tmp_path)))
+    report = json.loads((tmp_path / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_failed"
+    assert result["failed_tests"] == ["failing-flash"]
+    assert report["tool"] == "test_reactor"
+    assert report["error_type"] == "test_failed"
+    assert report["failed_tests"] == ["failing-flash"]
+    service = AgenticHILToolService(config)
+    try:
+        classified = service.call("classify_last_error")
+    finally:
+        service.close()
+    assert classified["error_type"] == "test_failed"
 
 
 def test_bin_flash_without_backend_address_fails_preflight(tmp_path: Path) -> None:

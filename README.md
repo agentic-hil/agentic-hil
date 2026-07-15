@@ -192,7 +192,7 @@ agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/h
 agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config ~/agentic-hil-tests/controller/diagnostics.yaml
 ```
 
-Relative test-configuration paths are resolved from the project working directory. No directory is searched automatically and no project/user precedence rule applies. Tests in the selected file run strictly one at a time, and a project-wide process lock rejects a concurrent reactor run for the same project.
+Relative test-configuration paths are resolved from the project working directory. No directory is searched automatically and no project/user precedence rule applies. Tests in the selected file run strictly one at a time. A project-wide hardware lease blocks concurrent reactor, MCP, CLI, and pytest hardware access; policy changes during a run abort remaining hardware actions.
 
 ```yaml
 version: 1

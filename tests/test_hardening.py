@@ -16,6 +16,7 @@ from agentic_hil.can import parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
+from agentic_hil.hardware_lock import ProjectHardwareLock
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
@@ -156,6 +157,21 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
+
+
+def test_com_stdio_fails_closed_while_project_hardware_is_busy(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    held_lock = ProjectHardwareLock(config.config_path)
+    assert held_lock.acquire() is True
+    errors = StringIO()
+    try:
+        exit_code = run_com_stdio(config, "dut", input_stream=BlockingStdin(), output_stream=StringIO(), error_stream=errors)
+    finally:
+        held_lock.release()
+
+    result = json.loads(errors.getvalue())
+    assert exit_code == 1
+    assert result["error_type"] == "hardware_busy"
 
 
 class ExplodingBridge:

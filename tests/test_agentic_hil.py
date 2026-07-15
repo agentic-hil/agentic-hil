@@ -87,6 +87,14 @@ def test_schema_exports_bundled_test_config_schema(tmp_path: Path) -> None:
     assert document["$id"] == "https://agentic-hil.local/schemas/testconfig.schema.json"
 
 
+def test_test_schema_cli_stdout_is_one_json_document(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = entrypoint(["test-schema"])
+
+    document = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert document["$id"] == "https://agentic-hil.local/schemas/testconfig.schema.json"
+
+
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
     output_path = tmp_path / ".mcp.json"
     result = mcp_config(str(output_path))
@@ -233,6 +241,29 @@ def test_named_debugger_cannot_use_reserved_default_name(tmp_path: Path) -> None
         load_config(str(config_path), str(tmp_path))
 
     assert excinfo.value.error_type == "config_invalid"
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "duplicate_key"),
+    [
+        ("debuggers:\n  probe: {}\n  probe: {}\n", "probe"),
+        ("devices:\n  dut: {}\n  dut: {}\n", "dut"),
+        ("com_ports:\n  uart: {}\n  uart: {}\n", "uart"),
+        ("can_buses:\n  bus: {}\n  bus: {}\n", "bus"),
+        ("adapters:\n  rig: {}\n  rig: {}\n", "rig"),
+        ("permissions:\n  allow_flash: true\n  allow_flash: false\n", "allow_flash"),
+    ],
+)
+def test_project_config_rejects_duplicate_mapping_keys(tmp_path: Path, yaml_text: str, duplicate_key: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml_text, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert f"duplicate key '{duplicate_key}'" in excinfo.value.details["backend_error"]
+    assert excinfo.value.details["line"] > 0
 
 
 def test_config_path_defines_project_root_across_working_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

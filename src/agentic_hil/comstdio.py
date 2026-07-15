@@ -8,6 +8,7 @@ import time
 from typing import BinaryIO, TextIO
 
 from agentic_hil.comports import ComPortService
+from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STDIN_CHUNK_BYTES = 4096
@@ -27,10 +28,20 @@ def run_com_stdio(
     input_stream = input_stream or sys.stdin.buffer
     output_stream = output_stream or sys.stdout
     error_stream = error_stream or sys.stderr
-    service = ComPortService(config)
+    hardware_lock = ProjectHardwareLock(config.config_path)
+    try:
+        acquired = hardware_lock.acquire()
+    except HardwareLockError as error:
+        write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired.", "backend_error": str(error)})
+        return 1
+    if not acquired:
+        write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_busy", "summary": "Project hardware is in use by another Agentic HIL process."})
+        return 1
+    service: ComPortService | None = None
     started_ok = False
     failed = False
     try:
+        service = ComPortService(config)
         started = service.session_start(port_id, True)
         if not started.get("ok"):
             write_error(error_stream, started)
@@ -64,9 +75,13 @@ def run_com_stdio(
                 break
         return 1 if failed else 0
     finally:
-        if started_ok:
-            service.session_stop(port_id)
-        service.close()
+        try:
+            if service is not None:
+                if started_ok:
+                    service.session_stop(port_id)
+                service.close()
+        finally:
+            hardware_lock.release()
 
 
 def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:
