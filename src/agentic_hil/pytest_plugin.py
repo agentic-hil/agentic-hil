@@ -13,6 +13,7 @@ instead, so a typo cannot silently disable the hardware suite in CI.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,6 +25,40 @@ if TYPE_CHECKING:
     from agentic_hil.types import AgenticHILConfig
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
+DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    group = parser.getgroup("agentic_hil")
+    group.addoption(
+        "--agentic-hil-config",
+        action="store",
+        default=None,
+        help="Deprecated config selector; must resolve to the discovered authoritative config.",
+    )
+    parser.addini("agentic_hil_config", help="Deprecated Agentic HIL config selector.", default=None)
+
+
+def resolve_plugin_config_path(config: pytest.Config) -> str:
+    option = config.getoption("--agentic-hil-config")
+    if option:
+        return str(Path(str(option)).resolve())
+    ini_value = config.getini("agentic_hil_config")
+    if ini_value:
+        return rootdir_anchored(config, str(ini_value))
+    return rootdir_anchored(config, DEFAULT_CONFIG_PATH)
+
+
+def rootdir_anchored(config: pytest.Config, path: str) -> str:
+    return path if Path(path).is_absolute() else str(config.rootpath / path)
+
+
+def configured_legacy_selector(config: pytest.Config) -> str | None:
+    option = config.getoption("--agentic-hil-config")
+    if option:
+        return str(Path(str(option)).resolve())
+    ini_value = config.getini("agentic_hil_config")
+    return rootdir_anchored(config, str(ini_value)) if ini_value else None
 
 
 @pytest.fixture(scope="session")
@@ -34,7 +69,15 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
     """
     from agentic_hil.config import ConfigError, load_authoritative_config, project_config_path
 
-    if not os.environ.get(CONFIG_ENV) and not project_config_path(request.config.rootpath).is_file():
+    authoritative_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(request.config.rootpath)).resolve()
+    legacy_selector = configured_legacy_selector(request.config)
+    if legacy_selector is not None and Path(legacy_selector).resolve() != authoritative_path:
+        pytest.fail(
+            "Deprecated Agentic HIL config selector cannot change policy authority. "
+            f"Set {CONFIG_ENV} to the absolute external config path or remove the legacy option.",
+            pytrace=False,
+        )
+    if not os.environ.get(CONFIG_ENV) and not authoritative_path.is_file():
         pytest.skip("Agentic HIL configuration unavailable: canonical external config does not exist")
 
     try:
@@ -73,7 +116,7 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
             stopped = _agentic_hil_service.debug_stop_session()
             if not stopped.get("ok"):
                 errors.append(f"debug: {stopped.get('summary', stopped.get('error_type'))}")
-        for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses)]:
+        for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses), ("adapter", _agentic_hil_service.adapters)]:
             try:
                 resource.close()
             except Exception as error:

@@ -142,6 +142,8 @@ class ArtifactManager:
             source_stat = os.fstat(descriptor)
             if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
+            if source_stat.st_size > self._max_upload_bytes():
+                return self._artifact_too_large(source_stat.st_size, tool)
             try:
                 current_path = source.resolve(strict=True)
                 current_stat = os.stat(source, follow_symlinks=False)
@@ -150,6 +152,7 @@ class ArtifactManager:
             if current_path != source or not os.path.samestat(source_stat, current_stat):
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact path changed after validation."}
             digest = hashlib.sha256()
+            copied_bytes = 0
             suffix = source.suffix.lower()
             staging_directory = Path(tempfile.mkdtemp(dir=self._staging.name, prefix="stage-"))
             with os.fdopen(descriptor, "rb") as source_file:
@@ -157,6 +160,9 @@ class ArtifactManager:
                 with tempfile.NamedTemporaryFile(dir=staging_directory, prefix=".tmp-", suffix=suffix, delete=False) as staged_file:
                     temporary_path = Path(staged_file.name)
                     for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
+                        copied_bytes += len(chunk)
+                        if copied_bytes > self._max_upload_bytes():
+                            return self._artifact_too_large(copied_bytes, tool)
                         digest.update(chunk)
                         staged_file.write(chunk)
                     staged_file.flush()
@@ -169,8 +175,16 @@ class ArtifactManager:
             os.replace(temporary_path, staged_path)
             temporary_path = None
             staged_artifact = dict(artifact)
-            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "size_bytes": source_stat.st_size, "staged": True})
+            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "size_bytes": copied_bytes, "staged": True})
             return {"ok": True, "artifact": staged_artifact}
+        except OSError as error:
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "artifact_staging_failed",
+                "summary": "Firmware artifact could not be copied into private backend staging.",
+                "backend_error": str(error),
+            }
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -218,7 +232,14 @@ class ArtifactManager:
         artifact["artifact_id"] = artifact_id
         return {"ok": True, "artifact": artifact, "validation": validation["validation"]}
 
-    def validate_output_path(self, output_path: str, tool: str, allowed_extensions: list[str] | None = None) -> JsonObject:
+    def validate_output_path(
+        self,
+        output_path: str,
+        tool: str,
+        allowed_extensions: list[str] | None = None,
+        *,
+        create_parent: bool = False,
+    ) -> JsonObject:
         allowed_extensions = allowed_extensions or [".hex", ".ihex"]
         resolved = Path(resolve_work_path(self.config, output_path))
         validation: JsonObject = {
@@ -232,7 +253,8 @@ class ArtifactManager:
             return self._output_validation_error(tool, "Output path is outside allowed artifact roots.", validation)
         if not validation["allowed_extension"]:
             return self._output_validation_error(tool, "Output path extension is not allowed for this debug dump.", validation)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            safe_configured_directory(self.config, str(resolved.parent), f"{tool}.output_path")
         return {
             "ok": True,
             "output": {"path": display_path(self.config, output_path), "resolved_path": str(resolved)},
@@ -307,12 +329,12 @@ class ArtifactManager:
     def _max_upload_bytes(self) -> int:
         return max(0, self.config.artifacts.max_upload_size_mb) * 1024 * 1024
 
-    def _artifact_too_large(self, size_bytes: int) -> JsonObject:
+    def _artifact_too_large(self, size_bytes: int, tool: str = "artifact_upload") -> JsonObject:
         return {
             "ok": False,
-            "tool": "artifact_upload",
+            "tool": tool,
             "error_type": "artifact_too_large",
-            "summary": "Uploaded artifact exceeds configured max_upload_size_mb.",
+            "summary": "Firmware artifact exceeds configured max_upload_size_mb.",
             "bytes": size_bytes,
             "max_bytes": self._max_upload_bytes(),
         }

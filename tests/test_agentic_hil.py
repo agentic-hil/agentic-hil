@@ -8,13 +8,27 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_STLINK_UNCONFIRMED, write_authoritative_config, write_config
+from conftest import (
+    FAKE_STLINK_UNCONFIRMED,
+    SIM_NTC_ADAPTER,
+    write_authoritative_config,
+    write_config,
+)
 
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import doctor, entrypoint, init_config, initialized_config_path, install_skill, mcp_config, schema
+from agentic_hil.cli import (
+    build_parser,
+    doctor,
+    entrypoint,
+    init_config,
+    initialized_config_path,
+    install_skill,
+    mcp_config,
+    schema,
+)
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
@@ -310,11 +324,14 @@ def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None
         service.close()
     assert info["ok"] is True
     assert probe["ok"] is True
+    probe_log = (tmp_path / probe["log_path"]).read_text(encoding="utf-8")
+    assert "mode=HOTPLUG" in probe_log
     assert flash["ok"] is True
     assert flash["operation_result"]["confirmed"] is True
     assert flash["reset_after_flash"] is False
     log_text = (tmp_path / flash["log_path"]).read_text(encoding="utf-8")
     assert "port=SWD" in log_text
+    assert "mode=HOTPLUG" in log_text
     assert "sn=STLINK123" in log_text
     assert "-w" in log_text
     assert "-v" in log_text
@@ -446,8 +463,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 29
-    assert len(set(MCP_TOOL_NAMES)) == 29
+    assert len(MCP_TOOL_NAMES) == 36
+    assert len(set(MCP_TOOL_NAMES)) == 36
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     config = load_config(str(write_config(tmp_path)))
     service = AgenticHILToolService(config)
@@ -554,3 +571,41 @@ def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> Non
     result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
     assert result["ok"] is False
     assert result["error_type"] == "config_invalid"
+
+
+NTC_ADAPTER_YAML = f'''adapters:
+  ntc_sim:
+    executable: "{SIM_NTC_ADAPTER.as_posix()}"
+    channels: ["temperature", "resistance"]
+    faults: ["open", "short_to_gnd", "short_to_vcc"]
+'''
+
+
+def test_adapter_api_roundtrip_remains_available(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML))))
+    try:
+        assert mcp_tool_call(service, "adapters_list")["adapters"]["ntc_sim"]["session_active"] is False
+        assert mcp_tool_call(service, "adapter_session_start", {"adapter_id": "ntc_sim"})["ok"] is True
+        assert mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 85})["ok"] is True
+        measured = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
+        assert measured["value"] == 85.0
+        invalid = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": float("nan")})
+        assert invalid["error_type"] == "invalid_argument"
+        huge = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 10**10000})
+        assert huge["error_type"] == "invalid_argument"
+        assert mcp_tool_call(service, "adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})["ok"] is True
+        assert mcp_tool_call(service, "adapter_clear_fault", {"adapter_id": "ntc_sim"})["ok"] is True
+        assert mcp_tool_call(service, "adapter_session_stop", {"adapter_id": "ntc_sim"})["ok"] is True
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("command", ["init", "doctor", "mcp-stdio", "com-stdio"])
+def test_legacy_cli_config_option_is_parsed(command: str) -> None:
+    arguments = [command, "--config", "legacy.yaml"]
+    if command == "com-stdio":
+        arguments.extend(["--port", "dut"])
+
+    parsed = build_parser().parse_args(arguments)
+
+    assert parsed.config == "legacy.yaml"

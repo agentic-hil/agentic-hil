@@ -24,7 +24,7 @@ from agentic_hil.debugger import create_debugger_backend
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import JsonObject
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
@@ -65,6 +65,8 @@ com_ports: {}
 
 can_buses: {}
 
+adapters: {}
+
 validation:
   require_existing_file: true
   require_allowed_root: true
@@ -80,6 +82,8 @@ permissions:
   allow_com_write: false
   allow_can_read: false
   allow_can_write: false
+  allow_adapter_read: false
+  allow_adapter_write: false
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 
@@ -139,17 +143,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init", help="write a deny-by-default authoritative config for the current workspace")
+    init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--force", action="store_true")
 
-    subparsers.add_parser("doctor", help="validate config and check debugger availability")
+    doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
+    doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
     subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
 
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
-    subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
+    mcp_stdio_parser = subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
+    mcp_stdio_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
     com_stdio_parser = subparsers.add_parser("com-stdio", help="bind stdin/stdout to a configured COM port")
+    com_stdio_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     com_stdio_parser.add_argument("--port", required=True)
     com_stdio_parser.add_argument("--max-read-bytes", type=int, default=None)
     com_stdio_parser.add_argument("--read-wait-timeout-s", type=float, default=0.05)
@@ -176,17 +184,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "init":
-        return init_config(args.force)
+        return init_config(args.config, args.force)
     if args.command == "doctor":
-        return doctor()
+        return doctor(args.config)
     if args.command == "debugger-probes":
         return debugger_probes()
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
-        return run_stdio_server(load_authoritative_config(Path.cwd()))
+        return run_stdio_server(load_cli_authoritative_config(args.config))
     if args.command == "com-stdio":
-        config = load_authoritative_config(Path.cwd())
+        config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
         return run_test_reactor(args.test_config)
@@ -199,9 +207,10 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
 
 
-def init_config(force: bool = False) -> JsonObject:
+def init_config(config_path: str | None = None, force: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
+    validate_legacy_config_selector(config_path, workspace, target_path)
     if target_path.exists() and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,9 +334,9 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": output}
 
 
-def doctor() -> JsonObject:
+def doctor(config_path: str | None = None) -> JsonObject:
     try:
-        config = load_authoritative_config(Path.cwd())
+        config = load_cli_authoritative_config(config_path)
     except ConfigError as error:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
@@ -365,6 +374,26 @@ def debugger_probes() -> JsonObject:
         return service.call("debugger_probes_list")
     finally:
         service.close()
+
+
+def load_cli_authoritative_config(config_path: str | None = None) -> AgenticHILConfig:
+    workspace = Path.cwd().resolve()
+    expected_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(workspace)).expanduser().resolve()
+    validate_legacy_config_selector(config_path, workspace, expected_path)
+    return load_authoritative_config(workspace)
+
+
+def validate_legacy_config_selector(config_path: str | None, workspace: Path, expected_path: Path) -> None:
+    if config_path is None:
+        return
+    selected = Path(config_path).expanduser()
+    selected = (selected if selected.is_absolute() else workspace / selected).resolve()
+    if selected != expected_path:
+        raise ConfigError(
+            "config_migration_required",
+            f"--config can no longer select repository-controlled policy. Set {CONFIG_ENV} to an absolute external config path or remove --config.",
+            {"selected_path": str(selected), "authoritative_path": str(expected_path)},
+        )
 
 
 def install_skill(agent: str | None = None, target: str | None = None, force: bool = False) -> JsonObject:

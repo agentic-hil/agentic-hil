@@ -12,8 +12,17 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import display_path, resolve_work_path, safe_write_text
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.report import (
+    logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
+    merge_audit_status,
+    read_last_report,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 PYOCD_NOT_FOUND: JsonObject = {
@@ -129,12 +138,15 @@ class PyOCDBackend:
             reset["artifact"] = self._artifact_summary(artifact)
             reset["verify"] = True
             reset["reset_after_flash"] = False
+            reset["side_effect_committed"] = True
+            reset["side_effect_status"] = "partial"
+            reset["retry_safe"] = False
             reset["error_type"] = "reset_failed"
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
-            return self._write_action_report(reset)
+            return self._write_action_report(merge_audit_status(reset, result, reset))
         result["reset_after_flash"] = reset_after_flash
         result["summary"] = "Firmware flashed, verified, and target reset."
-        return self._write_action_report(result)
+        return self._write_action_report(merge_audit_status(result, result, reset))
 
     def reset_target(self, mode: str = "run") -> JsonObject:
         allowed_modes = ["run", "halt", "init"]
@@ -226,16 +238,16 @@ class PyOCDBackend:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **PYOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+            return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+            return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
@@ -261,10 +273,17 @@ class PyOCDBackend:
         return None
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
-    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
+    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> Exception | None:
+        try:
+            safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
+        except (ConfigError, OSError) as error:
+            return error
+        return None
+
+    def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
+        return mark_audit_failure(result, error) if error is not None else result
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

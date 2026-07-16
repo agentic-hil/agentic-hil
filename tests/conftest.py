@@ -12,6 +12,7 @@ FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
+SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +40,7 @@ def write_config(
     devices_yaml: str = "devices: {}\n",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
+    adapters_yaml: str = "adapters: {}\n",
     permissions_yaml: str | None = None,
     config_path: Path | None = None,
 ) -> Path:
@@ -58,6 +60,8 @@ def write_config(
   allow_com_write: true
   allow_can_read: true
   allow_can_write: true
+  allow_adapter_read: true
+  allow_adapter_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 """
@@ -89,7 +93,7 @@ artifacts:
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{com_ports_yaml}{can_buses_yaml}{permissions_yaml}reports:
+{com_ports_yaml}{can_buses_yaml}{adapters_yaml}{permissions_yaml}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"

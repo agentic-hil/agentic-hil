@@ -48,6 +48,13 @@ MCP_TOOL_NAMES = [
     "can_session_stop",
     "can_send",
     "can_read",
+    "adapters_list",
+    "adapter_session_start",
+    "adapter_session_stop",
+    "adapter_set_value",
+    "adapter_inject_fault",
+    "adapter_clear_fault",
+    "adapter_measure",
 ]
 
 MCP_TOOLS: list[JsonObject] = [
@@ -80,6 +87,13 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}}, "required": ["bus_id"], "additionalProperties": False}},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, "required": ["bus_id", "frame_id"], "additionalProperties": False}},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": {"type": "number", "minimum": 0, "default": 0}}, "required": ["bus_id"], "additionalProperties": False}},
+    {"name": "adapters_list", "description": "List configured test adapters and session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "adapter_session_start", "description": "Start a configured test-adapter bridge session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "adapter_session_stop", "description": "Stop a configured test-adapter session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "adapter_set_value", "description": "Set an allowed test-adapter channel value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}}, "required": ["adapter_id", "channel", "value"], "additionalProperties": False}},
+    {"name": "adapter_inject_fault", "description": "Inject an allowed test-adapter fault.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "fault"], "additionalProperties": False}},
+    {"name": "adapter_clear_fault", "description": "Clear one or all injected test-adapter faults.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
+    {"name": "adapter_measure", "description": "Measure an allowed test-adapter channel.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
 ]
 
 AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) as the safe gate to the configured embedded hardware.
@@ -91,7 +105,7 @@ Workflow:
 4. Probe the target before flashing.
 5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
 6. Read structured results after every hardware action.
-7. Use configured COM port and CAN bus ids only.
+7. Use configured COM port, CAN bus, and test-adapter ids only.
 8. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 
 Safety rules:

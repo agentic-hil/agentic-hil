@@ -3,12 +3,13 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.report import read_last_report
+from agentic_hil.report import ensure_audit_ready, read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
@@ -20,12 +21,14 @@ class AgenticHILToolService:
         artifacts: ArtifactManager | None = None,
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
+        adapters: AdapterService | None = None,
     ):
         self.config = config
         self.backend = backend or create_debugger_backend(self.config)
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config)
         self.can_buses = can_buses or CanBusService(self.config)
+        self.adapters = adapters or AdapterService(self.config)
         self._debug_artifact: JsonObject | None = None
 
     def debugger_info(self) -> JsonObject:
@@ -94,7 +97,7 @@ class AgenticHILToolService:
         except Exception:
             self.artifacts.release_stage(staged["artifact"])
             raise
-        if result.get("ok"):
+        if result.get("ok") or result.get("cleanup_required"):
             self._debug_artifact = staged["artifact"]
         else:
             self.artifacts.release_stage(staged["artifact"])
@@ -193,12 +196,45 @@ class AgenticHILToolService:
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
             "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
+            "adapters_list": lambda: self.adapters.list_adapters(),
+            "adapter_session_start": lambda: self.adapters.session_start(str(args.get("adapter_id", ""))),
+            "adapter_session_stop": lambda: self.adapters.session_stop(str(args.get("adapter_id", ""))),
+            "adapter_set_value": lambda: self.adapters.set_value(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "adapter_inject_fault": lambda: self.adapters.inject_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "adapter_clear_fault": lambda: self.adapters.clear_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
         }
         if name in dispatch:
+            if name in audited_hardware_tools():
+                try:
+                    ensure_audit_ready(self.config)
+                except (ConfigError, OSError) as error:
+                    return {
+                        "ok": False,
+                        "tool": name,
+                        "error_type": "audit_unavailable",
+                        "summary": "Hardware action was not started because audit output is unavailable.",
+                        "side_effect_committed": False,
+                        "audit_ok": False,
+                        "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)},
+                    }
             try:
                 return dispatch[name]()
-            except ConfigError as error:
-                return {"tool": name, **error.to_dict()}
+            except (ConfigError, OSError) as error:
+                if name in audited_hardware_tools() or name in containment_tools():
+                    return {
+                        "ok": False,
+                        "tool": name,
+                        "error_type": "audit_failed_after_action",
+                        "summary": "Hardware action ran, but its audit result could not be completed.",
+                        "side_effect_status": "unknown",
+                        "retry_safe": False,
+                        "audit_ok": False,
+                        "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)},
+                    }
+                if isinstance(error, ConfigError):
+                    return {"tool": name, **error.to_dict()}
+                raise
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
     def close(self) -> None:
@@ -208,6 +244,7 @@ class AgenticHILToolService:
             ("artifacts", self.artifacts),
             ("com_ports", self.com_ports),
             ("can_buses", self.can_buses),
+            ("adapters", self.adapters),
         ]:
             try:
                 resource.close()
@@ -228,5 +265,25 @@ def number_argument(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def adapter_payload(args: JsonObject) -> JsonObject:
+    return {key: value for key, value in args.items() if key != "adapter_id"}
+
+
 def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
     return {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
+
+
+def audited_hardware_tools() -> set[str]:
+    return {
+        "probe_target", "flash_firmware", "reset_target", "debug_start_session",
+        "debug_set_breakpoint", "debug_continue",
+        "com_session_start", "com_write", "can_session_start", "can_send",
+        "adapter_session_start", "adapter_set_value", "adapter_inject_fault", "adapter_measure",
+    }
+
+
+def containment_tools() -> set[str]:
+    return {
+        "debug_stop_session", "debug_clear_breakpoints", "debug_halt",
+        "com_session_stop", "can_session_stop", "adapter_session_stop", "adapter_clear_fault",
+    }

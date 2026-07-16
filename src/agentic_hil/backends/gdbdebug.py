@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import display_path, safe_write_text
+from agentic_hil.config import ConfigError, display_path, safe_write_text
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -18,7 +18,14 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.report import (
+    logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEBUG_MODES = ["attach", "reset_halt", "load"]
@@ -83,6 +90,7 @@ class GdbDebugSessions:
         self._build_server_args = build_server_args
         self._classify_server_output = classify_server_output
         self.session: GdbDebugSession | None = None
+        self._audit_error: Exception | None = None
 
     def start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
         tool = "debug_start_session"
@@ -129,17 +137,23 @@ class GdbDebugSessions:
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
-            session.status = "error"
+                failure["cleanup_required"] = True
+                session.status = "error"
+            else:
+                self.session = None
             return self._report(failure)
 
         session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
-            session.status = "error"
             result = {"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)}
             if cleanup_error is not None:
                 result["cleanup_error"] = cleanup_error
+                result["cleanup_required"] = True
+                session.status = "error"
+            else:
+                self.session = None
             return self._report(result)
 
         session.status = "halted"
@@ -184,7 +198,7 @@ class GdbDebugSessions:
         active = session is not None and session.status not in {"stopped", "error"}
         result: JsonObject = {"ok": True, "tool": "debug_get_session_status", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "session": self._session_status(session) if session else None}
         result.update(target_stop_fields(session.stop_reason if session else None))
-        return result
+        return self._report(result)
 
     def set_breakpoint(self, location: JsonObject | str) -> JsonObject:
         tool = "debug_set_breakpoint"
@@ -195,6 +209,19 @@ class GdbDebugSessions:
         normalized = normalize_breakpoint_location(tool, location)
         if not normalized["ok"]:
             return self._report(normalized)
+        normalized_location = normalized["location"]
+        if "symbol" in normalized_location:
+            authorized = self._validate_symbol(tool, str(normalized_location["symbol"]))
+            if not authorized["ok"]:
+                return self._report(authorized)
+        elif not self.config.debug.allow_all_symbols:
+            return self._report({
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "permission_denied",
+                "summary": "File and line breakpoints require debug.allow_all_symbols.",
+            })
         response = self._gdb_command(session, f"-break-insert {mi_string(normalized['gdb_location'])}")
         if not response.ok:
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
@@ -286,10 +313,10 @@ class GdbDebugSessions:
         session = session_result["session"]
         self._refresh_session_stop(session)
         if session.stop_reason is None:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."}
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."})
         result = {"ok": True, "tool": tool, "backend": self.backend_name, "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session)}
         result.update(target_stop_fields(session.stop_reason))
-        return result
+        return self._report(result)
 
     def symbol_info(self, symbol: str) -> JsonObject:
         tool = "debug_symbol_info"
@@ -577,10 +604,7 @@ class GdbDebugSessions:
                     raise RuntimeError("Debug server remained active after kill.")
             except Exception as error:
                 errors.append(("debug_server", error))
-        try:
-            self._write_session_log(session)
-        except Exception as error:
-            errors.append(("session_log", error))
+        self._write_session_log(session)
         if errors:
             return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
         return None
@@ -631,10 +655,16 @@ class GdbDebugSessions:
             "server_stderr_tail": session.server_stderr,
             "gdb_commands": session.gdb.history() if session.gdb else [],
         }
-        with suppress(OSError):
+        try:
             safe_write_text(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
+        except (ConfigError, OSError) as error:
+            self._audit_error = error
 
     def _report(self, result: JsonObject) -> JsonObject:
+        result = mark_side_effect(result)
+        if self._audit_error is not None:
+            result = mark_audit_failure(result, self._audit_error)
+            self._audit_error = None
         return write_report(self.config, result)
 
 

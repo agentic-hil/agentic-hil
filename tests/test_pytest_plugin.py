@@ -63,3 +63,41 @@ def test_agentic_hil_fixture_fails_for_different_workspace(
     outcomes = result.parseoutcomes()
     assert outcomes.get("passed", 0) == 0
     assert outcomes.get("errors", 0) == 1 or outcomes.get("failed", 0) == 1
+
+
+def test_agentic_hil_fixture_fails_loudly_on_missing_explicit_config(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str((pytester.path / "missing.yaml").resolve()))
+    pytester.makepyfile(SERVICE_TEST)
+
+    result = pytester.runpytest(*PLUGIN_ARGS, "--rootdir", str(pytester.path))
+
+    outcomes = result.parseoutcomes()
+    assert outcomes.get("skipped", 0) == 0
+    assert outcomes.get("errors", 0) == 1 or outcomes.get("failed", 0) == 1
+
+
+def test_legacy_pytest_config_option_accepts_authoritative_path(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = write_authoritative_config(pytester.path, monkeypatch)
+    pytester.makepyfile(SERVICE_TEST)
+
+    result = pytester.runpytest(*PLUGIN_ARGS, "--rootdir", str(pytester.path), "--agentic-hil-config", str(config_path))
+
+    result.assert_outcomes(passed=1)
+
+
+def test_legacy_pytest_config_option_cannot_redirect_authority(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_authoritative_config(pytester.path, monkeypatch)
+    legacy = pytester.path / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("workspace_root: ignored\n", encoding="utf-8")
+    pytester.makepyfile(SERVICE_TEST)
+
+    result = pytester.runpytest(*PLUGIN_ARGS, "--rootdir", str(pytester.path), "--agentic-hil-config", str(legacy))
+
+    assert "cannot change policy authority" in result.stdout.str()

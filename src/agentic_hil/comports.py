@@ -9,6 +9,8 @@ from agentic_hil.config import display_path
 from agentic_hil.report import (
     append_jsonl,
     logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -43,7 +45,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 
 
 class ComPortSession:
-    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str):
+    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, *, start_reader: bool = True):
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
@@ -54,6 +56,13 @@ class ComPortSession:
         self.overflow_bytes = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
+        self.reader: threading.Thread | None = None
+        if start_reader:
+            self.start_reader()
+
+    def start_reader(self) -> None:
+        if self.reader is not None:
+            return
         self.reader = threading.Thread(target=self._reader_loop, daemon=True)
         self.reader.start()
 
@@ -71,7 +80,11 @@ class ComPortSession:
                     if overflow > 0:
                         del self.buffer[:overflow]
                         self.overflow_bytes += overflow
-                append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                audit_error = append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                if audit_error is not None:
+                    self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
+                    self.active = False
+                    break
             except Exception as error:  # serial backends raise implementation-specific exception classes
                 if self.active:
                     self.reader_error = {
@@ -142,9 +155,11 @@ class ComPortService:
         if not opened["ok"]:
             return self._write_report(opened)
         session = opened["session"]
+        audit_error = append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
+        session.start_reader()
         self.sessions[port_id] = session
-        append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
-        return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
+        result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."}
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def session_stop(self, port_id: str) -> JsonObject:
         port = self._configured_port(port_id, "com_session_stop")
@@ -154,11 +169,12 @@ class ComPortService:
         if session is None:
             return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
         try:
-            self._stop_session(session, "requested")
+            audit_error = self._stop_session(session, "requested")
         except Exception as error:
             return self._write_report(self._close_failure("com_session_stop", port_id, error))
         self.sessions.pop(port_id, None)
-        return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
+        result = {"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."}
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
         port = self._configured_port(port_id, "com_write")
@@ -186,10 +202,11 @@ class ComPortService:
                 flush()
         except Exception as error:
             result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
-            append_jsonl(session.log_path, {"event": "error", **result})
-            return result
-        append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
-        return {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+            audit_error = append_jsonl(session.log_path, {"event": "error", **result})
+            return mark_audit_failure(result, audit_error) if audit_error is not None else result
+        audit_error = append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
+        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        return mark_audit_failure(result, audit_error) if audit_error is not None else result
 
     def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
         return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
@@ -246,7 +263,7 @@ class ComPortService:
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
             log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
-            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path)}
+            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path, start_reader=False)}
         except Exception as error:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
 
@@ -288,10 +305,12 @@ class ComPortService:
             return False
         return session.active and bool(getattr(session.serial_handle, "is_open", True))
 
-    def _stop_session(self, session: ComPortSession, reason: str) -> None:
+    def _stop_session(self, session: ComPortSession, reason: str) -> Exception | None:
         session.active = False
         session.serial_handle.close()
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        if session.reader is not None and session.reader is not threading.current_thread():
+            session.reader.join(timeout=max(1.0, session.port_config.timeout_s + 0.5))
+        return append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _close_failure(self, tool: str, port_id: str, error: Exception) -> JsonObject:
         return {
@@ -304,7 +323,7 @@ class ComPortService:
         }
 
     def _write_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
     def _permission_denied(self, tool: str, summary: str, port_id: str | None = None) -> JsonObject:
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

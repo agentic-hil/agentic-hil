@@ -4,20 +4,28 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, write_config
 
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bridge import ProcessBridgeSession
-from agentic_hil.can import parse_can_id, payload_frame
+from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
-from agentic_hil.config import ConfigError, load_authoritative_config, load_config
+from agentic_hil.config import (
+    ConfigError,
+    _close_windows_handles,
+    _windows_hold_directory_chain,
+    load_authoritative_config,
+    load_config,
+)
 from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.report import append_jsonl
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig
@@ -486,6 +494,83 @@ def test_authoritative_config_rejects_workspace_can_bridge_executable(tmp_path: 
     assert rejected.value.details["field"] == "can_buses.injected.executable"
 
 
+def test_authoritative_config_rejects_process_bridge_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    bridge = workspace / "bridge.py"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_text("print('untrusted')\n", encoding="utf-8")
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        can_buses_yaml=(
+            'can_buses:\n  injected:\n    adapter: "process"\n    channel: "test"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n    args: ["{bridge.as_posix()}"]\n'
+        ),
+        permissions_yaml="permissions: {}\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "can_buses.injected.args"
+
+
+def test_authoritative_config_pins_external_adapter_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        adapters_yaml=(
+            f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n'
+            '    channels: ["temperature"]\n    faults: ["open"]\n'
+        ),
+        permissions_yaml="permissions: {}\n",
+    )
+
+    config = load_authoritative_config(workspace)
+
+    assert config.adapters["ntc"].executable == str(SIM_NTC_ADAPTER.resolve())
+
+
+def test_authoritative_config_rejects_workspace_adapter_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    bridge = workspace / "adapter.py"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_text("print('untrusted')\n", encoding="utf-8")
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        adapters_yaml=f'adapters:\n  injected:\n    executable: "{bridge.as_posix()}"\n',
+        permissions_yaml="permissions: {}\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "adapters.injected.executable"
+
+
+def test_authoritative_config_rejects_adapter_bridge_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        adapters_yaml=(
+            f'adapters:\n  injected:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n'
+            '    args: ["workspace-script.py"]\n'
+        ),
+        permissions_yaml="permissions: {}\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "adapters.injected.args"
+
+
 def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     host = tmp_path / "tools"
@@ -579,6 +664,133 @@ def test_report_directory_symlink_is_rejected(tmp_path: Path) -> None:
     assert result["error_type"] == "unsafe_configured_path"
 
 
+def test_last_report_file_symlink_is_rejected_without_reading_target(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    reports = tmp_path / ".agentic-hil" / "reports"
+    reports.mkdir(parents=True)
+    outside = tmp_path / "outside-report.json"
+    outside.write_text('{"secret": "must-not-be-read"}\n', encoding="utf-8")
+    report_path = reports / "last-report.json"
+    try:
+        report_path.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"file symlinks unavailable: {error}")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("get_last_report")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_configured_path"
+    assert "must-not-be-read" not in json.dumps(result)
+
+
+def test_parallel_jsonl_appends_keep_every_event_exactly_once(tmp_path: Path) -> None:
+    log_path = tmp_path / "events.jsonl"
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        list(executor.map(lambda event_id: append_jsonl(str(log_path), {"event_id": event_id}), range(1000)))
+
+    events = [json.loads(line)["event_id"] for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert len(events) == 1000
+    assert sorted(events) == list(range(1000))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle behavior")
+def test_windows_secure_io_handles_block_parent_rename(tmp_path: Path) -> None:
+    parent = tmp_path / "audit"
+    parent.mkdir()
+    handles = _windows_hold_directory_chain(parent)
+    try:
+        with pytest.raises(OSError):
+            os.replace(parent, tmp_path / "replacement")
+    finally:
+        _close_windows_handles(handles)
+
+
+def test_can_close_failure_retains_session_for_retry(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+
+    class RetryAdapter:
+        adapter_name = "process"
+
+        def __init__(self) -> None:
+            self.active = True
+            self.attempts = 0
+
+        def close(self) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise OSError("bridge busy")
+            self.active = False
+
+        def status(self) -> dict:
+            return {"active": self.active}
+
+    adapter = RetryAdapter()
+    log_path = tmp_path / ".agentic-hil" / "logs" / "can.jsonl"
+    log_path.parent.mkdir(parents=True)
+    session = CanBusSession("bench", config.can_buses["bench"], adapter, str(log_path))  # type: ignore[arg-type]
+    service = CanBusService(config)
+    service.sessions["bench"] = session
+
+    first = service.session_stop("bench")
+    second = service.session_stop("bench")
+
+    assert first["error_type"] == "can_adapter_close_failed"
+    assert second["ok"] is True
+    assert adapter.attempts == 2
+    assert "bench" not in service.sessions
+
+
+def test_unavailable_audit_prevents_hardware_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    backend = SimpleNamespace(
+        probe_target=lambda: calls.append("probe") or {"ok": True, "tool": "probe_target"},
+        close=lambda: None,
+    )
+    service = AgenticHILToolService(load_test_config(tmp_path), backend=backend)
+    monkeypatch.setattr("agentic_hil.report.safe_write_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "audit_unavailable"
+    assert result["side_effect_committed"] is False
+    assert calls == []
+
+
+def test_post_action_report_failure_preserves_committed_flash_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFfake")
+    config = load_test_config(tmp_path, debugger_type="stlink")
+    service = AgenticHILToolService(config)
+    from agentic_hil import report as report_module
+
+    original_write = report_module.safe_write_text
+
+    def fail_last_report(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("disk full")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "safe_write_text", fail_last_report)
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True
+    assert result["side_effect_committed"] is True
+    assert result["audit_ok"] is False
+    assert result["retry_safe"] is False
+    assert result["audit_error"]["backend_error"] == "disk full"
+
+
 def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
     config = load_test_config(tmp_path)
     outside = tmp_path / "outside" / "firmware.elf"
@@ -627,6 +839,42 @@ def test_artifact_is_rechecked_and_staged_before_backend_use(tmp_path: Path) -> 
         assert staged_path.read_bytes() == firmware.read_bytes()
     finally:
         manager.close()
+
+
+def test_backend_staging_rejects_artifact_above_limit(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"x" * (1024 * 1024 + 1))
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.bin")
+        result = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+    finally:
+        manager.close()
+
+    assert result["ok"] is False
+    assert result["tool"] == "flash_firmware"
+    assert result["error_type"] == "artifact_too_large"
+
+
+def test_backend_staging_io_error_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"approved")
+    manager = ArtifactManager(config)
+    validation = manager.validate_local_path("build/firmware.bin")
+    monkeypatch.setattr("agentic_hil.artifacts.tempfile.mkdtemp", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    try:
+        result = manager.stage_for_backend(validation["artifact"], "debug_start_session")
+    finally:
+        manager.close()
+
+    assert result["ok"] is False
+    assert result["tool"] == "debug_start_session"
+    assert result["error_type"] == "artifact_staging_failed"
+    assert result["backend_error"] == "disk full"
 
 
 def test_local_artifact_upload_rechecks_source_before_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

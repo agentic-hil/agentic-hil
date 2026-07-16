@@ -5,7 +5,6 @@ import os
 import re
 import subprocess
 import time
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +15,8 @@ from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
     append_jsonl,
     logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -65,8 +66,8 @@ class CanBusService:
         for bus_id, session in list(self.sessions.items()):
             permissions_revoked = not config.permissions.allow_can_read and not config.permissions.allow_can_write
             if permissions_revoked or config.can_buses.get(bus_id) != session.bus_config:
-                self.sessions.pop(bus_id, None)
                 self._stop_session(session, "config_reloaded")
+                self.sessions.pop(bus_id, None)
         self.config = config
 
     def list_buses(self) -> JsonObject:
@@ -83,6 +84,10 @@ class CanBusService:
         if existing and self._session_is_active(existing):
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
         if existing:
+            try:
+                self._stop_session(existing, "replaced")
+            except Exception as error:
+                return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "Previous CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error)})
             self.sessions.pop(bus_id, None)
         bus_config = bus["bus_config"]
         opened = open_adapter(self.config, bus_id, bus_config, clear_rx_queue)
@@ -94,18 +99,24 @@ class CanBusService:
         log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
         session = CanBusSession(bus_id, bus_config, adapter_session, log_path)
         self.sessions[bus_id] = session
-        append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
-        return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."})
+        audit_error = append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
+        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."}
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def session_stop(self, bus_id: str) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_session_stop")
         if not bus["ok"]:
             return self._write_report(bus)
-        session = self.sessions.pop(bus_id, None)
+        session = self.sessions.get(bus_id)
         if session is None:
             return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": False, "summary": "CAN bus session was not active."})
-        self._stop_session(session, "requested")
-        return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."})
+        try:
+            audit_error = self._stop_session(session, "requested")
+        except Exception as error:
+            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error)})
+        self.sessions.pop(bus_id, None)
+        result = {"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."}
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def send(self, bus_id: str, payload: JsonObject) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_send")
@@ -125,11 +136,11 @@ class CanBusService:
         sent = session.adapter_session.send(frame)
         if not sent["ok"]:
             result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **sent}
-            append_jsonl(session.log_path, {"event": "error", "direction": "tx", **result})
-            return self._write_report(result)
+            audit_error = append_jsonl(session.log_path, {"event": "error", "direction": "tx", **result})
+            return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         result = {"ok": True, "tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "adapter_result": public_backend_result(sent), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame sent."}
-        append_jsonl(session.log_path, {"direction": "tx", **result})
-        return self._write_report(result)
+        audit_error = append_jsonl(session.log_path, {"direction": "tx", **result})
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_read")
@@ -153,18 +164,25 @@ class CanBusService:
         read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, session.bus_config.timeout_s, 60.0)))
         if not read["ok"]:
             result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
-            append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
-            return self._write_report(result)
+            audit_error = append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
+            return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         frames = normalize_received_frames(read.get("frames", []))
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
-        append_jsonl(session.log_path, {"direction": "rx", **result})
-        return self._write_report(result)
+        audit_error = append_jsonl(session.log_path, {"direction": "rx", **result})
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def close(self) -> None:
-        sessions = list(self.sessions.values())
-        self.sessions.clear()
-        for session in sessions:
-            self._stop_session(session, "shutdown")
+        errors: list[tuple[str, Exception]] = []
+        for bus_id, session in list(self.sessions.items()):
+            try:
+                self._stop_session(session, "shutdown")
+            except Exception as error:
+                errors.append((bus_id, error))
+            else:
+                self.sessions.pop(bus_id, None)
+        if errors:
+            details = "; ".join(f"{bus_id}: {type(error).__name__}: {error}" for bus_id, error in errors)
+            raise RuntimeError(f"CAN bus cleanup failed: {details}") from errors[0][1]
 
     def _configured_bus(self, bus_id: str, tool: str) -> JsonObject:
         if not bus_id:
@@ -195,14 +213,13 @@ class CanBusService:
     def _session_is_active(self, session: CanBusSession) -> bool:
         return session.active and session.adapter_session.status().get("active") is not False
 
-    def _stop_session(self, session: CanBusSession, reason: str) -> None:
+    def _stop_session(self, session: CanBusSession, reason: str) -> Exception | None:
+        session.adapter_session.close()
         session.active = False
-        with suppress(Exception):
-            session.adapter_session.close()
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        return append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
     def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None) -> JsonObject:
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
@@ -249,10 +266,10 @@ class PythonCanAdapterSession:
             return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error)}
 
     def close(self) -> None:
-        self.active = False
         shutdown = getattr(self.bus, "shutdown", None)
         if callable(shutdown):
             shutdown()
+        self.active = False
 
     def status(self) -> JsonObject:
         return {"active": self.active, "backend": self.adapter_name}
@@ -302,7 +319,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     executable = resolve_work_path(config, bus_config.executable)
     if not Path(executable).is_file():
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found."}
-    command = [*invocation(executable), *bus_config.args]
+    command = invocation(executable)
     try:
         child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:

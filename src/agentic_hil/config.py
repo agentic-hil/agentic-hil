@@ -4,8 +4,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import stat
 import tempfile
+import threading
+from contextlib import suppress
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
@@ -17,6 +21,7 @@ from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
 from agentic_hil.types import (
+    AdapterConfig,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
@@ -36,6 +41,8 @@ CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
 
 
 class ConfigError(Exception):
@@ -94,8 +101,10 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
         raise_config_validation_error(errors[0], config_path)
 
 
-def load_config(config_path: str) -> AgenticHILConfig:
+def load_config(config_path: str | None = None, work_dir: str | None = None) -> AgenticHILConfig:
     """Parse one config file. Production entrypoints must use load_authoritative_config."""
+    if config_path is None:
+        return load_authoritative_config(work_dir or Path.cwd())
     config_file = Path(config_path).expanduser().resolve()
     resolved_config_path = str(config_file)
     if not config_file.exists():
@@ -146,6 +155,12 @@ def load_config(config_path: str) -> AgenticHILConfig:
             "workspace_root must be an existing directory.",
             {"path": resolved_config_path, "field": "workspace_root", "value": workspace_value},
         )
+    if work_dir is not None and workspace != Path(work_dir).resolve():
+        raise ConfigError(
+            "config_invalid",
+            "Configured workspace_root does not match the requested work directory.",
+            {"workspace_root": str(workspace), "expected_workspace": str(Path(work_dir).resolve())},
+        )
 
     target_raw = mapping(raw.get("target"), "target")
     devices_raw = mapping(raw.get("devices"), "devices")
@@ -154,6 +169,7 @@ def load_config(config_path: str) -> AgenticHILConfig:
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
     com_ports_raw = mapping(raw.get("com_ports"), "com_ports")
     can_buses_raw = mapping(raw.get("can_buses"), "can_buses")
+    adapters_raw = mapping(raw.get("adapters"), "adapters")
     validation_raw = mapping(raw.get("validation"), "validation")
     permissions_raw = mapping(raw.get("permissions"), "permissions")
     reports_raw = mapping(raw.get("reports"), "reports")
@@ -182,6 +198,7 @@ def load_config(config_path: str) -> AgenticHILConfig:
         artifacts=artifacts_config(artifacts_raw),
         com_ports=com_ports,
         can_buses={name: can_bus_config(name, value) for name, value in can_buses_raw.items()},
+        adapters={name: adapter_config(name, value) for name, value in adapters_raw.items()},
         validation=validation_config(validation_raw),
         permissions=permissions_config(permissions_raw),
         reports=reports_config(reports_raw),
@@ -203,6 +220,14 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
     else:
         requested = project_config_path(expected)
     resolved = requested.resolve()
+    if not resolved.is_file():
+        raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)})
+    if os.lstat(resolved).st_nlink != 1:
+        raise ConfigError(
+            "config_invalid",
+            "The authoritative config must be a single-link regular file.",
+            {"path": str(resolved)},
+        )
     config = load_config(str(resolved))
     workspace = Path(config.work_dir)
     if is_path_within_frozen(requested, workspace) or is_path_within(resolved, workspace):
@@ -313,6 +338,20 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         )
         for name, bus in config.can_buses.items()
     }
+    adapters = {
+        name: replace(
+            adapter,
+            executable=configured_executable(
+                config,
+                adapter.executable,
+                f"adapters.{name}.executable",
+                workspace_relative=True,
+                required=True,
+            )
+            or adapter.executable,
+        )
+        for name, adapter in config.adapters.items()
+    }
     debugger = replace(config.debugger, executable=debugger_executable)
     if debugger_enabled and debugger.type == "openocd":
         debugger = replace(
@@ -325,6 +364,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         debugger=debugger,
         debug=replace(config.debug, gdb_executable=gdb_executable),
         can_buses=can_buses,
+        adapters=adapters,
     )
 
 
@@ -370,10 +410,10 @@ def configured_executable(
             "Configured executables must be stored outside the workspace.",
             {"field": field, "path": str(resolved), "workspace_root": config.workspace_root},
         )
-    if not resolved.is_file():
+    if not resolved.is_file() or os.lstat(resolved).st_nlink != 1:
         raise ConfigError(
             "config_invalid",
-            "Configured executable must be an existing regular file.",
+            "Configured executable must be an existing single-link regular file.",
             {"field": field, "path": str(resolved)},
         )
     return str(resolved)
@@ -399,10 +439,10 @@ def configured_external_file(config: AgenticHILConfig, value: str, field: str) -
             "Configured debugger files must be stored outside the workspace.",
             {"field": field, "path": str(resolved), "workspace_root": config.workspace_root},
         )
-    if not resolved.is_file():
+    if not resolved.is_file() or os.lstat(resolved).st_nlink != 1:
         raise ConfigError(
             "config_invalid",
-            "Configured debugger file must be an existing regular file.",
+            "Configured debugger file must be an existing single-link regular file.",
             {"field": field, "path": str(resolved)},
         )
     return str(resolved)
@@ -435,30 +475,23 @@ def configured_work_path(config: AgenticHILConfig, requested_path: str) -> Path:
 
 def safe_configured_directory(config: AgenticHILConfig, requested_path: str, field: str) -> str:
     directory = configured_work_path(config, requested_path)
-    if not is_path_within_frozen(directory, Path(config.work_dir)) or directory.resolve() != directory:
+    if not is_path_within_frozen(directory, Path(config.work_dir)):
         raise ConfigError(
             "unsafe_configured_path",
             "Configured output directory contains a symlink or leaves the workspace.",
             {"field": field, "path": str(directory)},
         )
-    directory.mkdir(parents=True, exist_ok=True)
-    if directory.resolve() != directory:
-        raise ConfigError(
-            "unsafe_configured_path",
-            "Configured output directory changed while it was being opened.",
-            {"field": field, "path": str(directory)},
-        )
+    if os.name != "nt":
+        descriptor = _open_directory_fd(directory, create=True)
+        os.close(descriptor)
+    else:
+        handles = _windows_hold_directory_chain(directory, create=True)
+        _close_windows_handles(handles)
     return str(directory)
 
 
 def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
-    path = absolute_without_symlinks(Path(file_path))
-    if workspace is not None and not is_path_within_frozen(path, Path(workspace)):
-        raise ConfigError(
-            "unsafe_configured_path",
-            "Output file leaves the workspace.",
-            {"path": str(path)},
-        )
+    path = _validated_absolute_file_path(file_path, workspace)
     if path.parent.resolve() != path.parent or path.is_symlink() or (path.exists() and os.lstat(path).st_nlink > 1):
         raise ConfigError(
             "unsafe_configured_path",
@@ -468,26 +501,252 @@ def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -
     return path
 
 
+def _validated_absolute_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
+    path = absolute_without_symlinks(Path(file_path))
+    if workspace is not None and not is_path_within_frozen(path, Path(workspace)):
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Output file leaves the workspace.",
+            {"path": str(path)},
+        )
+    return path
+
+
+def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
+    path = absolute_without_symlinks(directory)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parts = path.parts
+    descriptor = os.open(parts[0], flags)
+    try:
+        for part in parts[1:]:
+            if create:
+                with suppress(FileExistsError):
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            opened = os.fstat(next_descriptor)
+            if not stat.S_ISDIR(opened.st_mode):
+                os.close(next_descriptor)
+                raise ConfigError("unsafe_configured_path", "Configured path component is not a directory.", {"path": str(path)})
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except (ConfigError, OSError):
+        os.close(descriptor)
+        raise
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(str(path))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
+
+
+def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> list[int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_info.restype = wintypes.BOOL
+    invalid_handle = ctypes.c_void_p(-1).value
+    file_read_attributes = 0x80
+    delete_access = 0x10000
+    file_share_read_write = 0x1 | 0x2
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    file_attribute_directory = 0x10
+    file_attribute_reparse_point = 0x400
+
+    path = absolute_without_symlinks(directory)
+    current = Path(path.anchor)
+    components = [current]
+    for part in path.parts[1:]:
+        current /= part
+        components.append(current)
+
+    handles: list[int] = []
+    try:
+        for component in components:
+            if create and not component.exists():
+                component.mkdir()
+            handle = create_file(
+                str(component),
+                file_read_attributes | delete_access,
+                file_share_read_write,
+                None,
+                open_existing,
+                file_flag_open_reparse_point | file_flag_backup_semantics,
+                None,
+            )
+            if handle == invalid_handle:
+                error_code = ctypes.get_last_error()
+                if error_code not in {5, 32}:
+                    raise ctypes.WinError(error_code)
+                handle = create_file(
+                    str(component),
+                    file_read_attributes,
+                    file_share_read_write,
+                    None,
+                    open_existing,
+                    file_flag_open_reparse_point | file_flag_backup_semantics,
+                    None,
+                )
+                if handle == invalid_handle:
+                    raise ctypes.WinError(ctypes.get_last_error())
+            numeric_handle = int(handle)
+            handles.append(numeric_handle)
+            info = ByHandleFileInformation()
+            if not get_info(handle, ctypes.byref(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if info.dwFileAttributes & file_attribute_reparse_point or not info.dwFileAttributes & file_attribute_directory:
+                raise ConfigError("unsafe_configured_path", "Configured path contains a Windows reparse point.", {"path": str(component)})
+        return handles
+    except Exception:
+        _close_windows_handles(handles)
+        raise
+
+
+def _close_windows_handles(handles: list[int]) -> None:
+    if not handles:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    for handle in reversed(handles):
+        close_handle(handle)
+
+
+def _validate_open_file(descriptor: int, path: Path) -> os.stat_result:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured file must be a single-link regular file.",
+            {"path": str(path)},
+        )
+    return opened
+
+
+def safe_read_bytes(file_path: str | Path, *, workspace: str | Path | None = None) -> bytes:
+    path = _validated_absolute_file_path(file_path, workspace)
+    if os.name != "nt":
+        parent_descriptor = _open_directory_fd(path.parent)
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+        try:
+            _validate_open_file(descriptor, path)
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                return handle.read()
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    directory_handles = _windows_hold_directory_chain(path.parent)
+    try:
+        path = safe_file_path(path, workspace)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0))
+    finally:
+        _close_windows_handles(directory_handles)
+    try:
+        opened = _validate_open_file(descriptor, path)
+        current = os.stat(path, follow_symlinks=False)
+        if not os.path.samestat(opened, current) or path.parent.resolve() != path.parent:
+            raise ConfigError("unsafe_configured_path", "Configured file changed while it was being opened.", {"path": str(path)})
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def safe_read_text(
+    file_path: str | Path,
+    *,
+    encoding: str = "utf-8",
+    workspace: str | Path | None = None,
+) -> str:
+    return safe_read_bytes(file_path, workspace=workspace).decode(encoding)
+
+
 def atomic_write_bytes(
     file_path: str | Path,
     data: bytes,
     *,
     workspace: str | Path | None = None,
 ) -> None:
-    path = safe_file_path(file_path, workspace)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-write-", dir=path.parent)
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.parent.resolve() != path.parent:
-            raise ConfigError("unsafe_configured_path", "Output directory changed while writing.", {"path": str(path)})
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
+    path = _validated_absolute_file_path(file_path, workspace)
+    with _path_lock(path):
+        if os.name != "nt":
+            parent_descriptor = _open_directory_fd(path.parent)
+            temporary_name = f".agentic-hil-write-{secrets.token_hex(16)}"
+            descriptor = -1
+            try:
+                try:
+                    current = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1):
+                    raise ConfigError("unsafe_configured_path", "Output file must be a single-link regular file.", {"path": str(path)})
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+                descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
+                with os.fdopen(descriptor, "wb") as handle:
+                    descriptor = -1
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_name, path.name, src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+                os.close(parent_descriptor)
+            return
+
+        directory_handles = _windows_hold_directory_chain(path.parent)
+        try:
+            path = safe_file_path(path, workspace)
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-write-", dir=path.parent)
+            temporary_path = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, path)
+            finally:
+                if temporary_path.exists():
+                    temporary_path.unlink()
+        finally:
+            _close_windows_handles(directory_handles)
 
 
 def atomic_write_text(
@@ -501,9 +760,68 @@ def atomic_write_text(
 
 
 def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
-    path = safe_file_path(file_path)
-    existing = path.read_text(encoding=encoding) if path.exists() else ""
-    atomic_write_text(path, existing + text, encoding=encoding)
+    path = _validated_absolute_file_path(file_path)
+    data = text.encode(encoding)
+    with _path_lock(path):
+        if os.name != "nt":
+            parent_descriptor = _open_directory_fd(path.parent)
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+            try:
+                _validate_open_file(descriptor, path)
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                _write_all(descriptor, data)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return
+
+        directory_handles = _windows_hold_directory_chain(path.parent)
+        try:
+            path = safe_file_path(path)
+            lock_path = path.with_name(f".{path.name}.lock")
+            safe_file_path(lock_path)
+            lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                lock_stat = _validate_open_file(lock_descriptor, lock_path)
+                if not os.path.samestat(lock_stat, os.stat(lock_path, follow_symlinks=False)):
+                    raise ConfigError("unsafe_configured_path", "Append lock changed while it was being opened.", {"path": str(lock_path)})
+                if os.fstat(lock_descriptor).st_size == 0:
+                    os.write(lock_descriptor, b"0")
+                os.lseek(lock_descriptor, 0, os.SEEK_SET)
+                import msvcrt
+
+                msvcrt.locking(lock_descriptor, msvcrt.LK_LOCK, 1)
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
+                try:
+                    opened = _validate_open_file(descriptor, path)
+                    current = os.stat(path, follow_symlinks=False)
+                    if not os.path.samestat(opened, current):
+                        raise ConfigError("unsafe_configured_path", "Append target changed while it was being opened.", {"path": str(path)})
+                    _write_all(descriptor, data)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                    os.lseek(lock_descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(lock_descriptor, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(lock_descriptor)
+        finally:
+            _close_windows_handles(directory_handles)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("File write made no progress.")
+        view = view[written:]
 
 
 def safe_write_text(
@@ -546,16 +864,24 @@ def raise_config_validation_error(error: Any, config_path: str | None = None) ->
         raise ConfigError("config_invalid", "Unknown Agentic HIL configuration field.", details) from error
     if error.validator == "enum":
         details["allowed_values"] = error.validator_value
-        details["value"] = error.instance
+        add_scalar_schema_value(details, error.instance)
         raise ConfigError("config_invalid", f"{details['field']} has an unsupported value.", details) from error
     if error.validator == "type":
         details["expected_type"] = error.validator_value
-        details["value"] = error.instance
+        add_scalar_schema_value(details, error.instance)
         raise ConfigError("config_invalid", f"{details['field']} has the wrong type.", details) from error
 
-    details["schema_error"] = error.message
-    details["value"] = error.instance
-    raise ConfigError("config_invalid", error.message or "Configuration validation failed.", details) from error
+    details["validator"] = error.validator
+    details["schema_error"] = "Value does not satisfy the Agentic HIL configuration schema."
+    add_scalar_schema_value(details, error.instance)
+    raise ConfigError("config_invalid", "Agentic HIL configuration failed schema validation.", details) from error
+
+
+def add_scalar_schema_value(details: JsonObject, value: object) -> None:
+    if isinstance(value, str):
+        details["value"] = value[:128]
+    elif isinstance(value, (int, float, bool)) or value is None:
+        details["value"] = value
 
 
 def schema_error_field(error: Any) -> str:
@@ -667,13 +993,24 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
         data_bitrate=None if raw.get("data_bitrate") is None else int(raw["data_bitrate"]),
         pcanbasic_dll=optional_string(raw.get("pcanbasic_dll")),
         executable=optional_string(raw.get("executable")),
-        args=string_list(raw.get("args"), []),
+        args=[],
         timeout_s=float(raw.get("timeout_s", 10.0)),
         poll_interval_ms=int(raw.get("poll_interval_ms", 10)),
         receive_own_messages=bool(raw.get("receive_own_messages", False)),
         listen_only=bool(raw.get("listen_only", False)),
         max_buffer_frames=int(raw.get("max_buffer_frames", 1024)),
         max_frame_data_bytes=int(raw.get("max_frame_data_bytes", 64 if fd else 8)),
+    )
+
+
+def adapter_config(name: str, value: Any) -> AdapterConfig:
+    raw = mapping(value, f"adapters.{name}")
+    return AdapterConfig(
+        executable=str(raw["executable"]),
+        args=[],
+        timeout_s=float(raw.get("timeout_s", 10.0)),
+        channels=string_list(raw.get("channels"), []),
+        faults=string_list(raw.get("faults"), []),
     )
 
 
@@ -697,6 +1034,8 @@ def permissions_config(raw: JsonObject) -> PermissionsConfig:
         allow_com_write=bool(raw.get("allow_com_write", default)),
         allow_can_read=bool(raw.get("allow_can_read", default)),
         allow_can_write=bool(raw.get("allow_can_write", default)),
+        allow_adapter_read=bool(raw.get("allow_adapter_read", default)),
+        allow_adapter_write=bool(raw.get("allow_adapter_write", default)),
         allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
         allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
     )

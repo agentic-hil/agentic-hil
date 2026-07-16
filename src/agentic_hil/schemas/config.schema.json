@@ -116,13 +116,29 @@
           "data_bitrate": { "type": ["integer", "null"], "minimum": 1, "default": null },
           "pcanbasic_dll": { "type": ["string", "null"], "default": null },
           "executable": { "type": ["string", "null"], "default": null },
-          "args": { "type": "array", "items": { "type": "string" }, "default": [] },
           "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
           "poll_interval_ms": { "type": "integer", "minimum": 1, "default": 10 },
           "receive_own_messages": { "type": "boolean", "default": false },
           "listen_only": { "type": "boolean", "default": false },
           "max_buffer_frames": { "type": "integer", "minimum": 1, "default": 1024 },
           "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 }
+        }
+      },
+      "default": {}
+    },
+    "adapters": {
+      "type": "object",
+      "description": "Named test adapters controlled through externally pinned bridge entry points.",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["executable"],
+        "properties": {
+          "executable": { "type": "string" },
+          "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
+          "channels": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] },
+          "faults": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] }
         }
       },
       "default": {}
@@ -149,6 +165,8 @@
         "allow_com_write": { "type": "boolean", "default": false },
         "allow_can_read": { "type": "boolean", "default": false },
         "allow_can_write": { "type": "boolean", "default": false },
+        "allow_adapter_read": { "type": "boolean", "default": false },
+        "allow_adapter_write": { "type": "boolean", "default": false },
         "allow_raw_debugger_commands": { "type": "boolean", "default": false },
         "allow_mass_erase": { "type": "boolean", "default": false }
       }

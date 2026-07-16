@@ -164,6 +164,30 @@ def test_debug_second_start_reports_session_already_active(tmp_path: Path) -> No
         service.close()
 
 
+def test_failed_debug_start_does_not_poison_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path)
+    from agentic_hil.backends import gdbdebug
+
+    original_wait = gdbdebug.wait_for_tcp_port
+    attempts = 0
+
+    def fail_once(port: int, timeout_s: float, server) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return False if attempts == 1 else original_wait(port, timeout_s, server)
+
+    monkeypatch.setattr(gdbdebug, "wait_for_tcp_port", fail_once)
+    try:
+        first = start_debug_session(service, mode="attach")
+        second = start_debug_session(service, mode="attach")
+
+        assert first["ok"] is False
+        assert first.get("cleanup_required") is not True
+        assert second["ok"] is True, second
+    finally:
+        service.close()
+
+
 def test_debug_symbol_info_reports_missing_symbol(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:
@@ -186,6 +210,41 @@ def test_debug_symbol_allowlist_blocks_unlisted_symbols(tmp_path: Path) -> None:
         assert allowed["ok"] is True
     finally:
         service.close()
+
+
+def test_debug_breakpoint_enforces_symbol_allowlist(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, allowed_symbols=["test_done"])
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        rejected = service.call("debug_set_breakpoint", {"location": "not_allowed"})
+        allowed = service.call("debug_set_breakpoint", {"location": {"function": "test_done"}})
+
+        assert rejected["ok"] is False
+        assert rejected["error_type"] == "permission_denied"
+        assert allowed["ok"] is True
+        assert [item["location"] for item in service.call("debug_list_breakpoints")["breakpoints"]] == [
+            {"symbol": "test_done"}
+        ]
+    finally:
+        service.close()
+
+
+def test_debug_file_breakpoint_requires_allow_all_symbols(tmp_path: Path) -> None:
+    restricted = debug_service(tmp_path, allowed_symbols=["test_done"])
+    unrestricted = debug_service(tmp_path / "unrestricted", allow_all_symbols=True)
+    try:
+        assert start_debug_session(restricted)["ok"] is True
+        rejected = restricted.call("debug_set_breakpoint", {"location": {"file": "main.c", "line": 12}})
+        assert rejected["ok"] is False
+        assert rejected["error_type"] == "permission_denied"
+
+        assert start_debug_session(unrestricted)["ok"] is True
+        allowed = unrestricted.call("debug_set_breakpoint", {"location": {"file": "main.c", "line": 12}})
+        assert allowed["ok"] is True
+    finally:
+        restricted.close()
+        unrestricted.close()
 
 
 def test_debug_dump_rejects_oversized_symbol(tmp_path: Path) -> None:
@@ -280,8 +339,10 @@ def test_active_debug_log_symlink_is_rejected(tmp_path: Path) -> None:
 
         result = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
 
-        assert result["ok"] is False
-        assert result["error_type"] == "unsafe_configured_path"
+        assert result["ok"] is True
+        assert result["side_effect_committed"] is True
+        assert result["audit_ok"] is False
+        assert result["retry_safe"] is False
         assert outside.read_text(encoding="utf-8") == "unchanged\n"
     finally:
         if log_path is not None and log_path.is_symlink():

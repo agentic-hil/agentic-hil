@@ -200,6 +200,21 @@ def test_test_config_rejects_duplicate_keys_with_location(tmp_path: Path) -> Non
     assert "duplicate key 'action'" in excinfo.value.details["backend_error"]
 
 
+def test_test_config_schema_error_does_not_echo_structured_input(tmp_path: Path) -> None:
+    secret = "operator-secret-must-not-leak"
+    path = write_test_config(
+        tmp_path,
+        f"version: 1\nname:\n  secret: {secret}\nsteps:\n  - {{device: dut, action: uart_open}}\n",
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_test_config(str(path), str(tmp_path))
+
+    assert excinfo.value.error_type == "test_config_invalid"
+    assert secret not in json.dumps(excinfo.value.details)
+    assert "value" not in excinfo.value.details
+
+
 def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -239,6 +254,54 @@ steps:
     assert result["failed_step"] == 2
     assert result["steps"] == []
     assert service.calls == []
+
+
+def test_preflight_rejects_cross_device_uart_close(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                devices_yaml=(
+                    "devices:\n  controller_a:\n    uart: shared\n"
+                    "  controller_b:\n    uart: shared\n"
+                ),
+                com_ports_yaml='com_ports:\n  shared:\n    device: "COM_TEST"\n',
+            )
+        )
+    )
+    plan_path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: controller_a, action: uart_open}\n  - {device: controller_b, action: uart_close}\n",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_preflight_does_not_create_dump_output_directories(tmp_path: Path) -> None:
+    service, _ = reactor_service(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 1
+steps:
+  - {device: dut, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/new/nested/memory.hex}
+  - {device: missing, action: flash, image_path: build/app.elf}
+""",
+    )
+    try:
+        result = TestReactor(service.config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["steps"] == []
+    assert not (tmp_path / "build" / "new").exists()
 
 
 def test_preflight_enforces_symbol_allowlist_before_hardware_actions(tmp_path: Path) -> None:

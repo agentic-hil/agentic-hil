@@ -64,9 +64,20 @@ def drain_oversized_line(input_stream: TextIO, limit: int) -> None:
             return
 
 
-def mcp_stdio() -> int:
+def mcp_stdio(config_path: str | None = None) -> int:
     try:
-        return run_stdio_server(load_authoritative_config(Path.cwd()))
+        workspace = Path.cwd().resolve()
+        config = load_authoritative_config(workspace)
+        if config_path is not None:
+            requested = Path(config_path).expanduser()
+            requested = (requested if requested.is_absolute() else workspace / requested).resolve()
+            if requested != Path(config.config_path):
+                raise ConfigError(
+                    "config_migration_required",
+                    "Explicit config paths cannot override the authoritative Agentic HIL policy. Use AGENTIC_HIL_CONFIG with an absolute external path.",
+                    {"selected_path": str(requested), "authoritative_path": config.config_path},
+                )
+        return run_stdio_server(config)
     except ConfigError as error:
         sys.stderr.write(json.dumps(error.to_dict(), indent=2) + "\n")
         return 2

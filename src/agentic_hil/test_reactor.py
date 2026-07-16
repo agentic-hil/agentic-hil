@@ -15,8 +15,8 @@ from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
     absolute_without_symlinks,
-    is_path_within,
     is_path_within_frozen,
+    safe_read_text,
 )
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
@@ -56,17 +56,17 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     base = Path(work_dir or Path.cwd()).resolve()
     requested = Path(test_config_path or DEFAULT_TEST_CONFIG_PATH)
     lexical_path = absolute_without_symlinks(requested if requested.is_absolute() else base / requested)
-    path = lexical_path.resolve()
-    if not is_path_within_frozen(lexical_path, base) or not is_path_within(path, base):
+    path = lexical_path
+    if not is_path_within_frozen(path, base):
         raise ConfigError(
             "test_config_invalid",
             "Test plan must remain inside the configured workspace.",
             {"path": str(path), "workspace_root": str(base)},
         )
-    if not path.is_file():
-        raise ConfigError("test_config_not_found", "Test reactor configuration file could not be found.", {"path": str(path)})
     try:
-        loaded = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+        loaded = yaml.load(safe_read_text(path, workspace=base), Loader=UniqueKeyLoader)
+    except FileNotFoundError as error:
+        raise ConfigError("test_config_not_found", "Test reactor configuration file could not be found.", {"path": str(path)}) from error
     except OSError as error:
         raise ConfigError(
             "test_config_unreadable",
@@ -157,7 +157,14 @@ def raise_test_config_validation_error(error: Any, path: str | None, prefix: lis
         if match:
             parts.append(match.group(1))
     field = format_test_config_field(parts)
-    details: JsonObject = {"path": path, "field": field, "schema_error": error.message, "value": error.instance}
+    details: JsonObject = {
+        "path": path,
+        "field": field,
+        "schema_error": "Value does not satisfy the test configuration schema.",
+        "validator": error.validator,
+    }
+    if isinstance(error.instance, (str, int, float, bool)) or error.instance is None:
+        details["value"] = error.instance[:128] if isinstance(error.instance, str) else error.instance
     if error.validator in {"enum", "const"}:
         details["allowed_values"] = error.validator_value if error.validator == "enum" else [error.validator_value]
     raise ConfigError("test_config_invalid", "Test reactor configuration failed schema validation.", details) from error
@@ -195,6 +202,15 @@ class Device:
             self._owns_uart_session = result.get("ok") is True and not result.get("already_active", False)
             return result
         if action == "uart_close":
+            if not self._owns_uart_session:
+                return {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "error_type": "uart_session_not_owned",
+                    "summary": "Device cannot close a UART session it did not open.",
+                    "device": self.id,
+                    "uart": self.config.uart,
+                }
             result = self.service.call("com_session_stop", {"port_id": self.config.uart})
             if result.get("ok") is True:
                 self._owns_uart_session = False
@@ -211,7 +227,7 @@ class Device:
                         "summary": "Debug session started, but the target is stopped abnormally.",
                     }
             else:
-                self._owns_debug_session = False
+                self._owns_debug_session = result.get("cleanup_required") is True
             return result
         if action == "run_until_breakpoint":
             return self._run_until_breakpoint(arguments)
@@ -393,7 +409,7 @@ class TestReactor:
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
         debug_active = False
-        active_uarts: set[str] = set()
+        active_uarts: dict[str, str] = {}
         permissions = self.config.permissions
 
         for index, step in enumerate(test_config.steps, start=1):
@@ -419,11 +435,19 @@ class TestReactor:
                         return preflight_error(index, step, "action", "UART opening is disabled by the authoritative config.")
                     if uart in active_uarts:
                         return preflight_error(index, step, "action", "UART session is already open in this test plan.")
-                    active_uarts.add(uart)
+                    active_uarts[uart] = step.device
                 else:
                     if uart not in active_uarts:
                         return preflight_error(index, step, "action", "UART session must be opened before it can be closed.")
-                    active_uarts.remove(uart)
+                    if active_uarts[uart] != step.device:
+                        return preflight_error(
+                            index,
+                            step,
+                            "action",
+                            "UART session may only be closed by the device that opened it.",
+                            {"uart": uart, "owner_device": active_uarts[uart]},
+                        )
+                    active_uarts.pop(uart)
                 continue
 
             if step.action == "flash":

@@ -81,7 +81,7 @@ Host configuration schemas are not portable: VS Code uses `servers`, Claude Code
 
 ## Configuration
 
-Run `agentic-hil init` from the project root. It creates the automatically discovered deny-by-default authoritative file outside the repository and binds `workspace_root` to the current absolute project path. The file defines the target, debugger backend, artifact roots, named serial ports and CAN buses, and per-action permissions:
+Run `agentic-hil init` from the project root. It creates the automatically discovered deny-by-default authoritative file outside the repository and binds `workspace_root` to the current absolute project path. The file defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
@@ -120,18 +120,26 @@ can_buses:
     channel: "can0"
     bitrate: 500000
 
+adapters:
+  ntc_sim:
+    executable: "/operator-controlled/agentic-hil-bridges/sim_ntc_adapter.py"
+    channels: ["temperature", "resistance"]
+    faults: ["open", "short_to_gnd", "short_to_vcc"]
+
 permissions:
   allow_flash: true
   allow_reset: true
   allow_com_write: true
   allow_can_write: true
+  allow_adapter_read: true
+  allow_adapter_write: true
   allow_raw_debugger_commands: false
   allow_mass_erase: false
 ```
 
 The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`.
 
-All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. There is no repository hardware config and hardware commands accept no configuration-path option.
+All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
 Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
@@ -143,6 +151,7 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Firmware | `flash_firmware`, `artifact_upload` | artifacts are validated, rechecked, and copied to private process staging before flashing; `allow_reset` is additionally required when `reset_after_flash` is requested |
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
+| Test adapters | `adapters_list`, `adapter_session_start`, `adapter_session_stop`, `adapter_set_value`, `adapter_inject_fault`, `adapter_clear_fault`, `adapter_measure` | externally pinned bridge entry point with channel/fault allowlists |
 | Diagnostics | `get_last_report`, `classify_last_error` | structured error classification with likely causes |
 | Debug sessions | `debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 
