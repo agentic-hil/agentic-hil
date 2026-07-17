@@ -17,19 +17,31 @@ def process_group_kwargs() -> dict[str, object]:
 def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
     if child.poll() is not None:
         return
+    kill_group = False
+    child_pgid = None
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     else:
         try:
-            os.killpg(os.getpgid(child.pid), signal.SIGTERM)
+            child_pgid = os.getpgid(child.pid)
         except ProcessLookupError:
             return
+        kill_group = child_pgid != os.getpgrp()
+        if kill_group:
+            os.killpg(child_pgid, signal.SIGTERM)
+        else:
+            # Defensive fallback for callers/tests that did not isolate the child.
+            with suppress(ProcessLookupError):
+                child.terminate()
     try:
         child.wait(timeout=max(0.1, timeout_s))
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        elif kill_group and child_pgid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(child_pgid, signal.SIGKILL)
         else:
             with suppress(ProcessLookupError):
-                os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+                child.kill()
         child.wait(timeout=max(0.1, timeout_s))
