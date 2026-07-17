@@ -213,6 +213,9 @@ class OpenOCDBackend:
     def close(self) -> None:
         self._debug.close()
 
+    def has_active_session(self) -> bool:
+        return self._debug.has_active_session()
+
     def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
         startup = "init; reset halt" if reset else "init; halt"
         return [

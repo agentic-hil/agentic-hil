@@ -189,6 +189,9 @@ class PyOCDBackend:
     def close(self) -> None:
         return None
 
+    def has_active_session(self) -> bool:
+        return False
+
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
         if configured:

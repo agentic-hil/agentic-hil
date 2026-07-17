@@ -407,6 +407,8 @@ class TestReactor:
         finally:
             close_results = self.close()
         cleanup_ok = all(item["result"].get("ok") is True for item in close_results)
+        if not cleanup_ok:
+            unsafe_state = True
         ok = len(results) == len(plan.tests) and all(result.get("ok") is True for result in results) and cleanup_ok
         failed_tests = [str(result["name"]) for result in results if result.get("ok") is not True]
         response: JsonObject = {
@@ -422,6 +424,8 @@ class TestReactor:
         if unsafe_state:
             response["error_type"] = "unsafe_test_state"
             response["summary"] = "Test reactor stopped because cleanup could not establish a safe state."
+            if not cleanup_ok:
+                response["cleanup_error_type"] = "device_close_failed"
         elif policy_changed:
             response["error_type"] = "policy_changed"
             response["summary"] = "Test reactor stopped because project policy changed during execution."

@@ -81,6 +81,12 @@ class FailingFlashService(RecordingService):
         return result
 
 
+class CloseFailureService(RecordingService):
+    def close(self) -> None:
+        self.closed = True
+        raise RuntimeError("device close failed")
+
+
 class PolicyChangingService(RecordingService):
     def __init__(self, tracker: ConcurrencyTracker, config_path: str) -> None:
         super().__init__(tracker)
@@ -414,6 +420,18 @@ tests:
     assert result["tests"][0]["error_type"] == "cleanup_failed"
     assert result["tests"][0]["step_error_type"] == "target_exception"
     assert result["aborted_tests"] == ["must-not-run"]
+
+
+def test_device_close_failure_is_reported_as_unsafe_state(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: CloseFailureService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["cleanup_error_type"] == "device_close_failed"
+    assert result["failed_tests"] == []
 
 
 def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:

@@ -311,6 +311,13 @@ class GdbDebugSessions:
             session.status = "stopped"
         self.session = None
 
+    def has_active_session(self) -> bool:
+        session = self.session
+        if session is None:
+            return False
+        gdb_active = session.gdb is not None and session.gdb.is_running()
+        return gdb_active or session.server.poll() is None
+
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.permissions
         if not permissions.allow_probe:
@@ -533,18 +540,30 @@ class GdbDebugSessions:
         return {"ok": True, "data": bytes(data)}
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> None:
+        first_error: Exception | None = None
         if session.gdb is not None:
-            with suppress(Exception):
+            try:
                 session.gdb.close(timeout_s)
+            except Exception as error:
+                first_error = error
         if session.server.poll() is None:
-            session.server.terminate()
-            with suppress(subprocess.TimeoutExpired):
-                session.server.wait(timeout=timeout_s)
-            if session.server.poll() is None:
-                session.server.kill()
-                with suppress(subprocess.TimeoutExpired):
+            try:
+                session.server.terminate()
+                try:
                     session.server.wait(timeout=timeout_s)
-        self._write_session_log(session)
+                except subprocess.TimeoutExpired:
+                    session.server.kill()
+                    session.server.wait(timeout=timeout_s)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        try:
+            self._write_session_log(session)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+        if first_error is not None:
+            raise first_error
 
     def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
         output = f"{session.server_stdout}{session.server_stderr}"

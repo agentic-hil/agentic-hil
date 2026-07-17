@@ -44,7 +44,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 
 
 class ComPortSession:
-    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str):
+    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, start_reader: bool = True):
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
@@ -55,8 +55,14 @@ class ComPortSession:
         self.overflow_bytes = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
-        self.reader = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader.start()
+        self.reader: threading.Thread | None = None
+        if start_reader:
+            self.start_reader()
+
+    def start_reader(self) -> None:
+        if self.reader is None:
+            self.reader = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader.start()
 
     def _reader_loop(self) -> None:
         while self.active:
@@ -89,12 +95,13 @@ class ComPortService:
     def __init__(self, config: AgenticHILConfig):
         self.config = config
         self.sessions: dict[str, ComPortSession] = {}
+        self._unmanaged_serial_handles: list[object] = []
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         for port_id, session in list(self.sessions.items()):
             if not config.permissions.allow_com_read or config.com_ports.get(port_id) != session.port_config:
-                self.sessions.pop(port_id, None)
                 self._stop_session(session, "config_reloaded")
+                self.sessions.pop(port_id, None)
         self.config = config
 
     def list_ports(self) -> JsonObject:
@@ -133,6 +140,7 @@ class ComPortService:
                     existing.buffer.clear()
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
         if existing:
+            self._stop_session(existing, "restart")
             self.sessions.pop(port_id, None)
 
         opened = self._open_serial(port_id, port["port_config"])
@@ -140,17 +148,28 @@ class ComPortService:
             return self._write_report(opened)
         session = opened["session"]
         self.sessions[port_id] = session
-        append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
-        return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
+        try:
+            session.start_reader()
+            append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
+            return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
+        except Exception:
+            try:
+                self._stop_session(session, "start_failed")
+            except Exception:
+                pass
+            else:
+                self.sessions.pop(port_id, None)
+            raise
 
     def session_stop(self, port_id: str) -> JsonObject:
         port = self._configured_port(port_id, "com_session_stop")
         if not port["ok"]:
             return self._write_report(port)
-        session = self.sessions.pop(port_id, None)
+        session = self.sessions.get(port_id)
         if session is None:
             return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
         self._stop_session(session, "requested")
+        self.sessions.pop(port_id, None)
         return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
@@ -219,10 +238,42 @@ class ComPortService:
         return result
 
     def close(self) -> None:
-        sessions = list(self.sessions.values())
-        self.sessions.clear()
-        for session in sessions:
-            self._stop_session(session, "shutdown")
+        first_error: Exception | None = None
+        for serial_handle in list(self._unmanaged_serial_handles):
+            try:
+                serial_handle.close()
+                if bool(getattr(serial_handle, "is_open", False)):
+                    raise RuntimeError("COM port remained open after close.")
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self._unmanaged_serial_handles.remove(serial_handle)
+        for port_id, session in list(self.sessions.items()):
+            try:
+                self._stop_session(session, "shutdown")
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self.sessions.pop(port_id, None)
+        if first_error is not None:
+            raise first_error
+
+    def has_active_sessions(self) -> bool:
+        for serial_handle in self._unmanaged_serial_handles:
+            try:
+                if bool(getattr(serial_handle, "is_open", True)):
+                    return True
+            except Exception:
+                return True
+        for session in self.sessions.values():
+            try:
+                if bool(getattr(session.serial_handle, "is_open", True)):
+                    return True
+            except Exception:
+                return True
+        return False
 
     def _open_serial(self, port_id: str, port_config: ComPortConfig) -> JsonObject:
         try:
@@ -230,11 +281,23 @@ class ComPortService:
         except ImportError:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"]}
         try:
-            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
             log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
-            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path)}
+            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
         except Exception as error:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+        try:
+            session = ComPortSession(port_id, port_config, serial_handle, log_path, start_reader=False)
+        except Exception as error:
+            result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port session could not be initialized.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            try:
+                serial_handle.close()
+                if bool(getattr(serial_handle, "is_open", False)):
+                    raise RuntimeError("COM port remained open after close.")
+            except Exception as cleanup_error:
+                self._unmanaged_serial_handles.append(serial_handle)
+                result["cleanup_error"] = str(cleanup_error)
+            return result
+        return {"ok": True, "session": session}
 
     def _configured_port(self, port_id: str, tool: str) -> JsonObject:
         if not port_id:
@@ -276,9 +339,11 @@ class ComPortService:
 
     def _stop_session(self, session: ComPortSession, reason: str) -> None:
         session.active = False
+        session.serial_handle.close()
+        if bool(getattr(session.serial_handle, "is_open", False)):
+            raise RuntimeError("COM port remained open after close.")
         with suppress(Exception):
-            session.serial_handle.close()
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

@@ -76,12 +76,16 @@ def run_com_stdio(
         return 1 if failed else 0
     finally:
         try:
-            if service is not None:
-                if started_ok:
+            if service is not None and started_ok:
+                try:
                     service.session_stop(port_id)
+                finally:
+                    service.close()
+            elif service is not None:
                 service.close()
         finally:
-            hardware_lock.release()
+            if service is None or not service.has_active_sessions():
+                hardware_lock.release()
 
 
 def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:

@@ -19,7 +19,7 @@ from agentic_hil.config import load_config
 from agentic_hil.hardware_lock import ProjectHardwareLock
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
 from agentic_hil.types import AdapterConfig, CanBusConfig
 
 WAIT_TIMEOUT_S = 5.0
@@ -86,6 +86,19 @@ class FailingSerialHandle:
         pass
 
 
+class IdleSerialHandle:
+    def __init__(self) -> None:
+        self.is_open = True
+        self.in_waiting = 0
+
+    def read(self, size: int) -> bytes:
+        time.sleep(POLL_INTERVAL_S)
+        return b""
+
+    def close(self) -> None:
+        self.is_open = False
+
+
 def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
@@ -101,6 +114,27 @@ def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None
     assert result["error_type"] == "session_not_active"
     assert result["reader_error"]["error_type"] == "serial_read_failed"
     assert service._session_is_active(session) is False
+
+
+def test_com_session_start_report_failure_rolls_back_resource_and_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = AgenticHILToolService(config)
+    serial_handle = IdleSerialHandle()
+    log_path = tmp_path / ".agentic-hil" / "logs" / "start-failure.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], serial_handle, str(log_path))
+    monkeypatch.setattr(service.com_ports, "_open_serial", lambda *_: {"ok": True, "session": session})
+    monkeypatch.setattr("agentic_hil.comports.append_jsonl", lambda *_: (_ for _ in ()).throw(OSError("log full")))
+
+    with pytest.raises(OSError, match="log full"):
+        service.call("com_session_start", {"port_id": "dut"})
+
+    assert "dut" not in service.com_ports.sessions
+    assert serial_handle.is_open is False
+    second_lock = ProjectHardwareLock(config.config_path)
+    assert second_lock.acquire() is True
+    second_lock.release()
+    service.close()
 
 
 class BlockingStdin:
@@ -137,6 +171,9 @@ class StubComPortService:
 
     def close(self) -> None:
         pass
+
+    def has_active_sessions(self) -> bool:
+        return False
 
 
 def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,10 +233,84 @@ def test_adapter_service_close_stops_all_sessions_despite_bridge_failure(tmp_pat
     second = AdapterSession("a2", adapter_config, ExplodingBridge(), str(log_dir / "a2.jsonl"))
     service.sessions.update({"a1": first, "a2": second})
 
-    service.close()
+    with pytest.raises(RuntimeError, match="bridge already gone"):
+        service.close()
 
     assert first.bridge.close_attempted and second.bridge.close_attempted
     assert first.active is False and second.active is False
+    assert service.has_active_sessions() is True
+
+
+class FailingCleanupSubsystem:
+    def __init__(self, active: bool = False, error: str | None = None) -> None:
+        self.active = active
+        self.error = error
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        self.active = False
+
+    def has_active_sessions(self) -> bool:
+        return self.active
+
+
+class FailingCleanupBackend(FailingCleanupSubsystem):
+    def has_active_session(self) -> bool:
+        return self.active
+
+
+def test_tool_service_close_attempts_every_subsystem_and_retains_unsafe_lease(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = FailingCleanupBackend(error="debug cleanup failed")
+    com_ports = FailingCleanupSubsystem()
+    can_buses = FailingCleanupSubsystem(active=True, error="CAN cleanup failed")
+    adapters = FailingCleanupSubsystem()
+    service = AgenticHILToolService(
+        config,
+        backend=backend,
+        com_ports=com_ports,
+        can_buses=can_buses,
+        adapters=adapters,
+        reload_config=False,
+    )
+
+    try:
+        with pytest.raises(HardwareCleanupError) as excinfo:
+            service.close()
+
+        assert [name for name, _ in excinfo.value.errors] == ["debugger", "can"]
+        assert backend.close_calls == com_ports.close_calls == can_buses.close_calls == adapters.close_calls == 1
+        second_lock = ProjectHardwareLock(config.config_path)
+        assert second_lock.acquire() is False
+    finally:
+        service._hardware_lock.release()
+
+
+def test_config_reload_closes_removed_session_and_releases_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = write_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    config = load_config(str(config_path), str(tmp_path))
+    service = AgenticHILToolService(config)
+    serial_handle = IdleSerialHandle()
+    log_path = tmp_path / ".agentic-hil" / "logs" / "reload.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], serial_handle, str(log_path))
+    monkeypatch.setattr(service.com_ports, "_open_serial", lambda *_: {"ok": True, "session": session})
+
+    try:
+        assert service.call("com_session_start", {"port_id": "dut"})["ok"] is True
+        write_config(tmp_path)
+        assert service.call("debugger_info")["ok"] is True
+
+        assert "dut" not in service.com_ports.sessions
+        assert serial_handle.is_open is False
+        second_lock = ProjectHardwareLock(config.config_path)
+        assert second_lock.acquire() is True
+        second_lock.release()
+    finally:
+        service.close()
 
 
 def test_artifact_upload_rejects_oversized_local_file(tmp_path: Path) -> None:

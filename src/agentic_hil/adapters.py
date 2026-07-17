@@ -43,8 +43,8 @@ class AdapterService:
         for adapter_id, session in list(self.sessions.items()):
             permissions_revoked = not config.permissions.allow_adapter_read and not config.permissions.allow_adapter_write
             if permissions_revoked or config.adapters.get(adapter_id) != session.adapter_config:
-                self.sessions.pop(adapter_id, None)
                 self._stop_session(session, "config_reloaded")
+                self.sessions.pop(adapter_id, None)
         self.config = config
 
     def list_adapters(self) -> JsonObject:
@@ -61,25 +61,39 @@ class AdapterService:
         if existing and self._session_is_active(existing):
             return self._write_report({"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": True, "session": self._session_status(existing), "summary": "Test adapter session is already active."})
         if existing:
+            self._stop_session(existing, "restart")
             self.sessions.pop(adapter_id, None)
+        log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
         opened = open_adapter_bridge(self.config, adapter_id, adapter["adapter_config"])
         if not opened["ok"]:
-            return self._write_report(opened)
+            failed_bridge = opened.get("session")
+            if failed_bridge is not None:
+                self.sessions[adapter_id] = AdapterSession(adapter_id, adapter["adapter_config"], failed_bridge, log_path)
+            return self._write_report(public_backend_result(opened))
         bridge = opened["session"]
-        log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
         session = AdapterSession(adapter_id, adapter["adapter_config"], bridge, log_path)
         self.sessions[adapter_id] = session
-        append_jsonl(session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
-        return self._write_report({"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": False, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "Test adapter session started."})
+        try:
+            append_jsonl(session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
+            return self._write_report({"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": False, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "Test adapter session started."})
+        except Exception:
+            try:
+                self._stop_session(session, "start_failed")
+            except Exception:
+                pass
+            else:
+                self.sessions.pop(adapter_id, None)
+            raise
 
     def session_stop(self, adapter_id: str) -> JsonObject:
         adapter = self._configured_adapter(adapter_id, "adapter_session_stop")
         if not adapter["ok"]:
             return self._write_report(adapter)
-        session = self.sessions.pop(adapter_id, None)
+        session = self.sessions.get(adapter_id)
         if session is None:
             return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": False, "summary": "Test adapter session was not active."})
         self._stop_session(session, "requested")
+        self.sessions.pop(adapter_id, None)
         return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": True, "session": self._session_status(session), "summary": "Test adapter session stopped."})
 
     def set_value(self, adapter_id: str, payload: JsonObject) -> JsonObject:
@@ -152,10 +166,26 @@ class AdapterService:
         return self._bridge_action(session, tool, "measure", {"channel": channel["channel"]})
 
     def close(self) -> None:
-        sessions = list(self.sessions.values())
-        self.sessions.clear()
-        for session in sessions:
-            self._stop_session(session, "shutdown")
+        first_error: Exception | None = None
+        for adapter_id, session in list(self.sessions.items()):
+            try:
+                self._stop_session(session, "shutdown")
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self.sessions.pop(adapter_id, None)
+        if first_error is not None:
+            raise first_error
+
+    def has_active_sessions(self) -> bool:
+        for session in self.sessions.values():
+            try:
+                if session.bridge.status().get("active") is not False:
+                    return True
+            except Exception:
+                return True
+        return False
 
     def _bridge_action(self, session: AdapterSession, tool: str, method: str, params: JsonObject) -> JsonObject:
         response = session.bridge.request(method, params, session.adapter_config.timeout_s)
@@ -229,9 +259,11 @@ class AdapterService:
 
     def _stop_session(self, session: AdapterSession, reason: str) -> None:
         session.active = False
+        session.bridge.close()
+        if session.bridge.status().get("active") is not False:
+            raise RuntimeError("Test adapter bridge remained active after close.")
         with suppress(Exception):
-            session.bridge.close()
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
@@ -255,6 +287,11 @@ def open_adapter_bridge(config: AgenticHILConfig, adapter_id: str, adapter_confi
     session = AdapterBridgeSession(child)
     opened = session.request("open", {"channels": adapter_config.channels, "faults": adapter_config.faults}, adapter_config.timeout_s)
     if not opened.get("ok"):
-        session.close()
-        return {"tool": "adapter_session_start", "adapter_id": adapter_id, "command": command_for_log(command), **opened}
+        result: JsonObject = {"tool": "adapter_session_start", "adapter_id": adapter_id, "command": command_for_log(command), **opened}
+        try:
+            session.close()
+        except Exception as error:
+            result["session"] = session
+            result["cleanup_error"] = str(error)
+        return result
     return {"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "Test adapter bridge opened."}

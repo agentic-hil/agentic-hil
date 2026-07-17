@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -44,18 +46,13 @@ HARDWARE_TOOLS = {
     "adapter_clear_fault",
     "adapter_measure",
 }
-SESSION_START_TOOLS = {
-    "debug_start_session": ("debug", None),
-    "com_session_start": ("com", "port_id"),
-    "can_session_start": ("can", "bus_id"),
-    "adapter_session_start": ("adapter", "adapter_id"),
-}
-SESSION_STOP_TOOLS = {
-    "debug_stop_session": ("debug", None),
-    "com_session_stop": ("com", "port_id"),
-    "can_session_stop": ("can", "bus_id"),
-    "adapter_session_stop": ("adapter", "adapter_id"),
-}
+
+
+class HardwareCleanupError(RuntimeError):
+    def __init__(self, errors: list[tuple[str, Exception]]):
+        self.errors = errors
+        details = "; ".join(f"{name}: {error}" for name, error in errors)
+        super().__init__(f"Hardware cleanup failed ({details}).")
 
 
 class AgenticHILToolService:
@@ -74,7 +71,6 @@ class AgenticHILToolService:
         self.reload_config = reload_config
         self.hardware_owner = hardware_owner
         self._hardware_lock = ProjectHardwareLock(config.config_path)
-        self._active_hardware_sessions: set[str] = set()
         self.backend = backend or create_debugger_backend(config)
         self.artifacts = artifacts or ArtifactManager(config)
         self.com_ports = com_ports or ComPortService(config)
@@ -204,16 +200,18 @@ class AgenticHILToolService:
         hardware_error = self._acquire_hardware(name)
         if hardware_error is not None:
             return hardware_error
-        result: JsonObject | None = None
         try:
             reload_error = self._reload_config(name)
             if reload_error is not None:
-                result = reload_error
-                return result
-            result = self._dispatch(name, args)
-            return result
+                return reload_error
+            return self._dispatch(name, args)
+        except Exception:
+            if name == "debug_start_session":
+                with suppress(Exception):
+                    self.backend.close()
+            raise
         finally:
-            self._finish_hardware_call(name, args, result)
+            self._reconcile_hardware_lease()
 
     def _dispatch(self, name: str, args: JsonObject) -> JsonObject:
         dispatch = {
@@ -277,16 +275,20 @@ class AgenticHILToolService:
             return None
         return tool_error(tool, "hardware_busy", "Project hardware is in use by another Agentic HIL process.")
 
-    def _finish_hardware_call(self, tool: str, arguments: JsonObject, result: JsonObject | None) -> None:
-        if tool not in HARDWARE_TOOLS or self.hardware_owner is not None:
+    def _reconcile_hardware_lease(self) -> None:
+        if self.hardware_owner is not None:
             return
-        if result is not None and result.get("ok") is True:
-            if tool in SESSION_START_TOOLS:
-                self._active_hardware_sessions.add(session_key(SESSION_START_TOOLS[tool], arguments))
-            elif tool in SESSION_STOP_TOOLS:
-                self._active_hardware_sessions.discard(session_key(SESSION_STOP_TOOLS[tool], arguments))
-        if not self._active_hardware_sessions:
+        active = (
+            self.backend.has_active_session()
+            or self.com_ports.has_active_sessions()
+            or self.can_buses.has_active_sessions()
+            or self.adapters.has_active_sessions()
+        )
+        if not active:
             self._hardware_lock.release()
+            return
+        if self._hardware_lock.handle is None and not self._hardware_lock.acquire():
+            raise HardwareLockError("Active hardware session exists without ownership of the project hardware lease.")
 
     def _reload_config(self, tool: str) -> JsonObject | None:
         if not self.reload_config:
@@ -311,24 +313,42 @@ class AgenticHILToolService:
         self.config = config
         return None
 
+    def cleanup_test_sessions(self) -> None:
+        self._close_subsystems(
+            (
+                ("adapters", self.adapters.close),
+                ("com", self.com_ports.close),
+                ("can", self.can_buses.close),
+            )
+        )
+
     def close(self) -> None:
+        self._close_subsystems(
+            (
+                ("debugger", self.backend.close),
+                ("com", self.com_ports.close),
+                ("can", self.can_buses.close),
+                ("adapters", self.adapters.close),
+            )
+        )
+
+    def _close_subsystems(self, actions: tuple[tuple[str, Callable[[], None]], ...]) -> None:
+        errors: list[tuple[str, Exception]] = []
+        for name, close_action in actions:
+            try:
+                close_action()
+            except Exception as error:
+                errors.append((name, error))
         try:
-            self.backend.close()
-            self.com_ports.close()
-            self.can_buses.close()
-            self.adapters.close()
-        finally:
-            self._active_hardware_sessions.clear()
-            self._hardware_lock.release()
+            self._reconcile_hardware_lease()
+        except Exception as error:
+            errors.append(("hardware_lease", error))
+        if errors:
+            raise HardwareCleanupError(errors)
 
 
 def adapter_payload(args: JsonObject) -> JsonObject:
     return {key: value for key, value in args.items() if key != "adapter_id"}
-
-
-def session_key(spec: tuple[str, str | None], arguments: JsonObject) -> str:
-    prefix, argument_name = spec
-    return prefix if argument_name is None else f"{prefix}:{arguments.get(argument_name, '')}"
 
 
 def number_argument(value: object) -> float | None:

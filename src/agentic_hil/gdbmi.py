@@ -140,8 +140,7 @@ class GdbMiClient:
             self.child.wait(timeout=max(0.1, timeout_s))
         if self.child.poll() is None:
             self.child.kill()
-            with suppress(subprocess.TimeoutExpired):
-                self.child.wait(timeout=max(0.1, timeout_s))
+            self.child.wait(timeout=max(0.1, timeout_s))
 
     def history(self) -> list[JsonObject]:
         with self.lock:

@@ -169,6 +169,9 @@ class STLinkBackend:
     def close(self) -> None:
         return None
 
+    def has_active_session(self) -> bool:
+        return False
+
     def classify_last_error(self) -> JsonObject:
         report = read_last_report(self.config)
         if not report.get("ok") and report.get("error_type") == "report_not_found":
