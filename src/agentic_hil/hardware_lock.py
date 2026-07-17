@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import tempfile
 import threading
 import uuid
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from agentic_hil.types import JsonObject
 
 
 class HardwareLockError(Exception):
     pass
+
+
+class HardwareQuarantinedError(HardwareLockError):
+    def __init__(self, details: JsonObject):
+        self.details = details
+        super().__init__("Project hardware state is quarantined.")
 
 
 class ProjectHardwareLock:
@@ -20,12 +30,16 @@ class ProjectHardwareLock:
     _owners_guard = threading.Lock()
 
     def __init__(self, config_path: str):
-        project_key = hashlib.sha256(os.path.normcase(str(Path(config_path).resolve())).encode("utf-8")).hexdigest()
-        self.path = Path(tempfile.gettempdir()) / "agentic-hil" / f"hardware-{project_key}.lock"
+        self.project_key = hashlib.sha256(os.path.normcase(str(Path(config_path).resolve())).encode("utf-8")).hexdigest()
+        self.path = Path(tempfile.gettempdir()) / "agentic-hil" / f"hardware-{self.project_key}.lock"
+        self.quarantine_path = self.path.with_suffix(".quarantine.json")
         self.owner_token = uuid.uuid4().hex
         self.handle: Any = None
 
-    def acquire(self) -> bool:
+    def acquire(self, ignore_quarantine: bool = False) -> bool:
+        quarantine = None if ignore_quarantine else self.quarantine_info()
+        if quarantine is not None:
+            raise HardwareQuarantinedError(quarantine)
         if self.handle is not None:
             return True
         try:
@@ -78,6 +92,58 @@ class ProjectHardwareLock:
                 if self._owners.get(str(self.path)) == self.owner_token:
                     self._owners.pop(str(self.path), None)
             self._close_handle()
+
+    def quarantine_info(self) -> JsonObject | None:
+        try:
+            raw = json.loads(self.quarantine_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as error:
+            return {"version": 1, "project_key": self.project_key, "reason": "quarantine_unreadable", "source": "hardware_lock", "active_resources": [], "inspection_errors": [{"type": "quarantine", "error": str(error)}]}
+        return raw if isinstance(raw, dict) else {"version": 1, "project_key": self.project_key, "reason": "quarantine_invalid", "source": "hardware_lock", "active_resources": [], "inspection_errors": [{"type": "quarantine", "error": "Quarantine marker is not a JSON object."}]}
+
+    def mark_quarantined(
+        self,
+        *,
+        reason: str,
+        source: str,
+        active_resources: list[JsonObject],
+        inspection_errors: list[JsonObject],
+    ) -> JsonObject:
+        marker: JsonObject = {
+            "version": 1,
+            "project_key": self.project_key,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "reason": reason,
+            "source": source,
+            "active_resources": active_resources,
+            "inspection_errors": inspection_errors,
+        }
+        self.quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.quarantine_path.with_name(f"{self.quarantine_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8") as handle:
+                json.dump(marker, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name != "nt":
+                with suppress(OSError):
+                    temp_path.chmod(0o600)
+            os.replace(temp_path, self.quarantine_path)
+        except OSError as error:
+            with suppress(OSError):
+                temp_path.unlink()
+            raise HardwareLockError(str(error)) from error
+        return marker
+
+    def clear_quarantine(self) -> None:
+        try:
+            self.quarantine_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise HardwareLockError(str(error)) from error
 
     @classmethod
     def owner_is_active(cls, config_path: str, owner_token: str) -> bool:

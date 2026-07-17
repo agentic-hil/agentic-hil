@@ -13,7 +13,7 @@ import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
 from agentic_hil.config import ConfigError, UniqueKeyLoader, load_config
-from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.report import write_report
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
@@ -203,6 +203,9 @@ class Device:
             return exception_result("device_close_exception", "Device service cleanup raised an exception.", error)
         return {"ok": True}
 
+    def hardware_state(self) -> JsonObject:
+        return self.service.hardware_state()
+
     def _run_until_breakpoint(self, arguments: JsonObject) -> JsonObject:
         breakpoint_result = self._call("debug_set_breakpoint", {"location": arguments["location"]})
         if breakpoint_result.get("ok") is not True:
@@ -249,6 +252,17 @@ class TestReactor:
         project_lock = ProjectTestLock(self.config.config_path)
         try:
             acquired = project_lock.acquire()
+        except HardwareQuarantinedError as error:
+            return {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "hardware_state_unconfirmed",
+                "test_config_path": plan.path,
+                "tests": [],
+                "cleanup": [],
+                "quarantine": error.details,
+                "summary": "Project hardware is quarantined after an incomplete cleanup.",
+            }
         except HardwareLockError as error:
             return {
                 "ok": False,
@@ -270,16 +284,58 @@ class TestReactor:
                 "cleanup": [],
                 "summary": "Project hardware is in use by another Agentic HIL process.",
             }
+        response: JsonObject | None = None
+        release_lock = False
         try:
             policy_error = self._establish_policy_baseline(plan.path)
             if policy_error is not None:
-                return self._finalize(policy_error)
-            initialization_error = self._initialize_devices(plan.path, project_lock.owner_token)
-            if initialization_error is not None:
-                return self._finalize(initialization_error)
-            return self._finalize(self._run_plan(plan))
+                response = policy_error
+            else:
+                initialization_error = self._initialize_devices(plan.path, project_lock.owner_token)
+                response = initialization_error if initialization_error is not None else self._run_plan(plan)
+        except Exception as error:
+            response = {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "test_reactor_exception",
+                "test_config_path": plan.path,
+                "tests": [],
+                "cleanup": self.close(),
+                "exception": exception_result("test_reactor_exception", "Test reactor raised an exception.", error),
+                "summary": "Test reactor failed unexpectedly.",
+            }
         finally:
+            hardware_state = self._collect_hardware_state()
+            if hardware_state["active"] and response is not None:
+                try:
+                    quarantine = project_lock.mark_quarantined(
+                        reason="hardware_cleanup_failed",
+                        source="test_reactor",
+                        active_resources=hardware_state["active_resources"],
+                        inspection_errors=hardware_state["inspection_errors"],
+                    )
+                except HardwareLockError as error:
+                    quarantine = None
+                    response["quarantine_error"] = str(error)
+                response.update(
+                    {
+                        "ok": False,
+                        "error_type": "unsafe_test_state",
+                        "hardware_state_unconfirmed": True,
+                        "lease_retained_until_process_exit": True,
+                        "active_resources": hardware_state["active_resources"],
+                        "inspection_errors": hardware_state["inspection_errors"],
+                        "summary": "Test reactor stopped because cleanup could not establish a safe hardware state.",
+                    }
+                )
+                if quarantine is not None:
+                    response["quarantine"] = quarantine
+            else:
+                release_lock = True
+        if release_lock:
             project_lock.release()
+        assert response is not None
+        return self._finalize(response)
 
     def _initialize_devices(self, test_config_path: str, hardware_owner: str) -> JsonObject | None:
         try:
@@ -305,6 +361,21 @@ class TestReactor:
                 "summary": "Test reactor device initialization failed; no tests were executed.",
             }
         return None
+
+    def _collect_hardware_state(self) -> JsonObject:
+        active_resources: list[JsonObject] = []
+        inspection_errors: list[JsonObject] = []
+        for device in self.devices.values():
+            try:
+                state = device.hardware_state()
+            except Exception as error:
+                inspection_errors.append({"device": device.id, "type": "device", "error": str(error)})
+                continue
+            for resource in state.get("active_resources", []):
+                active_resources.append({"device": device.id, **resource})
+            for error in state.get("inspection_errors", []):
+                inspection_errors.append({"device": device.id, **error})
+        return {"active": bool(active_resources or inspection_errors), "state_confirmed": not inspection_errors, "active_resources": active_resources, "inspection_errors": inspection_errors}
 
     def _establish_policy_baseline(self, test_config_path: str) -> JsonObject | None:
         current_digest = read_policy_digest(self.config.config_path)

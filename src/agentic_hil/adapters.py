@@ -179,13 +179,17 @@ class AdapterService:
             raise first_error
 
     def has_active_sessions(self) -> bool:
-        for session in self.sessions.values():
+        return bool(self.active_session_ids())
+
+    def active_session_ids(self) -> list[str]:
+        active: list[str] = []
+        for adapter_id, session in self.sessions.items():
             try:
                 if session.bridge.status().get("active") is not False:
-                    return True
+                    active.append(adapter_id)
             except Exception:
-                return True
-        return False
+                active.append(adapter_id)
+        return active
 
     def _bridge_action(self, session: AdapterSession, tool: str, method: str, params: JsonObject) -> JsonObject:
         response = session.bridge.request(method, params, session.adapter_config.timeout_s)

@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.config import display_path
@@ -66,6 +67,18 @@ class GdbDebugSession:
         self.server_stderr = ""
 
 
+@dataclass(frozen=True)
+class DebugCleanupResult:
+    gdb_active: bool
+    server_active: bool
+    resource_errors: list[str]
+    audit_errors: list[str]
+
+    @property
+    def resources_active(self) -> bool:
+        return self.gdb_active or self.server_active
+
+
 class GdbDebugSessions:
     """Typed GDB/MI debug sessions against a gdbserver-providing debugger process (e.g. OpenOCD)."""
 
@@ -117,15 +130,23 @@ class GdbDebugSessions:
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
             failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
-            self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if cleanup.resources_active:
+                session.status = "error"
+                return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_cleanup_failed", "resource_errors": cleanup.resource_errors, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "summary": "Debug startup failed and debug resources could not be stopped."})
             session.status = "error"
+            self.session = None
             return self._report(failure)
 
         session.gdb = GdbMiClient(str(resolved_gdb["executable"]), self.config.work_dir)
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
-            self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if cleanup.resources_active:
+                session.status = "error"
+                return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_cleanup_failed", "resource_errors": cleanup.resource_errors, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "summary": "Debug startup failed and debug resources could not be stopped."})
             session.status = "error"
+            self.session = None
             return self._report({"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)})
 
         session.status = "halted"
@@ -154,9 +175,13 @@ class GdbDebugSessions:
         if session is None or session.status == "stopped":
             return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S) if timeout_s is None else max(0.1, timeout_s)
-        self._cleanup_session(session, timeout)
+        cleanup = self._cleanup_session(session, timeout)
+        if cleanup.resources_active:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": session.status, "error_type": "hardware_cleanup_failed", "resource_errors": cleanup.resource_errors, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session resources could not be stopped."})
         session.status = "stopped"
         self.session = None
+        if cleanup.audit_errors:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "error_type": "audit_write_failed", "resources_stopped": True, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug resources were stopped, but the session log could not be written."})
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
 
     def get_session_status(self) -> JsonObject:
@@ -307,9 +332,15 @@ class GdbDebugSessions:
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
-            self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            cleanup = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            if cleanup.resources_active:
+                raise RuntimeError("Debug session resources could not be stopped: " + "; ".join(cleanup.resource_errors))
             session.status = "stopped"
-        self.session = None
+            self.session = None
+            if cleanup.audit_errors:
+                raise RuntimeError("Debug session log could not be written: " + "; ".join(cleanup.audit_errors))
+        else:
+            self.session = None
 
     def has_active_session(self) -> bool:
         session = self.session
@@ -317,6 +348,9 @@ class GdbDebugSessions:
             return False
         gdb_active = session.gdb is not None and session.gdb.is_running()
         return gdb_active or session.server.poll() is None
+
+    def active_session_ids(self) -> list[str]:
+        return ["default"] if self.has_active_session() else []
 
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.permissions
@@ -539,13 +573,14 @@ class GdbDebugSessions:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data)}
         return {"ok": True, "data": bytes(data)}
 
-    def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> None:
-        first_error: Exception | None = None
+    def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> DebugCleanupResult:
+        resource_errors: list[str] = []
+        audit_errors: list[str] = []
         if session.gdb is not None:
             try:
                 session.gdb.close(timeout_s)
             except Exception as error:
-                first_error = error
+                resource_errors.append(f"gdb: {error}")
         if session.server.poll() is None:
             try:
                 session.server.terminate()
@@ -555,15 +590,17 @@ class GdbDebugSessions:
                     session.server.kill()
                     session.server.wait(timeout=timeout_s)
             except Exception as error:
-                if first_error is None:
-                    first_error = error
+                resource_errors.append(f"server: {error}")
         try:
             self._write_session_log(session)
         except Exception as error:
-            if first_error is None:
-                first_error = error
-        if first_error is not None:
-            raise first_error
+            audit_errors.append(str(error))
+        return DebugCleanupResult(
+            gdb_active=session.gdb is not None and session.gdb.is_running(),
+            server_active=session.server.poll() is None,
+            resource_errors=resource_errors,
+            audit_errors=audit_errors,
+        )
 
     def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
         output = f"{session.server_stdout}{session.server_stderr}"

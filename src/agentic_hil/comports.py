@@ -261,19 +261,23 @@ class ComPortService:
             raise first_error
 
     def has_active_sessions(self) -> bool:
+        return bool(self.active_session_ids())
+
+    def active_session_ids(self) -> list[str]:
+        active: list[str] = []
         for serial_handle in self._unmanaged_serial_handles:
             try:
                 if bool(getattr(serial_handle, "is_open", True)):
-                    return True
+                    active.append("unmanaged")
             except Exception:
-                return True
-        for session in self.sessions.values():
+                active.append("unmanaged")
+        for port_id, session in self.sessions.items():
             try:
                 if bool(getattr(session.serial_handle, "is_open", True)):
-                    return True
+                    active.append(port_id)
             except Exception:
-                return True
-        return False
+                active.append(port_id)
+        return active
 
     def _open_serial(self, port_id: str, port_config: ComPortConfig) -> JsonObject:
         try:

@@ -11,7 +11,7 @@ from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.report import read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -195,6 +195,29 @@ class AgenticHILToolService:
     def classify_last_error(self) -> JsonObject:
         return self.backend.classify_last_error()
 
+    def hardware_state(self) -> JsonObject:
+        active_resources: list[JsonObject] = []
+        inspection_errors: list[JsonObject] = []
+        try:
+            if self.backend.has_active_session():
+                active_resources.append({"type": "debugger", "id": "default"})
+        except Exception as error:
+            inspection_errors.append({"type": "debugger", "error": str(error)})
+        for subsystem_name, get_active in (
+            ("com", self.com_ports.active_session_ids),
+            ("can", self.can_buses.active_session_ids),
+            ("adapter", self.adapters.active_session_ids),
+        ):
+            try:
+                for resource_id in get_active():
+                    active_resources.append({"type": subsystem_name, "id": resource_id})
+            except Exception as error:
+                inspection_errors.append({"type": subsystem_name, "error": str(error)})
+        return {"active": bool(active_resources or inspection_errors), "state_confirmed": not inspection_errors, "active_resources": active_resources, "inspection_errors": inspection_errors}
+
+    def has_active_hardware(self) -> bool:
+        return bool(self.hardware_state()["active"])
+
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         args = arguments or {}
         hardware_error = self._acquire_hardware(name)
@@ -267,6 +290,10 @@ class AgenticHILToolService:
             return None
         try:
             acquired = self._hardware_lock.acquire()
+        except HardwareQuarantinedError as error:
+            result = tool_error(tool, "hardware_state_unconfirmed", "Project hardware is quarantined after an incomplete cleanup.")
+            result["quarantine"] = error.details
+            return result
         except HardwareLockError as error:
             result = tool_error(tool, "hardware_lock_failed", "Project hardware lease could not be acquired.")
             result["backend_error"] = str(error)
@@ -278,13 +305,8 @@ class AgenticHILToolService:
     def _reconcile_hardware_lease(self) -> None:
         if self.hardware_owner is not None:
             return
-        active = (
-            self.backend.has_active_session()
-            or self.com_ports.has_active_sessions()
-            or self.can_buses.has_active_sessions()
-            or self.adapters.has_active_sessions()
-        )
-        if not active:
+        state = self.hardware_state()
+        if not state["active"]:
             self._hardware_lock.release()
             return
         if self._hardware_lock.handle is None and not self._hardware_lock.acquire():

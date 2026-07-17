@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +16,7 @@ from agentic_hil.can import parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
-from agentic_hil.hardware_lock import ProjectHardwareLock
+from agentic_hil.hardware_lock import HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
@@ -175,6 +175,17 @@ class StubComPortService:
     def has_active_sessions(self) -> bool:
         return False
 
+    def active_session_ids(self) -> list[str]:
+        return []
+
+
+class UncloseableComPortService(StubComPortService):
+    def close(self) -> None:
+        raise OSError("device did not close")
+
+    def active_session_ids(self) -> list[str]:
+        return ["dut"]
+
 
 def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
@@ -209,6 +220,37 @@ def test_com_stdio_fails_closed_while_project_hardware_is_busy(tmp_path: Path) -
     result = json.loads(errors.getvalue())
     assert exit_code == 1
     assert result["error_type"] == "hardware_busy"
+
+
+def test_com_stdio_quarantines_project_when_cleanup_leaves_active_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", UncloseableComPortService)
+    errors = StringIO()
+
+    exit_code = run_com_stdio(config, "dut", input_stream=BytesIO(b""), output_stream=StringIO(), error_stream=errors, eof_idle_timeout_s=0.0)
+
+    lines = errors.getvalue().splitlines()
+    assert exit_code == 1
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    assert result["error_type"] == "hardware_cleanup_failed"
+    assert result["hardware_state_unconfirmed"] is True
+    assert result["quarantine"]["source"] == "com_stdio"
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config.config_path).acquire()
+
+
+def test_hardware_quarantine_is_project_scoped(tmp_path: Path) -> None:
+    config_a = load_test_config(tmp_path / "a")
+    config_b = load_test_config(tmp_path / "b")
+    lock_a = ProjectHardwareLock(config_a.config_path)
+    lock_a.mark_quarantined(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
+
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config_a.config_path).acquire()
+    lock_b = ProjectHardwareLock(config_b.config_path)
+    assert lock_b.acquire() is True
+    lock_b.release()
 
 
 class ExplodingBridge:
@@ -255,6 +297,9 @@ class FailingCleanupSubsystem:
 
     def has_active_sessions(self) -> bool:
         return self.active
+
+    def active_session_ids(self) -> list[str]:
+        return ["fake"] if self.active else []
 
 
 class FailingCleanupBackend(FailingCleanupSubsystem):

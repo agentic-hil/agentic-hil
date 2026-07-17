@@ -185,13 +185,17 @@ class CanBusService:
             raise first_error
 
     def has_active_sessions(self) -> bool:
-        for session in self.sessions.values():
+        return bool(self.active_session_ids())
+
+    def active_session_ids(self) -> list[str]:
+        active: list[str] = []
+        for bus_id, session in self.sessions.items():
             try:
                 if session.adapter_session.status().get("active") is not False:
-                    return True
+                    active.append(bus_id)
             except Exception:
-                return True
-        return False
+                active.append(bus_id)
+        return active
 
     def _configured_bus(self, bus_id: str, tool: str) -> JsonObject:
         if not bus_id:

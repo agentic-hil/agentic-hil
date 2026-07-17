@@ -162,6 +162,29 @@ def test_debug_second_start_reports_session_already_active(tmp_path: Path) -> No
         service.close()
 
 
+def test_debug_stop_audit_failure_releases_session_for_restart(tmp_path: Path, monkeypatch) -> None:
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        debug_sessions = service.backend._debug
+        original_write_session_log = debug_sessions._write_session_log
+        monkeypatch.setattr(debug_sessions, "_write_session_log", lambda session: (_ for _ in ()).throw(OSError("log full")))
+
+        stopped = service.call("debug_stop_session")
+
+        assert stopped["ok"] is False
+        assert stopped["error_type"] == "audit_write_failed"
+        assert stopped["resources_stopped"] is True
+        assert debug_sessions.has_active_session() is False
+        assert debug_sessions.session is None
+
+        monkeypatch.setattr(debug_sessions, "_write_session_log", original_write_session_log)
+        restarted = start_debug_session(service, mode="attach")
+        assert restarted["ok"] is True, restarted
+    finally:
+        service.close()
+
+
 def test_debug_symbol_info_reports_missing_symbol(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:

@@ -15,10 +15,21 @@ from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import entrypoint, init_config, install_skill, mcp_config, schema
-from agentic_hil.cli import test_schema as export_test_schema
+from agentic_hil.cli import (
+    entrypoint,
+    hardware_recover,
+    hardware_status,
+    init_config,
+    install_skill,
+    mcp_config,
+    schema,
+)
+from agentic_hil.cli import (
+    test_schema as export_test_schema,
+)
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.hardware_lock import ProjectHardwareLock
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
@@ -112,6 +123,24 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert result["error_type"] == "mcp_config_exists"
     result_forced = mcp_config(str(output_path), force=True)
     assert result_forced["ok"] is True
+
+
+def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    lock = ProjectHardwareLock(config.config_path)
+    quarantine = lock.mark_quarantined(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
+
+    status = hardware_status(config.config_path)
+    denied = hardware_recover(config.config_path, acknowledge_hardware_checked=False)
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True)
+    clear_status = hardware_status(config.config_path)
+
+    assert status["quarantined"] is True
+    assert status["quarantine"]["created_at"] == quarantine["created_at"]
+    assert denied["error_type"] == "acknowledgement_required"
+    assert recovered["ok"] is True
+    assert recovered["recovered"] is True
+    assert clear_status["quarantined"] is False
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:

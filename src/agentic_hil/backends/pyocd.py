@@ -192,6 +192,9 @@ class PyOCDBackend:
     def has_active_session(self) -> bool:
         return False
 
+    def active_session_ids(self) -> list[str]:
+        return []
+
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
         if configured:

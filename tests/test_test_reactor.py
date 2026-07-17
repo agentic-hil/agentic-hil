@@ -9,6 +9,7 @@ from conftest import FAKE_GDB, FAKE_OPENOCD, write_config
 
 from agentic_hil.cli import entrypoint
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.hardware_lock import HardwareQuarantinedError
 from agentic_hil.test_reactor import (
     ProjectTestLock,
     load_test_config,
@@ -55,6 +56,9 @@ class RecordingService:
     def close(self) -> None:
         self.closed = True
 
+    def hardware_state(self) -> dict:
+        return {"active": False, "state_confirmed": True, "active_resources": [], "inspection_errors": []}
+
 
 class CleanupFailureService(RecordingService):
     def call(self, name: str, arguments: dict | None = None) -> dict:
@@ -85,6 +89,15 @@ class CloseFailureService(RecordingService):
     def close(self) -> None:
         self.closed = True
         raise RuntimeError("device close failed")
+
+
+class ActiveCloseFailureService(CloseFailureService):
+    def hardware_state(self) -> dict:
+        return {"active": True, "state_confirmed": True, "active_resources": [{"type": "debugger", "id": "default"}], "inspection_errors": []}
+
+
+class AuditCloseFailureService(CloseFailureService):
+    pass
 
 
 class PolicyChangingService(RecordingService):
@@ -432,6 +445,35 @@ def test_device_close_failure_is_reported_as_unsafe_state(tmp_path: Path) -> Non
     assert result["error_type"] == "unsafe_test_state"
     assert result["cleanup_error_type"] == "device_close_failed"
     assert result["failed_tests"] == []
+
+
+def test_reactor_quarantines_project_when_cleanup_leaves_active_hardware(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: ActiveCloseFailureService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["hardware_state_unconfirmed"] is True
+    assert result["quarantine"]["reason"] == "hardware_cleanup_failed"
+    assert result["active_resources"] == [{"device": "controller_a", "type": "debugger", "id": "default"}, {"device": "controller_b", "type": "debugger", "id": "default"}]
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectTestLock(config.config_path).acquire()
+
+
+def test_reactor_does_not_quarantine_when_cleanup_error_has_no_active_resource(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: AuditCloseFailureService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_test_state"
+    assert "quarantine" not in result
+    second_lock = ProjectTestLock(config.config_path)
+    assert second_lock.acquire() is True
+    second_lock.release()
 
 
 def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ import time
 from typing import BinaryIO, TextIO
 
 from agentic_hil.comports import ComPortService
-from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STDIN_CHUNK_BYTES = 4096
@@ -31,6 +31,9 @@ def run_com_stdio(
     hardware_lock = ProjectHardwareLock(config.config_path)
     try:
         acquired = hardware_lock.acquire()
+    except HardwareQuarantinedError as error:
+        write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_state_unconfirmed", "summary": "Project hardware is quarantined after an incomplete cleanup.", "quarantine": error.details})
+        return 1
     except HardwareLockError as error:
         write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired.", "backend_error": str(error)})
         return 1
@@ -40,52 +43,96 @@ def run_com_stdio(
     service: ComPortService | None = None
     started_ok = False
     failed = False
+    exit_code = 0
+    error_result: JsonObject | None = None
+    cleanup_error: Exception | None = None
+    hardware_state: JsonObject = {"active": False, "active_resources": [], "inspection_errors": []}
+    quarantine: JsonObject | None = None
     try:
         service = ComPortService(config)
         started = service.session_start(port_id, True)
         if not started.get("ok"):
-            write_error(error_stream, started)
-            return 1
-        started_ok = True
-        port = config.com_ports[port_id]
-        read_size = max_read_bytes or port.max_buffer_bytes
-        last_data_at = time.monotonic()
-        input_stream_closed = False
-        stdin_chunks = start_stdin_reader(input_stream)
-        while not failed:
-            chunk = next_stdin_chunk(stdin_chunks)
-            if chunk:
-                written = service.write_bytes(port_id, chunk, "com_stdio_write")
-                if not written.get("ok"):
+            error_result = started
+            exit_code = 1
+        else:
+            started_ok = True
+            port = config.com_ports[port_id]
+            read_size = max_read_bytes or port.max_buffer_bytes
+            last_data_at = time.monotonic()
+            input_stream_closed = False
+            stdin_chunks = start_stdin_reader(input_stream)
+            while not failed:
+                chunk = next_stdin_chunk(stdin_chunks)
+                if chunk:
+                    written = service.write_bytes(port_id, chunk, "com_stdio_write")
+                    if not written.get("ok"):
+                        failed = True
+                        error_result = written
+                elif chunk == b"":
+                    input_stream_closed = True
+                result = service.read_bytes(port_id, read_size, read_wait_timeout_s, "com_stdio_read")
+                if not result.get("ok"):
                     failed = True
-                    write_error(error_stream, written)
-            elif chunk == b"":
-                input_stream_closed = True
-            result = service.read_bytes(port_id, read_size, read_wait_timeout_s, "com_stdio_read")
-            if not result.get("ok"):
-                failed = True
-                write_error(error_stream, result)
-                break
-            if int(result.get("bytes_read", 0)) > 0:
-                output_stream.write(str(result["data"].get("text", "")))
-                output_stream.flush()
-                last_data_at = time.monotonic()
-                continue
-            if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
-                break
-        return 1 if failed else 0
+                    error_result = result
+                    break
+                if int(result.get("bytes_read", 0)) > 0:
+                    output_stream.write(str(result["data"].get("text", "")))
+                    output_stream.flush()
+                    last_data_at = time.monotonic()
+                    continue
+                if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
+                    break
+            exit_code = 1 if failed else 0
     finally:
-        try:
-            if service is not None and started_ok:
-                try:
+        if service is not None:
+            try:
+                if started_ok:
                     service.session_stop(port_id)
-                finally:
-                    service.close()
-            elif service is not None:
+            except Exception as error:
+                cleanup_error = error
+            try:
                 service.close()
-        finally:
-            if service is None or not service.has_active_sessions():
-                hardware_lock.release()
+            except Exception as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
+                active_resources = [{"type": "com", "id": resource_id} for resource_id in service.active_session_ids()]
+                hardware_state = {"active": bool(active_resources), "active_resources": active_resources, "inspection_errors": []}
+            except Exception as error:
+                hardware_state = {"active": True, "active_resources": [], "inspection_errors": [{"type": "com", "error": str(error)}]}
+        if hardware_state["active"]:
+            try:
+                quarantine = hardware_lock.mark_quarantined(
+                    reason="hardware_cleanup_failed",
+                    source="com_stdio",
+                    active_resources=hardware_state["active_resources"],
+                    inspection_errors=hardware_state["inspection_errors"],
+                )
+            except HardwareLockError as error:
+                quarantine = {"reason": "quarantine_failed", "source": "com_stdio", "backend_error": str(error)}
+        else:
+            hardware_lock.release()
+        if cleanup_error is not None or hardware_state["active"]:
+            result: JsonObject = {
+                "ok": False,
+                "tool": "com_stdio",
+                "error_type": "hardware_cleanup_failed",
+                "hardware_state_unconfirmed": bool(hardware_state["active"]),
+                "port_id": port_id,
+                "active_resources": hardware_state["active_resources"],
+                "inspection_errors": hardware_state["inspection_errors"],
+                "summary": "COM stdio cleanup could not confirm a safe hardware state.",
+            }
+            if cleanup_error is not None:
+                result["backend_error"] = str(cleanup_error)
+            if quarantine is not None:
+                result["quarantine"] = quarantine
+            write_error(error_stream, result)
+        elif error_result is not None:
+            write_error(error_stream, error_result)
+    if cleanup_error is not None or hardware_state["active"]:
+        return 1
+    return exit_code
 
 
 def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:
