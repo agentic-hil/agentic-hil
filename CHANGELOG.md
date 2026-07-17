@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Added `agentic-hil migrate-config --from <path>` to move 0.2.3 workspace-local configs into the external authoritative policy location with all hardware permissions forced back to deny-by-default for operator review.
+
+### Fixed
+
+- Preserved final test-reactor failure reports after successful cleanup and kept `classify_last_error` anchored to the latest failure instead of later read-only status calls.
+- Created nested debug-dump output directories only during real dump execution, while keeping test-reactor preflight read-only.
+- Prevented COM, CAN, and adapter sessions from leaking when audit log paths become unavailable during session start.
+
+### Security
+
+- Normalized symlink/reparse secure-I/O failures to structured `unsafe_configured_path` errors and avoided wrapping failed report reads as successful `get_last_report` calls.
+- Rejected legacy bridge `args` with explicit migration guidance and kept process bridges pinned to operator-controlled executables.
+- Bounded in-memory path locks to active operations and hardened child-process cleanup/decoding for debugger and bridge subprocesses.
+
 ## [0.2.4] - 2026-07-15
 
 ### Added

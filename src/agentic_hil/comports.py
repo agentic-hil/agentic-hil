@@ -5,9 +5,10 @@ import threading
 import time
 from pathlib import Path
 
-from agentic_hil.config import display_path
+from agentic_hil.config import ConfigError, display_path
 from agentic_hil.report import (
     append_jsonl,
+    audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
@@ -156,8 +157,16 @@ class ComPortService:
             return self._write_report(opened)
         session = opened["session"]
         audit_error = append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
-        session.start_reader()
         self.sessions[port_id] = session
+        try:
+            session.start_reader()
+        except Exception as error:
+            try:
+                self._stop_session(session, "start_failed")
+            except Exception as close_error:
+                return self._write_report(self._close_failure("com_session_start", port_id, close_error))
+            self.sessions.pop(port_id, None)
+            return self._write_report({"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_reader_start_failed", "summary": "COM port reader could not be started; the port was closed.", "backend_error": str(error)})
         result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."}
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
@@ -261,8 +270,11 @@ class ComPortService:
         except ImportError:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"]}
         try:
-            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
             log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
+        except (ConfigError, OSError) as error:
+            return audit_unavailable("com_session_start", error)
+        try:
+            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
             return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path, start_reader=False)}
         except Exception as error:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}

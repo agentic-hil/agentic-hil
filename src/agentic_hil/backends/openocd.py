@@ -15,10 +15,10 @@ from agentic_hil.backends.common import (
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
 from agentic_hil.report import (
+    classify_failure_report,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
-    read_last_report,
     timestamp_for_filename,
     utc_now_iso,
     write_report,
@@ -195,24 +195,7 @@ class OpenOCDBackend:
         return self._debug.dump_symbol_ihex(symbol, output)
 
     def classify_last_error(self) -> JsonObject:
-        report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") == "report_not_found":
-            return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL report has been written yet."}
-        if report.get("ok"):
-            return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL report did not contain an error."}
-        error_type = str(report.get("error_type", "unknown_debugger_error"))
-        result = {
-            "ok": True,
-            "tool": "classify_last_error",
-            "error_type": error_type,
-            "summary": report.get("summary", "Last Agentic HIL report contained an error."),
-            "likely_causes": report.get("likely_causes", self._likely_causes(error_type)),
-            "report_path": report.get("report_path"),
-            "log_path": report.get("log_path"),
-        }
-        if "backend_error_type" in report:
-            result["backend_error_type"] = report["backend_error_type"]
-        return result
+        return classify_failure_report(self.config, self._likely_causes)
 
     def close(self) -> None:
         self._debug.close()

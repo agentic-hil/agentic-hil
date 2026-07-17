@@ -27,6 +27,7 @@ from agentic_hil.cli import (
     initialized_config_path,
     install_skill,
     mcp_config,
+    migrate_config,
     schema,
 )
 from agentic_hil.comports import ComPortService
@@ -62,6 +63,53 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
     assert "allow_reset: false" in config_text
     assert "allow_upload: false" in config_text
     assert initialized_config_path(workspace) == config_path
+
+
+def test_migrate_config_writes_external_deny_by_default_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text(
+        "target:\n  name: old-target\nartifacts:\n  allow_upload: true\npermissions:\n  allow_probe: true\n",
+        encoding="utf-8",
+    )
+    target = initialized_config_path(workspace)
+    if target.exists():
+        target.unlink()
+
+    result = migrate_config(str(legacy))
+
+    assert result["ok"] is True
+    assert result["path"] == str(target)
+    migrated = target.read_text(encoding="utf-8")
+    assert f"workspace_root: {str(workspace.resolve())}" in migrated
+    assert "allow_probe: false" in migrated
+    assert "allow_upload: false" in migrated
+    assert load_config(str(target), str(workspace)).target.name == "old-target"
+
+
+def test_migrate_config_rejects_non_empty_bridge_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text(
+        "can_buses:\n  injected:\n    adapter: process\n    executable: /bin/python\n    args: [workspace-script.py]\n",
+        encoding="utf-8",
+    )
+    target = initialized_config_path(workspace)
+    if target.exists():
+        target.unlink()
+
+    with pytest.raises(ConfigError) as rejected:
+        migrate_config(str(legacy))
+
+    assert rejected.value.error_type == "config_migration_required"
+    assert rejected.value.details["field"] == "can_buses.injected.args"
+    assert not target.exists()
 
 
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:

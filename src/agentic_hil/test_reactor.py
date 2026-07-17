@@ -18,6 +18,7 @@ from agentic_hil.config import (
     is_path_within_frozen,
     safe_read_text,
 )
+from agentic_hil.report import write_report
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
 
@@ -352,7 +353,7 @@ class TestReactor:
             }
             if "step" in validation_error:
                 result["failed_step"] = validation_error["step"]
-            return result
+            return write_report(self.config, result)
 
         completed: list[JsonObject] = []
         failed_step: int | None = None
@@ -405,7 +406,7 @@ class TestReactor:
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
         elif not cleanup_ok:
             result["error_type"] = "cleanup_failed"
-        return result
+        return write_report(self.config, result)
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
         debug_active = False

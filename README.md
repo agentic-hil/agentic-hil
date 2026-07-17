@@ -141,6 +141,14 @@ The operator reviews this file and explicitly enables only the required resource
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
+Existing 0.2.3 projects with `.agentic-hil/config.yaml` must migrate explicitly:
+
+```bash
+agentic-hil migrate-config --from .agentic-hil/config.yaml
+```
+
+Migration writes the canonical external config, sets `workspace_root`, removes only empty legacy bridge `args`, and forces hardware permissions, uploads, and unrestricted symbol access back to `false`. Non-empty bridge `args` require manual migration: pin an operator-controlled wrapper directly as `executable` instead.
+
 Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
 ## MCP Tools

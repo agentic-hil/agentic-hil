@@ -64,9 +64,9 @@ def test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump(tmp_path: Path
         assert symbol["address"] == hex(CTC_ARRAY_ADDRESS)
         assert symbol["size_bytes"] == CTC_ARRAY_SIZE
 
-        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/new/nested/memory.hex"})
         assert dumped["ok"] is True, dumped
-        hex_lines = (tmp_path / "build" / "memory.hex").read_text(encoding="ascii").splitlines()
+        hex_lines = (tmp_path / "build" / "new" / "nested" / "memory.hex").read_text(encoding="ascii").splitlines()
         assert hex_lines[0] == ":020000042000DA"
         assert hex_lines[-1] == ":00000001FF"
 
@@ -112,6 +112,11 @@ def test_debug_continue_reports_unexpected_breakpoint(tmp_path: Path) -> None:
         assert continued["stop"]["frame"]["function"] == "assert_failed"
         assert "debug_clear_breakpoints" in " ".join(continued["suggested_actions"])
         assert continued["session"]["status"] == "halted"
+        assert service.call("debug_get_session_status")["target_ok"] is False
+        assert service.call("debug_get_stop_reason")["target_ok"] is False
+        classified = service.call("classify_last_error")
+        assert classified["error_type"] == "unexpected_breakpoint"
+        assert classified["source_tool"] == "debug_continue"
     finally:
         service.close()
 

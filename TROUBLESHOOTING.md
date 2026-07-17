@@ -41,13 +41,13 @@ In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
-## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
+## 2. `config_file_not_found` / `config_invalid` / `config_unreadable` / `config_migration_required`
 
 Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
-Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
+Likely cause: the automatically discovered config is missing, a legacy `.agentic-hil/config.yaml` still needs migration, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
-Fix: run `agentic-hil init` from the firmware project root. Review the deny-by-default file it creates outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init` for new projects, or `agentic-hil migrate-config --from .agentic-hil/config.yaml` for 0.2.3 projects. Review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
 ## 3. `config_required` / Workspace Binding Failure
 

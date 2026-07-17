@@ -6,6 +6,7 @@ import subprocess
 import threading
 from contextlib import suppress
 
+from agentic_hil.process import terminate_process_tree
 from agentic_hil.types import JsonObject
 
 CHILD_REAP_TIMEOUT_S = 5.0
@@ -39,13 +40,8 @@ class ProcessBridgeSession:
             self.request("close", {}, 1)
         finally:
             self.closed = True
-            self.child.terminate()
-            try:
-                self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                with suppress(subprocess.TimeoutExpired):
-                    self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+            with suppress(subprocess.TimeoutExpired):
+                terminate_process_tree(self.child, CHILD_REAP_TIMEOUT_S)
 
     def status(self) -> JsonObject:
         return {"active": not self.closed and self.child.poll() is None, "backend": self.adapter_name}
@@ -91,7 +87,11 @@ class ProcessBridgeSession:
                 response = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(response, dict):
+                continue
             request_id = response.get("id")
+            if not isinstance(request_id, int):
+                continue
             queue_ = self.pending.pop(request_id, None)
             if queue_ is not None:
                 queue_.put(response)

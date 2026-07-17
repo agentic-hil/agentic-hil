@@ -6,9 +6,11 @@ from pathlib import Path
 
 from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import ProcessBridgeSession, public_backend_result
-from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.config import ConfigError, display_path, resolve_work_path
+from agentic_hil.process import process_group_kwargs
 from agentic_hil.report import (
     append_jsonl,
+    audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
@@ -68,12 +70,19 @@ class AdapterService:
             except Exception as error:
                 return self._write_report(self._close_failure("adapter_session_start", adapter_id, error))
             self.sessions.pop(adapter_id, None)
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
+        except (ConfigError, OSError) as error:
+            return audit_unavailable("adapter_session_start", error)
         opened = open_adapter_bridge(self.config, adapter_id, adapter["adapter_config"])
         if not opened["ok"]:
             return self._write_report(opened)
         bridge = opened["session"]
-        log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
-        session = AdapterSession(adapter_id, adapter["adapter_config"], bridge, log_path)
+        try:
+            session = AdapterSession(adapter_id, adapter["adapter_config"], bridge, log_path)
+        except Exception as error:
+            bridge.close()
+            return self._write_report({"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_open_failed", "summary": "Test adapter session setup failed; the bridge was closed.", "backend_error": str(error)})
         self.sessions[adapter_id] = session
         audit_error = append_jsonl(session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
         result = {"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": False, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "Test adapter session started."}
@@ -281,7 +290,7 @@ def open_adapter_bridge(config: AgenticHILConfig, adapter_id: str, adapter_confi
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_not_found", "summary": "Test adapter bridge executable could not be found.", "executable": adapter_config.executable}
     command = invocation(executable)
     try:
-        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs())
     except OSError as error:
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_process_start_failed", "summary": "Test adapter bridge process could not be started.", "backend_error": str(error)}
     session = AdapterBridgeSession(child)

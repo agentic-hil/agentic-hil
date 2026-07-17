@@ -118,7 +118,7 @@ steps:
   - device: dut
     action: dump_memory
     symbol: CTC_array
-    output_path: build/memory.hex
+    output_path: build/new/nested/memory.hex
   - device: dut
     action: debug_stop
   - device: dut
@@ -142,7 +142,7 @@ steps:
     ]
     assert result["cleanup"] == []
     assert com_ports.active == set()
-    hex_lines = (tmp_path / "build" / "memory.hex").read_text(encoding="ascii").splitlines()
+    hex_lines = (tmp_path / "build" / "new" / "nested" / "memory.hex").read_text(encoding="ascii").splitlines()
     assert hex_lines[0] == ":020000042000DA"
     assert hex_lines[-1] == ":00000001FF"
 
@@ -161,6 +161,8 @@ steps:
     )
     try:
         result = TestReactor(service.config, service).run(load_test_config(str(test_path), str(tmp_path)))
+        last_report = service.call("get_last_report")
+        classified = service.call("classify_last_error")
     finally:
         service.close()
 
@@ -170,6 +172,10 @@ steps:
     assert [item["action"] for item in result["cleanup"]] == ["debug_stop", "uart_close"]
     assert com_ports.active == set()
     assert not (tmp_path / "build" / "should-not-exist.hex").exists()
+    assert last_report["report"]["tool"] == "test_reactor"
+    assert last_report["report"]["error_type"] == "unexpected_breakpoint"
+    assert classified["error_type"] == "unexpected_breakpoint"
+    assert classified["source_tool"] == "test_reactor"
 
 
 def test_test_config_accepts_json_and_rejects_unknown_actions(tmp_path: Path) -> None:

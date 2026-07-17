@@ -11,9 +11,11 @@ from typing import Protocol
 
 from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import ProcessBridgeSession, public_backend_result
-from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.config import ConfigError, display_path, resolve_work_path
+from agentic_hil.process import process_group_kwargs
 from agentic_hil.report import (
     append_jsonl,
+    audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
@@ -90,15 +92,26 @@ class CanBusService:
                 return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "Previous CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error)})
             self.sessions.pop(bus_id, None)
         bus_config = bus["bus_config"]
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
+        except (ConfigError, OSError) as error:
+            return audit_unavailable("can_session_start", error)
         opened = open_adapter(self.config, bus_id, bus_config, clear_rx_queue)
         if not opened["ok"]:
             return self._write_report(opened)
         adapter_session = opened["session"]
-        if clear_rx_queue and self.config.permissions.allow_can_read:
-            adapter_session.read(bus_config.max_buffer_frames, 0)
-        log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
         session = CanBusSession(bus_id, bus_config, adapter_session, log_path)
         self.sessions[bus_id] = session
+        if clear_rx_queue and self.config.permissions.allow_can_read:
+            try:
+                adapter_session.read(bus_config.max_buffer_frames, 0)
+            except Exception as error:
+                try:
+                    self._stop_session(session, "start_failed")
+                except Exception as close_error:
+                    return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN initialization failed and the session remains registered for cleanup retry.", "backend_error": str(close_error)})
+                self.sessions.pop(bus_id, None)
+                return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_open_failed", "summary": "CAN receive queue could not be cleared; the adapter was closed.", "backend_error": str(error)})
         audit_error = append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
         result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."}
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
@@ -321,7 +334,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found."}
     command = invocation(executable)
     try:
-        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs())
     except OSError as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error)}
     session = ProcessCanAdapterSession(child, bus_config.timeout_s)

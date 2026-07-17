@@ -9,7 +9,7 @@ from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.report import ensure_audit_ready, read_last_report
+from agentic_hil.report import audit_unavailable, ensure_audit_ready, read_last_report
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
@@ -157,7 +157,7 @@ class AgenticHILToolService:
 
     def get_last_report(self) -> JsonObject:
         report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") in {"report_not_found", "config_invalid"}:
+        if report.get("ok") is not True and report.get("tool") == "get_last_report":
             return report
         return {"ok": True, "tool": "get_last_report", "report": report}
 
@@ -209,15 +209,7 @@ class AgenticHILToolService:
                 try:
                     ensure_audit_ready(self.config)
                 except (ConfigError, OSError) as error:
-                    return {
-                        "ok": False,
-                        "tool": name,
-                        "error_type": "audit_unavailable",
-                        "summary": "Hardware action was not started because audit output is unavailable.",
-                        "side_effect_committed": False,
-                        "audit_ok": False,
-                        "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)},
-                    }
+                    return audit_unavailable(name, error)
             try:
                 return dispatch[name]()
             except (ConfigError, OSError) as error:

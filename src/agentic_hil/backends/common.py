@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil.process import CHILD_REAP_TIMEOUT_S, process_group_kwargs, terminate_process_tree
+
 
 @dataclass(frozen=True)
 class CompletedCommand:
@@ -20,31 +22,29 @@ class CompletedCommand:
 
 def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
     try:
-        completed = subprocess.run(
+        child = subprocess.Popen(
             command,
             cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=max(0.0, timeout_seconds),
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **process_group_kwargs(),
         )
+        try:
+            stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+            stdout, stderr = child.communicate(timeout=CHILD_REAP_TIMEOUT_S)
+            timed_out = True
         return CompletedCommand(
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-            returncode=completed.returncode,
-            timed_out=False,
+            stdout=decode_output(stdout),
+            stderr=decode_output(stderr),
+            returncode=child.returncode,
+            timed_out=timed_out,
             not_found=False,
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)
-    except subprocess.TimeoutExpired as error:
-        return CompletedCommand(
-            stdout=decode_output(error.stdout),
-            stderr=decode_output(error.stderr),
-            returncode=None,
-            timed_out=True,
-            not_found=False,
-        )
 
 
 def decode_output(value: str | bytes | None) -> str:

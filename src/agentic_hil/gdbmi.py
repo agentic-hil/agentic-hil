@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentic_hil.config import atomic_write_text
+from agentic_hil.process import process_group_kwargs, terminate_process_tree
 from agentic_hil.types import JsonObject
 
 GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2", "--init-eval-command=set auto-load off"]
@@ -55,6 +56,7 @@ class GdbMiClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **process_group_kwargs(),
         )
         self.lock = threading.Lock()
         self.next_token = 0
@@ -140,9 +142,7 @@ class GdbMiClient:
         with suppress(subprocess.TimeoutExpired):
             self.child.wait(timeout=max(0.1, timeout_s))
         if self.child.poll() is None:
-            self.child.kill()
-            with suppress(subprocess.TimeoutExpired):
-                self.child.wait(timeout=max(0.1, timeout_s))
+            terminate_process_tree(self.child, timeout_s)
         if self.child.poll() is None:
             raise RuntimeError("GDB process remained active after kill.")
 

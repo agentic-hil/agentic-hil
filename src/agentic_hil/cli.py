@@ -5,10 +5,14 @@ import json
 import os
 import re
 import sys
+import tempfile
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+
+import yaml
 
 from agentic_hil import __version__
 from agentic_hil.comports import list_available_com_ports
@@ -16,11 +20,20 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
+    UniqueKeyLoader,
+    absolute_without_symlinks,
     config_schema_text,
+    is_path_within_frozen,
     load_authoritative_config,
+    load_config,
+    pin_configured_executables,
+    pin_configured_paths,
     project_config_path,
+    safe_read_text,
+    validate_config_schema,
 )
 from agentic_hil.debugger import create_debugger_backend
+from agentic_hil.report import write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
@@ -146,6 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--force", action="store_true")
 
+    migrate_parser = subparsers.add_parser("migrate-config", help="migrate a 0.2.3 workspace config into the authoritative policy location")
+    migrate_parser.add_argument("--from", dest="source", default=".agentic-hil/config.yaml")
+
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
@@ -185,6 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "init":
         return init_config(args.config, args.force)
+    if args.command == "migrate-config":
+        return migrate_config(args.source)
     if args.command == "doctor":
         return doctor(args.config)
     if args.command == "debugger-probes":
@@ -241,6 +259,132 @@ def initialized_config_path(workspace: Path) -> Path:
     return project_config_path(workspace)
 
 
+def migrate_config(source: str) -> JsonObject:
+    workspace = Path.cwd().resolve()
+    source_path = Path(source).expanduser()
+    source_path = absolute_without_symlinks(source_path if source_path.is_absolute() else workspace / source_path)
+    if not is_path_within_frozen(source_path, workspace):
+        raise ConfigError("config_migration_required", "Migration source must be inside the current workspace.", {"path": str(source_path), "workspace_root": str(workspace)})
+    target_path = project_config_path(workspace)
+    if target_path.exists():
+        return {"ok": False, "error_type": "config_exists", "summary": "Authoritative Agentic HIL configuration already exists; migration will not overwrite it.", "path": str(target_path)}
+    try:
+        loaded = yaml.load(safe_read_text(source_path, workspace=workspace), Loader=UniqueKeyLoader)
+    except FileNotFoundError as error:
+        raise ConfigError("config_file_not_found", "Legacy Agentic HIL configuration could not be found.", {"path": str(source_path)}) from error
+    except UnicodeDecodeError as error:
+        raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid UTF-8 text.", {"path": str(source_path)}) from error
+    except yaml.YAMLError as error:
+        raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid YAML.", {"path": str(source_path), "backend_error": str(error)}) from error
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise ConfigError("config_invalid", "Legacy Agentic HIL configuration root must be a mapping.", {"path": str(source_path)})
+    legacy = deepcopy(loaded)
+    strip_empty_legacy_args(legacy, str(source_path))
+    base = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE) or {}
+    migrated = deep_merge(base, legacy)
+    migrated["workspace_root"] = str(workspace)
+    migrated.setdefault("debug", {})["allow_all_symbols"] = False
+    migrated.setdefault("artifacts", {})["allow_upload"] = False
+    migrated["permissions"] = deny_all_permissions()
+    validate_config_schema(migrated, str(target_path))
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.safe_dump(migrated, sort_keys=False)
+    validate_migrated_text(text, target_path, workspace)
+    write_exclusive_text(target_path, text)
+    previous = os.environ.pop(CONFIG_ENV, None)
+    try:
+        load_authoritative_config(workspace)
+    except Exception:
+        with suppress(FileNotFoundError):
+            target_path.unlink()
+        raise
+    finally:
+        if previous is not None:
+            os.environ[CONFIG_ENV] = previous
+    return {
+        "ok": True,
+        "summary": "Legacy Agentic HIL configuration migrated to the external authoritative policy location.",
+        "source_path": str(source_path),
+        "path": str(target_path),
+        "warnings": [
+            "All hardware permissions were set to false and require operator review.",
+            "artifacts.allow_upload and debug.allow_all_symbols were set to false.",
+            "Run agentic-hil doctor after reviewing and enabling only required capabilities.",
+        ],
+    }
+
+
+def deep_merge(base: JsonObject, updates: JsonObject) -> JsonObject:
+    result = deepcopy(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
+def strip_empty_legacy_args(raw: JsonObject, source_path: str) -> None:
+    for section in ("can_buses", "adapters"):
+        entries = raw.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, value in entries.items():
+            if not isinstance(value, dict) or "args" not in value:
+                continue
+            args = value.get("args")
+            if args:
+                raise ConfigError(
+                    "config_migration_required",
+                    "Process bridge args cannot be migrated safely. Pin an operator-controlled wrapper directly as executable.",
+                    {"path": source_path, "field": f"{section}.{name}.args"},
+                )
+            value.pop("args", None)
+
+
+def deny_all_permissions() -> JsonObject:
+    return {
+        "allow_probe": False,
+        "allow_flash": False,
+        "allow_reset": False,
+        "allow_com_read": False,
+        "allow_com_write": False,
+        "allow_can_read": False,
+        "allow_can_write": False,
+        "allow_adapter_read": False,
+        "allow_adapter_write": False,
+        "allow_raw_debugger_commands": False,
+        "allow_mass_erase": False,
+    }
+
+
+def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> None:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target_path.parent, delete=False) as handle:
+        temporary_path = Path(handle.name)
+        handle.write(text)
+    try:
+        pin_configured_executables(pin_configured_paths(load_config(str(temporary_path), str(workspace))))
+    finally:
+        with suppress(FileNotFoundError):
+            temporary_path.unlink()
+
+
+def write_exclusive_text(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
@@ -273,7 +417,7 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
         result.setdefault("step_error_type", result.get("error_type"))
         result["error_type"] = "cleanup_failed"
         result["summary"] = "Test reactor sequence failed during cleanup."
-    return result
+    return write_report(config, result)
 
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,12 +13,14 @@ from types import SimpleNamespace
 import pytest
 from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, write_config
 
+from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bridge import ProcessBridgeSession
 from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
+    _PATH_LOCKS,
     ConfigError,
     _close_windows_handles,
     _windows_hold_directory_chain,
@@ -440,8 +443,8 @@ def test_raw_config_requires_workspace_root(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as rejected:
         load_config(str(config_path))
 
-    assert rejected.value.error_type == "config_invalid"
-    assert rejected.value.details["field"] == "$"
+    assert rejected.value.error_type == "config_migration_required"
+    assert "migrate-config" in rejected.value.details["next_step"]
 
 
 def test_raw_config_rejects_duplicate_keys(tmp_path: Path) -> None:
@@ -512,7 +515,7 @@ def test_authoritative_config_rejects_process_bridge_arguments(tmp_path: Path, m
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.error_type == "config_migration_required"
     assert rejected.value.details["field"] == "can_buses.injected.args"
 
 
@@ -567,7 +570,7 @@ def test_authoritative_config_rejects_adapter_bridge_arguments(tmp_path: Path, m
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.error_type == "config_migration_required"
     assert rejected.value.details["field"] == "adapters.injected.args"
 
 
@@ -697,6 +700,15 @@ def test_parallel_jsonl_appends_keep_every_event_exactly_once(tmp_path: Path) ->
     assert sorted(events) == list(range(1000))
 
 
+def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:
+    _PATH_LOCKS.clear()
+
+    for index in range(100):
+        assert append_jsonl(str(tmp_path / f"event-{index}.jsonl"), {"event_id": index}) is None
+
+    assert _PATH_LOCKS == {}
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle behavior")
 def test_windows_secure_io_handles_block_parent_rename(tmp_path: Path) -> None:
     parent = tmp_path / "audit"
@@ -761,6 +773,53 @@ def test_unavailable_audit_prevents_hardware_action(tmp_path: Path, monkeypatch:
     assert result["error_type"] == "audit_unavailable"
     assert result["side_effect_committed"] is False
     assert calls == []
+
+
+def test_com_log_path_failure_does_not_open_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    def serial_open(*args, **kwargs):
+        opened.append("serial")
+        return SimpleNamespace(is_open=True, close=lambda: None)
+
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=serial_open))
+    monkeypatch.setattr("agentic_hil.comports.logs_directory", lambda config: (_ for _ in ()).throw(ConfigError("unsafe_configured_path", "bad log path")))
+    service = ComPortService(load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML))
+
+    result = service.session_start("dut")
+
+    assert result["error_type"] == "audit_unavailable"
+    assert opened == []
+    assert service.sessions == {}
+
+
+def test_can_log_path_failure_does_not_open_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    monkeypatch.setattr("agentic_hil.can.logs_directory", lambda config: (_ for _ in ()).throw(ConfigError("unsafe_configured_path", "bad log path")))
+    monkeypatch.setattr("agentic_hil.can.open_adapter", lambda *args, **kwargs: opened.append("adapter") or {"ok": True})
+    service = CanBusService(load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML))
+
+    result = service.session_start("bench")
+
+    assert result["error_type"] == "audit_unavailable"
+    assert opened == []
+    assert service.sessions == {}
+
+
+def test_adapter_log_path_failure_does_not_spawn_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+    adapters_yaml = f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n    channels: ["temperature"]\n'
+
+    monkeypatch.setattr("agentic_hil.adapters.logs_directory", lambda config: (_ for _ in ()).throw(ConfigError("unsafe_configured_path", "bad log path")))
+    monkeypatch.setattr("agentic_hil.adapters.open_adapter_bridge", lambda *args, **kwargs: opened.append("bridge") or {"ok": True})
+    service = AdapterService(load_test_config(tmp_path, adapters_yaml=adapters_yaml))
+
+    result = service.session_start("ntc")
+
+    assert result["error_type"] == "audit_unavailable"
+    assert opened == []
+    assert service.sessions == {}
 
 
 def test_post_action_report_failure_preserves_committed_flash_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

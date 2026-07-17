@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -9,7 +10,8 @@ import shutil
 import stat
 import tempfile
 import threading
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
@@ -41,7 +43,7 @@ CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
-_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
 
@@ -138,6 +140,13 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
+    if "workspace_root" not in raw:
+        raise ConfigError(
+            "config_migration_required",
+            "Agentic HIL 0.2.3-style configurations must be migrated to the external authoritative policy format.",
+            {"path": resolved_config_path, "next_step": f"agentic-hil migrate-config --from {resolved_config_path}"},
+        )
+    reject_legacy_bridge_args(raw, resolved_config_path)
     validate_config_schema(raw, resolved_config_path)
 
     workspace_value = str(raw["workspace_root"])
@@ -530,15 +539,42 @@ def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
             os.close(descriptor)
             descriptor = next_descriptor
         return descriptor
-    except (ConfigError, OSError):
+    except ConfigError:
         os.close(descriptor)
+        raise
+    except OSError as error:
+        os.close(descriptor)
+        _raise_unsafe_path_error(error, path)
         raise
 
 
-def _path_lock(path: Path) -> threading.Lock:
+def _raise_unsafe_path_error(error: OSError, path: Path) -> None:
+    if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured path contains a symlink or non-directory component.",
+            {"path": str(path)},
+        ) from error
+
+
+@contextmanager
+def _path_lock(path: Path) -> Iterator[None]:
     key = os.path.normcase(str(path))
     with _PATH_LOCKS_GUARD:
-        return _PATH_LOCKS.setdefault(key, threading.Lock())
+        lock, references = _PATH_LOCKS.get(key, (threading.Lock(), 0))
+        _PATH_LOCKS[key] = (lock, references + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _PATH_LOCKS_GUARD:
+            current = _PATH_LOCKS.get(key)
+            if current is not None and current[0] is lock:
+                if current[1] == 1:
+                    _PATH_LOCKS.pop(key, None)
+                else:
+                    _PATH_LOCKS[key] = (lock, current[1] - 1)
 
 
 def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> list[int]:
@@ -655,7 +691,11 @@ def safe_read_bytes(file_path: str | Path, *, workspace: str | Path | None = Non
         parent_descriptor = _open_directory_fd(path.parent)
         try:
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+            try:
+                descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+            except OSError as error:
+                _raise_unsafe_path_error(error, path)
+                raise
         finally:
             os.close(parent_descriptor)
         try:
@@ -767,7 +807,11 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
             parent_descriptor = _open_directory_fd(path.parent)
             try:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-                descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+                try:
+                    descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+                except OSError as error:
+                    _raise_unsafe_path_error(error, path)
+                    raise
             finally:
                 os.close(parent_descriptor)
             try:
@@ -1047,6 +1091,20 @@ def reports_config(raw: JsonObject) -> ReportsConfig:
 
 def logs_config(raw: JsonObject) -> LogsConfig:
     return LogsConfig(directory=str(raw.get("directory", ".agentic-hil/logs")))
+
+
+def reject_legacy_bridge_args(raw: JsonObject, config_path: str) -> None:
+    for section in ("can_buses", "adapters"):
+        entries = raw.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, value in entries.items():
+            if isinstance(value, dict) and "args" in value:
+                raise ConfigError(
+                    "config_migration_required",
+                    "Process bridge args are no longer accepted across the trusted policy boundary. Pin an operator-controlled wrapper directly as executable.",
+                    {"path": config_path, "field": f"{section}.{name}.args"},
+                )
 
 
 def mapping(value: Any, field_name: str) -> JsonObject:

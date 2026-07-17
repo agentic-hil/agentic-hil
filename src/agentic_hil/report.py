@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,10 @@ def last_report_path(config: AgenticHILConfig) -> str:
     return str(Path(reports_directory(config)) / "last-report.json")
 
 
+def last_failure_path(config: AgenticHILConfig) -> str:
+    return str(Path(reports_directory(config)) / "last-failure.json")
+
+
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched = dict(report)
     enriched.setdefault("audit_ok", True)
@@ -60,36 +65,48 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
         report_path = last_report_path(config)
         enriched.setdefault("report_path", display_path(config, report_path))
         safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
+        if is_failure_report(enriched):
+            safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
     except (ConfigError, OSError, ValueError) as error:
         return mark_audit_failure(enriched, error)
     return enriched
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:
-    report_path = last_report_path(config)
+    return read_report_file(config, last_report_path, "get_last_report", "No Agentic HIL report has been written yet.")
+
+
+def read_last_failure(config: AgenticHILConfig) -> JsonObject:
+    return read_report_file(config, last_failure_path, "classify_last_error", "No Agentic HIL failure has been recorded yet.")
+
+
+def read_report_file(config: AgenticHILConfig, path_factory: Callable[[AgenticHILConfig], str], tool: str, missing_summary: str) -> JsonObject:
     try:
+        report_path = path_factory(config)
         text = safe_read_text(report_path, workspace=config.work_dir)
     except FileNotFoundError:
         return {
             "ok": False,
-            "tool": "get_last_report",
+            "tool": tool,
             "error_type": "report_not_found",
-            "summary": "No Agentic HIL report has been written yet.",
+            "summary": missing_summary,
         }
+    except ConfigError as error:
+        return {"tool": tool, **error.to_dict()}
     except UnicodeDecodeError:
         return {
             "ok": False,
-            "tool": "get_last_report",
+            "tool": tool,
             "error_type": "config_invalid",
-            "summary": "Last Agentic HIL report is not valid UTF-8 text.",
+            "summary": "Agentic HIL report is not valid UTF-8 text.",
             "report_path": display_path(config, report_path),
         }
     except OSError as error:
         return {
             "ok": False,
-            "tool": "get_last_report",
+            "tool": tool,
             "error_type": "report_unreadable",
-            "summary": "Last Agentic HIL report could not be read.",
+            "summary": "Agentic HIL report could not be read.",
             "backend_error": str(error),
         }
     try:
@@ -97,11 +114,41 @@ def read_last_report(config: AgenticHILConfig) -> JsonObject:
     except json.JSONDecodeError:
         return {
             "ok": False,
-            "tool": "get_last_report",
+            "tool": tool,
             "error_type": "config_invalid",
-            "summary": "Last Agentic HIL report is not valid JSON.",
+            "summary": "Agentic HIL report is not valid JSON.",
             "report_path": display_path(config, report_path),
         }
+
+
+def is_failure_report(report: JsonObject) -> bool:
+    return report.get("ok") is not True or report.get("target_ok") is False or report.get("audit_ok") is False
+
+
+def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:
+    report = read_last_failure(config)
+    if not report.get("ok") and report.get("error_type") == "report_not_found":
+        return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL failure has been recorded yet."}
+    if report.get("ok") is True and report.get("target_ok") is not False and report.get("audit_ok") is not False:
+        return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL failure record did not contain an error."}
+    error_type = str(report.get("target_error_type") or report.get("error_type") or ("audit_failed" if report.get("audit_ok") is False else "unknown_debugger_error"))
+    result = {
+        "ok": True,
+        "tool": "classify_last_error",
+        "error_type": error_type,
+        "summary": report.get("summary", "Last Agentic HIL failure contained an error."),
+        "likely_causes": report.get("likely_causes", likely_causes(error_type)),
+        "report_path": report.get("report_path"),
+        "log_path": report.get("log_path"),
+        "source_tool": report.get("tool"),
+    }
+    if "backend_error_type" in report:
+        result["backend_error_type"] = report["backend_error_type"]
+    if "failed_step" in report:
+        result["failed_step"] = report["failed_step"]
+    if "step_error_type" in report:
+        result["step_error_type"] = report["step_error_type"]
+    return result
 
 
 def ensure_audit_ready(config: AgenticHILConfig) -> None:
@@ -113,6 +160,20 @@ def ensure_audit_ready(config: AgenticHILConfig) -> None:
             with suppress(FileNotFoundError):
                 probe.unlink()
     safe_file_path(last_report_path(config), config.work_dir)
+
+
+def audit_unavailable(tool: str, error: Exception) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_type": "audit_unavailable",
+        "summary": "Hardware action was not started because audit output is unavailable.",
+        "side_effect_committed": False,
+        "audit_ok": False,
+        "audit_error": error.to_dict()
+        if isinstance(error, ConfigError)
+        else {"error_type": type(error).__name__, "backend_error": str(error)},
+    }
 
 
 def mark_side_effect(result: JsonObject) -> JsonObject:

@@ -6,10 +6,9 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import ConfigError, display_path, safe_write_text
+from agentic_hil.config import ConfigError, display_path, safe_configured_directory, safe_write_text
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -18,6 +17,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
+from agentic_hil.process import process_group_kwargs, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
     mark_audit_failure,
@@ -42,7 +42,7 @@ TARGET_EXCEPTION_MARKERS = [
     ("default_handler", "default_handler"),
 ]
 SIGNAL_EXCEPTION_NAMES = {"SIGABRT", "SIGBUS", "SIGFPE", "SIGILL", "SIGSEGV"}
-ABNORMAL_STOP_REASONS = {"debugger_error", "exception", "fault", "unexpected_breakpoint"}
+ABNORMAL_STOP_REASONS = {"debugger_error", "exception", "fault", "timeout", "unexpected_breakpoint"}
 TCP_POLL_INTERVAL_S = 0.05
 TCP_CONNECT_TIMEOUT_S = 0.2
 MEMORY_READ_CHUNK_BYTES = 1024
@@ -124,6 +124,7 @@ class GdbDebugSessions:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **process_group_kwargs(),
             )
         except OSError as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
@@ -198,7 +199,7 @@ class GdbDebugSessions:
         active = session is not None and session.status not in {"stopped", "error"}
         result: JsonObject = {"ok": True, "tool": "debug_get_session_status", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "session": self._session_status(session) if session else None}
         result.update(target_stop_fields(session.stop_reason if session else None))
-        return self._report(result)
+        return result
 
     def set_breakpoint(self, location: JsonObject | str) -> JsonObject:
         tool = "debug_set_breakpoint"
@@ -271,12 +272,19 @@ class GdbDebugSessions:
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
         if stop.timed_out:
-            self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
-            session.gdb.wait_for_stop(min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
-            session.status = "halted"
-            session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout"}
+            interrupt = self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
+            confirmed = session.gdb.wait_for_stop(min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s)) if interrupt.ok else GdbMiStopResult(line="", reason="timeout", timed_out=True)
+            halt_confirmed = not confirmed.timed_out and confirmed.reason != "debugger_error"
+            if halt_confirmed:
+                session.stop_reason = self._stop_reason_from_gdb(session, confirmed)
+                session.status = "halted"
+            else:
+                session.status = "running"
+                session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
             self._write_session_log(session)
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout; it was halted.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": interrupt.ok, "halt_confirmed": halt_confirmed, "target_state": "halted" if halt_confirmed else "unknown"}
+            result.update(target_stop_fields(session.stop_reason))
+            return self._report(result)
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         stop_reason = str(session.stop_reason.get("stop_reason"))
         session.status = "error" if stop_reason == "debugger_error" else "halted"
@@ -300,8 +308,14 @@ class GdbDebugSessions:
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
-        session.status = "halted"
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
+        if stop.timed_out or stop.reason == "debugger_error":
+            session.status = "running" if stop.timed_out else "error"
+            self._write_session_log(session)
+            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout" if stop.timed_out else "debugger_error", "summary": "Target halt was requested but not confirmed.", "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": True, "halt_confirmed": False, "target_state": "unknown"}
+            result.update(target_stop_fields(session.stop_reason))
+            return self._report(result)
+        session.status = "halted"
         self._write_session_log(session)
         return self._report(self._stopped_result(tool, session, "Target halted"))
 
@@ -313,10 +327,10 @@ class GdbDebugSessions:
         session = session_result["session"]
         self._refresh_session_stop(session)
         if session.stop_reason is None:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."})
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."}
         result = {"ok": True, "tool": tool, "backend": self.backend_name, "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session)}
         result.update(target_stop_fields(session.stop_reason))
-        return self._report(result)
+        return result
 
     def symbol_info(self, symbol: str) -> JsonObject:
         tool = "debug_symbol_info"
@@ -345,8 +359,9 @@ class GdbDebugSessions:
         if not memory["ok"]:
             return self._report(memory)
         try:
+            safe_configured_directory(self.config, str(Path(str(output["resolved_path"])).parent), f"{tool}.output_path")
             write_intel_hex_file(Path(str(output["resolved_path"])), int(resolved["address_value"]), memory["data"])
-        except OSError as error:
+        except (ConfigError, OSError) as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "output_write_failed", "summary": "Intel HEX output file could not be written.", "backend_error": str(error)})
         self._write_session_log(session)
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "output": output, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol memory dumped as Intel HEX."})
@@ -593,13 +608,7 @@ class GdbDebugSessions:
                 errors.append(("gdb", error))
         if session.server.poll() is None:
             try:
-                session.server.terminate()
-                with suppress(subprocess.TimeoutExpired):
-                    session.server.wait(timeout=timeout_s)
-                if session.server.poll() is None:
-                    session.server.kill()
-                    with suppress(subprocess.TimeoutExpired):
-                        session.server.wait(timeout=timeout_s)
+                terminate_process_tree(session.server, timeout_s)
                 if session.server.poll() is None:
                     raise RuntimeError("Debug server remained active after kill.")
             except Exception as error:
