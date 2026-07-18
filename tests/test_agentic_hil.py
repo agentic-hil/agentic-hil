@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import (
@@ -146,6 +147,28 @@ def test_migrate_config_yaml_error_does_not_echo_secret(tmp_path: Path, monkeypa
     assert "line" in rejected.value.details
 
 
+def test_migrate_config_rejects_non_string_mapping_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("can_buses:\n  1: {}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_invalid"
+    assert result["line"] == 2
+    assert result["column"] == 3
+    assert "backend_error" not in result
+
+
 def test_write_exclusive_text_removes_incomplete_target_on_fsync_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "config.yaml"
 
@@ -223,6 +246,85 @@ def test_migrate_config_reports_destination_io_failure(tmp_path: Path, monkeypat
     assert exit_code == 1
     assert result["error_type"] == "config_write_failed"
     assert "secret path detail" not in json.dumps(result)
+
+
+def test_migrate_config_cleans_target_after_post_write_io_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
+    target = initialized_config_path(workspace)
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret detail")))
+
+    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_write_failed"
+    assert "secret detail" not in json.dumps(result)
+    assert not target.exists()
+
+
+def test_migrate_config_cleans_target_after_post_write_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
+    target = initialized_config_path(workspace)
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        migrate_config(str(legacy))
+
+    assert not target.exists()
+
+
+def test_migrate_config_cleans_validation_temp_after_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
+    target = initialized_config_path(workspace)
+    monkeypatch.setattr("agentic_hil.cli.os.fsync", lambda _descriptor: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        migrate_config(str(legacy))
+
+    assert not target.exists()
+    assert target.parent.exists()
+    assert list(target.parent.iterdir()) == []
+
+
+def test_migrate_config_parent_collision_is_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
+    target = initialized_config_path(workspace)
+    target.parent.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.write_text("not a directory", encoding="utf-8")
+
+    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_write_failed"
 
 
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
@@ -757,6 +859,66 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
     terminate_process_tree(child, 1.0)
 
     assert not pid_alive(descendant_pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended-start regression")
+def test_windows_process_does_not_run_before_job_registration(tmp_path: Path) -> None:
+    marker = tmp_path / "started"
+    child = subprocess.Popen([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)], **process_group_kwargs())
+    try:
+        time.sleep(0.1)
+        assert not marker.exists()
+        register_process_group(child)
+        child.wait(timeout=5)
+        assert marker.read_text(encoding="utf-8") == "started"
+        terminate_process_tree(child, 1.0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows fail-closed registration regression")
+def test_windows_job_setup_failure_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: (_ for _ in ()).throw(OSError("job setup failed")))
+
+    with pytest.raises(OSError, match="job setup failed"):
+        register_process_group(child)
+
+    assert child.poll() is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows missing Job Object regression")
+def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: None)
+
+    with pytest.raises(OSError, match="no containment handle"):
+        register_process_group(child)
+
+    assert child.poll() is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object verification regression")
+def test_windows_job_cleanup_reports_remaining_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = SimpleNamespace(_agentic_hil_job_handle=123, wait=lambda timeout: 0, poll=lambda: 0)
+    closed: list[int] = []
+    monkeypatch.setattr("agentic_hil.process._terminate_windows_job", lambda handle: None)
+    monkeypatch.setattr("agentic_hil.process._wait_for_windows_job", lambda handle, timeout: False)
+    monkeypatch.setattr("agentic_hil.process._close_windows_handle", lambda handle: closed.append(handle))
+
+    with pytest.raises(RuntimeError, match="retained active processes"):
+        terminate_process_tree(child, 0.1)  # type: ignore[arg-type]
+
+    assert closed == []
+    assert child._agentic_hil_job_handle == 123
+
+    monkeypatch.setattr("agentic_hil.process._wait_for_windows_job", lambda handle, timeout: True)
+    terminate_process_tree(child, 0.1)  # type: ignore[arg-type]
+
+    assert closed == [123]
+    assert child._agentic_hil_job_handle is None
+    assert child._agentic_hil_tree_reaped is True
 
 
 def test_process_can_adapter_close_reaps_child() -> None:

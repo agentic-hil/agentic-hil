@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -10,7 +12,9 @@ from pathlib import Path
 
 from agentic_hil.config import (
     ConfigError,
+    atomic_write_text,
     display_path,
+    is_path_within_frozen,
     safe_append_text,
     safe_configured_directory,
     safe_file_lock,
@@ -60,7 +64,24 @@ def last_failure_path(config: AgenticHILConfig) -> str:
 
 
 def report_lock_path(config: AgenticHILConfig) -> str:
-    return str(Path(reports_directory(config)) / ".report-pair.lock")
+    return str(report_state_directory(config) / ".report-state.lock")
+
+
+def report_state_path(config: AgenticHILConfig) -> str:
+    return str(report_state_directory(config) / "report-state.json")
+
+
+def report_state_directory(config: AgenticHILConfig) -> Path:
+    workspace = Path(config.work_dir)
+    config_directory = Path(config.config_path).resolve().parent
+    if not is_path_within_frozen(config_directory, workspace):
+        directory = config_directory
+    else:
+        identity = os.path.normcase(str(workspace.resolve()))
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        directory = Path(tempfile.gettempdir()).resolve() / "agentic-hil" / "report-state" / digest
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory
 
 
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
@@ -69,21 +90,108 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     try:
         report_path = last_report_path(config)
         enriched.setdefault("report_path", display_path(config, report_path))
-        with safe_file_lock(report_lock_path(config), workspace=config.work_dir):
+        with safe_file_lock(report_lock_path(config)):
+            state = load_or_initialize_report_state(config)
+            try:
+                if is_failure_report(enriched):
+                    safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
+                safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
+            except (ConfigError, OSError, ValueError) as error:
+                enriched = mark_audit_failure(enriched, error)
+            state["last_report"] = enriched
             if is_failure_report(enriched):
-                safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
-            safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
+                state["last_failure"] = enriched
+            write_report_state(config, state)
     except (ConfigError, OSError, ValueError) as error:
         return mark_audit_failure(enriched, error)
     return enriched
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:
-    return read_report_file(config, last_report_path, "get_last_report", "No Agentic HIL report has been written yet.")
+    return read_report_state_entry(config, "last_report", last_report_path, "get_last_report", "No Agentic HIL report has been written yet.")
 
 
 def read_last_failure(config: AgenticHILConfig) -> JsonObject:
-    return read_report_file(config, last_failure_path, "classify_last_error", "No Agentic HIL failure has been recorded yet.")
+    return read_report_state_entry(config, "last_failure", last_failure_path, "classify_last_error", "No Agentic HIL failure has been recorded yet.")
+
+
+def read_report_state_entry(
+    config: AgenticHILConfig,
+    key: str,
+    legacy_path_factory: Callable[[AgenticHILConfig], str],
+    tool: str,
+    missing_summary: str,
+) -> JsonObject:
+    state_path = report_state_path(config)
+    try:
+        with safe_file_lock(report_lock_path(config)):
+            state = read_report_state(config)
+            if state is None:
+                return read_report_file(config, legacy_path_factory, tool, missing_summary)
+            report = state.get(key)
+            if isinstance(report, dict):
+                return report
+            return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary}
+    except ConfigError as error:
+        return {"tool": tool, **error.to_dict()}
+    except (OSError, ValueError) as error:
+        return {
+            "ok": False,
+            "tool": tool,
+            "error_type": "report_unreadable",
+            "summary": "Agentic HIL report state could not be read.",
+            "report_path": state_path,
+            "backend_error": str(error),
+        }
+
+
+def read_report_state(config: AgenticHILConfig) -> JsonObject | None:
+    path = report_state_path(config)
+    try:
+        text = safe_read_text(path)
+    except FileNotFoundError:
+        return None
+    try:
+        state = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("config_invalid", "Agentic HIL report state is not valid JSON.", {"path": path}) from error
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise ConfigError("config_invalid", "Agentic HIL report state has an unsupported format.", {"path": path})
+    for key in ("last_report", "last_failure"):
+        if state.get(key) is not None and not isinstance(state.get(key), dict):
+            raise ConfigError("config_invalid", "Agentic HIL report state contains an invalid entry.", {"path": path, "field": key})
+    return state
+
+
+def load_or_initialize_report_state(config: AgenticHILConfig) -> JsonObject:
+    state = read_report_state(config)
+    if state is not None:
+        return state
+    state = {
+        "version": 1,
+        "last_report": read_legacy_report(config, last_report_path(config)),
+        "last_failure": read_legacy_report(config, last_failure_path(config)),
+    }
+    write_report_state(config, state)
+    return state
+
+
+def read_legacy_report(config: AgenticHILConfig, path: str) -> JsonObject | None:
+    try:
+        text = safe_read_text(path, workspace=config.work_dir)
+    except FileNotFoundError:
+        return None
+    try:
+        report = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("config_invalid", "Legacy Agentic HIL report is not valid JSON.", {"path": display_path(config, path)}) from error
+    if not isinstance(report, dict):
+        raise ConfigError("config_invalid", "Legacy Agentic HIL report root must be an object.", {"path": display_path(config, path)})
+    return report
+
+
+def write_report_state(config: AgenticHILConfig, state: JsonObject) -> None:
+    atomic_write_text(report_state_path(config), json.dumps(state, indent=2) + "\n")
 
 
 def read_report_file(config: AgenticHILConfig, path_factory: Callable[[AgenticHILConfig], str], tool: str, missing_summary: str) -> JsonObject:
@@ -167,8 +275,10 @@ def ensure_audit_ready(config: AgenticHILConfig) -> None:
                 probe.unlink()
     safe_file_path(last_report_path(config), config.work_dir)
     safe_file_path(last_failure_path(config), config.work_dir)
-    with safe_file_lock(report_lock_path(config), workspace=config.work_dir):
-        pass
+    safe_file_path(report_state_path(config))
+    with safe_file_lock(report_lock_path(config)):
+        state = load_or_initialize_report_state(config)
+        write_report_state(config, state)
 
 
 def audit_unavailable(tool: str, error: Exception) -> JsonObject:

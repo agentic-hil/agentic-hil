@@ -302,6 +302,9 @@ def migrate_config(source: str) -> JsonObject:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         text = yaml.safe_dump(migrated, sort_keys=False)
         validate_migrated_text(text, target_path, workspace)
+    except OSError as error:
+        raise ConfigError("config_write_failed", "Migrated Agentic HIL configuration could not be written.", {"path": str(target_path)}) from error
+    try:
         write_exclusive_text(target_path, text)
     except FileExistsError:
         return {"ok": False, "error_type": "config_exists", "summary": "Authoritative Agentic HIL configuration already exists; migration will not overwrite it.", "path": str(target_path)}
@@ -310,9 +313,11 @@ def migrate_config(source: str) -> JsonObject:
     previous = os.environ.pop(CONFIG_ENV, None)
     try:
         load_authoritative_config(workspace)
-    except Exception:
+    except BaseException as error:
         with suppress(FileNotFoundError):
             target_path.unlink()
+        if isinstance(error, OSError):
+            raise ConfigError("config_write_failed", "Migrated Agentic HIL configuration failed post-write validation.", {"path": str(target_path)}) from error
         raise
     finally:
         if previous is not None:
@@ -382,14 +387,18 @@ def require_migration_mapping(raw: JsonObject, field: str) -> JsonObject:
 
 
 def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> None:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target_path.parent, delete=False) as handle:
-        temporary_path = Path(handle.name)
-        handle.write(text)
+    temporary_path: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target_path.parent, delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         pin_configured_executables(pin_configured_paths(load_config(str(temporary_path), str(workspace))))
     finally:
-        with suppress(FileNotFoundError):
-            temporary_path.unlink()
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                temporary_path.unlink()
 
 
 def write_exclusive_text(path: Path, text: str) -> None:

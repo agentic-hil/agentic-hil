@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -30,7 +31,15 @@ from agentic_hil.config import (
 )
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.mcp import handle_mcp_message
-from agentic_hil.report import append_jsonl, ensure_audit_ready, write_report
+from agentic_hil.report import (
+    append_jsonl,
+    ensure_audit_ready,
+    read_last_failure,
+    read_last_report,
+    report_lock_path,
+    report_state_path,
+    write_report,
+)
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig
@@ -270,6 +279,48 @@ def test_bridge_stderr_is_capped_and_surfaced_in_errors() -> None:
     assert len(error["stderr_tail"]) <= 2000
 
 
+def test_bridge_close_propagates_reap_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = SimpleNamespace(stdout=[], stderr=[], poll=lambda: 0)
+    session = ProcessBridgeSession(child)
+    monkeypatch.setattr(
+        "agentic_hil.bridge.terminate_process_tree",
+        lambda process, timeout: (_ for _ in ()).throw(subprocess.TimeoutExpired("bridge", timeout)),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        session.close()
+
+    assert session.closed is False
+
+
+def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Path) -> None:
+    adapters_yaml = f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n    channels: ["temperature"]\n'
+    config = load_test_config(tmp_path, adapters_yaml=adapters_yaml)
+    service = AdapterService(config)
+
+    def fail_close() -> None:
+        raise subprocess.TimeoutExpired("bridge", 1)
+
+    bridge = SimpleNamespace(close=fail_close, status=lambda: {"active": True})
+    session = SimpleNamespace(
+        adapter_id="ntc",
+        adapter_config=config.adapters["ntc"],
+        bridge=bridge,
+        log_path=str(tmp_path / ".agentic-hil" / "logs" / "adapter.jsonl"),
+        started_at="now",
+        active=True,
+    )
+    service.sessions["ntc"] = session
+
+    result = service.session_stop("ntc")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_bridge_close_failed"
+    assert service.sessions["ntc"] is session
+    assert session.active is True
+    service.sessions.clear()
+
+
 def test_debug_set_breakpoint_requires_location(tmp_path: Path) -> None:
     service = AgenticHILToolService(load_test_config(tmp_path))
 
@@ -461,6 +512,23 @@ def test_raw_config_rejects_duplicate_keys(tmp_path: Path) -> None:
 
     assert rejected.value.error_type == "config_invalid"
     assert "valid YAML" in rejected.value.summary
+
+
+@pytest.mark.parametrize("section", ["devices", "com_ports", "can_buses", "adapters"])
+@pytest.mark.parametrize("non_string_key", ["1", "true", "2026-07-18"])
+def test_raw_config_rejects_non_string_mapping_keys(tmp_path: Path, section: str, non_string_key: str) -> None:
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace(f"{section}: {{}}", f"{section}:\n  {non_string_key}: {{}}"), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_config(str(config_path))
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["path"] == str(config_path.resolve())
+    assert rejected.value.details["line"] > 0
+    assert rejected.value.details["column"] > 0
+    assert "backend_error" not in rejected.value.details
 
 
 def test_authoritative_config_pins_external_can_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -977,6 +1045,49 @@ def test_report_pair_lock_keeps_last_files_on_same_operation(tmp_path: Path, mon
     reports = tmp_path / ".agentic-hil" / "reports"
     assert json.loads((reports / "last-report.json").read_text(encoding="utf-8"))["operation"] == "B"
     assert json.loads((reports / "last-failure.json").read_text(encoding="utf-8"))["operation"] == "B"
+
+
+def test_canonical_report_state_and_lock_are_outside_workspace(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+
+    result = write_report(config, {"ok": False, "operation": "A", "error_type": "test_failure"})
+
+    assert result["audit_ok"] is True
+    assert not Path(report_state_path(config)).is_relative_to(tmp_path)
+    assert not Path(report_lock_path(config)).is_relative_to(tmp_path)
+
+
+def test_canonical_report_state_ignores_mismatched_compatibility_snapshots(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    write_report(config, {"ok": False, "operation": "A", "error_type": "test_failure"})
+    reports = tmp_path / ".agentic-hil" / "reports"
+    reports.joinpath("last-report.json").write_text('{"ok": false, "operation": "B"}\n', encoding="utf-8")
+    reports.joinpath("last-failure.json").write_text('{"ok": false, "operation": "B"}\n', encoding="utf-8")
+
+    assert read_last_report(config)["operation"] == "A"
+    assert read_last_failure(config)["operation"] == "A"
+
+
+def test_second_snapshot_failure_is_recorded_atomically_in_canonical_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    from agentic_hil import report as report_module
+
+    original_write = report_module.safe_write_text
+
+    def fail_last_report(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("disk full")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "safe_write_text", fail_last_report)
+
+    result = write_report(config, {"ok": False, "operation": "B", "error_type": "test_failure"})
+
+    assert result["audit_ok"] is False
+    assert read_last_report(config)["operation"] == "B"
+    assert read_last_report(config)["audit_ok"] is False
+    assert read_last_failure(config)["operation"] == "B"
+    assert read_last_failure(config)["audit_ok"] is False
 
 
 def test_last_failure_write_failure_does_not_persist_successful_last_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

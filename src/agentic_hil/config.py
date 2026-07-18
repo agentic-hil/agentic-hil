@@ -67,6 +67,13 @@ def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, de
     result: JsonObject = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, str):
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found a non-string mapping key",
+                key_node.start_mark,
+            )
         try:
             duplicate = key in result
         except TypeError as error:
@@ -131,10 +138,14 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"path": resolved_config_path},
         ) from error
     except yaml.YAMLError as error:
+        details: JsonObject = {"path": resolved_config_path}
+        mark = getattr(error, "problem_mark", None)
+        if mark is not None:
+            details.update({"line": mark.line + 1, "column": mark.column + 1})
         raise ConfigError(
             "config_invalid",
             "Agentic HIL configuration file is not valid YAML.",
-            {"path": resolved_config_path},
+            details,
         ) from error
 
     raw: Any = loaded or {}
