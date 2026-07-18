@@ -501,10 +501,14 @@ def safe_configured_directory(config: AgenticHILConfig, requested_path: str, fie
 
 def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
     path = _validated_absolute_file_path(file_path, workspace)
-    if path.parent.resolve() != path.parent or path.is_symlink() or (path.exists() and os.lstat(path).st_nlink > 1):
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if path.parent.resolve() != path.parent or (existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1)):
         raise ConfigError(
             "unsafe_configured_path",
-            "Output file or its parent directory contains a symlink.",
+            "Output file must be a single-link regular file without symlinked parents.",
             {"path": str(path)},
         )
     return path
@@ -575,6 +579,55 @@ def _path_lock(path: Path) -> Iterator[None]:
                     _PATH_LOCKS.pop(key, None)
                 else:
                     _PATH_LOCKS[key] = (lock, current[1] - 1)
+
+
+@contextmanager
+def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None) -> Iterator[None]:
+    path = _validated_absolute_file_path(file_path, workspace)
+    with _path_lock(path):
+        if os.name != "nt":
+            parent_descriptor = _open_directory_fd(path.parent)
+            descriptor = -1
+            try:
+                flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+                _validate_open_file(descriptor, path)
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent_descriptor)
+            return
+
+        directory_handles = _windows_hold_directory_chain(path.parent)
+        descriptor = -1
+        try:
+            path = safe_file_path(path, workspace)
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+            opened = _validate_open_file(descriptor, path)
+            if not os.path.samestat(opened, os.stat(path, follow_symlinks=False)):
+                raise ConfigError("unsafe_configured_path", "Lock file changed while it was being opened.", {"path": str(path)})
+            if opened.st_size == 0:
+                os.write(descriptor, b"0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            _close_windows_handles(directory_handles)
 
 
 def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> list[int]:

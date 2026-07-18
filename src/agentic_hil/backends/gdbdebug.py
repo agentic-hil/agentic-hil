@@ -606,13 +606,12 @@ class GdbDebugSessions:
                 session.gdb.close(timeout_s)
             except Exception as error:
                 errors.append(("gdb", error))
-        if session.server.poll() is None:
-            try:
-                terminate_process_tree(session.server, timeout_s)
-                if session.server.poll() is None:
-                    raise RuntimeError("Debug server remained active after kill.")
-            except Exception as error:
-                errors.append(("debug_server", error))
+        try:
+            terminate_process_tree(session.server, timeout_s)
+            if session.server.poll() is None:
+                raise RuntimeError("Debug server remained active after kill.")
+        except Exception as error:
+            errors.append(("debug_server", error))
         self._write_session_log(session)
         if errors:
             return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)

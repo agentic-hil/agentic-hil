@@ -281,6 +281,8 @@ def migrate_config(source: str) -> JsonObject:
         raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid UTF-8 text.", {"path": str(source_path)}) from error
     except yaml.YAMLError as error:
         raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid YAML.", yaml_error_details(error, source_path)) from error
+    except OSError as error:
+        raise ConfigError("config_unreadable", "Legacy Agentic HIL configuration could not be read.", {"path": str(source_path)}) from error
     if loaded is None:
         loaded = {}
     if not isinstance(loaded, dict):
@@ -289,15 +291,22 @@ def migrate_config(source: str) -> JsonObject:
     strip_empty_legacy_args(legacy, str(source_path))
     base = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE) or {}
     migrated = deep_merge(base, legacy)
+    debug = require_migration_mapping(migrated, "debug")
+    artifacts = require_migration_mapping(migrated, "artifacts")
     migrated["workspace_root"] = str(workspace)
-    migrated.setdefault("debug", {})["allow_all_symbols"] = False
-    migrated.setdefault("artifacts", {})["allow_upload"] = False
+    debug["allow_all_symbols"] = False
+    artifacts["allow_upload"] = False
     migrated["permissions"] = deny_all_permissions()
     validate_config_schema(migrated, str(target_path))
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(migrated, sort_keys=False)
-    validate_migrated_text(text, target_path, workspace)
-    write_exclusive_text(target_path, text)
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        text = yaml.safe_dump(migrated, sort_keys=False)
+        validate_migrated_text(text, target_path, workspace)
+        write_exclusive_text(target_path, text)
+    except FileExistsError:
+        return {"ok": False, "error_type": "config_exists", "summary": "Authoritative Agentic HIL configuration already exists; migration will not overwrite it.", "path": str(target_path)}
+    except OSError as error:
+        raise ConfigError("config_write_failed", "Migrated Agentic HIL configuration could not be written.", {"path": str(target_path)}) from error
     previous = os.environ.pop(CONFIG_ENV, None)
     try:
         load_authoritative_config(workspace)
@@ -365,6 +374,13 @@ def deny_all_permissions() -> JsonObject:
     }
 
 
+def require_migration_mapping(raw: JsonObject, field: str) -> JsonObject:
+    value = raw.get(field)
+    if not isinstance(value, dict):
+        raise ConfigError("config_invalid", f"{field} must be a mapping.", {"field": field})
+    return value
+
+
 def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target_path.parent, delete=False) as handle:
         temporary_path = Path(handle.name)
@@ -380,6 +396,7 @@ def write_exclusive_text(path: Path, text: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     descriptor = -1
     created = False
+    complete = False
     try:
         descriptor = os.open(path, flags, 0o600)
         created = True
@@ -388,14 +405,15 @@ def write_exclusive_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-    except Exception:
-        if created:
-            with suppress(FileNotFoundError):
-                path.unlink()
-        raise
+        complete = True
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        try:
+            if descriptor >= 0:
+                os.close(descriptor)
+        finally:
+            if created and not complete:
+                with suppress(FileNotFoundError):
+                    path.unlink()
 
 
 def yaml_error_details(error: yaml.YAMLError, path: Path) -> JsonObject:

@@ -160,6 +160,71 @@ def test_write_exclusive_text_removes_incomplete_target_on_fsync_failure(tmp_pat
     assert not target.exists()
 
 
+def test_write_exclusive_text_removes_incomplete_target_on_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "config.yaml"
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        write_exclusive_text(target, "workspace_root: /tmp\n")
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("section_value", ["null", "[]"])
+@pytest.mark.parametrize("section", ["debug", "artifacts"])
+def test_migrate_config_rejects_wrong_shaped_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    section: str,
+    section_value: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text(f"{section}: {section_value}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == section
+
+
+def test_migrate_config_reports_source_io_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("agentic_hil.cli.safe_read_text", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret path detail")))
+
+    exit_code = entrypoint(["migrate-config", "--from", str((tmp_path / "legacy.yaml").resolve())])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_unreadable"
+    assert "secret path detail" not in json.dumps(result)
+
+
+def test_migrate_config_reports_destination_io_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.cli.write_exclusive_text", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret path detail")))
+
+    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "config_write_failed"
+    assert "secret path detail" not in json.dumps(result)
+
+
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "config.schema.json"
     result = schema(str(schema_path))
@@ -620,7 +685,8 @@ def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
 
 def pid_alive(pid: int) -> bool:
     if os.name == "nt":
-        return subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.count(str(pid)) > 0
+        output = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout
+        return str(pid).encode("ascii") in output
     try:
         os.kill(pid, 0)
         return True
@@ -674,6 +740,23 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
     finally:
         if child.poll() is None:
             child.kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
+def test_registered_windows_process_cleanup_kills_descendant_after_leader_exit(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    code = """
+import subprocess, sys
+descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+"""
+    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child.wait(timeout=5)
+    descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    terminate_process_tree(child, 1.0)
+
+    assert not pid_alive(descendant_pid)
 
 
 def test_process_can_adapter_close_reaps_child() -> None:

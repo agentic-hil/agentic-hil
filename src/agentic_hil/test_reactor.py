@@ -66,6 +66,21 @@ def propagate_result_status(aggregate: JsonObject, sources: list[JsonObject]) ->
             aggregate["target_error_type"] = target_failures[0]["target_error_type"]
 
 
+def merge_result_status(result: JsonObject, *sources: JsonObject) -> JsonObject:
+    merged = dict(result)
+    propagate_result_status(merged, list(sources))
+    retry_values = [source["retry_safe"] for source in sources if "retry_safe" in source]
+    if any(source.get("audit_ok") is False for source in sources):
+        merged["retry_safe"] = False
+    elif retry_values:
+        merged["retry_safe"] = all(value is not False for value in retry_values)
+    if any(source.get("audit_ok") is True for source in sources) and "audit_ok" not in merged:
+        merged["audit_ok"] = True
+    if any(source.get("target_ok") is True for source in sources) and "target_ok" not in merged:
+        merged["target_ok"] = True
+    return merged
+
+
 @dataclass(frozen=True)
 class TestStep:
     device: str
@@ -293,28 +308,31 @@ class Device:
 
     def _run_until_breakpoint(self, arguments: JsonObject) -> JsonObject:
         breakpoint_result = self.service.call("debug_set_breakpoint", {"location": arguments["location"]})
-        if breakpoint_result.get("ok") is not True:
+        if result_failed(breakpoint_result):
+            if breakpoint_result.get("side_effect_committed") is True or breakpoint_result.get("breakpoint"):
+                cleared = self.service.call("debug_clear_breakpoints")
+                return merge_result_status({**breakpoint_result, "breakpoint_cleanup": cleared}, breakpoint_result, cleared)
             return breakpoint_result
         continued = self.service.call("debug_continue", {"timeout_s": arguments.get("timeout_s")})
         cleared = self.service.call("debug_clear_breakpoints")
-        if cleared.get("ok") is not True:
-            if continued.get("ok") is not True:
-                return {**continued, "breakpoint_cleanup": cleared}
-            return {
+        if result_failed(cleared):
+            if result_failed(continued):
+                return merge_result_status({**continued, "breakpoint_cleanup": cleared}, breakpoint_result, continued, cleared)
+            return merge_result_status({
                 "ok": False,
                 "tool": "test_reactor",
-                "error_type": "breakpoint_cleanup_failed",
+                "error_type": result_error_type(cleared) if cleared.get("audit_ok") is False or cleared.get("target_ok") is False else "breakpoint_cleanup_failed",
                 "summary": "Target stopped, but the reactor breakpoint could not be removed.",
                 "device": self.id,
                 "breakpoint": breakpoint_result.get("breakpoint"),
                 "breakpoint_cleanup": cleared,
-            }
-        if continued.get("ok") is not True:
-            return continued
+            }, breakpoint_result, continued, cleared)
+        if result_failed(continued):
+            return merge_result_status(continued, breakpoint_result, continued, cleared)
         expected_id = breakpoint_result.get("breakpoint", {}).get("id")
         actual_id = continued.get("stop", {}).get("breakpoint_id")
         if continued.get("stop_reason") != "breakpoint_hit" or actual_id != expected_id:
-            return {
+            return merge_result_status({
                 "ok": False,
                 "tool": "test_reactor",
                 "error_type": "unexpected_stop",
@@ -322,15 +340,15 @@ class Device:
                 "device": self.id,
                 "expected_breakpoint_id": expected_id,
                 "stop": continued.get("stop"),
-            }
-        return {
+            }, breakpoint_result, continued, cleared)
+        return merge_result_status({
             "ok": True,
             "tool": "test_reactor",
             "summary": "Target stopped at the expected breakpoint.",
             "breakpoint": breakpoint_result["breakpoint"],
             "stop_reason": continued["stop_reason"],
             "stop": continued["stop"],
-        }
+        }, breakpoint_result, continued, cleared)
 
     def _capability_error(self, action: str, capability: str) -> JsonObject:
         return {

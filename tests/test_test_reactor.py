@@ -36,11 +36,12 @@ class FakeComPortService:
 
 
 class RecordingService:
-    def __init__(self, *, fail_cleanup: bool = False, raise_flash: bool = False, audit_flash_failure: bool = False) -> None:
+    def __init__(self, *, fail_cleanup: bool = False, raise_flash: bool = False, audit_flash_failure: bool = False, audit_failure_call: str | None = None) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.fail_cleanup = fail_cleanup
         self.raise_flash = raise_flash
         self.audit_flash_failure = audit_flash_failure
+        self.audit_failure_call = audit_failure_call
         self.breakpoint_id = 0
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
@@ -56,6 +57,12 @@ class RecordingService:
                 "side_effect_committed": True,
                 "retry_safe": False,
             }
+        if name == self.audit_failure_call:
+            result = {"ok": True, "audit_ok": False, "audit_error": {"error_type": "audit_failed"}, "side_effect_committed": True, "retry_safe": False}
+            if name == "debug_set_breakpoint":
+                self.breakpoint_id += 1
+                result["breakpoint"] = {"id": self.breakpoint_id}
+            return result
         if name == "com_session_start":
             return {"ok": True, "already_active": False}
         if name == "com_session_stop":
@@ -410,6 +417,31 @@ def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
     assert result["audit_ok"] is False
     assert result["retry_safe"] is False
     assert service.calls == [("flash_firmware", {"image_path": "build/app.elf"})]
+
+
+@pytest.mark.parametrize(
+    ("failed_call", "expected_calls"),
+    [
+        ("debug_set_breakpoint", ["debug_start_session", "debug_set_breakpoint", "debug_clear_breakpoints", "debug_stop_session"]),
+        ("debug_continue", ["debug_start_session", "debug_set_breakpoint", "debug_continue", "debug_clear_breakpoints", "debug_stop_session"]),
+        ("debug_clear_breakpoints", ["debug_start_session", "debug_set_breakpoint", "debug_continue", "debug_clear_breakpoints", "debug_stop_session"]),
+    ],
+)
+def test_run_until_breakpoint_propagates_internal_audit_failures(tmp_path: Path, failed_call: str, expected_calls: list[str]) -> None:
+    config = load_config(str(write_config(tmp_path, devices_yaml="devices:\n  dut:\n    debugger: true\n")))
+    plan_path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: dut, action: debug_start, image_path: build/app.elf}\n  - {device: dut, action: run_until_breakpoint, location: test_done}\n",
+    )
+    service = RecordingService(audit_failure_call=failed_call)
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["audit_ok"] is False
+    assert result["retry_safe"] is False
+    assert [name for name, _ in service.calls] == expected_calls
 
 
 def test_run_until_breakpoint_removes_each_owned_breakpoint(tmp_path: Path) -> None:

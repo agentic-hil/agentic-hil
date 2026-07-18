@@ -141,8 +141,7 @@ class GdbMiClient:
             self.command("-gdb-exit", min(GDB_EXIT_COMMAND_TIMEOUT_S, max(0.1, timeout_s)))
         with suppress(subprocess.TimeoutExpired):
             self.child.wait(timeout=max(0.1, timeout_s))
-        if self.child.poll() is None:
-            terminate_process_tree(self.child, timeout_s)
+        terminate_process_tree(self.child, timeout_s)
         if self.child.poll() is None:
             raise RuntimeError("GDB process remained active after kill.")
 

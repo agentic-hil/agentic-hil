@@ -13,6 +13,7 @@ from agentic_hil.config import (
     display_path,
     safe_append_text,
     safe_configured_directory,
+    safe_file_lock,
     safe_file_path,
     safe_read_text,
     safe_write_text,
@@ -58,15 +59,20 @@ def last_failure_path(config: AgenticHILConfig) -> str:
     return str(Path(reports_directory(config)) / "last-failure.json")
 
 
+def report_lock_path(config: AgenticHILConfig) -> str:
+    return str(Path(reports_directory(config)) / ".report-pair.lock")
+
+
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched = dict(report)
     enriched.setdefault("audit_ok", True)
     try:
         report_path = last_report_path(config)
         enriched.setdefault("report_path", display_path(config, report_path))
-        if is_failure_report(enriched):
-            safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
-        safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
+        with safe_file_lock(report_lock_path(config), workspace=config.work_dir):
+            if is_failure_report(enriched):
+                safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
+            safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
     except (ConfigError, OSError, ValueError) as error:
         return mark_audit_failure(enriched, error)
     return enriched
@@ -161,6 +167,8 @@ def ensure_audit_ready(config: AgenticHILConfig) -> None:
                 probe.unlink()
     safe_file_path(last_report_path(config), config.work_dir)
     safe_file_path(last_failure_path(config), config.work_dir)
+    with safe_file_lock(report_lock_path(config), workspace=config.work_dir):
+        pass
 
 
 def audit_unavailable(tool: str, error: Exception) -> JsonObject:

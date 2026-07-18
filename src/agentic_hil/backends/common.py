@@ -36,6 +36,7 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
         ))
         try:
             stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
             timed_out = False
         except subprocess.TimeoutExpired:
             terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)

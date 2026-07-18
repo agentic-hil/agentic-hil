@@ -15,6 +15,7 @@ from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, 
 
 from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import ProcessBridgeSession
 from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
@@ -27,6 +28,7 @@ from agentic_hil.config import (
     load_authoritative_config,
     load_config,
 )
+from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import append_jsonl, ensure_audit_ready, write_report
 from agentic_hil.stdio import run_stdio_server
@@ -850,6 +852,34 @@ def test_post_action_report_failure_preserves_committed_flash_result(tmp_path: P
     assert result["audit_error"]["backend_error"] == "disk full"
 
 
+def test_gdbmi_close_always_runs_process_tree_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = SimpleNamespace(poll=lambda: 0, wait=lambda timeout: 0)
+    client = object.__new__(GdbMiClient)
+    client.child = child
+    client.exited = threading.Event()
+    client.exited.set()
+    calls: list[object] = []
+    monkeypatch.setattr("agentic_hil.gdbmi.terminate_process_tree", lambda process, timeout: calls.append(process))
+
+    client.close(0.1)
+
+    assert calls == [child]
+
+
+def test_debug_server_cleanup_runs_after_leader_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = SimpleNamespace(poll=lambda: 0)
+    sessions = object.__new__(GdbDebugSessions)
+    sessions._write_session_log = lambda session: None
+    session = SimpleNamespace(gdb=None, server=child)
+    calls: list[object] = []
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.terminate_process_tree", lambda process, timeout: calls.append(process))
+
+    result = sessions._cleanup_session(session, 0.1)
+
+    assert result is None
+    assert calls == [child]
+
+
 def test_audit_ready_rejects_last_failure_symlink(tmp_path: Path) -> None:
     config = load_test_config(tmp_path)
     reports = tmp_path / ".agentic-hil" / "reports"
@@ -884,6 +914,69 @@ def test_audit_ready_rejects_last_failure_hardlink(tmp_path: Path) -> None:
         ensure_audit_ready(config)
 
     assert rejected.value.error_type == "unsafe_configured_path"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO regression")
+def test_audit_ready_rejects_fifo_before_hardware_runs(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    reports = tmp_path / ".agentic-hil" / "reports"
+    reports.mkdir(parents=True)
+    os.mkfifo(reports / "last-failure.json")
+    calls: list[str] = []
+    backend = SimpleNamespace(probe_target=lambda: calls.append("hardware") or {"ok": True}, close=lambda: None)
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["error_type"] == "audit_unavailable"
+    assert result["audit_ok"] is False
+    assert calls == []
+
+
+def test_report_pair_lock_keeps_last_files_on_same_operation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    from agentic_hil import report as report_module
+
+    original_write = report_module.safe_write_text
+    first_failure_started = threading.Event()
+    release_first = threading.Event()
+    second_write_started = threading.Event()
+
+    def controlled_write(config, path, text, **kwargs):
+        payload = json.loads(text)
+        if payload["operation"] == "A" and Path(path).name == "last-failure.json":
+            first_failure_started.set()
+            assert release_first.wait(5)
+        if payload["operation"] == "B":
+            second_write_started.set()
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "safe_write_text", controlled_write)
+    failures: list[Exception] = []
+
+    def write(operation: str) -> None:
+        try:
+            write_report(config, {"ok": False, "operation": operation, "error_type": "test_failure"})
+        except Exception as error:
+            failures.append(error)
+
+    first = threading.Thread(target=write, args=("A",))
+    second = threading.Thread(target=write, args=("B",))
+    first.start()
+    assert first_failure_started.wait(5)
+    second.start()
+    assert not second_write_started.wait(0.1)
+    release_first.set()
+    first.join(5)
+    second.join(5)
+
+    assert failures == []
+    assert not first.is_alive() and not second.is_alive()
+    reports = tmp_path / ".agentic-hil" / "reports"
+    assert json.loads((reports / "last-report.json").read_text(encoding="utf-8"))["operation"] == "B"
+    assert json.loads((reports / "last-failure.json").read_text(encoding="utf-8"))["operation"] == "B"
 
 
 def test_last_failure_write_failure_does_not_persist_successful_last_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
