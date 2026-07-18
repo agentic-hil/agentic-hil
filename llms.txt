@@ -62,6 +62,6 @@ Required workflow:
 
 pytest: installing `agentic-hil` registers the Python plugin `agentic_hil`; the `agentic_hil` fixture drives the same tools in CI regression suites.
 
-Safety: do not request raw OpenOCD commands, do not open host serial/CAN/adapter devices directly, do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative.
+Safety: do not request raw OpenOCD commands, do not open host serial/CAN/adapter devices directly, do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative. Treat `hardware_state_unconfirmed` as a hard stop: run `agentic-hil hardware-status`, do not delete marker files, and ask an operator to recover with `agentic-hil hardware-recover --quarantine-id <id> --acknowledge-hardware-checked` only after physical inspection.
 
 Agent setup guide: AI_AGENT_QUICKSTART.md. Human docs: README.md, TROUBLESHOOTING.md.

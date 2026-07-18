@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from io import BytesIO, StringIO
@@ -11,12 +14,18 @@ import pytest
 from conftest import write_config
 
 from agentic_hil.adapters import AdapterService, AdapterSession
-from agentic_hil.bridge import ProcessBridgeSession
+from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession
 from agentic_hil.can import parse_can_id, payload_frame
+from agentic_hil.cli import hardware_recover
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
-from agentic_hil.hardware_lock import HardwareQuarantinedError, ProjectHardwareLock
+from agentic_hil.hardware_lock import (
+    HardwareLockError,
+    HardwareQuarantinedError,
+    ProjectHardwareLock,
+    hardware_state_directory,
+)
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
@@ -240,11 +249,159 @@ def test_com_stdio_quarantines_project_when_cleanup_leaves_active_port(tmp_path:
         ProjectHardwareLock(config.config_path).acquire()
 
 
+def test_quarantine_requires_owned_lock(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+
+    with pytest.raises(HardwareLockError):
+        lock.mark_quarantined(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_hardware_state_files_use_private_permissions(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    try:
+        assert lock.state_dir.stat().st_mode & 0o777 == 0o700
+        assert lock.path.stat().st_mode & 0o777 == 0o600
+        assert lock.state_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        lock.release()
+
+
+def test_relative_state_home_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"
+    monkeypatch.setenv(variable, "relative-state")
+    monkeypatch.chdir(tmp_path)
+
+    assert hardware_state_directory().is_absolute()
+    assert not hardware_state_directory().is_relative_to(tmp_path)
+
+
+def test_relative_state_home_and_fallback_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"
+    monkeypatch.setenv(variable, "relative-state")
+    monkeypatch.setattr(Path, "home", lambda: Path("relative-home"))
+
+    with pytest.raises(HardwareLockError, match="not absolute"):
+        hardware_state_directory()
+
+
+def test_invalid_state_markers_get_content_bound_recovery_ids(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    lock._ensure_state_directory()
+    lock.state_path.write_text("{}", encoding="utf-8")
+    first = lock.status()["state"]
+    lock.state_path.write_text("[]", encoding="utf-8")
+    second = lock.status()["state"]
+
+    assert first["state"] == "quarantined"
+    assert first["quarantine_id"] != second["quarantine_id"]
+    stale = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first["quarantine_id"]))
+    assert stale["error_type"] == "quarantine_changed"
+
+
+def test_state_directory_fsync_failure_leaves_fail_closed_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    lock._ensure_state_directory()
+    lock.path.touch()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lock, "_ensure_state_directory", lambda: None)
+        patch.setattr("agentic_hil.hardware_lock.fsync_directory", lambda *_: (_ for _ in ()).throw(OSError("fsync failed")))
+        with pytest.raises(HardwareLockError, match="fsync failed"):
+            lock.acquire(source="test")
+
+    assert lock.handle is None
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config.config_path).acquire(source="test")
+
+
+def test_acquire_rechecks_state_after_os_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    original_acquire = lock._acquire_os_lock
+
+    def acquire_then_publish_state() -> bool:
+        acquired = original_acquire()
+        if acquired:
+            marker = lock._new_state("quarantined", source="race")
+            marker["reason"] = "hardware_cleanup_failed"
+            lock._write_state(marker)
+        return acquired
+
+    monkeypatch.setattr(lock, "_acquire_os_lock", acquire_then_publish_state)
+
+    with pytest.raises(HardwareQuarantinedError) as excinfo:
+        lock.acquire(source="test")
+
+    assert excinfo.value.details["state"] == "quarantined"
+    recovery = ProjectHardwareLock(config.config_path)
+    assert recovery.acquire(recovery=True, source="test") is True
+    recovery.clear_quarantine()
+    recovery.release_os_lock()
+
+
+def test_active_marker_blocks_after_owner_exits(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    script = """
+import sys
+from agentic_hil.hardware_lock import ProjectHardwareLock
+lock = ProjectHardwareLock(sys.argv[1])
+if not lock.acquire(source='crash_test'):
+    raise SystemExit(2)
+"""
+    completed = subprocess.run([sys.executable, "-c", script, str(config_path)], capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(str(config_path)).acquire()
+
+    recovery = ProjectHardwareLock(str(config_path))
+    assert recovery.acquire(recovery=True, source="test") is True
+    recovery.clear_quarantine()
+    recovery.release_os_lock()
+
+
+def test_hardware_status_reports_foreign_lock_busy(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    script = """
+import sys
+import time
+from agentic_hil.hardware_lock import ProjectHardwareLock
+lock = ProjectHardwareLock(sys.argv[1])
+if not lock.acquire(source='test'):
+    raise SystemExit(2)
+print('ready', flush=True)
+time.sleep(30)
+"""
+    child = subprocess.Popen([sys.executable, "-c", script, str(config_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        status = ProjectHardwareLock(str(config_path)).status()
+        assert status["busy"] is True
+        assert status["state"]["state"] == "active"
+        recovery = hardware_recover(str(config_path), acknowledge_hardware_checked=True, quarantine_id=str(status["state"]["lease_id"]))
+        assert recovery["error_type"] == "hardware_busy"
+    finally:
+        child.terminate()
+        child.wait(timeout=WAIT_TIMEOUT_S)
+        recovery = ProjectHardwareLock(str(config_path))
+        if recovery.acquire(recovery=True, source="test"):
+            recovery.clear_quarantine()
+            recovery.release_os_lock()
+
+
 def test_hardware_quarantine_is_project_scoped(tmp_path: Path) -> None:
     config_a = load_test_config(tmp_path / "a")
     config_b = load_test_config(tmp_path / "b")
     lock_a = ProjectHardwareLock(config_a.config_path)
-    lock_a.mark_quarantined(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
+    assert lock_a.acquire(source="test") is True
+    lock_a.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
 
     with pytest.raises(HardwareQuarantinedError):
         ProjectHardwareLock(config_a.config_path).acquire()
@@ -265,6 +422,56 @@ class ExplodingBridge:
         raise RuntimeError("bridge already gone")
 
 
+class UnsafeClosingBridge:
+    def __init__(self) -> None:
+        self.closed = False
+        self.last_close_result: BridgeCloseResult | None = None
+
+    def status(self) -> dict:
+        return {"active": not self.closed}
+
+    def close(self) -> BridgeCloseResult:
+        self.closed = True
+        self.last_close_result = BridgeCloseResult(process_reaped=True, safe_state_confirmed=False, close_response={"ok": False}, errors=["relay reset failed"])
+        return self.last_close_result
+
+
+def test_adapter_open_failure_retains_unconfirmed_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    bridge = UnsafeClosingBridge()
+    monkeypatch.setattr(
+        "agentic_hil.adapters.open_adapter_bridge",
+        lambda *_: {"ok": False, "error_type": "adapter_open_failed", "session": bridge, "cleanup_unconfirmed": True},
+    )
+    service = AdapterService(config)
+
+    result = service.session_start("ntc")
+
+    assert result["ok"] is False
+    assert service.active_session_ids() == ["ntc"]
+    assert service.cleanup_inspection_errors() == [{"id": "ntc", "error": "Physical safe state was not confirmed during adapter cleanup."}]
+
+
+def test_interrupted_adapter_open_quarantines_provisional_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    bridge = UnsafeClosingBridge()
+
+    def interrupted_open(*args, **kwargs):
+        on_started = args[3]
+        on_started(bridge)
+        bridge.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agentic_hil.adapters.open_adapter_bridge", interrupted_open)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("adapter_session_start", {"adapter_id": "ntc"})
+
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config.config_path).acquire()
+
+
 def test_adapter_service_close_stops_all_sessions_despite_bridge_failure(tmp_path: Path) -> None:
     config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
     service = AdapterService(config)
@@ -281,6 +488,38 @@ def test_adapter_service_close_stops_all_sessions_despite_bridge_failure(tmp_pat
     assert first.bridge.close_attempted and second.bridge.close_attempted
     assert first.active is False and second.active is False
     assert service.has_active_sessions() is True
+
+
+def test_tool_service_quarantines_unconfirmed_bridge_close(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    adapters = AdapterService(config)
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
+    log_dir = tmp_path / ".agentic-hil" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    adapters.sessions["ntc"] = AdapterSession("ntc", adapter_config, UnsafeClosingBridge(), str(log_dir / "ntc.jsonl"))
+    service = AgenticHILToolService(config, adapters=adapters, reload_config=False)
+
+    with pytest.raises(HardwareCleanupError):
+        service.close()
+
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config.config_path).acquire()
+
+
+def test_unconfirmed_bridge_stop_blocks_followup_hardware_action(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    adapters = AdapterService(config)
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
+    log_dir = tmp_path / ".agentic-hil" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    adapters.sessions["ntc"] = AdapterSession("ntc", adapter_config, UnsafeClosingBridge(), str(log_dir / "ntc.jsonl"))
+    service = AgenticHILToolService(config, adapters=adapters, reload_config=False)
+
+    with pytest.raises(RuntimeError, match="physical safe state"):
+        service.call("adapter_session_stop", {"adapter_id": "ntc"})
+
+    blocked = service.call("probe_target")
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
 
 
 class FailingCleanupSubsystem:
@@ -329,7 +568,8 @@ def test_tool_service_close_attempts_every_subsystem_and_retains_unsafe_lease(tm
         assert [name for name, _ in excinfo.value.errors] == ["debugger", "can"]
         assert backend.close_calls == com_ports.close_calls == can_buses.close_calls == adapters.close_calls == 1
         second_lock = ProjectHardwareLock(config.config_path)
-        assert second_lock.acquire() is False
+        with pytest.raises(HardwareQuarantinedError):
+            second_lock.acquire()
     finally:
         service._hardware_lock.release()
 

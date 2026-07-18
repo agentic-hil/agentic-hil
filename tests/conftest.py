@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 pytest_plugins = ["pytester"]
 
@@ -11,6 +14,12 @@ FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
+
+
+@pytest.fixture(autouse=True)
+def isolate_hardware_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"
+    monkeypatch.setenv(variable, str(tmp_path / "state-home"))
 
 
 def write_config(

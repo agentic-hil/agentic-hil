@@ -18,7 +18,7 @@ from agentic_hil.report import write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import TestReactor, load_test_config, test_config_schema_text
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import JsonObject
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
@@ -123,6 +123,11 @@ def entrypoint(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         print_json(error.to_dict())
         return 1
+    except HardwareLockError as error:
+        print_json({"ok": False, "error_type": "hardware_lock_failed", "backend_error": str(error), "summary": "Project hardware state storage is unavailable."})
+        return 1
+    except KeyboardInterrupt:
+        return 130
     if isinstance(result, int):
         return result
     if result is not None:
@@ -168,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hardware_recover_parser = subparsers.add_parser("hardware-recover", help="clear project hardware quarantine after operator inspection")
     hardware_recover_parser.add_argument("--config", default=None)
+    hardware_recover_parser.add_argument("--quarantine-id", default=None)
     hardware_recover_parser.add_argument("--acknowledge-hardware-checked", action="store_true")
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
@@ -210,7 +216,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "hardware-status":
         return hardware_status(args.config)
     if args.command == "hardware-recover":
-        return hardware_recover(args.config, args.acknowledge_hardware_checked)
+        return hardware_recover(args.config, args.acknowledge_hardware_checked, args.quarantine_id)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "test-schema":
@@ -283,37 +289,54 @@ def run_test_reactor(config_path: str | None, test_config_path: str) -> JsonObje
 
 def hardware_status(config_path: str | None = None) -> JsonObject:
     config = load_config(config_path)
-    hardware_lock = ProjectHardwareLock(config.config_path)
-    quarantine = hardware_lock.quarantine_info()
-    return {
-        "ok": True,
-        "tool": "hardware_status",
-        "locked_by_current_process": hardware_lock.handle is not None,
-        "quarantined": quarantine is not None,
-        "quarantine": quarantine,
-    }
+    try:
+        hardware_lock = ProjectHardwareLock(config.config_path)
+        status = hardware_lock.status()
+    except HardwareLockError as error:
+        return {"ok": False, "tool": "hardware_status", "error_type": "hardware_status_failed", "backend_error": str(error), "summary": "Project hardware lock state could not be inspected."}
+    state = status.get("state")
+    quarantine_id = state.get("quarantine_id") if isinstance(state, dict) else None
+    return {"tool": "hardware_status", **status, "quarantine_id": quarantine_id, "quarantine": state if status.get("quarantined") else None}
 
 
-def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False) -> JsonObject:
+def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False, quarantine_id: str | None = None) -> JsonObject:
     config = load_config(config_path)
-    hardware_lock = ProjectHardwareLock(config.config_path)
     if not acknowledge_hardware_checked:
         return {"ok": False, "tool": "hardware_recover", "error_type": "acknowledgement_required", "summary": "Use --acknowledge-hardware-checked after confirming hardware is safe."}
+    if not quarantine_id:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Use --quarantine-id from hardware-status after confirming the exact hardware state is safe."}
     try:
-        acquired = hardware_lock.acquire(ignore_quarantine=True)
+        hardware_lock = ProjectHardwareLock(config.config_path)
+        acquired = hardware_lock.acquire(recovery=True, source="hardware_recover")
     except HardwareLockError as error:
         result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired for recovery.", "backend_error": str(error)}
-        return write_report(config, result)
+        return write_hardware_recovery_report(config, result)
     if not acquired:
         result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_busy", "summary": "Project hardware is in use by another Agentic HIL process."}
-        return write_report(config, result)
+        return write_hardware_recovery_report(config, result)
     try:
         previous = hardware_lock.quarantine_info()
+        if previous is not None and previous.get("recovery_blocked") is True:
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_state_unreadable", "summary": "Hardware state marker is unreadable; repair state-file access before recovery.", "state": previous}
+            return write_hardware_recovery_report(config, result)
+        if previous is None or previous.get("quarantine_id", previous.get("lease_id")) != quarantine_id:
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Hardware state marker changed after operator inspection.", "state": previous}
+            return write_hardware_recovery_report(config, result)
         hardware_lock.clear_quarantine()
-        result = {"ok": True, "tool": "hardware_recover", "recovered": previous is not None, "quarantine": previous, "summary": "Project hardware quarantine cleared after operator acknowledgement." if previous is not None else "Project hardware was not quarantined."}
-        return write_report(config, result)
+        result = {"ok": True, "tool": "hardware_recover", "recovered": True, "state": previous, "summary": "Project hardware state marker cleared after operator acknowledgement."}
+        return write_hardware_recovery_report(config, result)
+    except HardwareLockError as error:
+        result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_recovery_failed", "summary": "Project hardware state marker could not be cleared.", "backend_error": str(error)}
+        return write_hardware_recovery_report(config, result)
     finally:
-        hardware_lock.release()
+        hardware_lock.release_os_lock()
+
+
+def write_hardware_recovery_report(config: AgenticHILConfig, result: JsonObject) -> JsonObject:
+    try:
+        return write_report(config, result)
+    except Exception as error:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "audit_write_failed", "operation_result": result, "backend_error": str(error), "summary": "Hardware recovery result could not be written."}
 
 
 def schema(output: str | None = None, force: bool = False) -> JsonObject | None:

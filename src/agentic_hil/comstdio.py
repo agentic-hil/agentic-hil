@@ -28,11 +28,11 @@ def run_com_stdio(
     input_stream = input_stream or sys.stdin.buffer
     output_stream = output_stream or sys.stdout
     error_stream = error_stream or sys.stderr
-    hardware_lock = ProjectHardwareLock(config.config_path)
     try:
-        acquired = hardware_lock.acquire()
+        hardware_lock = ProjectHardwareLock(config.config_path)
+        acquired = hardware_lock.acquire(source="com_stdio")
     except HardwareQuarantinedError as error:
-        write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_state_unconfirmed", "summary": "Project hardware is quarantined after an incomplete cleanup.", "quarantine": error.details})
+        write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_state_unconfirmed", "summary": "Project hardware state is unconfirmed after an incomplete cleanup.", "quarantine": error.details})
         return 1
     except HardwareLockError as error:
         write_error(error_stream, {"ok": False, "tool": "com_stdio", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired.", "backend_error": str(error)})
@@ -102,7 +102,7 @@ def run_com_stdio(
                 hardware_state = {"active": True, "active_resources": [], "inspection_errors": [{"type": "com", "error": str(error)}]}
         if hardware_state["active"]:
             try:
-                quarantine = hardware_lock.mark_quarantined(
+                quarantine = hardware_lock.quarantine_and_release(
                     reason="hardware_cleanup_failed",
                     source="com_stdio",
                     active_resources=hardware_state["active_resources"],
@@ -110,8 +110,19 @@ def run_com_stdio(
                 )
             except HardwareLockError as error:
                 quarantine = {"reason": "quarantine_failed", "source": "com_stdio", "backend_error": str(error)}
+                hardware_lock.release_os_lock()
         else:
-            hardware_lock.release()
+            try:
+                hardware_lock.confirm_safe_and_release()
+            except HardwareLockError as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                hardware_state = {
+                    "active": True,
+                    "active_resources": hardware_state["active_resources"],
+                    "inspection_errors": [*hardware_state["inspection_errors"], {"type": "hardware_state", "error": str(error)}],
+                }
+                quarantine = hardware_lock.quarantine_info()
         if cleanup_error is not None or hardware_state["active"]:
             result: JsonObject = {
                 "ok": False,

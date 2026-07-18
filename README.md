@@ -224,7 +224,16 @@ Export the editor/validation schema with `agentic-hil test-schema --output agent
 - Deliberate interlock: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
 - Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
 - Test adapter channels and fault names are explicit allowlists — Agentic HIL rejects anything not named in the config before it reaches the adapter bridge.
+- Hardware access is protected by a project-scoped lease plus a persistent state marker. Agentic HIL writes `active` before the first hardware action, clears it only after confirmed cleanup, and leaves or upgrades it to `quarantined` when cleanup is unsafe or unconfirmed.
+- `hardware_state_unconfirmed` is authoritative: do not run more hardware actions until an operator has inspected the rig and used `hardware-status` / `hardware-recover`.
+- Process bridges must confirm physical safe state on close with `safe_state_confirmed: true`; a dead bridge process alone is not proof that relays, loads, or injected faults were reset.
 - All actions log to `.agentic-hil/logs/` and write a structured report to `.agentic-hil/reports/`.
+
+### Hardware quarantine
+
+Quarantine is created when cleanup cannot prove that debugger, COM, CAN, or adapter resources are inactive and physically safe. While an `active` or `quarantined` marker exists, new hardware actions fail closed with `hardware_state_unconfirmed`. Markers live under `${XDG_STATE_HOME:-~/.local/state}/agentic-hil/hardware/` on Linux/macOS and `%LOCALAPPDATA%\agentic-hil\hardware\` on Windows, not the project tree.
+
+Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN resources free, adapter faults and relays reset, and DUT outputs in a safe state. Then use the exact `quarantine_id` reported by status so a stale acknowledgement cannot clear a newer unsafe state.
 
 ## pytest Plugin
 
@@ -249,6 +258,8 @@ agentic-hil doctor
 agentic-hil debugger-probes --config .agentic-hil/config.yaml --debugger controller_probe
 agentic-hil com-ports
 agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/hardware/boot.yaml
+agentic-hil hardware-status --config .agentic-hil/config.yaml
+agentic-hil hardware-recover --config .agentic-hil/config.yaml --quarantine-id <id> --acknowledge-hardware-checked
 agentic-hil mcp-config --output .mcp.json
 agentic-hil mcp-stdio --config .agentic-hil/config.yaml
 agentic-hil com-stdio --config .agentic-hil/config.yaml --port dut_uart

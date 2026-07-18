@@ -4,12 +4,25 @@ import json
 import queue
 import subprocess
 import threading
+from dataclasses import dataclass
 
 from agentic_hil.types import JsonObject
 
 CHILD_REAP_TIMEOUT_S = 5.0
 STDERR_TAIL_CHARS = 65536
 ERROR_STDERR_TAIL_CHARS = 2000
+
+
+@dataclass(frozen=True)
+class BridgeCloseResult:
+    process_reaped: bool
+    safe_state_confirmed: bool
+    close_response: JsonObject | None
+    errors: list[str]
+
+    @property
+    def cleanup_confirmed(self) -> bool:
+        return self.process_reaped and self.safe_state_confirmed
 
 
 class ProcessBridgeSession:
@@ -30,21 +43,31 @@ class ProcessBridgeSession:
         self.lock = threading.Lock()
         self.closed = False
         self.stderr = ""
+        self.last_close_result: BridgeCloseResult | None = None
         threading.Thread(target=self._stdout_reader, daemon=True).start()
         threading.Thread(target=self._stderr_reader, daemon=True).start()
 
-    def close(self) -> None:
+    def close(self) -> BridgeCloseResult:
+        close_response: JsonObject | None = None
+        pending_base_exception: BaseException | None = None
         try:
-            self.request("close", {}, 1)
-        finally:
-            if self.child.poll() is None:
-                self.child.terminate()
-                try:
-                    self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
-                except subprocess.TimeoutExpired:
-                    self.child.kill()
-                    self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
-            self.closed = self.child.poll() is not None
+            close_response = self.request("close", {}, 1)
+        except BaseException as error:
+            pending_base_exception = error
+        process_reaped, errors, reap_base_exception = self._reap_child()
+        if pending_base_exception is None:
+            pending_base_exception = reap_base_exception
+        if close_response is None:
+            close_response = self._bridge_error("close_interrupted", f"{self.bridge_label} close request was interrupted.")
+        safe_state_confirmed = close_response.get("ok") is True and close_response.get("safe_state_confirmed") is True
+        self.closed = process_reaped
+        if not safe_state_confirmed:
+            errors.append("bridge close did not confirm safe_state_confirmed=true")
+        result = BridgeCloseResult(process_reaped=process_reaped, safe_state_confirmed=safe_state_confirmed, close_response=close_response, errors=errors)
+        self.last_close_result = result
+        if pending_base_exception is not None:
+            raise pending_base_exception
+        return result
 
     def status(self) -> JsonObject:
         return {"active": self.child.poll() is None, "backend": self.adapter_name}
@@ -84,11 +107,39 @@ class ProcessBridgeSession:
             result["stderr_tail"] = self.stderr[-ERROR_STDERR_TAIL_CHARS:]
         return result
 
+    def _reap_child(self) -> tuple[bool, list[str], BaseException | None]:
+        errors: list[str] = []
+        pending_base_exception: BaseException | None = None
+        if self.child.poll() is None:
+            try:
+                self.child.terminate()
+                self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                errors.append("bridge process did not terminate before kill")
+                try:
+                    self.child.kill()
+                    self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+                except BaseException as error:
+                    errors.append(f"{type(error).__name__}: {error}")
+                    if not isinstance(error, Exception):
+                        pending_base_exception = error
+            except BaseException as error:
+                pending_base_exception = error
+                errors.append(f"{type(error).__name__}: {error}")
+                try:
+                    self.child.kill()
+                    self.child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+                except BaseException as reap_error:
+                    errors.append(f"{type(reap_error).__name__}: {reap_error}")
+        return self.child.poll() is not None, errors, pending_base_exception
+
     def _stdout_reader(self) -> None:
         for line in self.child.stdout:
             try:
                 response = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(response, dict):
                 continue
             request_id = response.get("id")
             queue_ = self.pending.pop(request_id, None)

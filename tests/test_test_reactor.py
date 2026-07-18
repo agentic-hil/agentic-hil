@@ -100,6 +100,14 @@ class AuditCloseFailureService(CloseFailureService):
     pass
 
 
+class InterruptingActiveService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        raise KeyboardInterrupt
+
+    def hardware_state(self) -> dict:
+        return {"active": True, "state_confirmed": True, "active_resources": [{"type": "debugger", "id": "default"}], "inspection_errors": []}
+
+
 class PolicyChangingService(RecordingService):
     def __init__(self, tracker: ConcurrencyTracker, config_path: str) -> None:
         super().__init__(tracker)
@@ -354,12 +362,19 @@ def test_lock_io_failure_is_structured(tmp_path: Path, monkeypatch: pytest.Monke
     plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
     invalid_temp_root = tmp_path / "not-a-directory"
     invalid_temp_root.write_text("file", encoding="utf-8")
-    monkeypatch.setattr("agentic_hil.hardware_lock.tempfile.gettempdir", lambda: str(invalid_temp_root))
+    monkeypatch.setattr("agentic_hil.hardware_lock.hardware_state_directory", lambda: invalid_temp_root)
+    services: list[RecordingService] = []
 
-    result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+    def service_factory(_: object) -> RecordingService:
+        service = RecordingService(ConcurrencyTracker())
+        services.append(service)
+        return service
+
+    result = Reactor(config, service_factory=service_factory).run(plan)
 
     assert result["ok"] is False
     assert result["error_type"] == "test_reactor_lock_failed"
+    assert services == []
 
 
 def test_preflight_exception_closes_services_and_releases_project_lock(tmp_path: Path) -> None:
@@ -474,6 +489,19 @@ def test_reactor_does_not_quarantine_when_cleanup_error_has_no_active_resource(t
     second_lock = ProjectTestLock(config.config_path)
     assert second_lock.acquire() is True
     second_lock.release()
+
+
+def test_keyboard_interrupt_quarantines_active_reactor_hardware(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        Reactor(config, service_factory=lambda _: InterruptingActiveService(ConcurrencyTracker())).run(plan)
+
+    state = ProjectTestLock(config.config_path).status()
+    assert state["quarantined"] is True
+    assert state["state"]["reason"] == "hardware_cleanup_failed"
+    assert state["state"]["active_resources"] == [{"device": "controller_a", "type": "debugger", "id": "default"}, {"device": "controller_b", "type": "debugger", "id": "default"}]
 
 
 def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:

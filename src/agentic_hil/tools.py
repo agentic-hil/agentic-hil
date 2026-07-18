@@ -213,6 +213,15 @@ class AgenticHILToolService:
                     active_resources.append({"type": subsystem_name, "id": resource_id})
             except Exception as error:
                 inspection_errors.append({"type": subsystem_name, "error": str(error)})
+        for subsystem_name, get_errors in (
+            ("can", getattr(self.can_buses, "cleanup_inspection_errors", lambda: [])),
+            ("adapter", getattr(self.adapters, "cleanup_inspection_errors", lambda: [])),
+        ):
+            try:
+                for error in get_errors():
+                    inspection_errors.append({"type": subsystem_name, **error})
+            except Exception as error:
+                inspection_errors.append({"type": subsystem_name, "error": str(error)})
         return {"active": bool(active_resources or inspection_errors), "state_confirmed": not inspection_errors, "active_resources": active_resources, "inspection_errors": inspection_errors}
 
     def has_active_hardware(self) -> bool:
@@ -289,9 +298,9 @@ class AgenticHILToolService:
         if self._hardware_lock.handle is not None:
             return None
         try:
-            acquired = self._hardware_lock.acquire()
+            acquired = self._hardware_lock.acquire(source=tool)
         except HardwareQuarantinedError as error:
-            result = tool_error(tool, "hardware_state_unconfirmed", "Project hardware is quarantined after an incomplete cleanup.")
+            result = tool_error(tool, "hardware_state_unconfirmed", "Project hardware state is unconfirmed after an incomplete cleanup.")
             result["quarantine"] = error.details
             return result
         except HardwareLockError as error:
@@ -307,9 +316,17 @@ class AgenticHILToolService:
             return
         state = self.hardware_state()
         if not state["active"]:
-            self._hardware_lock.release()
+            self._hardware_lock.confirm_safe_and_release()
             return
-        if self._hardware_lock.handle is None and not self._hardware_lock.acquire():
+        if state["inspection_errors"] and self._hardware_lock.handle is not None:
+            self._hardware_lock.quarantine_and_release(
+                reason="hardware_cleanup_failed",
+                source="tool_service",
+                active_resources=state["active_resources"],
+                inspection_errors=state["inspection_errors"],
+            )
+            return
+        if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="active_session_recovery"):
             raise HardwareLockError("Active hardware session exists without ownership of the project hardware lease.")
 
     def _reload_config(self, tool: str) -> JsonObject | None:
@@ -361,12 +378,27 @@ class AgenticHILToolService:
                 close_action()
             except Exception as error:
                 errors.append((name, error))
-        try:
-            self._reconcile_hardware_lease()
-        except Exception as error:
-            errors.append(("hardware_lease", error))
+        if self.hardware_owner is None:
+            try:
+                self._finish_hardware_lease()
+            except Exception as error:
+                errors.append(("hardware_lease", error))
         if errors:
             raise HardwareCleanupError(errors)
+
+    def _finish_hardware_lease(self) -> None:
+        state = self.hardware_state()
+        if state["active"]:
+            if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="tool_service_cleanup"):
+                raise HardwareLockError("Active hardware cleanup state exists but the project hardware lease is owned elsewhere.")
+            self._hardware_lock.quarantine_and_release(
+                reason="hardware_cleanup_failed",
+                source="tool_service_cleanup",
+                active_resources=state["active_resources"],
+                inspection_errors=state["inspection_errors"],
+            )
+            return
+        self._hardware_lock.confirm_safe_and_release()
 
 
 def adapter_payload(args: JsonObject) -> JsonObject:

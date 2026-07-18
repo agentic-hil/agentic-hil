@@ -249,9 +249,9 @@ class TestReactor:
         self._policy_digest: str | None = None
 
     def run(self, plan: TestPlan) -> JsonObject:
-        project_lock = ProjectTestLock(self.config.config_path)
         try:
-            acquired = project_lock.acquire()
+            project_lock = ProjectTestLock(self.config.config_path)
+            acquired = project_lock.acquire(source="test_reactor")
         except HardwareQuarantinedError as error:
             return {
                 "ok": False,
@@ -261,7 +261,7 @@ class TestReactor:
                 "tests": [],
                 "cleanup": [],
                 "quarantine": error.details,
-                "summary": "Project hardware is quarantined after an incomplete cleanup.",
+                "summary": "Project hardware state is unconfirmed after an incomplete cleanup.",
             }
         except HardwareLockError as error:
             return {
@@ -285,7 +285,7 @@ class TestReactor:
                 "summary": "Project hardware is in use by another Agentic HIL process.",
             }
         response: JsonObject | None = None
-        release_lock = False
+        pending_base_exception: BaseException | None = None
         try:
             policy_error = self._establish_policy_baseline(plan.path)
             if policy_error is not None:
@@ -294,21 +294,52 @@ class TestReactor:
                 initialization_error = self._initialize_devices(plan.path, project_lock.owner_token)
                 response = initialization_error if initialization_error is not None else self._run_plan(plan)
         except Exception as error:
+            try:
+                cleanup = self.close()
+            except Exception as cleanup_error:
+                cleanup = [{"device": "all", "result": exception_result("device_close_exception", "Device service cleanup raised an exception.", cleanup_error)}]
             response = {
                 "ok": False,
                 "tool": "test_reactor",
                 "error_type": "test_reactor_exception",
                 "test_config_path": plan.path,
                 "tests": [],
-                "cleanup": self.close(),
+                "cleanup": cleanup,
                 "exception": exception_result("test_reactor_exception", "Test reactor raised an exception.", error),
                 "summary": "Test reactor failed unexpectedly.",
             }
+        except BaseException as error:
+            pending_base_exception = error
+            try:
+                cleanup = self.close()
+            except Exception as cleanup_error:
+                cleanup = [{"device": "all", "result": exception_result("device_close_exception", "Device service cleanup raised an exception.", cleanup_error)}]
+            response = {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "test_reactor_interrupted",
+                "test_config_path": plan.path,
+                "tests": [],
+                "cleanup": cleanup,
+                "exception_type": type(error).__name__,
+                "summary": "Test reactor was interrupted.",
+            }
         finally:
             hardware_state = self._collect_hardware_state()
-            if hardware_state["active"] and response is not None:
+            if hardware_state["active"]:
+                if response is None:
+                    response = {
+                        "ok": False,
+                        "tool": "test_reactor",
+                        "error_type": "test_reactor_interrupted",
+                        "test_config_path": plan.path,
+                        "tests": [],
+                        "cleanup": [],
+                        "summary": "Test reactor did not complete before cleanup state was evaluated.",
+                    }
+                underlying_error_type = response.get("error_type")
                 try:
-                    quarantine = project_lock.mark_quarantined(
+                    quarantine = project_lock.quarantine_and_release(
                         reason="hardware_cleanup_failed",
                         source="test_reactor",
                         active_resources=hardware_state["active_resources"],
@@ -317,24 +348,42 @@ class TestReactor:
                 except HardwareLockError as error:
                     quarantine = None
                     response["quarantine_error"] = str(error)
+                    project_lock.release_os_lock()
                 response.update(
                     {
                         "ok": False,
                         "error_type": "unsafe_test_state",
                         "hardware_state_unconfirmed": True,
-                        "lease_retained_until_process_exit": True,
                         "active_resources": hardware_state["active_resources"],
                         "inspection_errors": hardware_state["inspection_errors"],
                         "summary": "Test reactor stopped because cleanup could not establish a safe hardware state.",
                     }
                 )
+                if underlying_error_type and underlying_error_type != "unsafe_test_state":
+                    response["underlying_error_type"] = underlying_error_type
                 if quarantine is not None:
                     response["quarantine"] = quarantine
             else:
-                release_lock = True
-        if release_lock:
-            project_lock.release()
+                try:
+                    project_lock.confirm_safe_and_release()
+                except HardwareLockError as error:
+                    if response is None:
+                        response = {"ok": False, "tool": "test_reactor", "test_config_path": plan.path, "tests": [], "cleanup": []}
+                    underlying_error_type = response.get("error_type")
+                    response.update(
+                        {
+                            "ok": False,
+                            "error_type": "unsafe_test_state",
+                            "underlying_error_type": underlying_error_type,
+                            "hardware_state_unconfirmed": True,
+                            "state_error": str(error),
+                            "summary": "Test reactor cleanup completed, but safe lease release could not be persisted.",
+                        }
+                    )
         assert response is not None
+        if pending_base_exception is not None:
+            self._finalize(response)
+            raise pending_base_exception
         return self._finalize(response)
 
     def _initialize_devices(self, test_config_path: str, hardware_owner: str) -> JsonObject | None:

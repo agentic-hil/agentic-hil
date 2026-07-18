@@ -128,19 +128,39 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
 def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
     config = load_config(str(write_config(tmp_path)), str(tmp_path))
     lock = ProjectHardwareLock(config.config_path)
-    quarantine = lock.mark_quarantined(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
+    assert lock.acquire(source="test") is True
+    quarantine = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
 
     status = hardware_status(config.config_path)
     denied = hardware_recover(config.config_path, acknowledge_hardware_checked=False)
-    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True)
+    missing_id = hardware_recover(config.config_path, acknowledge_hardware_checked=True)
+    stale = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id="stale")
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
     clear_status = hardware_status(config.config_path)
 
     assert status["quarantined"] is True
-    assert status["quarantine"]["created_at"] == quarantine["created_at"]
+    assert status["quarantine_id"] == quarantine["quarantine_id"]
+    assert status["quarantine"]["updated_at"] == quarantine["updated_at"]
     assert denied["error_type"] == "acknowledgement_required"
+    assert missing_id["error_type"] == "quarantine_id_required"
+    assert stale["error_type"] == "quarantine_changed"
     assert recovered["ok"] is True
     assert recovered["recovered"] is True
     assert clear_status["quarantined"] is False
+
+
+def test_hardware_recover_surfaces_report_failure_after_safe_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    quarantine = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+    monkeypatch.setattr("agentic_hil.cli.write_report", lambda *_: (_ for _ in ()).throw(OSError("report full")))
+
+    result = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
+
+    assert result["error_type"] == "audit_write_failed"
+    assert result["operation_result"]["ok"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
@@ -603,8 +623,10 @@ def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
 def test_process_can_adapter_close_reaps_child() -> None:
     child = spawn_ignoring_bridge_child()
     session = ProcessCanAdapterSession(child)
-    session.close()
+    result = session.close()
     assert child.poll() is not None
+    assert result.process_reaped is True
+    assert result.safe_state_confirmed is False
 
 
 def test_process_can_adapter_request_after_exit_returns_error() -> None:
@@ -613,6 +635,49 @@ def test_process_can_adapter_request_after_exit_returns_error() -> None:
     session.close()
     result = session.send(CanFrame(id=1, extended=False, rtr=False, data=b""))
     assert result["ok"] is False
+
+
+def test_process_bridge_close_reaps_child_when_close_request_is_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    monkeypatch.setattr(session, "request", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+
+    assert child.poll() is not None
+    assert session.last_close_result is not None
+    assert session.last_close_result.process_reaped is True
+    assert session.last_close_result.safe_state_confirmed is False
+
+
+def test_process_bridge_records_kill_interrupt_before_reraising(monkeypatch: pytest.MonkeyPatch) -> None:
+    class KillInterruptedChild:
+        stdin = None
+        stdout: list[str] = []
+        stderr: list[str] = []
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> None:
+            raise subprocess.TimeoutExpired("bridge", timeout)
+
+        def kill(self) -> None:
+            raise KeyboardInterrupt
+
+    session = ProcessCanAdapterSession(KillInterruptedChild())
+    monkeypatch.setattr(session, "request", lambda *_: {"ok": True, "safe_state_confirmed": True})
+
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+
+    assert session.last_close_result is not None
+    assert session.last_close_result.process_reaped is False
+    assert session.last_close_result.cleanup_confirmed is False
 
 
 NTC_ADAPTER_YAML = f'''adapters:

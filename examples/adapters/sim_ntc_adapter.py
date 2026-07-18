@@ -80,7 +80,8 @@ def handle(method: str, params: dict) -> dict:
             return ok(channel=channel, value=measured_resistance_ohm(), unit="ohm", fault=state["fault"])
         return error("channel_not_supported", "sim-ntc can only measure temperature and resistance.")
     if method == "close":
-        return ok()
+        state["fault"] = None
+        return ok(safe_state_confirmed=True)
     return error("unknown_method", f"unknown method: {method}")
 
 
