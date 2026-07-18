@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from conftest import FAKE_GDB, write_config
 
+from agentic_hil.cli import hardware_status
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import intel_hex_record, write_intel_hex_file
 from agentic_hil.tools import AgenticHILToolService
@@ -89,6 +91,90 @@ def test_debug_halt_records_manual_halt_stop(tmp_path: Path) -> None:
         assert halted["stop"]["stop_reason"] == "halted"
         assert halted["stop"]["backend_stop_reason"] == "signal-received"
         assert halted["stop"]["signal"]["name"] == "SIGINT"
+    finally:
+        service.close()
+
+
+def test_debug_continue_timeout_with_failed_interrupt_is_unconfirmed(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="continue_interrupt_failed", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        result = service.call("debug_continue", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert result["session"]["status"] == "error"
+    finally:
+        service.close()
+
+
+def test_debug_continue_transport_exit_is_unconfirmed(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="continue_gdb_exit", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        result = service.call("debug_continue", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert result["session"]["status"] == "error"
+    finally:
+        service.close()
+
+
+def test_debug_continue_timeout_without_followup_stop_is_unconfirmed(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="continue_no_followup_stop", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        result = service.call("debug_continue", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert result["session"]["status"] == "error"
+    finally:
+        service.close()
+
+
+def test_debug_continue_timeout_then_confirmed_halt_is_complete(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="continue_confirmed_fallback", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        result = service.call("debug_continue", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "timeout"
+        assert result["completion_confirmed"] is True
+        assert result["session"]["status"] == "halted"
+    finally:
+        service.close()
+
+
+def test_debug_halt_without_stop_event_is_unconfirmed(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="halt_no_stop", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+
+        result = service.call("debug_halt", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert result["session"]["status"] == "error"
+    finally:
+        service.close()
+
+
+def test_debug_halt_with_failed_interrupt_is_unconfirmed(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="halt_interrupt_failed", debugger_timeout_s=0.1)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+
+        result = service.call("debug_halt", {"timeout_s": 0.1})
+
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert result["session"]["status"] == "error"
     finally:
         service.close()
 
@@ -183,6 +269,27 @@ def test_debug_stop_audit_failure_releases_session_for_restart(tmp_path: Path, m
         assert restarted["ok"] is True, restarted
     finally:
         service.close()
+
+
+def test_debug_cleanup_interrupt_still_terminates_server(tmp_path: Path, monkeypatch) -> None:
+    service = debug_service(tmp_path)
+    assert start_debug_session(service, mode="attach")["ok"] is True
+    debug_sessions = service.backend._debug
+    session = debug_sessions.session
+    assert session is not None and session.gdb is not None
+    original_close = session.gdb.close
+
+    def close_then_interrupt(timeout_s: float) -> None:
+        original_close(timeout_s)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(session.gdb, "close", close_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.close()
+
+    assert session.server.poll() is not None
+    assert hardware_status(service.config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_debug_symbol_info_reports_missing_symbol(tmp_path: Path) -> None:

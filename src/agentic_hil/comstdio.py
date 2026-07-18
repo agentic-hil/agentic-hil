@@ -9,6 +9,7 @@ from typing import BinaryIO, TextIO
 
 from agentic_hil.comports import ComPortService
 from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
+from agentic_hil.report import utc_now_iso
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STDIN_CHUNK_BYTES = 4096
@@ -49,6 +50,8 @@ def run_com_stdio(
     pending_base_exception: BaseException | None = None
     hardware_state: JsonObject = {"active": False, "active_resources": [], "inspection_errors": []}
     quarantine: JsonObject | None = None
+    write_in_flight: JsonObject | None = None
+    unconfirmed_operations: list[JsonObject] = []
     try:
         service = ComPortService(config)
         started = service.session_start(port_id, True)
@@ -65,7 +68,23 @@ def run_com_stdio(
             while not failed:
                 chunk = next_stdin_chunk(stdin_chunks)
                 if chunk:
+                    write_in_flight = {"type": "operation", "tool": "com_stdio_write", "port_id": port_id, "started_at": utc_now_iso()}
                     written = service.write_bytes(port_id, chunk, "com_stdio_write")
+                    if not isinstance(written, dict):
+                        raise TypeError("COM stdio write returned a non-object result.")
+                    error_type = str(written.get("error_type", ""))
+                    completion_unconfirmed = written.get("completion_unconfirmed") is True or written.get("hardware_state_unconfirmed") is True or error_type == "serial_write_failed"
+                    if completion_unconfirmed:
+                        unconfirmed_operations.append(
+                            {
+                                **write_in_flight,
+                                "error_type": error_type or "completion_unconfirmed",
+                                "summary": "COM stdio write completion was not confirmed.",
+                            }
+                        )
+                        failed = True
+                        error_result = written
+                    write_in_flight = None
                     if not written.get("ok"):
                         failed = True
                         error_result = written
@@ -85,6 +104,16 @@ def run_com_stdio(
                     break
             exit_code = 1 if failed else 0
     except BaseException as error:
+        if write_in_flight is not None:
+            unconfirmed_operations.append(
+                {
+                    **write_in_flight,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "summary": "COM stdio write completion was not confirmed.",
+                }
+            )
+            write_in_flight = None
         pending_base_exception = error
     finally:
         if service is not None:
@@ -110,6 +139,14 @@ def run_com_stdio(
                 hardware_state = {"active": True, "active_resources": [], "inspection_errors": [{"type": "com", "error": str(error)}]}
                 if not isinstance(error, Exception) and pending_base_exception is None:
                     pending_base_exception = error
+        inspection_errors = [*hardware_state["inspection_errors"], *unconfirmed_operations]
+        if write_in_flight is not None:
+            inspection_errors.append({**write_in_flight, "summary": "COM stdio write was still in flight during cleanup."})
+        hardware_state = {
+            "active": bool(hardware_state["active_resources"] or inspection_errors),
+            "active_resources": hardware_state["active_resources"],
+            "inspection_errors": inspection_errors,
+        }
         if hardware_state["active"]:
             try:
                 quarantine = hardware_lock.quarantine_and_release(

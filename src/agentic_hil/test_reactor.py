@@ -430,7 +430,14 @@ class TestReactor:
                 active_resources.append({"device": device.id, **resource})
             for error in state.get("inspection_errors", []):
                 inspection_errors.append({"device": device.id, **error})
-        return {"active": bool(active_resources or inspection_errors), "state_confirmed": not inspection_errors, "active_resources": active_resources, "inspection_errors": inspection_errors}
+        unique_errors: list[JsonObject] = []
+        seen: set[tuple[object, ...]] = set()
+        for item in inspection_errors:
+            key = tuple(item.get(field) for field in ("type", "device", "test", "step", "action", "tool", "error_type"))
+            if key not in seen:
+                seen.add(key)
+                unique_errors.append(item)
+        return {"active": bool(active_resources or unique_errors), "state_confirmed": not unique_errors, "active_resources": active_resources, "inspection_errors": unique_errors}
 
     def _establish_policy_baseline(self, test_config_path: str) -> JsonObject | None:
         current_digest = read_policy_digest(self.config.config_path)
@@ -521,7 +528,8 @@ class TestReactor:
                         "exception": exception_result("test_exception", "Test execution raised an exception.", error),
                     }
                 results.append(result)
-                if result.get("error_type") in {"cleanup_failed", "step_exception", "test_exception", "hardware_state_unconfirmed"}:
+                error_type = result.get("error_type")
+                if error_type in {"cleanup_failed", "test_exception", "hardware_state_unconfirmed"} or (error_type == "step_exception" and result.get("completion_confirmed") is not True):
                     unsafe_state = True
                     policy_changed = result.get("step_error_type") == "policy_changed"
                     aborted_tests = [remaining.name for remaining in plan.tests[test_index + 1 :]]
@@ -644,11 +652,16 @@ class TestReactor:
                 try:
                     result = device.execute(step)
                 except Exception as error:
-                    self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
+                    completion_confirmed = getattr(error, "_agentic_hil_completion_confirmed", False) is True
+                    if not completion_confirmed:
+                        self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
                     self._step_in_flight = None
                     result = exception_result("step_exception", "Test step raised an exception.", error)
+                    if completion_confirmed:
+                        result["completion_confirmed"] = True
                 except BaseException as error:
-                    self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
+                    if getattr(error, "_agentic_hil_completion_confirmed", False) is not True:
+                        self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
                     self._step_in_flight = None
                     raise
                 else:
@@ -657,6 +670,10 @@ class TestReactor:
                         self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
                         self._step_in_flight = None
                         raise error
+                    step_error_type = str(result.get("error_type", ""))
+                    if result.get("completion_unconfirmed") is True or result.get("hardware_state_unconfirmed") is True or step_error_type in {"hardware_state_unconfirmed", "hardware_cleanup_failed"}:
+                        self._execution_inspection_errors.append({**self._step_in_flight, "error_type": step_error_type or "completion_unconfirmed", "summary": "Test reactor step completion was not confirmed."})
+                        result = {**result, "ok": False, "error_type": step_error_type or "hardware_state_unconfirmed", "hardware_state_unconfirmed": True}
                     self._step_in_flight = None
                 steps.append({"index": index, "action": step.action, "result": result})
                 if result.get("ok") is not True:
@@ -681,6 +698,8 @@ class TestReactor:
                 result["step_error_type"] = step_error_type
             else:
                 result["error_type"] = step_error_type
+                if step_result.get("completion_confirmed") is True:
+                    result["completion_confirmed"] = True
         return result
 
     def close(self) -> list[JsonObject]:

@@ -121,7 +121,18 @@ class MalformedStepService(RecordingService):
 class UnconfirmedStepService(RecordingService):
     def call(self, name: str, arguments: dict | None = None) -> dict:
         self.calls.append(name)
-        return {"ok": False, "tool": name, "error_type": "hardware_cleanup_failed", "hardware_state_unconfirmed": True}
+        return {"ok": True, "tool": name, "error_type": "hardware_cleanup_failed", "hardware_state_unconfirmed": True}
+
+
+class ConfirmedExceptionService(RecordingService):
+    def __init__(self, tracker: ConcurrencyTracker, error_type: type[BaseException]) -> None:
+        super().__init__(tracker)
+        self.error_type = error_type
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        error = self.error_type("report failed")
+        error._agentic_hil_completion_confirmed = True
+        raise error
 
 
 class PolicyChangingService(RecordingService):
@@ -561,6 +572,32 @@ def test_unconfirmed_step_result_aborts_remaining_devices(tmp_path: Path) -> Non
     assert result["tests"][0]["error_type"] == "hardware_state_unconfirmed"
     assert result["aborted_tests"] == ["test-b"]
     assert services[1].calls == []
+    state = ProjectTestLock(config.config_path).status()
+    assert state["hardware_state_unconfirmed"] is True
+    assert state["state"]["inspection_errors"][0]["action"] == "flash"
+    assert state["state"]["inspection_errors"][0]["device"] == "controller_a"
+
+
+def test_confirmed_step_exception_fails_without_quarantine(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: ConfirmedExceptionService(ConcurrencyTracker(), RuntimeError)).run(plan)
+
+    assert result["ok"] is False
+    assert result["tests"][0]["error_type"] == "step_exception"
+    assert result.get("error_type") != "unsafe_test_state"
+    assert ProjectTestLock(config.config_path).status()["hardware_state_unconfirmed"] is False
+
+
+def test_confirmed_step_base_exception_is_reraised_without_quarantine(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        Reactor(config, service_factory=lambda _: ConfirmedExceptionService(ConcurrencyTracker(), KeyboardInterrupt)).run(plan)
+
+    assert ProjectTestLock(config.config_path).status()["hardware_state_unconfirmed"] is False
 
 
 def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:

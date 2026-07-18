@@ -490,14 +490,24 @@ def open_process_adapter(
         try:
             close_result = session.close()
         except Exception as error:
-            result["session"] = session
             result["cleanup_error"] = str(error)
-            result["cleanup_unconfirmed"] = True
+            close_result = session.last_close_result
+            if close_result is not None and close_result.cleanup_confirmed:
+                result["cleanup_confirmed"] = True
+                result["completion_confirmed"] = True
+            else:
+                result["session"] = session
+                result["cleanup_unconfirmed"] = True
+                result["completion_unconfirmed"] = True
             return result
-        if not close_result.cleanup_confirmed:
+        if close_result.cleanup_confirmed:
+            result["cleanup_confirmed"] = True
+            result["completion_confirmed"] = True
+        else:
             result["session"] = session
             result["cleanup_error"] = "; ".join(close_result.errors)
             result["cleanup_unconfirmed"] = True
+            result["completion_unconfirmed"] = True
         return result
     return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
 

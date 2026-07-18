@@ -73,6 +73,31 @@ def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> No
     assert "result" in responses[1]
 
 
+@pytest.mark.parametrize("cleanup_error", [RuntimeError("cleanup failed"), KeyboardInterrupt()])
+def test_mcp_shutdown_cleanup_failure_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_error: BaseException) -> None:
+    config = load_test_config(tmp_path)
+    errors = StringIO()
+
+    class CleanupFailingService:
+        def __init__(self, _config) -> None:
+            pass
+
+        def close(self) -> None:
+            raise cleanup_error
+
+    monkeypatch.setattr("agentic_hil.stdio.AgenticHILToolService", CleanupFailingService)
+
+    if isinstance(cleanup_error, Exception):
+        assert run_stdio_server(config, input_stream=StringIO(""), output_stream=StringIO(), error_stream=errors) == 1
+    else:
+        with pytest.raises(type(cleanup_error)):
+            run_stdio_server(config, input_stream=StringIO(""), output_stream=StringIO(), error_stream=errors)
+
+    result = json.loads(errors.getvalue())
+    assert result["tool"] == "mcp_stdio"
+    assert result["error_type"] == "hardware_cleanup_failed"
+
+
 def test_empty_jsonrpc_batch_returns_invalid_request(tmp_path: Path) -> None:
     service = AgenticHILToolService(load_test_config(tmp_path))
 
@@ -196,6 +221,24 @@ class UncloseableComPortService(StubComPortService):
         return ["dut"]
 
 
+class InterruptingWriteComPortService(StubComPortService):
+    def write_bytes(self, port_id: str, data: bytes, tool: str) -> dict:
+        raise KeyboardInterrupt
+
+
+class FailedWriteComPortService(StubComPortService):
+    def write_bytes(self, port_id: str, data: bytes, tool: str) -> dict:
+        return {"ok": False, "tool": tool, "error_type": "serial_write_failed"}
+
+
+class ContradictoryWriteComPortService(StubComPortService):
+    writes = 0
+
+    def write_bytes(self, port_id: str, data: bytes, tool: str) -> dict:
+        type(self).writes += 1
+        return {"ok": True, "tool": tool, "completion_unconfirmed": True}
+
+
 def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     monkeypatch.setattr("agentic_hil.comstdio.ComPortService", StubComPortService)
@@ -214,6 +257,49 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
+
+
+def test_com_stdio_interrupted_write_stays_quarantined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", InterruptingWriteComPortService)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_com_stdio(config, "dut", input_stream=BytesIO(b"partial"), output_stream=StringIO(), error_stream=StringIO(), eof_idle_timeout_s=0.0)
+
+    state = hardware_status(config.config_path)
+    assert state["hardware_state_unconfirmed"] is True
+    assert state["state"]["inspection_errors"][0]["tool"] == "com_stdio_write"
+
+
+def test_com_stdio_serial_write_failure_stays_quarantined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", FailedWriteComPortService)
+    errors = StringIO()
+
+    exit_code = run_com_stdio(config, "dut", input_stream=BytesIO(b"partial"), output_stream=StringIO(), error_stream=errors, eof_idle_timeout_s=0.0)
+
+    result = json.loads(errors.getvalue())
+    assert exit_code == 1
+    assert result["hardware_state_unconfirmed"] is True
+    assert result["inspection_errors"][0]["error_type"] == "serial_write_failed"
+
+
+def test_com_stdio_confirmed_write_releases_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", StubComPortService)
+
+    assert run_com_stdio(config, "dut", input_stream=BytesIO(b"confirmed"), output_stream=StringIO(), error_stream=StringIO(), eof_idle_timeout_s=0.0) == 0
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_com_stdio_unconfirmed_success_stops_before_later_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    ContradictoryWriteComPortService.writes = 0
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", ContradictoryWriteComPortService)
+
+    assert run_com_stdio(config, "dut", input_stream=BytesIO(b"queued writes"), output_stream=StringIO(), error_stream=StringIO(), eof_idle_timeout_s=0.0) == 1
+    assert ContradictoryWriteComPortService.writes == 1
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
 
 
 def test_com_stdio_fails_closed_while_project_hardware_is_busy(tmp_path: Path) -> None:
@@ -710,6 +796,26 @@ class SafeClosingBridge:
         return self.last_close_result
 
 
+class OpenFailingBridge(SafeClosingBridge):
+    def __init__(self, safe_close: bool) -> None:
+        super().__init__()
+        self.safe_close = safe_close
+
+    def request(self, method: str, params: dict, timeout_s: float) -> dict:
+        return {"ok": False, "error_type": "adapter_bridge_timeout"}
+
+    def close(self) -> BridgeCloseResult:
+        self.active = False
+        self.last_close_result = BridgeCloseResult(process_reaped=True, safe_state_confirmed=self.safe_close, close_response={"ok": self.safe_close, "safe_state_confirmed": self.safe_close}, errors=[] if self.safe_close else ["unsafe"])
+        return self.last_close_result
+
+
+class OpenFailingCloseErrorBridge(OpenFailingBridge):
+    def close(self) -> BridgeCloseResult:
+        super().close()
+        raise RuntimeError("close audit failed")
+
+
 class FakeChild:
     def __init__(self) -> None:
         self.active = True
@@ -1069,6 +1175,65 @@ def test_can_post_open_interrupt_runs_confirmed_cleanup(tmp_path: Path, monkeypa
     assert bridge.last_close_result is not None and bridge.last_close_result.cleanup_confirmed
     state = hardware_status(config.config_path)
     assert state["hardware_state_unconfirmed"] is False, json.dumps(state, indent=2)
+
+
+@pytest.mark.parametrize("safe_close", [True, False])
+def test_adapter_open_failure_reflects_cleanup_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, safe_close: bool) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    bridge = OpenFailingBridge(safe_close)
+    monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: FakeChild())
+    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: bridge)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call("adapter_session_start", {"adapter_id": "ntc"})
+
+    if safe_close:
+        assert result["completion_confirmed"] is True
+    else:
+        assert result["completion_unconfirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is (not safe_close)
+
+
+@pytest.mark.parametrize("safe_close", [True, False])
+def test_process_can_open_failure_reflects_cleanup_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, safe_close: bool) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    bridge = OpenFailingBridge(safe_close)
+    monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: FakeChild())
+    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: bridge)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call("can_session_start", {"bus_id": "bench"})
+
+    if safe_close:
+        assert result["completion_confirmed"] is True
+    else:
+        assert result["completion_unconfirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is (not safe_close)
+
+
+@pytest.mark.parametrize("subsystem", ["adapter", "can"])
+def test_bridge_open_failure_with_safe_close_exception_releases_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subsystem: str) -> None:
+    bridge = OpenFailingCloseErrorBridge(True)
+    if subsystem == "adapter":
+        config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+        monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
+        monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: FakeChild())
+        monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: bridge)
+        tool, arguments = "adapter_session_start", {"adapter_id": "ntc"}
+    else:
+        config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+        monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
+        monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: FakeChild())
+        monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: bridge)
+        tool, arguments = "can_session_start", {"bus_id": "bench"}
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call(tool, arguments)
+
+    assert result["completion_confirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_adapter_bridge_constructor_interrupt_reaps_child_and_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

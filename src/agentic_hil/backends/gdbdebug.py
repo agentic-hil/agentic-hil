@@ -175,7 +175,15 @@ class GdbDebugSessions:
         if session is None or session.status == "stopped":
             return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S) if timeout_s is None else max(0.1, timeout_s)
-        cleanup = self._cleanup_session(session, timeout)
+        try:
+            cleanup = self._cleanup_session(session, timeout)
+        except BaseException as error:
+            cleanup = getattr(error, "_agentic_hil_cleanup_result", None)
+            if isinstance(cleanup, DebugCleanupResult) and not cleanup.resources_active:
+                session.status = "stopped"
+                self.session = None
+                error._agentic_hil_completion_confirmed = True
+            raise
         if cleanup.resources_active:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": session.status, "error_type": "hardware_cleanup_failed", "resource_errors": cleanup.resource_errors, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session resources could not be stopped."})
         session.status = "stopped"
@@ -250,13 +258,28 @@ class GdbDebugSessions:
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
-        if stop.timed_out:
-            self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
-            session.gdb.wait_for_stop(min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
-            session.status = "halted"
-            session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout"}
+        if stop.error_message:
+            session.status = "error"
+            session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "stop_wait_failed", "backend_error": stop.error_message}
             self._write_session_log(session)
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "completion_confirmed": True, "summary": "Target did not stop before the timeout; it was halted.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Target started running, but the debugger could not confirm a stop event.", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+        if stop.timed_out:
+            interrupt = self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
+            if not interrupt.ok:
+                session.status = "error"
+                session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "interrupt_failed", "backend_error": interrupt.error_message}
+                self._write_session_log(session)
+                return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Target timeout occurred and the follow-up interrupt failed.", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            interrupted_stop = session.gdb.wait_for_stop(min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
+            if interrupted_stop.timed_out or interrupted_stop.error_message:
+                session.status = "error"
+                session.stop_reason = {"stop_reason": "timeout" if interrupted_stop.timed_out else "debugger_error", "backend_stop_reason": "halt_unconfirmed", "backend_error": interrupted_stop.error_message}
+                self._write_session_log(session)
+                return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Target timeout occurred and no confirmed stop event followed.", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            session.stop_reason = self._stop_reason_from_gdb(session, interrupted_stop)
+            session.status = "error" if session.stop_reason.get("stop_reason") == "debugger_error" else "halted"
+            self._write_session_log(session)
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "completion_confirmed": True, "summary": "Target did not stop before the timeout and was then confirmed halted.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         stop_reason = str(session.stop_reason.get("stop_reason"))
         session.status = "error" if stop_reason == "debugger_error" else "halted"
@@ -275,9 +298,17 @@ class GdbDebugSessions:
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S) if timeout_s is None else max(0.1, timeout_s)
         response = self._gdb_command(session, "-exec-interrupt --all", timeout)
         if not response.ok:
-            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
+            session.status = "error"
+            session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "interrupt_failed", "backend_error": response.error_message}
+            self._write_session_log(session)
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Debugger could not confirm the halt request.", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
+        if stop.timed_out or stop.error_message:
+            session.status = "error"
+            session.stop_reason = {"stop_reason": "timeout" if stop.timed_out else "debugger_error", "backend_stop_reason": "halt_unconfirmed", "backend_error": stop.error_message}
+            self._write_session_log(session)
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Debugger accepted the halt request, but no confirmed stop event was received.", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
         session.status = "halted"
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         self._write_session_log(session)
@@ -332,7 +363,15 @@ class GdbDebugSessions:
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
-            cleanup = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            try:
+                cleanup = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
+            except BaseException as error:
+                cleanup = getattr(error, "_agentic_hil_cleanup_result", None)
+                if isinstance(cleanup, DebugCleanupResult) and not cleanup.resources_active:
+                    session.status = "stopped"
+                    self.session = None
+                    error._agentic_hil_completion_confirmed = True
+                raise
             if cleanup.resources_active:
                 raise RuntimeError("Debug session resources could not be stopped: " + "; ".join(cleanup.resource_errors))
             session.status = "stopped"
@@ -576,11 +615,14 @@ class GdbDebugSessions:
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> DebugCleanupResult:
         resource_errors: list[str] = []
         audit_errors: list[str] = []
+        pending_base_exception: BaseException | None = None
         if session.gdb is not None:
             try:
                 session.gdb.close(timeout_s)
-            except Exception as error:
-                resource_errors.append(f"gdb: {error}")
+            except BaseException as error:
+                resource_errors.append(f"gdb: {type(error).__name__}: {error}")
+                if not isinstance(error, Exception):
+                    pending_base_exception = error
         if session.server.poll() is None:
             try:
                 session.server.terminate()
@@ -589,18 +631,26 @@ class GdbDebugSessions:
                 except subprocess.TimeoutExpired:
                     session.server.kill()
                     session.server.wait(timeout=timeout_s)
-            except Exception as error:
-                resource_errors.append(f"server: {error}")
+            except BaseException as error:
+                resource_errors.append(f"server: {type(error).__name__}: {error}")
+                if pending_base_exception is None and not isinstance(error, Exception):
+                    pending_base_exception = error
         try:
             self._write_session_log(session)
-        except Exception as error:
-            audit_errors.append(str(error))
-        return DebugCleanupResult(
+        except BaseException as error:
+            audit_errors.append(f"{type(error).__name__}: {error}")
+            if pending_base_exception is None and not isinstance(error, Exception):
+                pending_base_exception = error
+        result = DebugCleanupResult(
             gdb_active=session.gdb is not None and session.gdb.is_running(),
             server_active=session.server.poll() is None,
             resource_errors=resource_errors,
             audit_errors=audit_errors,
         )
+        if pending_base_exception is not None:
+            pending_base_exception._agentic_hil_cleanup_result = result
+            raise pending_base_exception
+        return result
 
     def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
         output = f"{session.server_stdout}{session.server_stderr}"
