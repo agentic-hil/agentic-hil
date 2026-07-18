@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -29,10 +30,12 @@ from agentic_hil.cli import (
     mcp_config,
     migrate_config,
     schema,
+    write_exclusive_text,
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
+from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -90,6 +93,19 @@ def test_migrate_config_writes_external_deny_by_default_policy(tmp_path: Path, m
     assert load_config(str(target), str(workspace)).target.name == "old-target"
 
 
+def test_migrate_config_accepts_explicit_external_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    legacy = tmp_path / "external-config.yaml"
+    legacy.write_text("target:\n  name: external-target\n", encoding="utf-8")
+
+    result = migrate_config(str(legacy.resolve()))
+
+    assert result["ok"] is True
+    assert load_config(result["path"], str(workspace)).target.name == "external-target"
+
+
 def test_migrate_config_rejects_non_empty_bridge_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -109,6 +125,38 @@ def test_migrate_config_rejects_non_empty_bridge_args(tmp_path: Path, monkeypatc
 
     assert rejected.value.error_type == "config_migration_required"
     assert rejected.value.details["field"] == "can_buses.injected.args"
+    assert not target.exists()
+
+
+def test_migrate_config_yaml_error_does_not_echo_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    secret = "legacy-secret-must-not-leak"
+    legacy = workspace / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text(f"bridge_password: [{secret}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        migrate_config(str(legacy))
+
+    details = json.dumps(rejected.value.to_dict())
+    assert rejected.value.error_type == "config_invalid"
+    assert secret not in details
+    assert "line" in rejected.value.details
+
+
+def test_write_exclusive_text_removes_incomplete_target_on_fsync_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "config.yaml"
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError):
+        write_exclusive_text(target, "workspace_root: /tmp\n")
+
     assert not target.exists()
 
 
@@ -568,6 +616,64 @@ def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.count(str(pid)) > 0
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_process_cleanup_kills_sigterm_ignoring_descendant(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    code = """
+import signal, subprocess, sys, time
+descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
+time.sleep(30)
+"""
+    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    try:
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            time.sleep(0.01)
+        descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        terminate_process_tree(child, 1.0)
+
+        assert child.poll() is not None
+        assert not pid_alive(descendant_pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_process_cleanup_handles_exited_group_leader(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    code = """
+import signal, subprocess, sys
+descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+"""
+    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    try:
+        child.wait(timeout=5)
+        descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        terminate_process_tree(child, 1.0)
+
+        assert not pid_alive(descendant_pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
 
 
 def test_process_can_adapter_close_reaps_child() -> None:

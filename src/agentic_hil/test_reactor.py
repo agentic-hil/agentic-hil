@@ -37,6 +37,35 @@ DEBUG_ACTIONS = {"debug_start", "run_until_breakpoint", "dump_memory", "debug_st
 DEBUGGER_DEVICE_ACTIONS = {"flash", *DEBUG_ACTIONS}
 
 
+def result_failed(result: JsonObject) -> bool:
+    return result.get("ok") is not True or result.get("target_ok") is False or result.get("audit_ok") is False
+
+
+def result_error_type(result: JsonObject) -> str:
+    if result.get("error_type"):
+        return str(result["error_type"])
+    if result.get("target_ok") is False:
+        return str(result.get("target_error_type") or "target_failed")
+    if result.get("audit_ok") is False:
+        return "audit_failed"
+    return "step_failed"
+
+
+def propagate_result_status(aggregate: JsonObject, sources: list[JsonObject]) -> None:
+    audit_failures = [source for source in sources if source.get("audit_ok") is False]
+    if audit_failures:
+        aggregate["audit_ok"] = False
+        if "audit_error" in audit_failures[0]:
+            aggregate["audit_error"] = audit_failures[0]["audit_error"]
+        aggregate["audit_errors"] = [source["audit_error"] for source in audit_failures if "audit_error" in source]
+        aggregate["retry_safe"] = audit_failures[0].get("retry_safe", False)
+    target_failures = [source for source in sources if source.get("target_ok") is False]
+    if target_failures:
+        aggregate["target_ok"] = False
+        if "target_error_type" in target_failures[0]:
+            aggregate["target_error_type"] = target_failures[0]["target_error_type"]
+
+
 @dataclass(frozen=True)
 class TestStep:
     device: str
@@ -379,13 +408,13 @@ class TestReactor:
                             error,
                         )
                 completed.append({"index": index, "device": step.device, "action": step.action, "result": result})
-                if result.get("ok") is not True:
+                if result_failed(result):
                     failed_step = index
                     break
         finally:
             cleanup = [result for device in reversed(list(self.devices.values())) for result in device.cleanup()]
 
-        cleanup_errors = [item for item in cleanup if item["result"].get("ok") is not True]
+        cleanup_errors = [item for item in cleanup if result_failed(item["result"])]
         cleanup_ok = not cleanup_errors
         ok = failed_step is None and cleanup_ok
         result: JsonObject = {
@@ -399,9 +428,10 @@ class TestReactor:
             "cleanup_errors": cleanup_errors,
             "summary": "Test reactor sequence completed." if ok else "Test reactor sequence failed.",
         }
+        propagate_result_status(result, [step["result"] for step in completed] + [item["result"] for item in cleanup])
         if failed_step is not None:
             result["failed_step"] = failed_step
-            step_error_type = completed[-1]["result"].get("error_type", "step_failed")
+            step_error_type = result_error_type(completed[-1]["result"])
             result["step_error_type"] = step_error_type
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
         elif not cleanup_ok:

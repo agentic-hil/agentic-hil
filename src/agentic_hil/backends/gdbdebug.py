@@ -17,7 +17,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.process import process_group_kwargs, terminate_process_tree
+from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
     mark_audit_failure,
@@ -115,7 +115,7 @@ class GdbDebugSessions:
         server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
         log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
         try:
-            server = subprocess.Popen(
+            server = register_process_group(subprocess.Popen(
                 server_args,
                 cwd=str(Path(str(resolved_server["executable_path"])).parent),
                 text=True,
@@ -125,7 +125,7 @@ class GdbDebugSessions:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 **process_group_kwargs(),
-            )
+            ))
         except OSError as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
 

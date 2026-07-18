@@ -28,7 +28,7 @@ from agentic_hil.config import (
     load_config,
 )
 from agentic_hil.mcp import handle_mcp_message
-from agentic_hil.report import append_jsonl
+from agentic_hil.report import append_jsonl, ensure_audit_ready, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig
@@ -848,6 +848,61 @@ def test_post_action_report_failure_preserves_committed_flash_result(tmp_path: P
     assert result["audit_ok"] is False
     assert result["retry_safe"] is False
     assert result["audit_error"]["backend_error"] == "disk full"
+
+
+def test_audit_ready_rejects_last_failure_symlink(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    reports = tmp_path / ".agentic-hil" / "reports"
+    reports.mkdir(parents=True)
+    outside = tmp_path / "outside-last-failure.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    target = reports / "last-failure.json"
+    try:
+        target.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"file symlinks unavailable: {error}")
+
+    with pytest.raises(ConfigError) as rejected:
+        ensure_audit_ready(config)
+
+    assert rejected.value.error_type == "unsafe_configured_path"
+
+
+def test_audit_ready_rejects_last_failure_hardlink(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    reports = tmp_path / ".agentic-hil" / "reports"
+    reports.mkdir(parents=True)
+    outside = tmp_path / "outside-last-failure.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    target = reports / "last-failure.json"
+    try:
+        os.link(outside, target)
+    except OSError as error:
+        pytest.skip(f"hard links unavailable: {error}")
+
+    with pytest.raises(ConfigError) as rejected:
+        ensure_audit_ready(config)
+
+    assert rejected.value.error_type == "unsafe_configured_path"
+
+
+def test_last_failure_write_failure_does_not_persist_successful_last_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    from agentic_hil import report as report_module
+
+    original_write = report_module.safe_write_text
+
+    def fail_last_failure(config, path, text, **kwargs):
+        if Path(path).name == "last-failure.json":
+            raise OSError("fsync failed")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "safe_write_text", fail_last_failure)
+
+    result = write_report(config, {"ok": False, "tool": "probe_target", "error_type": "probe_failed"})
+
+    assert result["audit_ok"] is False
+    assert not (tmp_path / ".agentic-hil" / "reports" / "last-report.json").exists()
 
 
 def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:

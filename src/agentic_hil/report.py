@@ -64,9 +64,9 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     try:
         report_path = last_report_path(config)
         enriched.setdefault("report_path", display_path(config, report_path))
-        safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
         if is_failure_report(enriched):
             safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
+        safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
     except (ConfigError, OSError, ValueError) as error:
         return mark_audit_failure(enriched, error)
     return enriched
@@ -160,6 +160,7 @@ def ensure_audit_ready(config: AgenticHILConfig) -> None:
             with suppress(FileNotFoundError):
                 probe.unlink()
     safe_file_path(last_report_path(config), config.work_dir)
+    safe_file_path(last_failure_path(config), config.work_dir)
 
 
 def audit_unavailable(tool: str, error: Exception) -> JsonObject:

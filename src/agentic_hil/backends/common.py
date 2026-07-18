@@ -8,7 +8,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_hil.process import CHILD_REAP_TIMEOUT_S, process_group_kwargs, terminate_process_tree
+from agentic_hil.process import (
+    CHILD_REAP_TIMEOUT_S,
+    process_group_kwargs,
+    register_process_group,
+    terminate_process_tree,
+)
 
 
 @dataclass(frozen=True)
@@ -22,13 +27,13 @@ class CompletedCommand:
 
 def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
     try:
-        child = subprocess.Popen(
+        child = register_process_group(subprocess.Popen(
             command,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             **process_group_kwargs(),
-        )
+        ))
         try:
             stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
             timed_out = False

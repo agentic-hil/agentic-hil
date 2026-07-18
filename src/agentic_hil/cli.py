@@ -146,8 +146,12 @@ def entrypoint(argv: list[str] | None = None) -> int:
         return result
     if result is not None:
         print_json(result)
-        return 0 if result.get("ok") else 1
+        return 0 if result_succeeded(result) else 1
     return 0
+
+
+def result_succeeded(result: JsonObject) -> bool:
+    return result.get("ok") is True and result.get("audit_ok") is not False and result.get("target_ok") is not False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -261,21 +265,22 @@ def initialized_config_path(workspace: Path) -> Path:
 
 def migrate_config(source: str) -> JsonObject:
     workspace = Path.cwd().resolve()
-    source_path = Path(source).expanduser()
-    source_path = absolute_without_symlinks(source_path if source_path.is_absolute() else workspace / source_path)
-    if not is_path_within_frozen(source_path, workspace):
+    requested_source = Path(source).expanduser()
+    source_path = absolute_without_symlinks(requested_source if requested_source.is_absolute() else workspace / requested_source)
+    source_in_workspace = is_path_within_frozen(source_path, workspace)
+    if not requested_source.is_absolute() and not source_in_workspace:
         raise ConfigError("config_migration_required", "Migration source must be inside the current workspace.", {"path": str(source_path), "workspace_root": str(workspace)})
     target_path = project_config_path(workspace)
     if target_path.exists():
         return {"ok": False, "error_type": "config_exists", "summary": "Authoritative Agentic HIL configuration already exists; migration will not overwrite it.", "path": str(target_path)}
     try:
-        loaded = yaml.load(safe_read_text(source_path, workspace=workspace), Loader=UniqueKeyLoader)
+        loaded = yaml.load(safe_read_text(source_path, workspace=workspace if source_in_workspace else None), Loader=UniqueKeyLoader)
     except FileNotFoundError as error:
         raise ConfigError("config_file_not_found", "Legacy Agentic HIL configuration could not be found.", {"path": str(source_path)}) from error
     except UnicodeDecodeError as error:
         raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid UTF-8 text.", {"path": str(source_path)}) from error
     except yaml.YAMLError as error:
-        raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid YAML.", {"path": str(source_path), "backend_error": str(error)}) from error
+        raise ConfigError("config_invalid", "Legacy Agentic HIL configuration is not valid YAML.", yaml_error_details(error, source_path)) from error
     if loaded is None:
         loaded = {}
     if not isinstance(loaded, dict):
@@ -373,16 +378,32 @@ def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> Non
 
 def write_exclusive_text(path: Path, text: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = -1
+    created = False
     try:
+        descriptor = os.open(path, flags, 0o600)
+        created = True
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = -1
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+    except Exception:
+        if created:
+            with suppress(FileNotFoundError):
+                path.unlink()
+        raise
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def yaml_error_details(error: yaml.YAMLError, path: Path) -> JsonObject:
+    details: JsonObject = {"path": str(path)}
+    mark = getattr(error, "problem_mark", None)
+    if mark is not None:
+        details.update({"line": mark.line + 1, "column": mark.column + 1})
+    return details
 
 
 def run_test_reactor(test_config_path: str | None = None) -> JsonObject:

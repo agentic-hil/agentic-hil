@@ -7,7 +7,7 @@ from pathlib import Path
 from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import ProcessBridgeSession, public_backend_result
 from agentic_hil.config import ConfigError, display_path, resolve_work_path
-from agentic_hil.process import process_group_kwargs
+from agentic_hil.process import process_group_kwargs, register_process_group
 from agentic_hil.report import (
     append_jsonl,
     audit_unavailable,
@@ -290,7 +290,7 @@ def open_adapter_bridge(config: AgenticHILConfig, adapter_id: str, adapter_confi
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_not_found", "summary": "Test adapter bridge executable could not be found.", "executable": adapter_config.executable}
     command = invocation(executable)
     try:
-        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs())
+        child = register_process_group(subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs()))
     except OSError as error:
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_process_start_failed", "summary": "Test adapter bridge process could not be started.", "backend_error": str(error)}
     session = AdapterBridgeSession(child)

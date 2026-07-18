@@ -36,10 +36,11 @@ class FakeComPortService:
 
 
 class RecordingService:
-    def __init__(self, *, fail_cleanup: bool = False, raise_flash: bool = False) -> None:
+    def __init__(self, *, fail_cleanup: bool = False, raise_flash: bool = False, audit_flash_failure: bool = False) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.fail_cleanup = fail_cleanup
         self.raise_flash = raise_flash
+        self.audit_flash_failure = audit_flash_failure
         self.breakpoint_id = 0
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
@@ -47,6 +48,14 @@ class RecordingService:
         self.calls.append((name, arguments))
         if name == "flash_firmware" and self.raise_flash:
             raise OSError("flash transport failed")
+        if name == "flash_firmware" and self.audit_flash_failure:
+            return {
+                "ok": True,
+                "audit_ok": False,
+                "audit_error": {"error_type": "unsafe_configured_path"},
+                "side_effect_committed": True,
+                "retry_safe": False,
+            }
         if name == "com_session_start":
             return {"ok": True, "already_active": False}
         if name == "com_session_stop":
@@ -383,6 +392,26 @@ def test_reactor_converts_step_exception_to_structured_failure(tmp_path: Path) -
     assert result["steps"][0]["result"]["exception_type"] == "OSError"
 
 
+def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
+    config = load_config(
+        str(write_config(tmp_path, devices_yaml="devices:\n  dut:\n    debugger: true\n    uart: dut_uart\n", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')),
+    )
+    plan_path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: dut, action: flash, image_path: build/app.elf}\n  - {device: dut, action: uart_open}\n",
+    )
+    service = RecordingService(audit_flash_failure=True)
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 1
+    assert result["error_type"] == "audit_failed"
+    assert result["audit_ok"] is False
+    assert result["retry_safe"] is False
+    assert service.calls == [("flash_firmware", {"image_path": "build/app.elf"})]
+
+
 def test_run_until_breakpoint_removes_each_owned_breakpoint(tmp_path: Path) -> None:
     config = load_config(
         str(write_config(tmp_path, devices_yaml="devices:\n  dut:\n    debugger: true\n")),
@@ -448,3 +477,12 @@ def test_cli_uses_authoritative_config_and_repository_local_test_plan(
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert result["error_type"] == "test_config_invalid"
+
+
+def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr("agentic_hil.cli.run_test_reactor", lambda _path: {"ok": True, "audit_ok": False})
+
+    exit_code = entrypoint(["test-reactor"])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["audit_ok"] is False

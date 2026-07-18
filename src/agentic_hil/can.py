@@ -12,7 +12,7 @@ from typing import Protocol
 from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import ProcessBridgeSession, public_backend_result
 from agentic_hil.config import ConfigError, display_path, resolve_work_path
-from agentic_hil.process import process_group_kwargs
+from agentic_hil.process import process_group_kwargs, register_process_group
 from agentic_hil.report import (
     append_jsonl,
     audit_unavailable,
@@ -334,7 +334,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found."}
     command = invocation(executable)
     try:
-        child = subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs())
+        child = register_process_group(subprocess.Popen(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_group_kwargs()))
     except OSError as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error)}
     session = ProcessCanAdapterSession(child, bus_config.timeout_s)
