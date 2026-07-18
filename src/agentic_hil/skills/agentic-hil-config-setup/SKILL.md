@@ -23,4 +23,4 @@ Never bypass Agentic HIL policy with raw debugger commands, direct serial device
 
 If any Agentic HIL tool returns `permission_denied`, stop and ask the user before changing policy.
 
-If any Agentic HIL tool returns `hardware_state_unconfirmed`, or `agentic-hil hardware-status` shows an `active` or `quarantined` marker, stop hardware actions. Do not delete marker files manually. Ask the operator to inspect the rig and recover with `agentic-hil hardware-recover --quarantine-id <id> --acknowledge-hardware-checked` only after hardware is safe.
+If any Agentic HIL tool returns `hardware_state_unconfirmed`, or `agentic-hil hardware-status` shows an `active` or `quarantined` marker, stop hardware actions. Do not delete marker files manually. Ask the operator to inspect the rig and recover with `agentic-hil hardware-recover --quarantine-id <id> --acknowledge-hardware-checked` only after hardware is safe. Restart existing Agentic HIL service processes after recovery; locally poisoned instances remain blocked.

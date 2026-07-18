@@ -55,40 +55,63 @@ class ProjectHardwareLock:
         self.path = self.state_dir / f"hardware-{self.project_key}.lock"
         self.state_path = self.state_dir / f"hardware-{self.project_key}.state.json"
         self.quarantine_path = self.state_path
-        self.owner_token = uuid.uuid4().hex
-        self.lease_id = uuid.uuid4().hex
+        self.owner_token = ""
+        self.lease_id = ""
         self.handle: Any = None
+        self._instance_guard = threading.RLock()
 
     def acquire(self, *, recovery: bool = False, source: str = "agentic_hil", ignore_quarantine: bool | None = None) -> bool:
+        with self._instance_guard:
+            return self._acquire(recovery=recovery, source=source, ignore_quarantine=ignore_quarantine)
+
+    def _acquire(self, *, recovery: bool, source: str, ignore_quarantine: bool | None) -> bool:
         if ignore_quarantine is not None:
             recovery = ignore_quarantine
         if self.handle is not None:
             return True
+        self.owner_token = uuid.uuid4().hex
+        with self._owners_guard:
+            if str(self.path) in self._owners:
+                return False
+            self._owners[str(self.path)] = self.owner_token
         try:
             self._open_handle()
             if not self._acquire_os_lock():
                 self._close_handle()
+                self._clear_owner_reservation()
                 return False
             state = self._read_state()
             if state is not None and not recovery:
                 self._release_os_lock()
                 raise HardwareQuarantinedError(state)
             if not recovery:
-                self._write_state(self._new_state("active", source=source))
+                self.lease_id = uuid.uuid4().hex
+                self._write_state(self._new_active_state(source))
         except HardwareLockError:
             if self.handle is not None:
                 self._release_os_lock()
+            else:
+                self._clear_owner_reservation()
             raise
         except OSError as error:
             if self.handle is not None:
                 self._release_os_lock()
+            else:
+                self._clear_owner_reservation()
             raise HardwareLockError(str(error)) from error
-
-        with self._owners_guard:
-            self._owners[str(self.path)] = self.owner_token
+        except BaseException:
+            if self.handle is not None:
+                self._release_os_lock()
+            else:
+                self._clear_owner_reservation()
+            raise
         return True
 
     def confirm_safe_and_release(self) -> None:
+        with self._instance_guard:
+            self._confirm_safe_and_release()
+
+    def _confirm_safe_and_release(self) -> None:
         if self.handle is None:
             return
         try:
@@ -104,9 +127,10 @@ class ProjectHardwareLock:
         active_resources: list[JsonObject],
         inspection_errors: list[JsonObject],
     ) -> JsonObject:
-        marker = self.mark_quarantined(reason=reason, source=source, active_resources=active_resources, inspection_errors=inspection_errors)
-        self._release_os_lock()
-        return marker
+        with self._instance_guard:
+            marker = self.mark_quarantined(reason=reason, source=source, active_resources=active_resources, inspection_errors=inspection_errors)
+            self._release_os_lock()
+            return marker
 
     def status(self) -> JsonObject:
         state = self._read_state()
@@ -125,7 +149,8 @@ class ProjectHardwareLock:
         self.confirm_safe_and_release()
 
     def release_os_lock(self) -> None:
-        self._release_os_lock()
+        with self._instance_guard:
+            self._release_os_lock()
 
     def quarantine_info(self) -> JsonObject | None:
         return self._read_state()
@@ -138,16 +163,19 @@ class ProjectHardwareLock:
         active_resources: list[JsonObject],
         inspection_errors: list[JsonObject],
     ) -> JsonObject:
-        self._require_owner()
-        marker = self._new_state("quarantined", source=source, active_resources=active_resources, inspection_errors=inspection_errors)
-        marker["reason"] = reason
-        marker["quarantine_id"] = marker["lease_id"]
-        self._write_state(marker)
-        return marker
+        with self._instance_guard:
+            self._require_owner()
+            active_state = self._read_state()
+            if active_state is None or active_state.get("state") != "active" or active_state.get("lease_id") != self.lease_id:
+                raise HardwareLockError("Current active hardware lease state is missing or owned by another lease.")
+            marker = self._quarantined_state_from_active(active_state, reason=reason, source=source, active_resources=active_resources, inspection_errors=inspection_errors)
+            self._write_state(marker)
+            return marker
 
     def clear_quarantine(self) -> None:
-        self._require_owner()
-        self._delete_state()
+        with self._instance_guard:
+            self._require_owner()
+            self._delete_state()
 
     @classmethod
     def owner_is_active(cls, config_path: str, owner_token: str) -> bool:
@@ -155,34 +183,43 @@ class ProjectHardwareLock:
         with cls._owners_guard:
             return cls._owners.get(str(lock.path)) == owner_token
 
-    def _new_state(
-        self,
-        state: Literal["active", "quarantined"],
-        *,
-        source: str,
-        active_resources: list[JsonObject] | None = None,
-        inspection_errors: list[JsonObject] | None = None,
-    ) -> JsonObject:
-        previous = self._read_state() if self.state_path.exists() else None
-        started_at = str(previous.get("started_at")) if isinstance(previous, dict) and previous.get("started_at") else utc_now_iso()
-        lease_id = str(previous.get("lease_id")) if isinstance(previous, dict) and previous.get("lease_id") else self.lease_id
-        marker: JsonObject = {
+    def _new_active_state(self, source: str) -> JsonObject:
+        started_at = utc_now_iso()
+        return {
             "version": 1,
-            "state": state,
+            "state": "active",
             "project_key": self.project_key,
-            "lease_id": lease_id,
-            "quarantine_id": lease_id,
+            "lease_id": self.lease_id,
+            "quarantine_id": self.lease_id,
             "pid": os.getpid(),
             "hostname": socket.gethostname(),
             "started_at": started_at,
-            "updated_at": utc_now_iso(),
+            "updated_at": started_at,
             "source": source,
             "config_path": self.config_path,
             "reason": None,
-            "active_resources": active_resources or [],
-            "inspection_errors": inspection_errors or [],
+            "active_resources": [],
+            "inspection_errors": [],
         }
-        return marker
+
+    def _quarantined_state_from_active(
+        self,
+        active_state: JsonObject,
+        *,
+        reason: str,
+        source: str,
+        active_resources: list[JsonObject],
+        inspection_errors: list[JsonObject],
+    ) -> JsonObject:
+        return {
+            **active_state,
+            "state": "quarantined",
+            "updated_at": utc_now_iso(),
+            "source": source,
+            "reason": reason,
+            "active_resources": active_resources,
+            "inspection_errors": inspection_errors,
+        }
 
     def _read_state(self) -> JsonObject | None:
         try:
@@ -192,7 +229,13 @@ class ProjectHardwareLock:
         except OSError as error:
             marker_id = "unreadable-" + hashlib.sha256(f"{self.project_key}:{error}".encode()).hexdigest()
             return self._invalid_state("state_unreadable", str(error), marker_id, recovery_blocked=True)
-        marker_id = "invalid-" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        try:
+            stat = self.state_path.stat()
+        except OSError as error:
+            marker_id = "unreadable-" + hashlib.sha256(f"{self.project_key}:{error}".encode()).hexdigest()
+            return self._invalid_state("state_unreadable", str(error), marker_id, recovery_blocked=True)
+        fingerprint = f"{text}\0{stat.st_size}\0{stat.st_mtime_ns}\0{getattr(stat, 'st_ino', 0)}"
+        marker_id = "invalid-" + hashlib.sha256(fingerprint.encode()).hexdigest()
         try:
             raw = json.loads(text)
         except json.JSONDecodeError as error:
@@ -361,6 +404,11 @@ class ProjectHardwareLock:
     def _owner_in_current_process(self) -> bool:
         with self._owners_guard:
             return str(self.path) in self._owners
+
+    def _clear_owner_reservation(self) -> None:
+        with self._owners_guard:
+            if self._owners.get(str(self.path)) == self.owner_token:
+                self._owners.pop(str(self.path), None)
 
     def _ensure_state_directory(self) -> None:
         try:

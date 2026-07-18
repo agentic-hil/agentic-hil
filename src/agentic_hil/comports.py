@@ -152,13 +152,18 @@ class ComPortService:
             session.start_reader()
             append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."})
-        except Exception:
+        except BaseException as error:
+            cleanup_confirmed = False
             try:
                 self._stop_session(session, "start_failed")
-            except Exception:
-                pass
+            except BaseException:
+                cleanup_confirmed = not bool(getattr(session.serial_handle, "is_open", True))
             else:
                 self.sessions.pop(port_id, None)
+                cleanup_confirmed = True
+            if cleanup_confirmed:
+                self.sessions.pop(port_id, None)
+                error._agentic_hil_completion_confirmed = True
             raise
 
     def session_stop(self, port_id: str) -> JsonObject:
@@ -167,10 +172,24 @@ class ComPortService:
             return self._write_report(port)
         session = self.sessions.get(port_id)
         if session is None:
-            return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
-        self._stop_session(session, "requested")
+            try:
+                return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
+            except BaseException as error:
+                error._agentic_hil_completion_confirmed = True
+                raise
+        try:
+            self._stop_session(session, "requested")
+        except BaseException as error:
+            if not bool(getattr(session.serial_handle, "is_open", True)):
+                self.sessions.pop(port_id, None)
+                error._agentic_hil_completion_confirmed = True
+            raise
         self.sessions.pop(port_id, None)
-        return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
+        try:
+            return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."})
+        except BaseException as error:
+            error._agentic_hil_completion_confirmed = True
+            raise
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
         port = self._configured_port(port_id, "com_write")
@@ -239,24 +258,31 @@ class ComPortService:
 
     def close(self) -> None:
         first_error: Exception | None = None
+        pending_base_exception: BaseException | None = None
         for serial_handle in list(self._unmanaged_serial_handles):
             try:
                 serial_handle.close()
                 if bool(getattr(serial_handle, "is_open", False)):
                     raise RuntimeError("COM port remained open after close.")
-            except Exception as error:
-                if first_error is None:
+            except BaseException as error:
+                if isinstance(error, Exception) and first_error is None:
                     first_error = error
+                elif not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
             else:
                 self._unmanaged_serial_handles.remove(serial_handle)
         for port_id, session in list(self.sessions.items()):
             try:
                 self._stop_session(session, "shutdown")
-            except Exception as error:
-                if first_error is None:
+            except BaseException as error:
+                if isinstance(error, Exception) and first_error is None:
                     first_error = error
+                elif not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
             else:
                 self.sessions.pop(port_id, None)
+        if pending_base_exception is not None:
+            raise pending_base_exception
         if first_error is not None:
             raise first_error
 
@@ -291,15 +317,23 @@ class ComPortService:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
         try:
             session = ComPortSession(port_id, port_config, serial_handle, log_path, start_reader=False)
-        except Exception as error:
+        except BaseException as error:
             result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port session could not be initialized.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            cleanup_confirmed = False
             try:
                 serial_handle.close()
                 if bool(getattr(serial_handle, "is_open", False)):
                     raise RuntimeError("COM port remained open after close.")
-            except Exception as cleanup_error:
+                cleanup_confirmed = True
+            except BaseException as cleanup_error:
                 self._unmanaged_serial_handles.append(serial_handle)
                 result["cleanup_error"] = str(cleanup_error)
+                if not isinstance(cleanup_error, Exception):
+                    raise
+            if not isinstance(error, Exception):
+                if cleanup_confirmed:
+                    error._agentic_hil_completion_confirmed = True
+                raise
             return result
         return {"ok": True, "session": session}
 

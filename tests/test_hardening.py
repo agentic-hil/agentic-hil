@@ -15,8 +15,8 @@ from conftest import write_config
 
 from agentic_hil.adapters import AdapterService, AdapterSession
 from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession
-from agentic_hil.can import parse_can_id, payload_frame
-from agentic_hil.cli import hardware_recover
+from agentic_hil.can import CanBusService, CanBusSession, open_python_can_adapter, parse_can_id, payload_frame
+from agentic_hil.cli import hardware_recover, hardware_status
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
@@ -328,7 +328,9 @@ def test_acquire_rechecks_state_after_os_lock(tmp_path: Path, monkeypatch: pytes
     def acquire_then_publish_state() -> bool:
         acquired = original_acquire()
         if acquired:
-            marker = lock._new_state("quarantined", source="race")
+            lock.lease_id = "race"
+            marker = lock._new_active_state("race")
+            marker["state"] = "quarantined"
             marker["reason"] = "hardware_cleanup_failed"
             lock._write_state(marker)
         return acquired
@@ -343,6 +345,35 @@ def test_acquire_rechecks_state_after_os_lock(tmp_path: Path, monkeypatch: pytes
     assert recovery.acquire(recovery=True, source="test") is True
     recovery.clear_quarantine()
     recovery.release_os_lock()
+
+
+def test_each_acquire_gets_fresh_lease_id(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+
+    assert lock.acquire(source="first") is True
+    first = lock.status()["state"]["lease_id"]
+    lock.confirm_safe_and_release()
+    assert lock.acquire(source="second") is True
+    second = lock.status()["state"]["lease_id"]
+    lock.confirm_safe_and_release()
+
+    assert first != second
+
+
+def test_old_recovery_id_cannot_clear_newer_incident_from_same_lock(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="first") is True
+    first = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first["quarantine_id"]))["ok"] is True
+
+    assert lock.acquire(source="second") is True
+    second = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+
+    assert second["quarantine_id"] != first["quarantine_id"]
+    stale = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first["quarantine_id"]))
+    assert stale["error_type"] == "quarantine_changed"
 
 
 def test_active_marker_blocks_after_owner_exits(tmp_path: Path) -> None:
@@ -546,6 +577,166 @@ class FailingCleanupBackend(FailingCleanupSubsystem):
         return self.active
 
 
+class InspectionOnlySubsystem(FailingCleanupSubsystem):
+    def cleanup_inspection_errors(self) -> list[dict]:
+        return [{"id": "stale", "error": "cleanup unconfirmed"}]
+
+
+class OperationBackend(FailingCleanupBackend):
+    def __init__(self, *, reset_error: BaseException | None = None, reset_result: dict | None = None, flash_error: BaseException | None = None) -> None:
+        super().__init__()
+        self.reset_error = reset_error
+        self.reset_result = reset_result or {"ok": True}
+        self.flash_error = flash_error
+        self.probe_calls = 0
+
+    def reset_target(self, mode: str) -> dict:
+        if self.reset_error is not None:
+            raise self.reset_error
+        return self.reset_result
+
+    def probe_target(self) -> dict:
+        self.probe_calls += 1
+        return {"ok": True}
+
+    def flash_firmware(self, artifact: dict, reset_after_flash: bool) -> dict:
+        if self.flash_error is not None:
+            raise self.flash_error
+        return {"ok": True}
+
+
+class DeadBridge:
+    last_close_result = None
+
+    def status(self) -> dict:
+        return {"active": False}
+
+    def close(self):
+        return BridgeCloseResult(process_reaped=True, safe_state_confirmed=False, close_response={"ok": False}, errors=["bridge crashed"])
+
+
+class DeadCanAdapter(DeadBridge):
+    adapter_name = "process"
+
+
+class InterruptAfterCloseBridge:
+    def __init__(self, safe: bool) -> None:
+        self.safe = safe
+        self.closed = False
+        self.last_close_result: BridgeCloseResult | None = None
+
+    def status(self) -> dict:
+        return {"active": not self.closed}
+
+    def close(self):
+        self.closed = True
+        self.last_close_result = BridgeCloseResult(process_reaped=True, safe_state_confirmed=self.safe, close_response={"ok": self.safe, "safe_state_confirmed": self.safe}, errors=[] if self.safe else ["unsafe"])
+        raise KeyboardInterrupt
+
+
+class CleanupInterruptBackend(FailingCleanupBackend):
+    def close(self) -> None:
+        self.close_calls += 1
+        raise KeyboardInterrupt
+
+
+class ConcurrentResetBackend(OperationBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_calls = 0
+        self.max_active_calls = 0
+        self.guard = threading.Lock()
+
+    def reset_target(self, mode: str) -> dict:
+        with self.guard:
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        time.sleep(0.05)
+        with self.guard:
+            self.active_calls -= 1
+        return {"ok": True}
+
+
+class BlockingResetBackend(OperationBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def reset_target(self, mode: str) -> dict:
+        self.started.set()
+        assert self.release.wait(WAIT_TIMEOUT_S)
+        return {"ok": True}
+
+
+class InterruptingDebugBackend(OperationBackend):
+    def debug_start_session(self, artifact: dict, mode: str, timeout_s: float | None) -> dict:
+        self.active = True
+        raise KeyboardInterrupt
+
+
+class MalformedResultBackend(OperationBackend):
+    def reset_target(self, mode: str):
+        return None
+
+
+class MalformedCloseCanAdapter:
+    adapter_name = "process"
+
+    def __init__(self) -> None:
+        self.active = True
+
+    def status(self) -> dict:
+        return {"active": self.active}
+
+    def close(self):
+        self.active = False
+        return None
+
+
+class SafeClosingBridge:
+    adapter_name = "process"
+
+    def __init__(self) -> None:
+        self.active = True
+        self.last_close_result: BridgeCloseResult | None = None
+
+    def status(self) -> dict:
+        return {"active": self.active}
+
+    def close(self) -> BridgeCloseResult:
+        self.active = False
+        self.last_close_result = BridgeCloseResult(process_reaped=True, safe_state_confirmed=True, close_response={"ok": True, "safe_state_confirmed": True}, errors=[])
+        return self.last_close_result
+
+
+class FakeChild:
+    def __init__(self) -> None:
+        self.active = True
+        self.terminated = False
+
+    def poll(self):
+        return None if self.active else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.active = False
+
+    def kill(self) -> None:
+        self.active = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+class FakeCanBus:
+    def __init__(self) -> None:
+        self.active = True
+
+    def shutdown(self) -> None:
+        self.active = False
+
+
 def test_tool_service_close_attempts_every_subsystem_and_retains_unsafe_lease(tmp_path: Path) -> None:
     config = load_test_config(tmp_path)
     backend = FailingCleanupBackend(error="debug cleanup failed")
@@ -572,6 +763,452 @@ def test_tool_service_close_attempts_every_subsystem_and_retains_unsafe_lease(tm
             second_lock.acquire()
     finally:
         service._hardware_lock.release()
+
+
+def test_interrupted_one_shot_operation_without_session_stays_quarantined(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, backend=OperationBackend(reset_error=KeyboardInterrupt()), reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("reset_target", {"mode": "run"})
+
+    state = hardware_status(config.config_path)
+    assert state["hardware_state_unconfirmed"] is True
+    assert state["state"]["inspection_errors"][0]["tool"] == "reset_target"
+
+
+def test_structured_one_shot_failure_is_completion_confirmed(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, backend=OperationBackend(reset_result={"ok": False, "error_type": "reset_failed"}), reload_config=False)
+
+    result = service.call("reset_target", {"mode": "run"})
+
+    assert result["error_type"] == "reset_failed"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_unhandled_flash_exception_without_session_stays_quarantined(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    firmware = tmp_path / "build" / "app.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFtest")
+    service = AgenticHILToolService(config, backend=OperationBackend(flash_error=OSError("transport lost")), reload_config=False)
+
+    with pytest.raises(OSError, match="transport lost"):
+        service.call("flash_firmware", {"image_path": "build/app.elf"})
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_malformed_hardware_result_stays_quarantined(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, backend=MalformedResultBackend(), reload_config=False)
+
+    with pytest.raises(TypeError, match="non-object"):
+        service.call("reset_target", {"mode": "run"})
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_structured_hardware_timeout_stays_quarantined(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend(reset_result={"ok": False, "error_type": "timeout"})
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    assert service.call("reset_target", {"mode": "run"})["error_type"] == "timeout"
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_explicitly_confirmed_timeout_releases_hardware_lease(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend(reset_result={"ok": False, "error_type": "timeout", "completion_confirmed": True})
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    assert service.call("reset_target", {"mode": "run"})["error_type"] == "timeout"
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_interrupted_debug_start_closes_backend_before_quarantine_decision(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    image = tmp_path / "firmware.elf"
+    image.write_bytes(b"elf")
+    backend = InterruptingDebugBackend()
+    artifacts = SimpleNamespace(validate_local_path=lambda _: {"ok": True, "artifact": {"resolved_path": str(image)}})
+    service = AgenticHILToolService(config, backend=backend, artifacts=artifacts, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("debug_start_session", {"image_path": str(image)})
+
+    assert backend.active is False
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_dead_adapter_bridge_blocks_followup_before_backend_call(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    backend = OperationBackend()
+    adapters = AdapterService(config)
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
+    log_path = tmp_path / ".agentic-hil" / "logs" / "dead-adapter.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    adapters.sessions["ntc"] = AdapterSession("ntc", adapter_config, DeadBridge(), str(log_path))
+    service = AgenticHILToolService(config, backend=backend, adapters=adapters, reload_config=False)
+
+    state = service.hardware_state()
+    blocked = service.call("probe_target")
+
+    assert state["active"] is True
+    assert state["inspection_errors"][0]["id"] == "ntc"
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+    assert backend.probe_calls == 0
+
+
+def test_dead_process_can_bridge_is_unconfirmed(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "dead-can.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    can_buses.sessions["bench"] = CanBusSession("bench", config.can_buses["bench"], DeadCanAdapter(), str(log_path))
+    service = AgenticHILToolService(config, can_buses=can_buses, reload_config=False)
+
+    state = service.hardware_state()
+
+    assert state["active"] is True
+    assert state["inspection_errors"][0]["id"] == "bench"
+
+
+def test_process_can_rejects_malformed_close_result(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "malformed-close.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = CanBusSession("bench", config.can_buses["bench"], MalformedCloseCanAdapter(), str(log_path))
+    can_buses.sessions["bench"] = session
+
+    with pytest.raises(RuntimeError, match="structured close result"):
+        can_buses.session_stop("bench")
+
+    assert session.cleanup_unconfirmed is True
+
+
+@pytest.mark.parametrize("safe", [False, True])
+def test_bridge_stop_interrupt_preserves_confirmed_cleanup_state(tmp_path: Path, safe: bool) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    adapters = AdapterService(config)
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
+    log_path = tmp_path / ".agentic-hil" / "logs" / "interrupt-close.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    adapters.sessions["ntc"] = AdapterSession("ntc", adapter_config, InterruptAfterCloseBridge(safe), str(log_path))
+    service = AgenticHILToolService(config, adapters=adapters, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("adapter_session_stop", {"adapter_id": "ntc"})
+
+    status = hardware_status(config.config_path)
+    assert status["hardware_state_unconfirmed"] is (not safe)
+
+
+def test_external_recovery_does_not_reenable_poisoned_service(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    backend = OperationBackend()
+    adapters = AdapterService(config)
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["temp"], faults=["open"])
+    log_dir = tmp_path / ".agentic-hil" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    adapters.sessions["ntc"] = AdapterSession("ntc", adapter_config, UnsafeClosingBridge(), str(log_dir / "ntc.jsonl"))
+    service = AgenticHILToolService(config, backend=backend, adapters=adapters, reload_config=False)
+    with pytest.raises(RuntimeError):
+        service.call("adapter_session_stop", {"adapter_id": "ntc"})
+    status = hardware_status(config.config_path)
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))
+
+    blocked = service.call("probe_target")
+
+    assert recovered["ok"] is True
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+    assert backend.probe_calls == 0
+
+
+def test_poisoned_service_does_not_recreate_recovered_incident_on_close(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, backend=OperationBackend(reset_error=KeyboardInterrupt()), reload_config=False)
+    with pytest.raises(KeyboardInterrupt):
+        service.call("reset_target", {"mode": "run"})
+    status = hardware_status(config.config_path)
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))["ok"] is True
+
+    assert service.call("probe_target")["error_type"] == "hardware_state_unconfirmed"
+    service.close()
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_preflight_incident_is_not_recreated_after_recovery(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, adapters=InspectionOnlySubsystem(), reload_config=False)
+
+    assert service.call("probe_target")["error_type"] == "hardware_state_unconfirmed"
+    status = hardware_status(config.config_path)
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))["ok"] is True
+    service.close()
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_cleanup_interrupt_still_closes_remaining_subsystems_and_finalizes_lease(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = CleanupInterruptBackend()
+    com_ports = FailingCleanupSubsystem()
+    can_buses = FailingCleanupSubsystem()
+    adapters = FailingCleanupSubsystem()
+    service = AgenticHILToolService(config, backend=backend, com_ports=com_ports, can_buses=can_buses, adapters=adapters, reload_config=False)
+    assert service._hardware_lock.acquire(source="test") is True
+
+    with pytest.raises(KeyboardInterrupt):
+        service.close()
+
+    assert backend.close_calls == com_ports.close_calls == can_buses.close_calls == adapters.close_calls == 1
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_hardware_calls_are_serialized_within_service(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = ConcurrentResetBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+    threads = [threading.Thread(target=service.call, args=("reset_target", {"mode": "run"})) for _ in range(2)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=WAIT_TIMEOUT_S)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert backend.max_active_calls == 1
+
+
+def test_nonhardware_call_and_close_wait_for_hardware_operation(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = BlockingResetBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+    hardware_thread = threading.Thread(target=lambda: service.call("reset_target", {"mode": "run"}))
+    nonhardware_thread = threading.Thread(target=lambda: service.call("get_last_report"))
+    close_thread = threading.Thread(target=service.close)
+
+    hardware_thread.start()
+    assert backend.started.wait(WAIT_TIMEOUT_S)
+    nonhardware_thread.start()
+    close_thread.start()
+    time.sleep(0.05)
+
+    assert nonhardware_thread.is_alive()
+    assert close_thread.is_alive()
+    assert hardware_status(config.config_path)["state"]["state"] == "active"
+
+    backend.release.set()
+    for thread in (hardware_thread, nonhardware_thread, close_thread):
+        thread.join(timeout=WAIT_TIMEOUT_S)
+        assert not thread.is_alive()
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_same_lock_instance_concurrent_acquire_does_not_leak_owner(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    results: list[bool] = []
+    threads = [threading.Thread(target=lambda: results.append(lock.acquire(source="thread"))) for _ in range(2)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=WAIT_TIMEOUT_S)
+
+    owner_token = lock.owner_token
+    assert results == [True, True]
+    assert ProjectHardwareLock.owner_is_active(config.config_path, owner_token) is True
+    lock.release()
+    assert ProjectHardwareLock.owner_is_active(config.config_path, owner_token) is False
+
+
+def test_adapter_post_open_interrupt_runs_confirmed_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    bridge = SafeClosingBridge()
+
+    def opened(*args):
+        args[3](bridge)
+        return {"ok": True, "session": bridge}
+
+    monkeypatch.setattr("agentic_hil.adapters.open_adapter_bridge", opened)
+    monkeypatch.setattr("agentic_hil.adapters.append_jsonl", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("adapter_session_start", {"adapter_id": "ntc"})
+
+    assert bridge.last_close_result is not None and bridge.last_close_result.cleanup_confirmed
+    state = hardware_status(config.config_path)
+    assert state["hardware_state_unconfirmed"] is False, json.dumps(state, indent=2)
+
+
+def test_can_post_open_interrupt_runs_confirmed_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    bridge = SafeClosingBridge()
+
+    def opened(*args):
+        args[4](bridge)
+        return {"ok": True, "session": bridge}
+
+    monkeypatch.setattr("agentic_hil.can.open_adapter", opened)
+    monkeypatch.setattr("agentic_hil.can.append_jsonl", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("can_session_start", {"bus_id": "bench", "clear_rx_queue": False})
+
+    assert bridge.last_close_result is not None and bridge.last_close_result.cleanup_confirmed
+    state = hardware_status(config.config_path)
+    assert state["hardware_state_unconfirmed"] is False, json.dumps(state, indent=2)
+
+
+def test_adapter_bridge_constructor_interrupt_reaps_child_and_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    child = FakeChild()
+    monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("adapter_session_start", {"adapter_id": "ntc"})
+
+    assert child.terminated is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_process_can_constructor_interrupt_reaps_child_and_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    child = FakeChild()
+    monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("can_session_start", {"bus_id": "bench"})
+
+    assert child.terminated is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_python_can_registration_interrupt_closes_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML.replace('adapter: "process"', 'adapter: "socketcan"'))
+    bus = FakeCanBus()
+    monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **_: bus))
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        open_python_can_adapter(config, "bench", config.can_buses["bench"], False, lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert bus.active is False
+    assert raised.value._agentic_hil_completion_confirmed is True
+
+
+def test_python_can_registered_interrupt_preserves_original_and_safe_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    can_yaml = CAN_BUS_YAML.replace('adapter: "process"', 'adapter: "socketcan"')
+    config = load_test_config(tmp_path, can_buses_yaml=can_yaml)
+    bridge = SafeClosingBridge()
+
+    def interrupted(*args):
+        args[4](bridge)
+        bridge.active = False
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agentic_hil.can.open_adapter", interrupted)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("can_session_start", {"bus_id": "bench", "clear_rx_queue": False})
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_com_session_constructor_interrupt_closes_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    serial_handle = IdleSerialHandle()
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial_handle))
+    monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("com_session_start", {"port_id": "dut"})
+
+    assert serial_handle.is_open is False
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_adapter_stop_report_interrupt_does_not_quarantine_safe_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "adapter-stop-report.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    adapters = AdapterService(config)
+    adapters.sessions["ntc"] = AdapterSession("ntc", config.adapters["ntc"], SafeClosingBridge(), str(log_path))
+    monkeypatch.setattr("agentic_hil.adapters.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, adapters=adapters, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("adapter_session_stop", {"adapter_id": "ntc"})
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_can_stop_report_interrupt_does_not_quarantine_safe_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "can-stop-report.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    can_buses = CanBusService(config)
+    can_buses.sessions["bench"] = CanBusSession("bench", config.can_buses["bench"], SafeClosingBridge(), str(log_path))
+    monkeypatch.setattr("agentic_hil.can.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, can_buses=can_buses, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("can_session_stop", {"bus_id": "bench"})
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_com_stop_report_interrupt_does_not_quarantine_safe_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "com-stop-report.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    serial_handle = IdleSerialHandle()
+    com_ports = ComPortService(config)
+    com_ports.sessions["dut"] = ComPortSession("dut", config.com_ports["dut"], serial_handle, str(log_path))
+    monkeypatch.setattr("agentic_hil.comports.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, com_ports=com_ports, reload_config=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("com_session_stop", {"port_id": "dut"})
+
+    assert serial_handle.is_open is False
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_noop_stop_report_interrupts_do_not_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML, can_buses_yaml=CAN_BUS_YAML, adapters_yaml=ADAPTER_YAML)
+    monkeypatch.setattr("agentic_hil.comports.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr("agentic_hil.can.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr("agentic_hil.adapters.write_report", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    for tool, arguments in (
+        ("com_session_stop", {"port_id": "dut"}),
+        ("can_session_stop", {"bus_id": "bench"}),
+        ("adapter_session_stop", {"adapter_id": "ntc"}),
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            service.call(tool, arguments)
+
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_config_reload_closes_removed_session_and_releases_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

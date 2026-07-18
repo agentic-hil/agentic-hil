@@ -146,6 +146,7 @@ def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
     assert stale["error_type"] == "quarantine_changed"
     assert recovered["ok"] is True
     assert recovered["recovered"] is True
+    assert recovered["restart_required"] is True
     assert clear_status["quarantined"] is False
 
 

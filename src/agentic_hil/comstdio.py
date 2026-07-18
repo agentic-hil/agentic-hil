@@ -46,6 +46,7 @@ def run_com_stdio(
     exit_code = 0
     error_result: JsonObject | None = None
     cleanup_error: Exception | None = None
+    pending_base_exception: BaseException | None = None
     hardware_state: JsonObject = {"active": False, "active_resources": [], "inspection_errors": []}
     quarantine: JsonObject | None = None
     try:
@@ -83,23 +84,32 @@ def run_com_stdio(
                 if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
                     break
             exit_code = 1 if failed else 0
+    except BaseException as error:
+        pending_base_exception = error
     finally:
         if service is not None:
             try:
                 if started_ok:
                     service.session_stop(port_id)
-            except Exception as error:
-                cleanup_error = error
+            except BaseException as error:
+                if isinstance(error, Exception):
+                    cleanup_error = error
+                elif pending_base_exception is None:
+                    pending_base_exception = error
             try:
                 service.close()
-            except Exception as error:
-                if cleanup_error is None:
+            except BaseException as error:
+                if isinstance(error, Exception) and cleanup_error is None:
                     cleanup_error = error
+                elif not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
             try:
                 active_resources = [{"type": "com", "id": resource_id} for resource_id in service.active_session_ids()]
                 hardware_state = {"active": bool(active_resources), "active_resources": active_resources, "inspection_errors": []}
-            except Exception as error:
+            except BaseException as error:
                 hardware_state = {"active": True, "active_resources": [], "inspection_errors": [{"type": "com", "error": str(error)}]}
+                if not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
         if hardware_state["active"]:
             try:
                 quarantine = hardware_lock.quarantine_and_release(
@@ -141,6 +151,8 @@ def run_com_stdio(
             write_error(error_stream, result)
         elif error_result is not None:
             write_error(error_stream, error_result)
+    if pending_base_exception is not None:
+        raise pending_base_exception
     if cleanup_error is not None or hardware_state["active"]:
         return 1
     return exit_code

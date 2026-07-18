@@ -108,6 +108,22 @@ class InterruptingActiveService(RecordingService):
         return {"active": True, "state_confirmed": True, "active_resources": [{"type": "debugger", "id": "default"}], "inspection_errors": []}
 
 
+class InterruptingInactiveService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        raise KeyboardInterrupt
+
+
+class MalformedStepService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None):
+        return None
+
+
+class UnconfirmedStepService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        self.calls.append(name)
+        return {"ok": False, "tool": name, "error_type": "hardware_cleanup_failed", "hardware_state_unconfirmed": True}
+
+
 class PolicyChangingService(RecordingService):
     def __init__(self, tracker: ConcurrencyTracker, config_path: str) -> None:
         super().__init__(tracker)
@@ -502,6 +518,49 @@ def test_keyboard_interrupt_quarantines_active_reactor_hardware(tmp_path: Path) 
     assert state["quarantined"] is True
     assert state["state"]["reason"] == "hardware_cleanup_failed"
     assert state["state"]["active_resources"] == [{"device": "controller_a", "type": "debugger", "id": "default"}, {"device": "controller_b", "type": "debugger", "id": "default"}]
+
+
+def test_keyboard_interrupt_without_session_quarantines_reactor_step(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        Reactor(config, service_factory=lambda _: InterruptingInactiveService(ConcurrencyTracker())).run(plan)
+
+    state = ProjectTestLock(config.config_path).status()
+    assert state["hardware_state_unconfirmed"] is True
+    assert state["state"]["inspection_errors"][0]["action"] == "flash"
+
+
+def test_malformed_step_result_aborts_and_quarantines_reactor(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: MalformedStepService(ConcurrencyTracker())).run(plan)
+
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["aborted_tests"] == ["test-b"]
+    state = ProjectTestLock(config.config_path).status()
+    assert state["hardware_state_unconfirmed"] is True
+    assert state["state"]["inspection_errors"][0]["error_type"] == "TypeError"
+
+
+def test_unconfirmed_step_result_aborts_remaining_devices(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    services: list[UnconfirmedStepService] = []
+
+    def service_factory(_):
+        service = UnconfirmedStepService(ConcurrencyTracker())
+        services.append(service)
+        return service
+
+    result = Reactor(config, service_factory=service_factory).run(plan)
+
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["tests"][0]["error_type"] == "hardware_state_unconfirmed"
+    assert result["aborted_tests"] == ["test-b"]
+    assert services[1].calls == []
 
 
 def test_policy_change_blocks_remaining_hardware_steps_and_tests(tmp_path: Path) -> None:

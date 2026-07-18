@@ -6,7 +6,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.backends.common import command_for_log, invocation
-from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result
+from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result, reap_unmanaged_child
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
     append_jsonl,
@@ -34,6 +34,7 @@ class AdapterSession:
         self.started_at = utc_now_iso()
         self.active = True
         self.cleanup_unconfirmed = False
+        self.close_confirmed = False
 
 
 class AdapterService:
@@ -75,19 +76,22 @@ class AdapterService:
 
         try:
             opened = open_adapter_bridge(self.config, adapter_id, adapter["adapter_config"], register_provisional)
-        except BaseException:
+        except BaseException as error:
             if provisional is not None:
                 close_result = provisional.bridge.last_close_result
                 provisional.active = False
-                provisional.cleanup_unconfirmed = close_result is None or not close_result.cleanup_confirmed
+                provisional.close_confirmed = close_result is not None and close_result.cleanup_confirmed
+                provisional.cleanup_unconfirmed = not provisional.close_confirmed
                 if not provisional.cleanup_unconfirmed:
                     self.sessions.pop(adapter_id, None)
+                    error._agentic_hil_completion_confirmed = True
             raise
         if not opened["ok"]:
             failed_bridge = opened.get("session")
             if provisional is not None:
                 provisional.active = False
                 provisional.cleanup_unconfirmed = bool(opened.get("cleanup_unconfirmed"))
+                provisional.close_confirmed = not provisional.cleanup_unconfirmed
                 if not provisional.cleanup_unconfirmed:
                     self.sessions.pop(adapter_id, None)
             elif failed_bridge is not None:
@@ -103,13 +107,18 @@ class AdapterService:
         try:
             append_jsonl(session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
             return self._write_report({"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": False, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "Test adapter session started."})
-        except Exception:
+        except BaseException as error:
+            cleanup_confirmed = False
             try:
                 self._stop_session(session, "start_failed")
-            except Exception:
-                pass
+            except BaseException:
+                cleanup_confirmed = session.close_confirmed
             else:
                 self.sessions.pop(adapter_id, None)
+                cleanup_confirmed = True
+            if cleanup_confirmed:
+                self.sessions.pop(adapter_id, None)
+                error._agentic_hil_completion_confirmed = True
             raise
 
     def session_stop(self, adapter_id: str) -> JsonObject:
@@ -118,10 +127,24 @@ class AdapterService:
             return self._write_report(adapter)
         session = self.sessions.get(adapter_id)
         if session is None:
-            return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": False, "summary": "Test adapter session was not active."})
-        self._stop_session(session, "requested")
+            try:
+                return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": False, "summary": "Test adapter session was not active."})
+            except BaseException as error:
+                error._agentic_hil_completion_confirmed = True
+                raise
+        try:
+            self._stop_session(session, "requested")
+        except BaseException as error:
+            if session.close_confirmed:
+                self.sessions.pop(adapter_id, None)
+                error._agentic_hil_completion_confirmed = True
+            raise
         self.sessions.pop(adapter_id, None)
-        return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": True, "session": self._session_status(session), "summary": "Test adapter session stopped."})
+        try:
+            return self._write_report({"ok": True, "tool": "adapter_session_stop", "adapter_id": adapter_id, "was_active": True, "session": self._session_status(session), "summary": "Test adapter session stopped."})
+        except BaseException as error:
+            error._agentic_hil_completion_confirmed = True
+            raise
 
     def set_value(self, adapter_id: str, payload: JsonObject) -> JsonObject:
         tool = "adapter_set_value"
@@ -194,14 +217,21 @@ class AdapterService:
 
     def close(self) -> None:
         first_error: Exception | None = None
+        pending_base_exception: BaseException | None = None
         for adapter_id, session in list(self.sessions.items()):
             try:
                 self._stop_session(session, "shutdown")
-            except Exception as error:
-                if first_error is None:
+            except BaseException as error:
+                if isinstance(error, Exception) and first_error is None:
                     first_error = error
+                elif not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
+                if session.close_confirmed:
+                    self.sessions.pop(adapter_id, None)
             else:
                 self.sessions.pop(adapter_id, None)
+        if pending_base_exception is not None:
+            raise pending_base_exception
         if first_error is not None:
             raise first_error
 
@@ -209,20 +239,26 @@ class AdapterService:
         return bool(self.active_session_ids())
 
     def active_session_ids(self) -> list[str]:
-        active: list[str] = []
-        for adapter_id, session in self.sessions.items():
-            if session.cleanup_unconfirmed:
-                active.append(adapter_id)
-                continue
-            try:
-                if session.bridge.status().get("active") is not False:
-                    active.append(adapter_id)
-            except Exception:
-                active.append(adapter_id)
-        return active
+        return [adapter_id for adapter_id, session in self.sessions.items() if not session.close_confirmed]
 
     def cleanup_inspection_errors(self) -> list[JsonObject]:
-        return [{"id": adapter_id, "error": "Physical safe state was not confirmed during adapter cleanup."} for adapter_id, session in self.sessions.items() if session.cleanup_unconfirmed]
+        errors: list[JsonObject] = []
+        for adapter_id, session in self.sessions.items():
+            if session.close_confirmed:
+                continue
+            try:
+                bridge_active = session.bridge.status().get("active") is not False
+            except Exception as error:
+                session.cleanup_unconfirmed = True
+                errors.append({"id": adapter_id, "error": f"Adapter bridge status could not be inspected: {error}"})
+                continue
+            close_result = getattr(session.bridge, "last_close_result", None)
+            if session.cleanup_unconfirmed:
+                errors.append({"id": adapter_id, "error": "Physical safe state was not confirmed during adapter cleanup."})
+            elif not bridge_active and (close_result is None or not close_result.cleanup_confirmed):
+                session.cleanup_unconfirmed = True
+                errors.append({"id": adapter_id, "error": "Adapter bridge exited without confirmed physical safe state."})
+        return errors
 
     def _bridge_action(self, session: AdapterSession, tool: str, method: str, params: JsonObject) -> JsonObject:
         response = session.bridge.request(method, params, session.adapter_config.timeout_s)
@@ -253,7 +289,11 @@ class AdapterService:
         if not adapter["ok"]:
             return adapter
         session = self.sessions.get(adapter_id)
-        if session is None or not self._session_is_active(session):
+        if session is None:
+            return {"ok": False, "tool": tool, "adapter_id": adapter_id, "error_type": "session_not_active", "summary": "Test adapter session is not active. Start it with adapter_session_start first."}
+        if not self._session_is_active(session):
+            if session.cleanup_unconfirmed:
+                return {"ok": False, "tool": tool, "adapter_id": adapter_id, "error_type": "hardware_state_unconfirmed", "summary": "Adapter bridge exited without confirmed physical safe state."}
             return {"ok": False, "tool": tool, "adapter_id": adapter_id, "error_type": "session_not_active", "summary": "Test adapter session is not active. Start it with adapter_session_start first."}
         return {"ok": True, "session": session}
 
@@ -289,17 +329,31 @@ class AdapterService:
         return result
 
     def _session_status(self, session: AdapterSession) -> JsonObject:
-        return {"session_active": self._session_is_active(session), "cleanup_unconfirmed": session.cleanup_unconfirmed, "started_at": session.started_at, "bridge_status": session.bridge.status(), "log_path": display_path(self.config, session.log_path)}
+        return {"session_active": self._session_is_active(session), "cleanup_unconfirmed": session.cleanup_unconfirmed, "close_confirmed": session.close_confirmed, "started_at": session.started_at, "bridge_status": session.bridge.status(), "log_path": display_path(self.config, session.log_path)}
 
     def _session_is_active(self, session: AdapterSession) -> bool:
-        return session.active and not session.cleanup_unconfirmed and session.bridge.status().get("active") is not False
+        if session.close_confirmed or session.cleanup_unconfirmed or not session.active:
+            return False
+        try:
+            bridge_active = session.bridge.status().get("active") is not False
+        except Exception:
+            session.cleanup_unconfirmed = True
+            return False
+        if not bridge_active:
+            close_result = getattr(session.bridge, "last_close_result", None)
+            if close_result is None or not close_result.cleanup_confirmed:
+                session.cleanup_unconfirmed = True
+            return False
+        return True
 
     def _stop_session(self, session: AdapterSession, reason: str) -> None:
         session.active = False
         try:
             close_result = session.bridge.close()
-        except Exception:
-            session.cleanup_unconfirmed = True
+        except BaseException:
+            close_result = getattr(session.bridge, "last_close_result", None)
+            session.close_confirmed = close_result is not None and close_result.cleanup_confirmed
+            session.cleanup_unconfirmed = not session.close_confirmed
             raise
         if not isinstance(close_result, BridgeCloseResult) or not close_result.cleanup_confirmed:
             session.cleanup_unconfirmed = True
@@ -308,6 +362,7 @@ class AdapterService:
         if session.bridge.status().get("active") is not False:
             session.cleanup_unconfirmed = True
             raise RuntimeError("Test adapter bridge remained active after close.")
+        session.close_confirmed = True
         with suppress(Exception):
             append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
@@ -335,14 +390,22 @@ def open_adapter_bridge(
         child = subprocess.Popen(command, cwd=config.work_dir, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_process_start_failed", "summary": "Test adapter bridge process could not be started.", "backend_error": str(error)}
-    session = AdapterBridgeSession(child)
+    try:
+        session = AdapterBridgeSession(child)
+    except BaseException:
+        reap_unmanaged_child(child)
+        raise
     try:
         if on_started is not None:
             on_started(session)
         opened = session.request("open", {"channels": adapter_config.channels, "faults": adapter_config.faults}, adapter_config.timeout_s)
-    except BaseException:
-        with suppress(BaseException):
-            session.close()
+    except BaseException as error:
+        try:
+            close_result = session.close()
+        except BaseException:
+            close_result = session.last_close_result
+        if close_result is not None and close_result.cleanup_confirmed:
+            error._agentic_hil_completion_confirmed = True
         raise
     if not opened.get("ok"):
         result: JsonObject = {"tool": "adapter_session_start", "adapter_id": adapter_id, "command": command_for_log(command), **opened}

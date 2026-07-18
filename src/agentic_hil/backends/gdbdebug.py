@@ -256,7 +256,7 @@ class GdbDebugSessions:
             session.status = "halted"
             session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout"}
             self._write_session_log(session)
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout; it was halted.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "completion_confirmed": True, "summary": "Target did not stop before the timeout; it was halted.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         stop_reason = str(session.stop_reason.get("stop_reason"))
         session.status = "error" if stop_reason == "debugger_error" else "halted"

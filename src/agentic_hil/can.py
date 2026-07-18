@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 from agentic_hil.backends.common import command_for_log, invocation
-from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result
+from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result, reap_unmanaged_child
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
     append_jsonl,
@@ -55,6 +55,7 @@ class CanBusSession:
         self.started_at = utc_now_iso()
         self.active = True
         self.cleanup_unconfirmed = False
+        self.close_confirmed = False
 
 
 class CanBusService:
@@ -97,19 +98,28 @@ class CanBusService:
 
         try:
             opened = open_adapter(self.config, bus_id, bus_config, clear_rx_queue, register_provisional)
-        except BaseException:
+        except BaseException as error:
             if provisional is not None:
-                close_result = provisional.adapter_session.last_close_result
                 provisional.active = False
-                provisional.cleanup_unconfirmed = close_result is None or not close_result.cleanup_confirmed
+                if provisional.bus_config.adapter == "process":
+                    close_result = getattr(provisional.adapter_session, "last_close_result", None)
+                    provisional.close_confirmed = isinstance(close_result, BridgeCloseResult) and close_result.cleanup_confirmed
+                else:
+                    try:
+                        provisional.close_confirmed = provisional.adapter_session.status().get("active") is False
+                    except BaseException:
+                        provisional.close_confirmed = False
+                provisional.cleanup_unconfirmed = not provisional.close_confirmed
                 if not provisional.cleanup_unconfirmed:
                     self.sessions.pop(bus_id, None)
+                    error._agentic_hil_completion_confirmed = True
             raise
         if not opened["ok"]:
             failed_adapter = opened.get("session")
             if provisional is not None:
                 provisional.active = False
                 provisional.cleanup_unconfirmed = bool(opened.get("cleanup_unconfirmed"))
+                provisional.close_confirmed = not provisional.cleanup_unconfirmed
                 if not provisional.cleanup_unconfirmed:
                     self.sessions.pop(bus_id, None)
             elif failed_adapter is not None:
@@ -128,13 +138,18 @@ class CanBusService:
                 adapter_session.read(bus_config.max_buffer_frames, 0)
             append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."})
-        except Exception:
+        except BaseException as error:
+            cleanup_confirmed = False
             try:
                 self._stop_session(session, "start_failed")
-            except Exception:
-                pass
+            except BaseException:
+                cleanup_confirmed = session.close_confirmed
             else:
                 self.sessions.pop(bus_id, None)
+                cleanup_confirmed = True
+            if cleanup_confirmed:
+                self.sessions.pop(bus_id, None)
+                error._agentic_hil_completion_confirmed = True
             raise
 
     def session_stop(self, bus_id: str) -> JsonObject:
@@ -143,10 +158,24 @@ class CanBusService:
             return self._write_report(bus)
         session = self.sessions.get(bus_id)
         if session is None:
-            return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": False, "summary": "CAN bus session was not active."})
-        self._stop_session(session, "requested")
+            try:
+                return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": False, "summary": "CAN bus session was not active."})
+            except BaseException as error:
+                error._agentic_hil_completion_confirmed = True
+                raise
+        try:
+            self._stop_session(session, "requested")
+        except BaseException as error:
+            if session.close_confirmed:
+                self.sessions.pop(bus_id, None)
+                error._agentic_hil_completion_confirmed = True
+            raise
         self.sessions.pop(bus_id, None)
-        return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."})
+        try:
+            return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."})
+        except BaseException as error:
+            error._agentic_hil_completion_confirmed = True
+            raise
 
     def send(self, bus_id: str, payload: JsonObject) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_send")
@@ -201,14 +230,21 @@ class CanBusService:
 
     def close(self) -> None:
         first_error: Exception | None = None
+        pending_base_exception: BaseException | None = None
         for bus_id, session in list(self.sessions.items()):
             try:
                 self._stop_session(session, "shutdown")
-            except Exception as error:
-                if first_error is None:
+            except BaseException as error:
+                if isinstance(error, Exception) and first_error is None:
                     first_error = error
+                elif not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
+                if session.close_confirmed:
+                    self.sessions.pop(bus_id, None)
             else:
                 self.sessions.pop(bus_id, None)
+        if pending_base_exception is not None:
+            raise pending_base_exception
         if first_error is not None:
             raise first_error
 
@@ -216,20 +252,26 @@ class CanBusService:
         return bool(self.active_session_ids())
 
     def active_session_ids(self) -> list[str]:
-        active: list[str] = []
-        for bus_id, session in self.sessions.items():
-            if session.cleanup_unconfirmed:
-                active.append(bus_id)
-                continue
-            try:
-                if session.adapter_session.status().get("active") is not False:
-                    active.append(bus_id)
-            except Exception:
-                active.append(bus_id)
-        return active
+        return [bus_id for bus_id, session in self.sessions.items() if not session.close_confirmed]
 
     def cleanup_inspection_errors(self) -> list[JsonObject]:
-        return [{"id": bus_id, "error": "Physical safe state was not confirmed during CAN adapter cleanup."} for bus_id, session in self.sessions.items() if session.cleanup_unconfirmed]
+        errors: list[JsonObject] = []
+        for bus_id, session in self.sessions.items():
+            if session.close_confirmed:
+                continue
+            try:
+                adapter_active = session.adapter_session.status().get("active") is not False
+            except Exception as error:
+                session.cleanup_unconfirmed = True
+                errors.append({"id": bus_id, "error": f"CAN adapter status could not be inspected: {error}"})
+                continue
+            close_result = getattr(session.adapter_session, "last_close_result", None)
+            if session.cleanup_unconfirmed:
+                errors.append({"id": bus_id, "error": "Physical safe state was not confirmed during CAN adapter cleanup."})
+            elif not adapter_active and (not isinstance(close_result, BridgeCloseResult) or not close_result.cleanup_confirmed):
+                session.cleanup_unconfirmed = True
+                errors.append({"id": bus_id, "error": "CAN adapter ended without confirmed safe shutdown."})
+        return errors
 
     def _configured_bus(self, bus_id: str, tool: str) -> JsonObject:
         if not bus_id:
@@ -244,7 +286,11 @@ class CanBusService:
         if not bus["ok"]:
             return bus
         session = self.sessions.get(bus_id)
-        if session is None or not self._session_is_active(session):
+        if session is None:
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "session_not_active", "summary": "CAN bus session is not active. Start it with can_session_start first."}
+        if not self._session_is_active(session):
+            if session.cleanup_unconfirmed:
+                return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "hardware_state_unconfirmed", "summary": "CAN adapter ended without confirmed safe shutdown."}
             return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "session_not_active", "summary": "CAN bus session is not active. Start it with can_session_start first."}
         return {"ok": True, "session": session}
 
@@ -255,24 +301,40 @@ class CanBusService:
         return result
 
     def _session_status(self, session: CanBusSession) -> JsonObject:
-        return {"session_active": self._session_is_active(session), "cleanup_unconfirmed": session.cleanup_unconfirmed, "started_at": session.started_at, "adapter": session.adapter_session.adapter_name, "adapter_status": session.adapter_session.status(), "log_path": display_path(self.config, session.log_path)}
+        return {"session_active": self._session_is_active(session), "cleanup_unconfirmed": session.cleanup_unconfirmed, "close_confirmed": session.close_confirmed, "started_at": session.started_at, "adapter": session.adapter_session.adapter_name, "adapter_status": session.adapter_session.status(), "log_path": display_path(self.config, session.log_path)}
 
     def _session_is_active(self, session: CanBusSession) -> bool:
-        return session.active and not session.cleanup_unconfirmed and session.adapter_session.status().get("active") is not False
+        if session.close_confirmed or session.cleanup_unconfirmed or not session.active:
+            return False
+        try:
+            adapter_active = session.adapter_session.status().get("active") is not False
+        except Exception:
+            session.cleanup_unconfirmed = True
+            return False
+        if not adapter_active:
+            close_result = getattr(session.adapter_session, "last_close_result", None)
+            if not isinstance(close_result, BridgeCloseResult) or not close_result.cleanup_confirmed:
+                session.cleanup_unconfirmed = True
+            return False
+        return True
 
     def _stop_session(self, session: CanBusSession, reason: str) -> None:
         session.active = False
         try:
             close_result = session.adapter_session.close()
-        except Exception:
-            session.cleanup_unconfirmed = True
+        except BaseException:
+            close_result = getattr(session.adapter_session, "last_close_result", None)
+            session.close_confirmed = isinstance(close_result, BridgeCloseResult) and close_result.cleanup_confirmed
+            session.cleanup_unconfirmed = not session.close_confirmed
             raise
-        if isinstance(close_result, BridgeCloseResult) and not close_result.cleanup_confirmed:
+        if session.bus_config.adapter == "process" and (not isinstance(close_result, BridgeCloseResult) or not close_result.cleanup_confirmed):
             session.cleanup_unconfirmed = True
-            raise RuntimeError("CAN adapter cleanup did not confirm a physical safe state: " + "; ".join(close_result.errors))
+            errors = close_result.errors if isinstance(close_result, BridgeCloseResult) else ["process adapter returned no structured close result"]
+            raise RuntimeError("CAN adapter cleanup did not confirm a physical safe state: " + "; ".join(errors))
         if session.adapter_session.status().get("active") is not False:
             session.cleanup_unconfirmed = True
             raise RuntimeError("CAN adapter remained active after close.")
+        session.close_confirmed = True
         with suppress(Exception):
             append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
@@ -291,11 +353,11 @@ def open_adapter(
     bus_id: str,
     bus_config: CanBusConfig,
     clear_rx_queue: bool,
-    on_started: Callable[[ProcessCanAdapterSession], None] | None = None,
+    on_started: Callable[[CanAdapterSession], None] | None = None,
 ) -> JsonObject:
     if bus_config.adapter == "process":
         return open_process_adapter(config, bus_id, bus_config, clear_rx_queue, on_started)
-    return open_python_can_adapter(config, bus_id, bus_config, clear_rx_queue)
+    return open_python_can_adapter(config, bus_id, bus_config, clear_rx_queue, on_started)
 
 
 class PythonCanAdapterSession:
@@ -338,7 +400,13 @@ class PythonCanAdapterSession:
         return {"active": self.active, "backend": self.adapter_name}
 
 
-def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
+def open_python_can_adapter(
+    config: AgenticHILConfig,
+    bus_id: str,
+    bus_config: CanBusConfig,
+    clear_rx_queue: bool,
+    on_started: Callable[[CanAdapterSession], None] | None = None,
+) -> JsonObject:
     if (
         bus_config.adapter == "peak"
         and not is_windows_peak_channel(bus_config.channel)
@@ -350,13 +418,25 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         import can
     except ImportError:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters."}
+    interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
     try:
-        interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
-        session = PythonCanAdapterSession(bus_config.adapter, bus)
-        return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
+    try:
+        session = PythonCanAdapterSession(bus_config.adapter, bus)
+        if on_started is not None:
+            on_started(session)
+    except BaseException as error:
+        try:
+            shutdown = getattr(bus, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+            error._agentic_hil_completion_confirmed = True
+        except BaseException:
+            pass
+        raise
+    return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
 
 
 class ProcessCanAdapterSession(ProcessBridgeSession):
@@ -376,7 +456,7 @@ def open_process_adapter(
     bus_id: str,
     bus_config: CanBusConfig,
     clear_rx_queue: bool,
-    on_started: Callable[[ProcessCanAdapterSession], None] | None = None,
+    on_started: Callable[[CanAdapterSession], None] | None = None,
 ) -> JsonObject:
     if not bus_config.executable:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "config_invalid", "field": f"can_buses.{bus_id}.executable", "summary": "adapter: process requires executable."}
@@ -388,14 +468,22 @@ def open_process_adapter(
         child = subprocess.Popen(command, cwd=config.work_dir, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error)}
-    session = ProcessCanAdapterSession(child)
+    try:
+        session = ProcessCanAdapterSession(child)
+    except BaseException:
+        reap_unmanaged_child(child)
+        raise
     try:
         if on_started is not None:
             on_started(session)
         opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
-    except BaseException:
-        with suppress(BaseException):
-            session.close()
+    except BaseException as error:
+        try:
+            close_result = session.close()
+        except BaseException:
+            close_result = session.last_close_result
+        if close_result is not None and close_result.cleanup_confirmed:
+            error._agentic_hil_completion_confirmed = True
         raise
     if not opened.get("ok"):
         result: JsonObject = {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened}

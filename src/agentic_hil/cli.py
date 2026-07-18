@@ -323,7 +323,7 @@ def hardware_recover(config_path: str | None = None, acknowledge_hardware_checke
             result = {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Hardware state marker changed after operator inspection.", "state": previous}
             return write_hardware_recovery_report(config, result)
         hardware_lock.clear_quarantine()
-        result = {"ok": True, "tool": "hardware_recover", "recovered": True, "state": previous, "summary": "Project hardware state marker cleared after operator acknowledgement."}
+        result = {"ok": True, "tool": "hardware_recover", "recovered": True, "restart_required": True, "state": previous, "summary": "Project hardware state marker cleared after operator acknowledgement. Restart any existing Agentic HIL service process before further hardware access."}
         return write_hardware_recovery_report(config, result)
     except HardwareLockError as error:
         result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_recovery_failed", "summary": "Project hardware state marker could not be cleared.", "backend_error": str(error)}

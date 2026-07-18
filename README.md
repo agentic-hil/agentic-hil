@@ -233,7 +233,9 @@ Export the editor/validation schema with `agentic-hil test-schema --output agent
 
 Quarantine is created when cleanup cannot prove that debugger, COM, CAN, or adapter resources are inactive and physically safe. While an `active` or `quarantined` marker exists, new hardware actions fail closed with `hardware_state_unconfirmed`. Markers live under `${XDG_STATE_HOME:-~/.local/state}/agentic-hil/hardware/` on Linux/macOS and `%LOCALAPPDATA%\agentic-hil\hardware\` on Windows, not the project tree.
 
-Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN resources free, adapter faults and relays reset, and DUT outputs in a safe state. Then use the exact `quarantine_id` reported by status so a stale acknowledgement cannot clear a newer unsafe state.
+Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN resources free, adapter faults and relays reset, and DUT outputs in a safe state. Then use the exact `quarantine_id` reported by status so a stale acknowledgement cannot clear a newer unsafe state. Recovery clears persistent state only; restart any existing MCP, pytest, or CLI service process before further hardware access because locally poisoned instances remain blocked.
+
+The lease is project-scoped by configuration path. Two projects that name the same physical probe, COM port, CAN channel, or adapter do not share a global resource lock; operators must avoid concurrent access across projects.
 
 ## pytest Plugin
 

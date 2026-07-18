@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
-from agentic_hil.report import read_last_report
+from agentic_hil.report import read_last_report, utc_now_iso
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 HARDWARE_TOOLS = {
@@ -47,6 +47,26 @@ HARDWARE_TOOLS = {
     "adapter_measure",
 }
 
+INDETERMINATE_TIMEOUT_TOOLS = {
+    "probe_target",
+    "flash_firmware",
+    "reset_target",
+    "debug_set_breakpoint",
+    "debug_clear_breakpoints",
+    "debug_continue",
+    "debug_halt",
+}
+INDETERMINATE_TRANSPORT_ERRORS = {
+    "serial_write_failed",
+    "can_send_failed",
+    "can_adapter_timeout",
+    "can_adapter_process_exited",
+    "can_adapter_invalid_response",
+    "adapter_bridge_timeout",
+    "adapter_bridge_process_exited",
+    "adapter_bridge_invalid_response",
+}
+
 
 class HardwareCleanupError(RuntimeError):
     def __init__(self, errors: list[tuple[str, Exception]]):
@@ -76,6 +96,11 @@ class AgenticHILToolService:
         self.com_ports = com_ports or ComPortService(config)
         self.can_buses = can_buses or CanBusService(config)
         self.adapters = adapters or AdapterService(config)
+        self._hardware_call_guard = threading.RLock()
+        self._operation_in_flight: JsonObject | None = None
+        self._unconfirmed_operations: list[JsonObject] = []
+        self._poisoned_state: JsonObject | None = None
+        self._incident_persisted = False
 
     def debugger_info(self) -> JsonObject:
         return self.backend.info()
@@ -196,6 +221,18 @@ class AgenticHILToolService:
         return self.backend.classify_last_error()
 
     def hardware_state(self) -> JsonObject:
+        state = self._session_hardware_state()
+        inspection_errors = [*state["inspection_errors"], *self._unconfirmed_operations]
+        if self._operation_in_flight is not None:
+            inspection_errors.append({**self._operation_in_flight, "summary": "Hardware operation is still in flight."})
+        return {
+            "active": bool(state["active_resources"] or inspection_errors),
+            "state_confirmed": not inspection_errors,
+            "active_resources": state["active_resources"],
+            "inspection_errors": inspection_errors,
+        }
+
+    def _session_hardware_state(self) -> JsonObject:
         active_resources: list[JsonObject] = []
         inspection_errors: list[JsonObject] = []
         try:
@@ -228,6 +265,10 @@ class AgenticHILToolService:
         return bool(self.hardware_state()["active"])
 
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
+        with self._hardware_call_guard:
+            return self._call(name, arguments)
+
+    def _call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         args = arguments or {}
         hardware_error = self._acquire_hardware(name)
         if hardware_error is not None:
@@ -236,12 +277,24 @@ class AgenticHILToolService:
             reload_error = self._reload_config(name)
             if reload_error is not None:
                 return reload_error
+            if name in HARDWARE_TOOLS:
+                def invoke() -> JsonObject:
+                    try:
+                        return self._dispatch(name, args)
+                    except BaseException as error:
+                        if name == "debug_start_session":
+                            cleanup_confirmed = False
+                            try:
+                                self.backend.close()
+                                cleanup_confirmed = not self.backend.has_active_session()
+                            except BaseException:
+                                pass
+                            if cleanup_confirmed:
+                                error._agentic_hil_completion_confirmed = True
+                        raise
+
+                return self._invoke_hardware_operation(name, invoke)
             return self._dispatch(name, args)
-        except Exception:
-            if name == "debug_start_session":
-                with suppress(Exception):
-                    self.backend.close()
-            raise
         finally:
             self._reconcile_hardware_lease()
 
@@ -291,6 +344,40 @@ class AgenticHILToolService:
     def _acquire_hardware(self, tool: str) -> JsonObject | None:
         if tool not in HARDWARE_TOOLS:
             return None
+        if self._poisoned_state is not None:
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "hardware_state_unconfirmed",
+                "summary": "This Agentic HIL service instance observed an unconfirmed hardware state and must be restarted.",
+                "local_state": self._poisoned_state,
+            }
+        local_state = self.hardware_state()
+        if local_state["inspection_errors"]:
+            self._poison(local_state)
+            if self.hardware_owner is None:
+                try:
+                    if self._hardware_lock.handle is None:
+                        acquired = self._hardware_lock.acquire(source="local_state_quarantine")
+                    else:
+                        acquired = True
+                    if acquired:
+                        self._hardware_lock.quarantine_and_release(
+                            reason="hardware_cleanup_failed",
+                            source="tool_service_preflight",
+                            active_resources=local_state["active_resources"],
+                            inspection_errors=local_state["inspection_errors"],
+                        )
+                        self._incident_persisted = True
+                except HardwareLockError:
+                    pass
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "hardware_state_unconfirmed",
+                "summary": "This Agentic HIL service instance observed an unconfirmed hardware state and must be restarted.",
+                "local_state": self._poisoned_state,
+            }
         if self.hardware_owner is not None:
             if ProjectHardwareLock.owner_is_active(self.config.config_path, self.hardware_owner):
                 return None
@@ -314,17 +401,21 @@ class AgenticHILToolService:
     def _reconcile_hardware_lease(self) -> None:
         if self.hardware_owner is not None:
             return
+        if self._incident_persisted and self._hardware_lock.handle is None:
+            return
         state = self.hardware_state()
         if not state["active"]:
             self._hardware_lock.confirm_safe_and_release()
             return
         if state["inspection_errors"] and self._hardware_lock.handle is not None:
+            self._poison(state)
             self._hardware_lock.quarantine_and_release(
                 reason="hardware_cleanup_failed",
                 source="tool_service",
                 active_resources=state["active_resources"],
                 inspection_errors=state["inspection_errors"],
             )
+            self._incident_persisted = True
             return
         if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="active_session_recovery"):
             raise HardwareLockError("Active hardware session exists without ownership of the project hardware lease.")
@@ -353,42 +444,56 @@ class AgenticHILToolService:
         return None
 
     def cleanup_test_sessions(self) -> None:
-        self._close_subsystems(
-            (
-                ("adapters", self.adapters.close),
-                ("com", self.com_ports.close),
-                ("can", self.can_buses.close),
+        with self._hardware_call_guard:
+            self._close_subsystems(
+                (
+                    ("adapters", self.adapters.close),
+                    ("com", self.com_ports.close),
+                    ("can", self.can_buses.close),
+                )
             )
-        )
 
     def close(self) -> None:
-        self._close_subsystems(
-            (
-                ("debugger", self.backend.close),
-                ("com", self.com_ports.close),
-                ("can", self.can_buses.close),
-                ("adapters", self.adapters.close),
+        with self._hardware_call_guard:
+            self._close_subsystems(
+                (
+                    ("debugger", self.backend.close),
+                    ("com", self.com_ports.close),
+                    ("can", self.can_buses.close),
+                    ("adapters", self.adapters.close),
+                )
             )
-        )
 
     def _close_subsystems(self, actions: tuple[tuple[str, Callable[[], None]], ...]) -> None:
         errors: list[tuple[str, Exception]] = []
+        pending_base_exception: BaseException | None = None
         for name, close_action in actions:
             try:
                 close_action()
-            except Exception as error:
-                errors.append((name, error))
+            except BaseException as error:
+                if isinstance(error, Exception):
+                    errors.append((name, error))
+                elif pending_base_exception is None:
+                    pending_base_exception = error
         if self.hardware_owner is None:
             try:
                 self._finish_hardware_lease()
-            except Exception as error:
-                errors.append(("hardware_lease", error))
+            except BaseException as error:
+                if isinstance(error, Exception):
+                    errors.append(("hardware_lease", error))
+                elif pending_base_exception is None:
+                    pending_base_exception = error
+        if pending_base_exception is not None:
+            raise pending_base_exception
         if errors:
             raise HardwareCleanupError(errors)
 
     def _finish_hardware_lease(self) -> None:
+        if self._incident_persisted and self._hardware_lock.handle is None:
+            return
         state = self.hardware_state()
         if state["active"]:
+            self._poison(state)
             if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="tool_service_cleanup"):
                 raise HardwareLockError("Active hardware cleanup state exists but the project hardware lease is owned elsewhere.")
             self._hardware_lock.quarantine_and_release(
@@ -397,8 +502,53 @@ class AgenticHILToolService:
                 active_resources=state["active_resources"],
                 inspection_errors=state["inspection_errors"],
             )
+            self._incident_persisted = True
             return
         self._hardware_lock.confirm_safe_and_release()
+
+    def _invoke_hardware_operation(self, tool: str, action: Callable[[], JsonObject]) -> JsonObject:
+        operation: JsonObject = {"type": "operation", "tool": tool, "started_at": utc_now_iso()}
+        self._operation_in_flight = operation
+        try:
+            result = action()
+            if not isinstance(result, dict):
+                raise TypeError("Hardware tool returned a non-object result.")
+            error_type = str(result.get("error_type", ""))
+            completion_unconfirmed = (
+                result.get("completion_unconfirmed") is True
+                or result.get("hardware_state_unconfirmed") is True
+                or error_type == "hardware_cleanup_failed"
+                or (result.get("completion_confirmed") is not True and ((error_type == "timeout" and tool in INDETERMINATE_TIMEOUT_TOOLS) or error_type in INDETERMINATE_TRANSPORT_ERRORS))
+            )
+            if completion_unconfirmed:
+                self._record_unconfirmed_operation(tool, operation["started_at"], None, result.get("error_type"))
+            return result
+        except BaseException as error:
+            if getattr(error, "_agentic_hil_completion_confirmed", False) is not True:
+                self._record_unconfirmed_operation(tool, operation["started_at"], error)
+            raise
+        finally:
+            self._operation_in_flight = None
+
+    def _record_unconfirmed_operation(self, tool: str, started_at: object, error: BaseException | None, error_type: object = None) -> None:
+        operation: JsonObject = {
+            "type": "operation",
+            "tool": tool,
+            "started_at": str(started_at),
+            "error_type": str(error_type or (type(error).__name__ if error is not None else "completion_unconfirmed")),
+            "error": str(error) if error is not None else "",
+            "summary": "Hardware operation completion was not confirmed.",
+        }
+        self._unconfirmed_operations.append(operation)
+        self._incident_persisted = False
+        self._poisoned_state = {"error_type": "hardware_state_unconfirmed", "active_resources": [], "inspection_errors": [*self._unconfirmed_operations]}
+
+    def _poison(self, state: JsonObject) -> None:
+        self._poisoned_state = {
+            "error_type": "hardware_state_unconfirmed",
+            "active_resources": state["active_resources"],
+            "inspection_errors": state["inspection_errors"],
+        }
 
 
 def adapter_payload(args: JsonObject) -> JsonObject:

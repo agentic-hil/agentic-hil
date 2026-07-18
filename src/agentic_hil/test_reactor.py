@@ -247,6 +247,8 @@ class TestReactor:
         self.devices: dict[str, Device] = {}
         self._loaded_policy_digest = read_policy_digest(config.config_path)
         self._policy_digest: str | None = None
+        self._step_in_flight: JsonObject | None = None
+        self._execution_inspection_errors: list[JsonObject] = []
 
     def run(self, plan: TestPlan) -> JsonObject:
         try:
@@ -296,8 +298,10 @@ class TestReactor:
         except Exception as error:
             try:
                 cleanup = self.close()
-            except Exception as cleanup_error:
+            except BaseException as cleanup_error:
                 cleanup = [{"device": "all", "result": exception_result("device_close_exception", "Device service cleanup raised an exception.", cleanup_error)}]
+                if not isinstance(cleanup_error, Exception):
+                    pending_base_exception = cleanup_error
             response = {
                 "ok": False,
                 "tool": "test_reactor",
@@ -312,7 +316,7 @@ class TestReactor:
             pending_base_exception = error
             try:
                 cleanup = self.close()
-            except Exception as cleanup_error:
+            except BaseException as cleanup_error:
                 cleanup = [{"device": "all", "result": exception_result("device_close_exception", "Device service cleanup raised an exception.", cleanup_error)}]
             response = {
                 "ok": False,
@@ -413,7 +417,9 @@ class TestReactor:
 
     def _collect_hardware_state(self) -> JsonObject:
         active_resources: list[JsonObject] = []
-        inspection_errors: list[JsonObject] = []
+        inspection_errors: list[JsonObject] = [*self._execution_inspection_errors]
+        if self._step_in_flight is not None:
+            inspection_errors.append({**self._step_in_flight, "summary": "Test reactor step completion was not confirmed."})
         for device in self.devices.values():
             try:
                 state = device.hardware_state()
@@ -515,7 +521,7 @@ class TestReactor:
                         "exception": exception_result("test_exception", "Test execution raised an exception.", error),
                     }
                 results.append(result)
-                if result.get("error_type") in {"cleanup_failed", "test_exception"}:
+                if result.get("error_type") in {"cleanup_failed", "step_exception", "test_exception", "hardware_state_unconfirmed"}:
                     unsafe_state = True
                     policy_changed = result.get("step_error_type") == "policy_changed"
                     aborted_tests = [remaining.name for remaining in plan.tests[test_index + 1 :]]
@@ -634,10 +640,24 @@ class TestReactor:
         failed_step: int | None = None
         try:
             for index, step in enumerate(test.steps, start=1):
+                self._step_in_flight = {"type": "operation", "test": test.name, "device": test.device, "step": index, "action": step.action}
                 try:
                     result = device.execute(step)
                 except Exception as error:
+                    self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
+                    self._step_in_flight = None
                     result = exception_result("step_exception", "Test step raised an exception.", error)
+                except BaseException as error:
+                    self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
+                    self._step_in_flight = None
+                    raise
+                else:
+                    if not isinstance(result, dict):
+                        error = TypeError("Test reactor device step returned a non-object result.")
+                        self._execution_inspection_errors.append({**self._step_in_flight, "error_type": type(error).__name__, "error": str(error), "summary": "Test reactor step completion was not confirmed."})
+                        self._step_in_flight = None
+                        raise error
+                    self._step_in_flight = None
                 steps.append({"index": index, "action": step.action, "result": result})
                 if result.get("ok") is not True:
                     failed_step = index
@@ -654,14 +674,29 @@ class TestReactor:
                 result["step_error_type"] = steps[-1]["result"].get("error_type", "step_failed")
         elif failed_step is not None:
             result["failed_step"] = failed_step
-            result["error_type"] = steps[-1]["result"].get("error_type", "step_failed")
+            step_result = steps[-1]["result"]
+            step_error_type = step_result.get("error_type", "step_failed")
+            if step_result.get("completion_unconfirmed") is True or step_result.get("hardware_state_unconfirmed") is True or step_error_type in {"hardware_state_unconfirmed", "hardware_cleanup_failed"}:
+                result["error_type"] = "hardware_state_unconfirmed"
+                result["step_error_type"] = step_error_type
+            else:
+                result["error_type"] = step_error_type
         return result
 
     def close(self) -> list[JsonObject]:
-        return [
-            {"device": device.id, "result": device.close()}
-            for device in self.devices.values()
-        ]
+        results: list[JsonObject] = []
+        pending_base_exception: BaseException | None = None
+        for device in self.devices.values():
+            try:
+                result = device.close()
+            except BaseException as error:
+                result = exception_result("device_close_exception", "Device service cleanup raised an exception.", error)
+                if not isinstance(error, Exception) and pending_base_exception is None:
+                    pending_base_exception = error
+            results.append({"device": device.id, "result": result})
+        if pending_base_exception is not None:
+            raise pending_base_exception
+        return results
 
 
 def validate_artifact(device: Device, test: TestCase, index: int, step: TestStep, require_elf: bool) -> tuple[JsonObject | None, Path | None]:
@@ -685,7 +720,7 @@ def capability_error(device: str, action: str, capability: str) -> JsonObject:
     return {"ok": False, "tool": "test_reactor", "error_type": "device_capability_unavailable", "summary": f"Device lacks {capability} capability.", "device": device, "action": action}
 
 
-def exception_result(error_type: str, summary: str, error: Exception) -> JsonObject:
+def exception_result(error_type: str, summary: str, error: BaseException) -> JsonObject:
     return {"ok": False, "tool": "test_reactor", "error_type": error_type, "summary": summary, "exception_type": type(error).__name__, "backend_error": str(error)}
 
 

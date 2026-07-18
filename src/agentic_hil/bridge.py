@@ -13,6 +13,21 @@ STDERR_TAIL_CHARS = 65536
 ERROR_STDERR_TAIL_CHARS = 2000
 
 
+def reap_unmanaged_child(child: subprocess.Popen[str]) -> bool:
+    if child.poll() is not None:
+        return True
+    try:
+        child.terminate()
+        child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+    except BaseException:
+        try:
+            child.kill()
+            child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+        except BaseException:
+            pass
+    return child.poll() is not None
+
+
 @dataclass(frozen=True)
 class BridgeCloseResult:
     process_reaped: bool
