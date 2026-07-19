@@ -393,7 +393,21 @@ def validate_windows_state_root(root: Path) -> None:
         if not get_token_information(token, 1, token_info, required, ctypes.byref(required)):
             raise ctypes.WinError(ctypes.get_last_error())
         current_sid = ctypes.c_void_p.from_buffer(token_info).value
-        if not equal_sid(owner_sid, current_sid):
+        # Administrator tokens create directories owned by BUILTIN\Administrators
+        # or SYSTEM; both are trusted principals, so accept them as owners.
+        create_well_known_sid = advapi32.CreateWellKnownSid
+        create_well_known_sid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        create_well_known_sid.restype = wintypes.BOOL
+        trusted_owner = bool(equal_sid(owner_sid, current_sid))
+        for sid_type in (22, 26):
+            if trusted_owner:
+                break
+            size = wintypes.DWORD(68)
+            candidate = ctypes.create_string_buffer(size.value)
+            if not create_well_known_sid(sid_type, None, candidate, ctypes.byref(size)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            trusted_owner = bool(equal_sid(owner_sid, candidate))
+        if not trusted_owner:
             raise ConfigError("unsafe_configured_path", "state_root must be owned by the current Windows user.", {"field": "state_root", "path": str(root)})
         if not dacl.value or windows_acl_grants_untrusted_access(advapi32, dacl, current_sid, 0x500D0116):
             raise ConfigError("unsafe_configured_path", "state_root must not grant write access to other Windows principals.", {"field": "state_root", "path": str(root)})
