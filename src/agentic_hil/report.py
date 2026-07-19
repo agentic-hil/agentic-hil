@@ -177,7 +177,10 @@ def canonical_audit_evidence(config: AgenticHILConfig, log_path: str | Path) -> 
         return {"canonical_log_present": canonical_exists, "canonical_log_corrupted": True, "workspace_log_verified": False}
     evidence: JsonObject = {
         "canonical_log_present": True,
-        "canonical_log_path": str(canonical),
+        # Emit only the log's basename: the absolute canonical path lives under
+        # the (environment-derived) state_root and must not reach an operator or
+        # MCP sink. Presence, sequence, and chain digest are the evidence.
+        "canonical_log_name": Path(canonical).name,
         "log_sequence": int(sidecar["sequence"]),
         "log_chain_sha256": str(sidecar["chain_sha256"]),
     }
@@ -256,17 +259,15 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     enriched = mark_audit_failure(enriched, error)
                 else:
                     enriched = snapshot
-            enriched["state_path"] = report_state_path(config)
             state["last_report"] = enriched
             if is_failure_report(enriched):
                 state["last_failure"] = enriched
             write_report_state(config, state)
     except (ConfigError, OSError, ValueError) as error:
         failed = mark_audit_failure(enriched, error)
-        # Neither pointer can be trusted after a failed commit: strip both so the
+        # report_path can't be trusted after a failed commit: strip it so the
         # result never advertises a path whose persisted content it cannot prove.
         failed.pop("report_path", None)
-        failed.pop("state_path", None)
         return failed
     return enriched
 
@@ -296,7 +297,6 @@ def read_report_state_entry(
     tool: str,
     missing_summary: str,
 ) -> JsonObject:
-    state_path = report_state_path(config)
     try:
         with safe_file_lock(report_lock_path(config)):
             state = read_report_state(config)
@@ -309,12 +309,13 @@ def read_report_state_entry(
     except ConfigError as error:
         return {"tool": tool, **error.to_dict()}
     except (OSError, ValueError) as error:
+        # The absolute state-root path is internal; report the failure without
+        # emitting it to an operator/MCP sink.
         return {
             "ok": False,
             "tool": tool,
             "error_type": "report_unreadable",
             "summary": "Agentic HIL report state could not be read.",
-            "report_path": state_path,
             "backend_error": str(error),
         }
 
