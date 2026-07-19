@@ -20,6 +20,7 @@ from agentic_hil.config import (
     safe_read_text,
     trusted_state_directory,
 )
+from agentic_hil.redact import redact_sensitive
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 LEASE_VERSION = 2
@@ -436,7 +437,9 @@ class HardwareCoordinator:
                 "blocked": self.blocked or blocked_state,
                 "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
                 "lifecycle_state": self._state,
-                "record": record,
+                # The record carries the internal owner_token nonce; redact it so
+                # it is never emitted to an operator terminal or MCP client.
+                "record": redact_sensitive(record),
                 "leases": [lease.status() for lease in self.leases.values()],
             }
 

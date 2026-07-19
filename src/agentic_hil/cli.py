@@ -33,6 +33,7 @@ from agentic_hil.config import (
     validate_config_schema,
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
+from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
@@ -771,4 +772,4 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
 
 
 def print_json(value: JsonObject) -> None:
-    sys.stdout.write(json.dumps(value, indent=2) + "\n")
+    sys.stdout.write(json.dumps(redact_sensitive(value), indent=2) + "\n")

@@ -1319,6 +1319,26 @@ def test_adopted_lease_less_incident_survives_unrelated_release(tmp_path: Path) 
     owner.close()
 
 
+def test_lease_status_never_emits_owner_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:secret-leak")
+    try:
+        status = owner.status()
+        # The in-process nonce must not appear in the operator-facing record.
+        assert status["record"]["owner_token"] == "[redacted]"
+        assert owner.owner_token not in json.dumps(status)
+
+        monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
+        entrypoint(["lease-status"])
+        printed = capsys.readouterr().out
+        assert owner.owner_token not in printed
+        assert "[redacted]" in printed
+    finally:
+        lease.release()
+        owner.close()
+
+
 def test_release_fault_reraises_keyboard_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     owner = HardwareCoordinator(config_for(tmp_path), "owner")
     lease = owner.acquire("physical:interrupt")

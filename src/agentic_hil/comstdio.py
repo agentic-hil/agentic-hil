@@ -13,6 +13,7 @@ from typing import BinaryIO, TextIO
 
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError
+from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -215,5 +216,5 @@ def next_stdin_chunk(reader: StdinReader) -> tuple[str, bytes | BaseException | 
 
 
 def write_error(output: TextIO, result: JsonObject) -> None:
-    output.write(json.dumps(result) + "\n")
+    output.write(json.dumps(redact_sensitive(result)) + "\n")
     output.flush()
