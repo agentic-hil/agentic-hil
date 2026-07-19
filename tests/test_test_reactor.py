@@ -301,7 +301,7 @@ def test_project_lock_rejects_a_concurrent_reactor_run(tmp_path: Path) -> None:
     try:
         result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
     finally:
-        held_lock.release()
+        held_lock.confirm_safe_and_release()
 
     assert result["ok"] is False
     assert result["error_type"] == "test_reactor_busy"
@@ -317,7 +317,7 @@ def test_project_lock_blocks_regular_tool_service_hardware_calls(tmp_path: Path)
         result = service.call("probe_target")
     finally:
         service.close()
-        held_lock.release()
+        held_lock.confirm_safe_and_release()
 
     assert result["ok"] is False
     assert result["error_type"] == "hardware_busy"
@@ -381,7 +381,7 @@ def test_device_services_are_created_only_after_lock_and_partial_initialization_
     assert services[0].closed is True
     lock = ProjectTestLock(config.config_path)
     assert lock.acquire() is True
-    lock.release()
+    lock.confirm_safe_and_release()
 
 
 def test_lock_io_failure_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,7 +421,7 @@ def test_preflight_exception_closes_services_and_releases_project_lock(tmp_path:
     assert all(service.closed for service in services)
     lock = ProjectTestLock(config.config_path)
     assert lock.acquire() is True
-    lock.release()
+    lock.confirm_safe_and_release()
 
 
 def test_cleanup_failure_aborts_remaining_tests(tmp_path: Path) -> None:
@@ -515,7 +515,7 @@ def test_reactor_does_not_quarantine_when_cleanup_error_has_no_active_resource(t
     assert "quarantine" not in result
     second_lock = ProjectTestLock(config.config_path)
     assert second_lock.acquire() is True
-    second_lock.release()
+    second_lock.confirm_safe_and_release()
 
 
 def test_keyboard_interrupt_quarantines_active_reactor_hardware(tmp_path: Path) -> None:

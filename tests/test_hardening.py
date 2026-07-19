@@ -167,7 +167,7 @@ def test_com_session_start_report_failure_rolls_back_resource_and_lease(tmp_path
     assert serial_handle.is_open is False
     second_lock = ProjectHardwareLock(config.config_path)
     assert second_lock.acquire() is True
-    second_lock.release()
+    second_lock.confirm_safe_and_release()
     service.close()
 
 
@@ -310,7 +310,7 @@ def test_com_stdio_fails_closed_while_project_hardware_is_busy(tmp_path: Path) -
     try:
         exit_code = run_com_stdio(config, "dut", input_stream=BlockingStdin(), output_stream=StringIO(), error_stream=errors)
     finally:
-        held_lock.release()
+        held_lock.confirm_safe_and_release()
 
     result = json.loads(errors.getvalue())
     assert exit_code == 1
@@ -353,7 +353,7 @@ def test_hardware_state_files_use_private_permissions(tmp_path: Path) -> None:
         assert lock.path.stat().st_mode & 0o777 == 0o600
         assert lock.state_path.stat().st_mode & 0o777 == 0o600
     finally:
-        lock.release()
+        lock.confirm_safe_and_release()
 
 
 def test_relative_state_home_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,7 +429,7 @@ def test_acquire_rechecks_state_after_os_lock(tmp_path: Path, monkeypatch: pytes
     assert excinfo.value.details["state"] == "quarantined"
     recovery = ProjectHardwareLock(config.config_path)
     assert recovery.acquire(recovery=True, source="test") is True
-    recovery.clear_quarantine()
+    recovery.clear_quarantine(str(recovery.quarantine_info()["quarantine_id"]))
     recovery.release_os_lock()
 
 
@@ -452,7 +452,7 @@ def test_old_recovery_id_cannot_clear_newer_incident_from_same_lock(tmp_path: Pa
     lock = ProjectHardwareLock(config.config_path)
     assert lock.acquire(source="first") is True
     first = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
-    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first["quarantine_id"]))["ok"] is True
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first["quarantine_id"]), force_live_owner=True)["ok"] is True
 
     assert lock.acquire(source="second") is True
     second = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
@@ -479,7 +479,7 @@ if not lock.acquire(source='crash_test'):
 
     recovery = ProjectHardwareLock(str(config_path))
     assert recovery.acquire(recovery=True, source="test") is True
-    recovery.clear_quarantine()
+    recovery.clear_quarantine(str(recovery.quarantine_info()["quarantine_id"]))
     recovery.release_os_lock()
 
 
@@ -509,7 +509,7 @@ time.sleep(30)
         child.wait(timeout=WAIT_TIMEOUT_S)
         recovery = ProjectHardwareLock(str(config_path))
         if recovery.acquire(recovery=True, source="test"):
-            recovery.clear_quarantine()
+            recovery.clear_quarantine(str(recovery.quarantine_info()["quarantine_id"]))
             recovery.release_os_lock()
 
 
@@ -524,7 +524,7 @@ def test_hardware_quarantine_is_project_scoped(tmp_path: Path) -> None:
         ProjectHardwareLock(config_a.config_path).acquire()
     lock_b = ProjectHardwareLock(config_b.config_path)
     assert lock_b.acquire() is True
-    lock_b.release()
+    lock_b.confirm_safe_and_release()
 
 
 class ExplodingBridge:
@@ -1027,7 +1027,7 @@ def test_external_recovery_does_not_reenable_poisoned_service(tmp_path: Path) ->
     with pytest.raises(RuntimeError):
         service.call("adapter_session_stop", {"adapter_id": "ntc"})
     status = hardware_status(config.config_path)
-    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]), force_live_owner=True)
 
     blocked = service.call("probe_target")
 
@@ -1042,7 +1042,7 @@ def test_poisoned_service_does_not_recreate_recovered_incident_on_close(tmp_path
     with pytest.raises(KeyboardInterrupt):
         service.call("reset_target", {"mode": "run"})
     status = hardware_status(config.config_path)
-    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))["ok"] is True
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]), force_live_owner=True)["ok"] is True
 
     assert service.call("probe_target")["error_type"] == "hardware_state_unconfirmed"
     service.close()
@@ -1056,7 +1056,7 @@ def test_preflight_incident_is_not_recreated_after_recovery(tmp_path: Path) -> N
 
     assert service.call("probe_target")["error_type"] == "hardware_state_unconfirmed"
     status = hardware_status(config.config_path)
-    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]))["ok"] is True
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(status["quarantine_id"]), force_live_owner=True)["ok"] is True
     service.close()
 
     assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
@@ -1133,7 +1133,7 @@ def test_same_lock_instance_concurrent_acquire_does_not_leak_owner(tmp_path: Pat
     owner_token = lock.owner_token
     assert results == [True, True]
     assert ProjectHardwareLock.owner_is_active(config.config_path, owner_token) is True
-    lock.release()
+    lock.confirm_safe_and_release()
     assert ProjectHardwareLock.owner_is_active(config.config_path, owner_token) is False
 
 
@@ -1395,7 +1395,7 @@ def test_config_reload_closes_removed_session_and_releases_lease(tmp_path: Path,
         assert serial_handle.is_open is False
         second_lock = ProjectHardwareLock(config.config_path)
         assert second_lock.acquire() is True
-        second_lock.release()
+        second_lock.confirm_safe_and_release()
     finally:
         service.close()
 
@@ -1507,3 +1507,63 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
 
     assert result["ok"] is False, f"{tool} must be blocked when {flag} is false"
     assert result["error_type"] == "permission_denied"
+
+
+def test_payload_frame_enforces_classic_and_fd_frame_shapes() -> None:
+    def bus(fd: bool, max_bytes: int) -> CanBusConfig:
+        return CanBusConfig(
+            adapter="process", channel="vcan0", bitrate=500000, fd=fd, data_bitrate=None,
+            pcanbasic_dll=None, executable=None, args=[], timeout_s=1.0, poll_interval_ms=10,
+            receive_own_messages=False, listen_only=False, max_buffer_frames=16, max_frame_data_bytes=max_bytes,
+        )
+
+    classic_overlong = payload_frame(bus(fd=False, max_bytes=64), {"frame_id": 1, "data_hex": "00" * 9})
+    fd_rtr = payload_frame(bus(fd=True, max_bytes=64), {"frame_id": 1, "rtr": True, "data_hex": ""})
+    fd_invalid_length = payload_frame(bus(fd=True, max_bytes=64), {"frame_id": 1, "data_hex": "00" * 13})
+    fd_valid_length = payload_frame(bus(fd=True, max_bytes=64), {"frame_id": 1, "data_hex": "00" * 12})
+
+    assert classic_overlong["ok"] is False
+    assert classic_overlong["error_type"] == "invalid_argument"
+    assert fd_rtr["ok"] is False
+    assert fd_rtr["error_type"] == "invalid_argument"
+    assert fd_invalid_length["ok"] is False
+    assert fd_invalid_length["error_type"] == "invalid_argument"
+    assert fd_valid_length["ok"] is True
+
+
+def test_process_is_alive_probe_does_not_kill_the_target_process() -> None:
+    from agentic_hil.hardware_lock import process_is_alive
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert process_is_alive(child.pid) is True
+        assert child.poll() is None, "liveness probe must not terminate the probed process"
+    finally:
+        child.kill()
+        child.wait(timeout=WAIT_TIMEOUT_S)
+    assert wait_until(lambda: process_is_alive(child.pid) is False)
+
+
+def test_marker_owner_is_alive_matches_hostname_and_pid() -> None:
+    import socket
+
+    from agentic_hil.hardware_lock import marker_owner_is_alive
+
+    assert marker_owner_is_alive({"hostname": socket.gethostname(), "pid": os.getpid()}) is True
+    assert marker_owner_is_alive({"hostname": "other-host", "pid": os.getpid()}) is False
+    assert marker_owner_is_alive({"hostname": socket.gethostname(), "pid": -1}) is False
+
+
+def test_mcp_tool_schemas_match_service_argument_validation() -> None:
+    from agentic_hil.mcp import MCP_TOOL_SCHEMAS
+    from agentic_hil.tools import REQUIRED_TOOL_ARGUMENTS, TOOL_ARGUMENTS
+
+    assert set(MCP_TOOL_SCHEMAS) == set(TOOL_ARGUMENTS)
+    for name, schema in MCP_TOOL_SCHEMAS.items():
+        mcp_properties = set(schema.get("properties", {}))
+        assert mcp_properties <= TOOL_ARGUMENTS[name], f"{name}: MCP accepts arguments the service rejects"
+        service_required = REQUIRED_TOOL_ARGUMENTS.get(name, set())
+        mcp_required = set(schema.get("required", []))
+        for one_of in schema.get("oneOf", []):
+            mcp_required |= set(one_of.get("required", []))
+        assert service_required <= mcp_required, f"{name}: service requires arguments MCP treats as optional"

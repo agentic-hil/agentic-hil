@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import os
 import re
+import uuid
 from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.report import fsync_directory, safe_filename
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
@@ -68,15 +71,18 @@ class ArtifactManager:
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
 
-        sha256: str | None = None
-        size_bytes: int | None = None
-        if validation["exists"]:
-            size_bytes = resolved.stat().st_size
-            if self.config.validation.compute_sha256:
-                sha256 = sha256_file(resolved)
-                validation["sha256_computed"] = True
-            if self.config.validation.inspect_known_formats:
-                validation.update(self._inspect_format(resolved))
+        if not validation["exists"]:
+            return self._validation_error("Firmware artifact does not exist and cannot be staged.", validation, "artifact_not_found")
+        staged = self._stage_artifact(resolved)
+        if not staged["ok"]:
+            return staged
+        staged_path = Path(staged["resolved_path"])
+        sha256 = staged["sha256"]
+        size_bytes = staged["size_bytes"]
+        validation["sha256_computed"] = True
+        validation["content_addressed_staging"] = True
+        if self.config.validation.inspect_known_formats:
+            validation.update(self._inspect_format(staged_path))
 
         failed_plausibility = [
             key for key in ["elf_header", "hex_parseable", "bin_size_plausible"] if validation.get(key) is False
@@ -89,13 +95,51 @@ class ArtifactManager:
             "artifact": {
                 "source": "path",
                 "path": display_path(self.config, image_path),
-                "resolved_path": str(resolved),
+                "source_resolved_path": str(resolved),
+                "resolved_path": str(staged_path),
+                "staging_path": display_path(self.config, str(staged_path)),
                 "sha256": sha256,
                 "size_bytes": size_bytes,
                 "validation": validation,
             },
             "validation": validation,
         }
+
+    def _stage_artifact(self, source: Path) -> JsonObject:
+        staging_directory = Path(self.config.work_dir) / ".agentic-hil" / "artifacts"
+        temp_path = staging_directory / f"staging-{uuid.uuid4().hex}.tmp"
+        digest = hashlib.sha256()
+        size_bytes = 0
+        try:
+            staging_directory.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as source_handle, temp_path.open("xb") as staged_handle:
+                for chunk in iter(lambda: source_handle.read(SHA256_CHUNK_BYTES), b""):
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+                    staged_handle.write(chunk)
+                staged_handle.flush()
+                os.fsync(staged_handle.fileno())
+            sha256 = digest.hexdigest()
+            content_directory = staging_directory / sha256
+            staged_name = safe_filename(source.stem, "artifact") + source.suffix.lower()
+            staged_path = content_directory / staged_name
+            if staged_path.exists() and sha256_file(staged_path) == sha256 and staged_path.stat().st_size == size_bytes:
+                temp_path.unlink()
+            else:
+                content_directory.mkdir(parents=True, exist_ok=True)
+                os.replace(temp_path, staged_path)
+                fsync_directory(content_directory)
+            return {"ok": True, "resolved_path": str(staged_path), "sha256": sha256, "size_bytes": size_bytes}
+        except OSError as error:
+            with suppress(OSError):
+                temp_path.unlink()
+            return {
+                "ok": False,
+                "tool": "flash_firmware",
+                "error_type": "artifact_staging_failed",
+                "summary": "Firmware artifact could not be copied into immutable content-addressed staging.",
+                "backend_error": str(error),
+            }
 
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:

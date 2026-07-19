@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
-from agentic_hil.report import read_last_report, utc_now_iso
+from agentic_hil.report import AuditWriteError, read_last_report, utc_now_iso
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 HARDWARE_TOOLS = {
@@ -66,6 +68,26 @@ INDETERMINATE_TRANSPORT_ERRORS = {
     "adapter_bridge_process_exited",
     "adapter_bridge_invalid_response",
 }
+DEBUG_SESSION_CONFLICT_TOOLS = {"probe_target", "flash_firmware", "reset_target"}
+CLEANUP_TOOLS = {"debug_stop_session", "com_session_stop", "can_session_stop", "adapter_session_stop"}
+TOOL_ARGUMENTS: dict[str, set[str]] = {
+    "debugger_info": set(), "debugger_probes_list": {"debugger"}, "probe_target": set(), "artifact_upload": {"image_path", "filename", "data_base64"},
+    "flash_firmware": {"image_path", "artifact_id", "reset_after_flash"}, "reset_target": {"mode"},
+    "debug_start_session": {"image_path", "artifact_id", "mode", "timeout_s"}, "debug_stop_session": {"timeout_s"}, "debug_get_session_status": set(),
+    "debug_set_breakpoint": {"location"}, "debug_list_breakpoints": set(), "debug_clear_breakpoints": set(), "debug_continue": {"timeout_s"}, "debug_halt": {"timeout_s"},
+    "debug_get_stop_reason": set(), "debug_symbol_info": {"symbol"}, "debug_dump_symbol_ihex": {"symbol", "output_path"}, "get_last_report": set(), "classify_last_error": set(),
+    "com_ports_list": set(), "com_session_start": {"port_id", "clear_buffer"}, "com_session_stop": {"port_id"}, "com_write": {"port_id", "text", "hex"}, "com_read": {"port_id", "max_bytes", "wait_timeout_s"},
+    "can_buses_list": set(), "can_session_start": {"bus_id", "clear_rx_queue"}, "can_session_stop": {"bus_id"}, "can_send": {"bus_id", "frame_id", "id", "extended", "rtr", "data_hex", "hex"}, "can_read": {"bus_id", "max_frames", "wait_timeout_s"},
+    "adapters_list": set(), "adapter_session_start": {"adapter_id"}, "adapter_session_stop": {"adapter_id"}, "adapter_set_value": {"adapter_id", "channel", "value", "unit"},
+    "adapter_inject_fault": {"adapter_id", "fault", "channel"}, "adapter_clear_fault": {"adapter_id", "fault", "channel"}, "adapter_measure": {"adapter_id", "channel"},
+}
+REQUIRED_TOOL_ARGUMENTS: dict[str, set[str]] = {
+    "debug_set_breakpoint": {"location"}, "debug_symbol_info": {"symbol"}, "debug_dump_symbol_ihex": {"symbol", "output_path"},
+    "com_session_start": {"port_id"}, "com_session_stop": {"port_id"}, "com_write": {"port_id"}, "com_read": {"port_id"},
+    "can_session_start": {"bus_id"}, "can_session_stop": {"bus_id"}, "can_send": {"bus_id"}, "can_read": {"bus_id"},
+    "adapter_session_start": {"adapter_id"}, "adapter_session_stop": {"adapter_id"}, "adapter_set_value": {"adapter_id", "channel", "value"},
+    "adapter_inject_fault": {"adapter_id", "fault"}, "adapter_clear_fault": {"adapter_id"}, "adapter_measure": {"adapter_id", "channel"},
+}
 
 
 class HardwareCleanupError(RuntimeError):
@@ -101,6 +123,7 @@ class AgenticHILToolService:
         self._unconfirmed_operations: list[JsonObject] = []
         self._poisoned_state: JsonObject | None = None
         self._incident_persisted = False
+        self._incident_id: str | None = None
 
     def debugger_info(self) -> JsonObject:
         return self.backend.info()
@@ -146,6 +169,8 @@ class AgenticHILToolService:
         return self.artifacts.upload(payload)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return tool_error("reset_target", "permission_denied", "Target reset is disabled because permissions.allow_probe is false.")
         return self.backend.reset_target(mode)
 
     def debug_start_session(self, payload: JsonObject | None = None) -> JsonObject:
@@ -251,6 +276,7 @@ class AgenticHILToolService:
             except Exception as error:
                 inspection_errors.append({"type": subsystem_name, "error": str(error)})
         for subsystem_name, get_errors in (
+            ("com", getattr(self.com_ports, "cleanup_inspection_errors", lambda: [])),
             ("can", getattr(self.can_buses, "cleanup_inspection_errors", lambda: [])),
             ("adapter", getattr(self.adapters, "cleanup_inspection_errors", lambda: [])),
         ):
@@ -269,7 +295,12 @@ class AgenticHILToolService:
             return self._call(name, arguments)
 
     def _call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
+        if arguments is not None and not isinstance(arguments, dict):
+            return tool_error(name, "invalid_argument", "Tool arguments must be an object.")
         args = arguments or {}
+        validation_error = validate_tool_arguments(name, args)
+        if validation_error is not None:
+            return validation_error
         hardware_error = self._acquire_hardware(name)
         if hardware_error is not None:
             return hardware_error
@@ -280,6 +311,13 @@ class AgenticHILToolService:
             if name in HARDWARE_TOOLS:
                 def invoke() -> JsonObject:
                     try:
+                        if name in DEBUG_SESSION_CONFLICT_TOOLS:
+                            try:
+                                debug_active = self.backend.has_active_session()
+                            except Exception as error:
+                                return {"ok": False, "tool": name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": f"Debug-session state could not be inspected: {error}"}
+                            if debug_active:
+                                return tool_error(name, "debug_session_active", "Stop the typed debug session before starting a one-shot debugger operation.")
                         return self._dispatch(name, args)
                     except BaseException as error:
                         if name == "debug_start_session":
@@ -296,16 +334,19 @@ class AgenticHILToolService:
                 return self._invoke_hardware_operation(name, invoke)
             return self._dispatch(name, args)
         finally:
-            self._reconcile_hardware_lease()
+            if self._poisoned_state is not None and name in CLEANUP_TOOLS and self._hardware_lock.mode == "recovery":
+                self._hardware_lock.release_os_lock()
+            else:
+                self._reconcile_hardware_lease()
 
     def _dispatch(self, name: str, args: JsonObject) -> JsonObject:
         dispatch = {
             "debugger_info": lambda: self.debugger_info(),
-            "debugger_probes_list": lambda: self.debugger_probes_list(str(args.get("debugger", "default"))),
+            "debugger_probes_list": lambda: self.debugger_probes_list(args.get("debugger", "default")),
             "probe_target": lambda: self.probe_target(),
             "flash_firmware": lambda: self.flash_firmware(args),
             "artifact_upload": lambda: self.artifact_upload(args),
-            "reset_target": lambda: self.reset_target(str(args.get("mode", "run"))),
+            "reset_target": lambda: self.reset_target(args.get("mode", "run")),
             "debug_start_session": lambda: self.debug_start_session(args),
             "debug_stop_session": lambda: self.debug_stop_session(args),
             "debug_get_session_status": lambda: self.debug_get_session_status(),
@@ -320,22 +361,22 @@ class AgenticHILToolService:
             "get_last_report": lambda: self.get_last_report(),
             "classify_last_error": lambda: self.classify_last_error(),
             "com_ports_list": lambda: self.com_ports.list_ports(),
-            "com_session_start": lambda: self.com_ports.session_start(str(args.get("port_id", "")), bool(args.get("clear_buffer", True))),
-            "com_session_stop": lambda: self.com_ports.session_stop(str(args.get("port_id", ""))),
-            "com_write": lambda: self.com_ports.write(str(args.get("port_id", "")), {key: value for key, value in args.items() if key in {"text", "hex"}}),
-            "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s", 0.0)),
+            "com_session_start": lambda: self.com_ports.session_start(args.get("port_id", ""), args.get("clear_buffer", True)),
+            "com_session_stop": lambda: self.com_ports.session_stop(args.get("port_id", "")),
+            "com_write": lambda: self.com_ports.write(args.get("port_id", ""), {key: value for key, value in args.items() if key in {"text", "hex"}}),
+            "com_read": lambda: self.com_ports.read(args.get("port_id", ""), args.get("max_bytes"), args.get("wait_timeout_s", 0.0)),
             "can_buses_list": lambda: self.can_buses.list_buses(),
-            "can_session_start": lambda: self.can_buses.session_start(str(args.get("bus_id", "")), bool(args.get("clear_rx_queue", True))),
-            "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
-            "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
-            "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
+            "can_session_start": lambda: self.can_buses.session_start(args.get("bus_id", ""), args.get("clear_rx_queue", True)),
+            "can_session_stop": lambda: self.can_buses.session_stop(args.get("bus_id", "")),
+            "can_send": lambda: self.can_buses.send(args.get("bus_id", ""), {key: value for key, value in args.items() if key != "bus_id"}),
+            "can_read": lambda: self.can_buses.read(args.get("bus_id", ""), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
             "adapters_list": lambda: self.adapters.list_adapters(),
-            "adapter_session_start": lambda: self.adapters.session_start(str(args.get("adapter_id", ""))),
-            "adapter_session_stop": lambda: self.adapters.session_stop(str(args.get("adapter_id", ""))),
-            "adapter_set_value": lambda: self.adapters.set_value(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_inject_fault": lambda: self.adapters.inject_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_clear_fault": lambda: self.adapters.clear_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
+            "adapter_session_start": lambda: self.adapters.session_start(args.get("adapter_id", "")),
+            "adapter_session_stop": lambda: self.adapters.session_stop(args.get("adapter_id", "")),
+            "adapter_set_value": lambda: self.adapters.set_value(args.get("adapter_id", ""), adapter_payload(args)),
+            "adapter_inject_fault": lambda: self.adapters.inject_fault(args.get("adapter_id", ""), adapter_payload(args)),
+            "adapter_clear_fault": lambda: self.adapters.clear_fault(args.get("adapter_id", ""), adapter_payload(args)),
+            "adapter_measure": lambda: self.adapters.measure(args.get("adapter_id", ""), adapter_payload(args)),
         }
         if name in dispatch:
             return dispatch[name]()
@@ -345,6 +386,18 @@ class AgenticHILToolService:
         if tool not in HARDWARE_TOOLS:
             return None
         if self._poisoned_state is not None:
+            if tool in CLEANUP_TOOLS:
+                if self.hardware_owner is not None:
+                    if ProjectHardwareLock.owner_is_active(self.config.config_path, self.hardware_owner):
+                        return None
+                else:
+                    marker = self._hardware_lock.quarantine_info()
+                    if marker is not None and marker.get("quarantine_id") == self._incident_id:
+                        try:
+                            if self._hardware_lock.acquire(recovery=True, source="poisoned_service_cleanup"):
+                                return None
+                        except HardwareLockError:
+                            pass
             return {
                 "ok": False,
                 "tool": tool,
@@ -362,13 +415,14 @@ class AgenticHILToolService:
                     else:
                         acquired = True
                     if acquired:
-                        self._hardware_lock.quarantine_and_release(
+                        marker = self._hardware_lock.quarantine_and_release(
                             reason="hardware_cleanup_failed",
                             source="tool_service_preflight",
                             active_resources=local_state["active_resources"],
                             inspection_errors=local_state["inspection_errors"],
                         )
                         self._incident_persisted = True
+                        self._incident_id = str(marker["quarantine_id"])
                 except HardwareLockError:
                     pass
             return {
@@ -407,15 +461,25 @@ class AgenticHILToolService:
         if not state["active"]:
             self._hardware_lock.confirm_safe_and_release()
             return
-        if state["inspection_errors"] and self._hardware_lock.handle is not None:
+        if state["inspection_errors"]:
+            if self._hardware_lock.handle is None:
+                try:
+                    acquired = self._hardware_lock.acquire(source="tool_service_reconcile")
+                except HardwareQuarantinedError:
+                    self._poison(state)
+                    self._incident_persisted = True
+                    return
+                if not acquired:
+                    raise HardwareLockError("Unconfirmed hardware state exists without ownership of the project hardware lease.")
             self._poison(state)
-            self._hardware_lock.quarantine_and_release(
+            marker = self._hardware_lock.quarantine_and_release(
                 reason="hardware_cleanup_failed",
                 source="tool_service",
                 active_resources=state["active_resources"],
                 inspection_errors=state["inspection_errors"],
             )
             self._incident_persisted = True
+            self._incident_id = str(marker["quarantine_id"])
             return
         if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="active_session_recovery"):
             raise HardwareLockError("Active hardware session exists without ownership of the project hardware lease.")
@@ -427,26 +491,53 @@ class AgenticHILToolService:
             config = load_config(self.config.config_path, self.config.work_dir)
         except ConfigError as error:
             return {"tool": tool, **error.to_dict()}
-        if config == self.config:
+        subsystems_match = all(getattr(subsystem, "config", config) == config for subsystem in (self.backend, self.artifacts, self.com_ports, self.can_buses, self.adapters))
+        if config == self.config and subsystems_match:
             return None
-
-        if config.debugger.type == self.config.debugger.type:
-            self.backend.reconfigure(config)
-        else:
-            backend = create_debugger_backend(config)
-            self.backend.close()
-            self.backend = backend
-        self.artifacts.reconfigure(config)
-        self.com_ports.reconfigure(config)
-        self.can_buses.reconfigure(config)
-        self.adapters.reconfigure(config)
-        self.config = config
+        started_at = utc_now_iso()
+        old_config = self.config
+        old_backend = self.backend
+        try:
+            if config.debugger.type == self.config.debugger.type:
+                self.backend.reconfigure(config)
+            else:
+                old_backend.close()
+                self.backend = create_debugger_backend(config)
+            self.artifacts.reconfigure(config)
+            self.com_ports.reconfigure(config)
+            self.can_buses.reconfigure(config)
+            self.adapters.reconfigure(config)
+            self.config = config
+        except BaseException as error:
+            rollback_errors: list[str] = []
+            if self.backend is not old_backend:
+                with suppress(BaseException):
+                    self.backend.close()
+                self.backend = old_backend
+            for name, subsystem in (("debugger", self.backend), ("artifacts", self.artifacts), ("com", self.com_ports), ("can", self.can_buses), ("adapter", self.adapters)):
+                try:
+                    subsystem.reconfigure(old_config)
+                except BaseException as rollback_error:
+                    rollback_errors.append(f"{name}: {type(rollback_error).__name__}: {rollback_error}")
+            self.config = old_config
+            if isinstance(error, AuditWriteError) and not rollback_errors:
+                result = tool_error(tool, "audit_write_failed", "Project policy reload closed sessions safely, but a cleanup audit record could not be written.")
+                result["completion_confirmed"] = True
+                result["backend_error"] = str(error)
+                return result
+            self._record_unconfirmed_operation("config_reload", started_at, error, "config_reconfigure_failed")
+            if not isinstance(error, Exception):
+                raise
+            result = tool_error(tool, "config_reconfigure_failed", "Project configuration could not be applied consistently; restart this service.")
+            result.update({"completion_unconfirmed": True, "hardware_state_unconfirmed": True, "reload_error": str(error), "rollback_errors": rollback_errors})
+            return result
         return None
 
     def cleanup_test_sessions(self) -> None:
         with self._hardware_call_guard:
             self._close_subsystems(
                 (
+                    ("debugger", self.backend.close),
                     ("adapters", self.adapters.close),
                     ("com", self.com_ports.close),
                     ("can", self.can_buses.close),
@@ -490,19 +581,34 @@ class AgenticHILToolService:
 
     def _finish_hardware_lease(self) -> None:
         if self._incident_persisted and self._hardware_lock.handle is None:
+            current = self._session_hardware_state()
+            if not current["active_resources"]:
+                return
+            if self._hardware_lock.quarantine_info() is not None:
+                return
+            if not self._hardware_lock.acquire(source="tool_service_post_recovery_cleanup"):
+                raise HardwareLockError("New cleanup failure could not acquire a fresh project hardware lease.")
+            marker = self._hardware_lock.quarantine_and_release(
+                reason="hardware_cleanup_failed",
+                source="tool_service_post_recovery_cleanup",
+                active_resources=current["active_resources"],
+                inspection_errors=current["inspection_errors"],
+            )
+            self._incident_id = str(marker["quarantine_id"])
             return
         state = self.hardware_state()
         if state["active"]:
             self._poison(state)
             if self._hardware_lock.handle is None and not self._hardware_lock.acquire(source="tool_service_cleanup"):
                 raise HardwareLockError("Active hardware cleanup state exists but the project hardware lease is owned elsewhere.")
-            self._hardware_lock.quarantine_and_release(
+            marker = self._hardware_lock.quarantine_and_release(
                 reason="hardware_cleanup_failed",
                 source="tool_service_cleanup",
                 active_resources=state["active_resources"],
                 inspection_errors=state["inspection_errors"],
             )
             self._incident_persisted = True
+            self._incident_id = str(marker["quarantine_id"])
             return
         self._hardware_lock.confirm_safe_and_release()
 
@@ -510,6 +616,9 @@ class AgenticHILToolService:
         operation: JsonObject = {"type": "operation", "tool": tool, "started_at": utc_now_iso()}
         self._operation_in_flight = operation
         try:
+            if self.hardware_owner is None and self._hardware_lock.mode == "normal":
+                state = self._session_hardware_state()
+                self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=operation)
             result = action()
             if not isinstance(result, dict):
                 raise TypeError("Hardware tool returned a non-object result.")
@@ -522,6 +631,16 @@ class AgenticHILToolService:
             )
             if completion_unconfirmed:
                 self._record_unconfirmed_operation(tool, operation["started_at"], None, result.get("error_type"))
+            elif self.hardware_owner is None and self._hardware_lock.mode == "normal":
+                state = self._session_hardware_state()
+                self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=None)
+            return result
+        except AuditWriteError as error:
+            result = tool_error(tool, "audit_write_failed", "Hardware completion was confirmed, but its audit record could not be written.")
+            result["completion_confirmed"] = True
+            result["backend_error"] = str(error)
+            if error.operation_result is not None:
+                result["operation_result"] = error.operation_result
             return result
         except BaseException as error:
             if getattr(error, "_agentic_hil_completion_confirmed", False) is not True:
@@ -555,13 +674,61 @@ def adapter_payload(args: JsonObject) -> JsonObject:
     return {key: value for key, value in args.items() if key != "adapter_id"}
 
 
+def validate_tool_arguments(tool: str, args: JsonObject) -> JsonObject | None:
+    allowed = TOOL_ARGUMENTS.get(tool)
+    if allowed is not None:
+        unknown = sorted(set(args) - allowed)
+        if unknown:
+            return tool_error(tool, "invalid_argument", f"Unknown argument(s): {', '.join(unknown)}.")
+    missing = sorted(REQUIRED_TOOL_ARGUMENTS.get(tool, set()) - set(args))
+    if missing:
+        return tool_error(tool, "invalid_argument", f"Missing required argument(s): {', '.join(missing)}.")
+    for key in ("debugger", "image_path", "artifact_id", "filename", "data_base64", "mode", "symbol", "output_path", "port_id", "text", "hex", "bus_id", "data_hex", "adapter_id", "channel", "fault", "unit"):
+        if key in args and not isinstance(args[key], str):
+            return tool_error(tool, "invalid_argument", f"{key} must be a string.")
+    for key in ("reset_after_flash", "clear_buffer", "clear_rx_queue", "extended", "rtr"):
+        if key in args and not isinstance(args[key], bool):
+            return tool_error(tool, "invalid_argument", f"{key} must be a boolean.")
+    for key in ("timeout_s", "wait_timeout_s", "value"):
+        if key in args and (isinstance(args[key], bool) or not isinstance(args[key], (int, float)) or not math.isfinite(float(args[key]))):
+            return tool_error(tool, "invalid_argument", f"{key} must be a finite number.")
+    for key in ("max_bytes", "max_frames"):
+        if key in args and (isinstance(args[key], bool) or not isinstance(args[key], int)):
+            return tool_error(tool, "invalid_argument", f"{key} must be an integer.")
+    if tool in {"flash_firmware", "debug_start_session"} and ("image_path" in args) == ("artifact_id" in args):
+        return tool_error(tool, "invalid_argument", "Provide exactly one of image_path or artifact_id.")
+    if tool == "artifact_upload":
+        local = "image_path" in args
+        encoded = "filename" in args and "data_base64" in args
+        if local == encoded or (not local and set(args) & {"filename", "data_base64"} != {"filename", "data_base64"}):
+            return tool_error(tool, "invalid_argument", "Provide image_path or both filename and data_base64.")
+    if tool == "com_write" and ("text" in args) == ("hex" in args):
+        return tool_error(tool, "invalid_argument", "Provide exactly one of text or hex.")
+    if tool == "can_send":
+        if ("frame_id" in args) == ("id" in args):
+            return tool_error(tool, "invalid_argument", "Provide exactly one of frame_id or id.")
+        frame_id = args.get("frame_id", args.get("id"))
+        if isinstance(frame_id, bool) or not isinstance(frame_id, (int, str)):
+            return tool_error(tool, "invalid_argument", "frame_id must be an integer or string.")
+    if "mode" in args:
+        allowed_modes = {"run", "halt", "init"} if tool == "reset_target" else {"attach", "reset_halt", "load"}
+        if args["mode"] not in allowed_modes:
+            return tool_error(tool, "invalid_argument", f"mode must be one of: {', '.join(sorted(allowed_modes))}.")
+    if tool == "debug_set_breakpoint":
+        location = args.get("location")
+        if not isinstance(location, (str, dict)) or isinstance(location, str) and not location.strip():
+            return tool_error(tool, "invalid_argument", "location must be a non-empty string or object.")
+        if isinstance(location, dict) and set(location) - {"symbol", "function", "file", "line"}:
+            return tool_error(tool, "invalid_argument", "location contains unknown fields.")
+    return None
+
+
 def number_argument(value: object) -> float | None:
     if value is None:
         return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         return None
+    return float(value)
 
 
 def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:

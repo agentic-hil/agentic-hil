@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from agentic_hil import __version__
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
@@ -95,6 +97,8 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "adapter_clear_fault", "description": "Clear an injected fault (or all faults) on a test adapter.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
     {"name": "adapter_measure", "description": "Measure a configured test adapter channel and return the structured value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
 ]
+MCP_TOOL_SCHEMAS = {str(tool["name"]): tool["inputSchema"] for tool in MCP_TOOLS}
+MCP_TOOL_VALIDATORS = {name: Draft202012Validator(schema) for name, schema in MCP_TOOL_SCHEMAS.items()}
 
 AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) as the safe gate to the configured embedded hardware.
 
@@ -112,6 +116,10 @@ Safety rules:
 - Do not request arbitrary shell access for hardware actions.
 - Do not flash files outside configured artifact roots.
 - Treat permission_denied as authoritative and stop.
+- Treat hardware_state_unconfirmed as a hard stop for all hardware actions.
+- Never delete a hardware state marker manually.
+- Before recovery, stop the original Agentic HIL process and physically verify the rig is safe.
+- Recover only with the exact quarantine id from hardware-status, then start a new service process.
 """
 
 MCP_PROMPTS = [{"name": "agentic_hil_embedded_workflow", "description": "Safe workflow for using Agentic HIL hardware tools from an AI agent."}]
@@ -182,6 +190,13 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
         arguments = {}
     if not isinstance(arguments, dict):
         return mcp_tool_error(name, "invalid_argument", "tools/call arguments must be an object.")
+    validator = MCP_TOOL_VALIDATORS.get(name)
+    if validator is not None:
+        error = next(iter(validator.iter_errors(arguments)), None)
+        if error is not None:
+            field = ".".join(str(part) for part in error.absolute_path)
+            summary = f"Invalid tool arguments{f' at {field}' if field else ''}: {error.message}"
+            return mcp_tool_error(name, "invalid_argument", summary)
     result = tools.call(name, arguments)
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "structuredContent": result, "isError": result.get("ok") is False}
 

@@ -45,16 +45,20 @@ class GdbMiClient:
     def __init__(self, executable: str, work_dir: str):
         from agentic_hil.backends.common import invocation
 
-        self.child = subprocess.Popen(
-            [*invocation(executable), *GDB_MI_ARGS],
-            cwd=work_dir,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            self.child = subprocess.Popen(
+                [*invocation(executable), *GDB_MI_ARGS],
+                cwd=work_dir,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except BaseException as error:
+            error._agentic_hil_completion_confirmed = True
+            raise
         self.lock = threading.Lock()
         self.next_token = 0
         self.pending: JsonObject | None = None
@@ -62,8 +66,21 @@ class GdbMiClient:
         self.last_stop_line: str | None = None
         self.command_history: list[JsonObject] = []
         self.exited = threading.Event()
-        threading.Thread(target=self._stdout_reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        try:
+            threading.Thread(target=self._stdout_reader, daemon=True).start()
+            threading.Thread(target=self._stderr_reader, daemon=True).start()
+        except BaseException as error:
+            if self.child.poll() is None:
+                with suppress(BaseException):
+                    self.child.terminate()
+                    self.child.wait(timeout=GDB_EXIT_COMMAND_TIMEOUT_S)
+            if self.child.poll() is None:
+                with suppress(BaseException):
+                    self.child.kill()
+                    self.child.wait(timeout=GDB_EXIT_COMMAND_TIMEOUT_S)
+            if self.child.poll() is not None:
+                error._agentic_hil_completion_confirmed = True
+            raise
 
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
         if "\n" in mi_command or "\r" in mi_command:

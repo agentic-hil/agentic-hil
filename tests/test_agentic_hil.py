@@ -135,7 +135,8 @@ def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
     denied = hardware_recover(config.config_path, acknowledge_hardware_checked=False)
     missing_id = hardware_recover(config.config_path, acknowledge_hardware_checked=True)
     stale = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id="stale")
-    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
+    live_owner = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]), force_live_owner=True)
     clear_status = hardware_status(config.config_path)
 
     assert status["quarantined"] is True
@@ -144,6 +145,7 @@ def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
     assert denied["error_type"] == "acknowledgement_required"
     assert missing_id["error_type"] == "quarantine_id_required"
     assert stale["error_type"] == "quarantine_changed"
+    assert live_owner["error_type"] == "owner_process_still_running"
     assert recovered["ok"] is True
     assert recovered["recovered"] is True
     assert recovered["restart_required"] is True
@@ -157,7 +159,7 @@ def test_hardware_recover_surfaces_report_failure_after_safe_clear(tmp_path: Pat
     quarantine = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
     monkeypatch.setattr("agentic_hil.cli.write_report", lambda *_: (_ for _ in ()).throw(OSError("report full")))
 
-    result = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
+    result = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]), force_live_owner=True)
 
     assert result["error_type"] == "audit_write_failed"
     assert result["operation_result"]["ok"] is True
@@ -219,7 +221,7 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
         probe = mcp_tool_call(service, "probe_target")
     finally:
         service.close()
-    assert probe["ok"] is True
+    assert probe["ok"] is True, probe
     log_text = (tmp_path / probe["log_path"]).read_text(encoding="utf-8")
     assert "adapter serial STLINK123" in log_text
 

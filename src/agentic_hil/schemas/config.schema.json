@@ -132,6 +132,17 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["channel"],
+        "allOf": [
+          {
+            "if": { "properties": { "fd": { "const": false } } },
+            "then": {
+              "properties": {
+                "data_bitrate": { "type": "null" },
+                "max_frame_data_bytes": { "maximum": 8 }
+              }
+            }
+          }
+        ],
         "properties": {
           "adapter": { "type": "string", "default": "peak", "enum": ["peak", "socketcan", "process"] },
           "channel": { "type": "string" },

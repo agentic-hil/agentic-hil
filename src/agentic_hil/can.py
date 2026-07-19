@@ -5,7 +5,6 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -24,6 +23,7 @@ from agentic_hil.report import (
 from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
 
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
+CAN_FD_VALID_DATA_LENGTHS = frozenset([0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64])
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,10 @@ class CanBusService:
             return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by .agentic-hil/config.yaml.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
+            if clear_rx_queue and self.config.permissions.allow_can_read:
+                cleared = existing.adapter_session.read(existing.bus_config.max_buffer_frames, 0)
+                if not isinstance(cleared, dict) or cleared.get("ok") is not True:
+                    return self._write_report(queue_clear_failure(bus_id, existing, cleared))
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
         if existing:
             self._stop_session(existing, "restart")
@@ -135,7 +139,21 @@ class CanBusService:
         adapter_session = session.adapter_session
         try:
             if clear_rx_queue and self.config.permissions.allow_can_read:
-                adapter_session.read(bus_config.max_buffer_frames, 0)
+                cleared = adapter_session.read(bus_config.max_buffer_frames, 0)
+                if not isinstance(cleared, dict) or cleared.get("ok") is not True:
+                    result = queue_clear_failure(bus_id, session, cleared)
+                    try:
+                        self._stop_session(session, "queue_clear_failed")
+                    except BaseException as cleanup_error:
+                        result.update({"completion_unconfirmed": True, "hardware_state_unconfirmed": True, "cleanup_error": str(cleanup_error)})
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                    else:
+                        self.sessions.pop(bus_id, None)
+                        result.pop("completion_unconfirmed", None)
+                        result.pop("hardware_state_unconfirmed", None)
+                        result["completion_confirmed"] = True
+                    return self._write_report(result)
             append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
             return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."})
         except BaseException as error:
@@ -335,8 +353,7 @@ class CanBusService:
             session.cleanup_unconfirmed = True
             raise RuntimeError("CAN adapter remained active after close.")
         session.close_confirmed = True
-        with suppress(Exception):
-            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
@@ -361,16 +378,26 @@ def open_adapter(
 
 
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object):
+    def __init__(self, adapter_name: str, bus: object, is_fd: bool = False, bitrate_switch: bool = False):
         self.adapter_name = adapter_name
         self.bus = bus
+        self.is_fd = is_fd
+        self.bitrate_switch = bitrate_switch
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
         try:
             import can
 
-            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data)
+            message = can.Message(
+                arbitration_id=frame.id,
+                is_extended_id=frame.extended,
+                is_remote_frame=frame.rtr,
+                is_fd=self.is_fd,
+                bitrate_switch=self.bitrate_switch,
+                error_state_indicator=False,
+                data=frame.data,
+            )
             self.bus.send(message)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
@@ -419,12 +446,28 @@ def open_python_can_adapter(
     except ImportError:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters."}
     interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
+    bus_options: dict[str, object] = {
+        "interface": interface,
+        "channel": bus_config.channel,
+        "bitrate": bus_config.bitrate,
+        "fd": bus_config.fd,
+        "receive_own_messages": bus_config.receive_own_messages,
+    }
+    if bus_config.fd and bus_config.data_bitrate is not None:
+        bus_options["data_bitrate"] = bus_config.data_bitrate
+    if bus_config.listen_only:
+        bus_state = getattr(can, "BusState", None)
+        if bus_state is None or not hasattr(bus_state, "PASSIVE"):
+            return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "Configured listen_only mode is not supported by this python-can installation."}
+        bus_options["state"] = bus_state.PASSIVE
+    if bus_config.adapter == "peak" and bus_config.pcanbasic_dll is not None:
+        bus_options["dll"] = bus_config.pcanbasic_dll
     try:
-        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+        bus = can.Bus(**bus_options)
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
     try:
-        session = PythonCanAdapterSession(bus_config.adapter, bus)
+        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.fd, bus_config.fd and bus_config.data_bitrate is not None)
         if on_started is not None:
             on_started(session)
     except BaseException as error:
@@ -516,8 +559,10 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
     parsed_id = parse_can_id(payload.get("frame_id", payload.get("id")))
     if parsed_id is None:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "frame_id must be an integer or hexadecimal string such as 0x123."}
-    extended = bool(payload.get("extended", False))
-    rtr = bool(payload.get("rtr", False))
+    extended = payload.get("extended", False)
+    rtr = payload.get("rtr", False)
+    if not isinstance(extended, bool) or not isinstance(rtr, bool):
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "extended and rtr must be booleans."}
     max_id = 0x1FFFFFFF if extended else 0x7FF
     if parsed_id < 0 or parsed_id > max_id:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "Extended CAN frame_id must be between 0 and 0x1fffffff." if extended else "Standard CAN frame_id must be between 0 and 0x7ff."}
@@ -529,7 +574,27 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "data_hex must contain valid hexadecimal bytes."}
     if len(data) > bus_config.max_frame_data_bytes:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bytes_requested": len(data), "max_frame_data_bytes": bus_config.max_frame_data_bytes}
+    if not bus_config.fd and len(data) > 8:
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "Classic CAN frames cannot contain more than 8 data bytes.", "bytes_requested": len(data), "max_frame_data_bytes": 8}
+    if bus_config.fd and rtr:
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN FD buses do not support remote (RTR) frames."}
+    if bus_config.fd and len(data) not in CAN_FD_VALID_DATA_LENGTHS:
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN FD frame data length must be 0-8, 12, 16, 20, 24, 32, 48, or 64 bytes.", "bytes_requested": len(data)}
     return {"ok": True, "frame": CanFrame(id=parsed_id, extended=extended, rtr=rtr, data=data)}
+
+
+def queue_clear_failure(bus_id: str, session: CanBusSession, cleared: object) -> JsonObject:
+    details = cleared if isinstance(cleared, dict) else {"backend_error": "CAN adapter returned a non-object queue-clear result."}
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": session.adapter_session.adapter_name,
+        "error_type": str(details.get("error_type", "can_read_failed")),
+        "backend_error": details.get("backend_error"),
+        "queue_clear": details,
+        "summary": "CAN receive queue could not be cleared before session use.",
+    }
 
 
 def parse_can_id(value: object) -> int | None:

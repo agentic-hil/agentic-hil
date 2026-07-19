@@ -6,7 +6,8 @@ from typing import TextIO
 
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.report import AuditWriteError
+from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
 from agentic_hil.types import AgenticHILConfig
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
@@ -63,16 +64,25 @@ def run_stdio_server(
         except BaseException as error:
             cleanup_error = error
     if cleanup_error is not None:
+        try:
+            state = tools.hardware_state()
+            hardware_unconfirmed = bool(state["active"])
+        except Exception as state_error:
+            state = {"active_resources": [], "inspection_errors": [{"type": "hardware_state", "error": str(state_error)}]}
+            hardware_unconfirmed = True
+        audit_only = cleanup_error_is_audit_only(cleanup_error)
         error_stream.write(
             json.dumps(
                 {
                     "ok": False,
                     "tool": "mcp_stdio",
-                    "error_type": "hardware_cleanup_failed",
-                    "hardware_state_unconfirmed": True,
+                    "error_type": "audit_write_failed" if audit_only and not hardware_unconfirmed else "hardware_cleanup_failed",
+                    "hardware_state_unconfirmed": hardware_unconfirmed,
+                    "active_resources": state["active_resources"],
+                    "inspection_errors": state["inspection_errors"],
                     "exception_type": type(cleanup_error).__name__,
                     "backend_error": str(cleanup_error),
-                    "summary": "MCP server shutdown could not confirm a safe hardware state.",
+                    "summary": "MCP server shutdown could not confirm a safe hardware state." if hardware_unconfirmed else "MCP server hardware cleanup completed, but shutdown reporting failed.",
                 }
             )
             + "\n"
@@ -85,6 +95,14 @@ def run_stdio_server(
             raise cleanup_error
         return 1
     return 0
+
+
+def cleanup_error_is_audit_only(error: BaseException) -> bool:
+    if isinstance(error, AuditWriteError):
+        return True
+    if isinstance(error, HardwareCleanupError):
+        return bool(error.errors) and all(isinstance(item, AuditWriteError) for _, item in error.errors)
+    return False
 
 
 def drain_oversized_line(input_stream: TextIO, limit: int) -> None:

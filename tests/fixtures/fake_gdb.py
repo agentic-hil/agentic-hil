@@ -80,6 +80,9 @@ def main() -> int:
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
+        elif command == "-thread-info":
+            state = "running" if behavior() == "initial_running" else "stopped"
+            emit(f'{token}^done,threads=[{{id="1",state="{state}"}}],current-thread-id="1"')
         elif command.startswith(("-gdb-set", "-file-exec-and-symbols", "-interpreter-exec", "-target-download", "-break-delete")):
             emit(f"{token}^done")
         elif command.startswith("-break-insert"):

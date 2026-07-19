@@ -13,7 +13,7 @@ from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import DEFAULT_CONFIG_PATH, ConfigError, config_schema_text, display_path, load_config
 from agentic_hil.debugger import create_debugger_backend
-from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock, marker_owner_is_alive
 from agentic_hil.report import write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import TestReactor, load_test_config, test_config_schema_text
@@ -175,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     hardware_recover_parser.add_argument("--config", default=None)
     hardware_recover_parser.add_argument("--quarantine-id", default=None)
     hardware_recover_parser.add_argument("--acknowledge-hardware-checked", action="store_true")
+    hardware_recover_parser.add_argument("--force-live-owner", action="store_true", help="emergency override after independently stopping or isolating the source process")
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
@@ -216,7 +217,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "hardware-status":
         return hardware_status(args.config)
     if args.command == "hardware-recover":
-        return hardware_recover(args.config, args.acknowledge_hardware_checked, args.quarantine_id)
+        return hardware_recover(args.config, args.acknowledge_hardware_checked, args.quarantine_id, args.force_live_owner)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "test-schema":
@@ -299,7 +300,7 @@ def hardware_status(config_path: str | None = None) -> JsonObject:
     return {"tool": "hardware_status", **status, "quarantine_id": quarantine_id, "quarantine": state if status.get("quarantined") else None}
 
 
-def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False, quarantine_id: str | None = None) -> JsonObject:
+def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False, quarantine_id: str | None = None, force_live_owner: bool = False) -> JsonObject:
     config = load_config(config_path)
     if not acknowledge_hardware_checked:
         return {"ok": False, "tool": "hardware_recover", "error_type": "acknowledgement_required", "summary": "Use --acknowledge-hardware-checked after confirming hardware is safe."}
@@ -322,7 +323,10 @@ def hardware_recover(config_path: str | None = None, acknowledge_hardware_checke
         if previous is None or previous.get("quarantine_id", previous.get("lease_id")) != quarantine_id:
             result = {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Hardware state marker changed after operator inspection.", "state": previous}
             return write_hardware_recovery_report(config, result)
-        hardware_lock.clear_quarantine()
+        if not force_live_owner and marker_owner_is_alive(previous):
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "owner_process_still_running", "summary": "Stop the original Agentic HIL process before recovery.", "state": previous}
+            return write_hardware_recovery_report(config, result)
+        hardware_lock.clear_quarantine(quarantine_id)
         result = {"ok": True, "tool": "hardware_recover", "recovered": True, "restart_required": True, "state": previous, "summary": "Project hardware state marker cleared after operator acknowledgement. Restart any existing Agentic HIL service process before further hardware access."}
         return write_hardware_recovery_report(config, result)
     except HardwareLockError as error:

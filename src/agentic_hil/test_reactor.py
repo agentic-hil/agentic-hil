@@ -213,7 +213,8 @@ class Device:
         continued = self._call("debug_continue", {"timeout_s": arguments.get("timeout_s")})
         cleared = self._cleanup_call("debug_clear_breakpoints")
         if cleared.get("ok") is not True:
-            return {"ok": False, "tool": "test_reactor", "error_type": "breakpoint_cleanup_failed", "summary": "Reactor breakpoint could not be removed.", "breakpoint_cleanup": cleared}
+            unsafe = cleared.get("completion_unconfirmed") is True or cleared.get("hardware_state_unconfirmed") is True or cleared.get("error_type") in {"hardware_state_unconfirmed", "hardware_cleanup_failed"}
+            return {"ok": False, "tool": "test_reactor", "error_type": "hardware_state_unconfirmed" if unsafe else "breakpoint_cleanup_failed", "step_error_type": cleared.get("error_type"), "completion_unconfirmed": unsafe, "hardware_state_unconfirmed": unsafe, "summary": "Reactor breakpoint could not be removed.", "breakpoint_cleanup": cleared}
         if continued.get("ok") is not True:
             return continued
         expected = breakpoint_result.get("breakpoint", {}).get("id")
@@ -249,8 +250,13 @@ class TestReactor:
         self._policy_digest: str | None = None
         self._step_in_flight: JsonObject | None = None
         self._execution_inspection_errors: list[JsonObject] = []
+        self._project_lock: ProjectHardwareLock | None = None
+        self._has_run = False
 
     def run(self, plan: TestPlan) -> JsonObject:
+        if self._has_run:
+            raise RuntimeError("TestReactor instances are single-use.")
+        self._has_run = True
         try:
             project_lock = ProjectTestLock(self.config.config_path)
             acquired = project_lock.acquire(source="test_reactor")
@@ -286,6 +292,7 @@ class TestReactor:
                 "cleanup": [],
                 "summary": "Project hardware is in use by another Agentic HIL process.",
             }
+        self._project_lock = project_lock
         response: JsonObject | None = None
         pending_base_exception: BaseException | None = None
         try:
@@ -343,7 +350,7 @@ class TestReactor:
                     }
                 underlying_error_type = response.get("error_type")
                 try:
-                    quarantine = project_lock.quarantine_and_release(
+                    quarantine = project_lock.mark_quarantined(
                         reason="hardware_cleanup_failed",
                         source="test_reactor",
                         active_resources=hardware_state["active_resources"],
@@ -352,7 +359,6 @@ class TestReactor:
                 except HardwareLockError as error:
                     quarantine = None
                     response["quarantine_error"] = str(error)
-                    project_lock.release_os_lock()
                 response.update(
                     {
                         "ok": False,
@@ -367,12 +373,15 @@ class TestReactor:
                     response["underlying_error_type"] = underlying_error_type
                 if quarantine is not None:
                     response["quarantine"] = quarantine
+                try:
+                    response = self._finalize(response)
+                finally:
+                    project_lock.release_os_lock()
             else:
                 try:
-                    project_lock.confirm_safe_and_release()
+                    response = self._finalize(response)
+                    project_lock.confirm_safe()
                 except HardwareLockError as error:
-                    if response is None:
-                        response = {"ok": False, "tool": "test_reactor", "test_config_path": plan.path, "tests": [], "cleanup": []}
                     underlying_error_type = response.get("error_type")
                     response.update(
                         {
@@ -384,11 +393,14 @@ class TestReactor:
                             "summary": "Test reactor cleanup completed, but safe lease release could not be persisted.",
                         }
                     )
+                    response = self._finalize(response)
+                finally:
+                    project_lock.release_os_lock()
+            self._project_lock = None
         assert response is not None
         if pending_base_exception is not None:
-            self._finalize(response)
             raise pending_base_exception
-        return self._finalize(response)
+        return response
 
     def _initialize_devices(self, test_config_path: str, hardware_owner: str) -> JsonObject | None:
         try:
@@ -650,6 +662,9 @@ class TestReactor:
             for index, step in enumerate(test.steps, start=1):
                 self._step_in_flight = {"type": "operation", "test": test.name, "device": test.device, "step": index, "action": step.action}
                 try:
+                    if self._project_lock is not None:
+                        state = self._collect_hardware_state()
+                        self._project_lock.update_active_state(source=f"test_reactor:{test.name}:{index}", active_resources=state["active_resources"], operation=self._step_in_flight)
                     result = device.execute(step)
                 except Exception as error:
                     completion_confirmed = getattr(error, "_agentic_hil_completion_confirmed", False) is True
@@ -674,6 +689,9 @@ class TestReactor:
                     if result.get("completion_unconfirmed") is True or result.get("hardware_state_unconfirmed") is True or step_error_type in {"hardware_state_unconfirmed", "hardware_cleanup_failed"}:
                         self._execution_inspection_errors.append({**self._step_in_flight, "error_type": step_error_type or "completion_unconfirmed", "summary": "Test reactor step completion was not confirmed."})
                         result = {**result, "ok": False, "error_type": step_error_type or "hardware_state_unconfirmed", "hardware_state_unconfirmed": True}
+                    if self._project_lock is not None:
+                        state = self._collect_hardware_state()
+                        self._project_lock.update_active_state(source=f"test_reactor:{test.name}:{index}", active_resources=state["active_resources"], operation=None)
                     self._step_in_flight = None
                 steps.append({"index": index, "action": step.action, "result": result})
                 if result.get("ok") is not True:

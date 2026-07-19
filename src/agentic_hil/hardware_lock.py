@@ -58,6 +58,8 @@ class ProjectHardwareLock:
         self.owner_token = ""
         self.lease_id = ""
         self.handle: Any = None
+        self.mode: Literal["none", "normal", "recovery"] = "none"
+        self.recovery_incident_id: str | None = None
         self._instance_guard = threading.RLock()
 
     def acquire(self, *, recovery: bool = False, source: str = "agentic_hil", ignore_quarantine: bool | None = None) -> bool:
@@ -68,6 +70,9 @@ class ProjectHardwareLock:
         if ignore_quarantine is not None:
             recovery = ignore_quarantine
         if self.handle is not None:
+            requested_mode = "recovery" if recovery else "normal"
+            if self.mode != requested_mode:
+                raise HardwareLockError("Hardware lock mode cannot change while held.")
             return True
         self.owner_token = uuid.uuid4().hex
         with self._owners_guard:
@@ -85,8 +90,12 @@ class ProjectHardwareLock:
                 self._release_os_lock()
                 raise HardwareQuarantinedError(state)
             if not recovery:
+                self.mode = "normal"
                 self.lease_id = uuid.uuid4().hex
                 self._write_state(self._new_active_state(source))
+            else:
+                self.mode = "recovery"
+                self.recovery_incident_id = str(state.get("quarantine_id")) if isinstance(state, dict) else None
         except HardwareLockError:
             if self.handle is not None:
                 self._release_os_lock()
@@ -115,9 +124,23 @@ class ProjectHardwareLock:
         if self.handle is None:
             return
         try:
-            self._delete_state()
+            self._confirm_safe()
         finally:
             self._release_os_lock()
+
+    def confirm_safe(self) -> None:
+        with self._instance_guard:
+            self._confirm_safe()
+
+    def _confirm_safe(self) -> None:
+        if self.handle is None:
+            raise HardwareLockError("No hardware lease is held.")
+        if self.mode != "normal":
+            raise HardwareLockError("Only a normal hardware lease can confirm safe completion.")
+        state = self._read_state()
+        if state is None or state.get("state") != "active" or state.get("lease_id") != self.lease_id:
+            raise HardwareLockError("Current active hardware lease state is missing or owned by another lease.")
+        self._delete_state()
 
     def quarantine_and_release(
         self,
@@ -146,7 +169,7 @@ class ProjectHardwareLock:
         }
 
     def release(self) -> None:
-        self.confirm_safe_and_release()
+        self.release_os_lock()
 
     def release_os_lock(self) -> None:
         with self._instance_guard:
@@ -172,10 +195,26 @@ class ProjectHardwareLock:
             self._write_state(marker)
             return marker
 
-    def clear_quarantine(self) -> None:
+    def clear_quarantine(self, expected_quarantine_id: str) -> None:
         with self._instance_guard:
             self._require_owner()
+            if self.mode != "recovery":
+                raise HardwareLockError("Quarantine can only be cleared under a recovery lock.")
+            state = self._read_state()
+            if state is None or state.get("state") not in {"active", "quarantined"} or state.get("quarantine_id") != expected_quarantine_id:
+                raise HardwareLockError("Hardware quarantine changed after operator inspection.")
             self._delete_state()
+
+    def update_active_state(self, *, source: str, active_resources: list[JsonObject], operation: JsonObject | None) -> None:
+        with self._instance_guard:
+            self._require_owner()
+            if self.mode != "normal":
+                raise HardwareLockError("Only a normal hardware lease can update active state.")
+            state = self._read_state()
+            if state is None or state.get("state") != "active" or state.get("lease_id") != self.lease_id:
+                raise HardwareLockError("Current active hardware lease state is missing or owned by another lease.")
+            marker = {**state, "updated_at": utc_now_iso(), "source": source, "active_resources": active_resources, "operation": operation}
+            self._write_state(marker)
 
     @classmethod
     def owner_is_active(cls, config_path: str, owner_token: str) -> bool:
@@ -362,6 +401,10 @@ class ProjectHardwareLock:
                 if self._owners.get(str(self.path)) == self.owner_token:
                     self._owners.pop(str(self.path), None)
             self._close_handle()
+            self.mode = "none"
+            self.recovery_incident_id = None
+            self.lease_id = ""
+            self.owner_token = ""
 
     def _probe_lock_available(self) -> bool:
         handle: Any = None
@@ -460,6 +503,56 @@ def hardware_state_directory() -> Path:
     candidate = Path(configured).expanduser() if configured else fallback
     base = candidate if candidate.is_absolute() else fallback
     return base / "agentic-hil" / "hardware"
+
+
+def marker_owner_is_alive(marker: JsonObject) -> bool:
+    if marker.get("hostname") != socket.gethostname():
+        return False
+    pid = marker.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    return process_is_alive(pid)
+
+
+def process_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_process_is_alive(pid)
+    # POSIX only: on Windows os.kill(pid, 0) TERMINATES the target process.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ERROR_ACCESS_DENIED = 5
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def utc_now_iso() -> str:

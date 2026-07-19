@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.config import display_path
@@ -91,11 +91,18 @@ class ComPortSession:
                 break
 
 
+@dataclass
+class UnmanagedSerialHandle:
+    port_id: str
+    serial_handle: object
+    cleanup_error: str
+
+
 class ComPortService:
     def __init__(self, config: AgenticHILConfig):
         self.config = config
         self.sessions: dict[str, ComPortSession] = {}
-        self._unmanaged_serial_handles: list[object] = []
+        self._unmanaged_serial_handles: list[UnmanagedSerialHandle] = []
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         for port_id, session in list(self.sessions.items()):
@@ -136,8 +143,15 @@ class ComPortService:
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
             if clear_buffer:
+                reset_input_buffer = getattr(existing.serial_handle, "reset_input_buffer", None)
+                if callable(reset_input_buffer):
+                    try:
+                        reset_input_buffer()
+                    except Exception as error:
+                        return self._write_report({"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_read_failed", "summary": "COM port input buffer could not be cleared before session use.", "backend_error": str(error), "likely_causes": likely_causes("serial_read_failed")})
                 with existing.lock:
                     existing.buffer.clear()
+                    existing.overflow_bytes = 0
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
         if existing:
             self._stop_session(existing, "restart")
@@ -211,7 +225,11 @@ class ComPortService:
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
         try:
-            session.serial_handle.write(data)
+            written = session.serial_handle.write(data)
+            if not isinstance(written, int) or isinstance(written, bool):
+                return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "completion_unconfirmed": True, "bytes_requested": len(data), "bytes_written": None, "summary": "Serial backend did not report a valid write count."}
+            if written != len(data):
+                return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "completion_unconfirmed": True, "bytes_requested": len(data), "bytes_written": written, "summary": "Serial write completed only partially."}
             flush = getattr(session.serial_handle, "flush", None)
             if callable(flush):
                 flush()
@@ -259,10 +277,10 @@ class ComPortService:
     def close(self) -> None:
         first_error: Exception | None = None
         pending_base_exception: BaseException | None = None
-        for serial_handle in list(self._unmanaged_serial_handles):
+        for item in list(self._unmanaged_serial_handles):
             try:
-                serial_handle.close()
-                if bool(getattr(serial_handle, "is_open", False)):
+                item.serial_handle.close()
+                if bool(getattr(item.serial_handle, "is_open", False)):
                     raise RuntimeError("COM port remained open after close.")
             except BaseException as error:
                 if isinstance(error, Exception) and first_error is None:
@@ -270,7 +288,7 @@ class ComPortService:
                 elif not isinstance(error, Exception) and pending_base_exception is None:
                     pending_base_exception = error
             else:
-                self._unmanaged_serial_handles.remove(serial_handle)
+                self._unmanaged_serial_handles.remove(item)
         for port_id, session in list(self.sessions.items()):
             try:
                 self._stop_session(session, "shutdown")
@@ -291,12 +309,12 @@ class ComPortService:
 
     def active_session_ids(self) -> list[str]:
         active: list[str] = []
-        for serial_handle in self._unmanaged_serial_handles:
+        for item in self._unmanaged_serial_handles:
             try:
-                if bool(getattr(serial_handle, "is_open", True)):
-                    active.append("unmanaged")
+                if bool(getattr(item.serial_handle, "is_open", True)):
+                    active.append(item.port_id)
             except Exception:
-                active.append("unmanaged")
+                active.append(item.port_id)
         for port_id, session in self.sessions.items():
             try:
                 if bool(getattr(session.serial_handle, "is_open", True)):
@@ -304,6 +322,17 @@ class ComPortService:
             except Exception:
                 active.append(port_id)
         return active
+
+    def cleanup_inspection_errors(self) -> list[JsonObject]:
+        errors: list[JsonObject] = []
+        for item in self._unmanaged_serial_handles:
+            try:
+                may_be_open = bool(getattr(item.serial_handle, "is_open", True))
+            except Exception:
+                may_be_open = True
+            if may_be_open:
+                errors.append({"id": item.port_id, "error": item.cleanup_error, "summary": "COM handle remained open after failed session initialization."})
+        return errors
 
     def _open_serial(self, port_id: str, port_config: ComPortConfig) -> JsonObject:
         try:
@@ -326,8 +355,10 @@ class ComPortService:
                     raise RuntimeError("COM port remained open after close.")
                 cleanup_confirmed = True
             except BaseException as cleanup_error:
-                self._unmanaged_serial_handles.append(serial_handle)
+                self._unmanaged_serial_handles.append(UnmanagedSerialHandle(port_id, serial_handle, str(cleanup_error)))
                 result["cleanup_error"] = str(cleanup_error)
+                result["hardware_state_unconfirmed"] = True
+                result["completion_unconfirmed"] = True
                 if not isinstance(cleanup_error, Exception):
                     raise
             if not isinstance(error, Exception):
@@ -380,8 +411,7 @@ class ComPortService:
         session.serial_handle.close()
         if bool(getattr(session.serial_handle, "is_open", False)):
             raise RuntimeError("COM port remained open after close.")
-        with suppress(Exception):
-            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

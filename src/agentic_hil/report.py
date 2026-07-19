@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.types import AgenticHILConfig, JsonObject
+
+
+class AuditWriteError(OSError):
+    def __init__(self, message: str, operation_result: JsonObject | None = None):
+        super().__init__(message)
+        self.operation_result = operation_result
+        self._agentic_hil_completion_confirmed = True
 
 
 def utc_now_iso() -> str:
@@ -32,8 +43,12 @@ def logs_directory(config: AgenticHILConfig) -> str:
 def append_jsonl(log_path: str, event: JsonObject) -> None:
     entry = dict(event)
     entry.setdefault("time", utc_now_iso())
-    with Path(log_path).open("a", encoding="utf-8") as file:
-        file.write(json.dumps(entry) + "\n")
+    try:
+        with Path(log_path).open("a", encoding="utf-8") as file:
+            file.write(json.dumps(entry) + "\n")
+            file.flush()
+    except OSError as error:
+        raise AuditWriteError(str(error), entry) from error
 
 
 def safe_filename(value: str, fallback: str = "item") -> str:
@@ -48,8 +63,52 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     report_path = last_report_path(config)
     enriched = dict(report)
     enriched.setdefault("report_path", display_path(config, report_path))
-    Path(report_path).write_text(json.dumps(enriched, indent=2) + "\n", encoding="utf-8")
+    try:
+        atomic_write_text(Path(report_path), json.dumps(enriched, indent=2) + "\n")
+    except OSError as error:
+        raise AuditWriteError(str(error), enriched) from error
     return enriched
+
+
+def write_audit_json(path: str | Path, payload: JsonObject) -> None:
+    try:
+        atomic_write_text(Path(path), json.dumps(payload, indent=2) + "\n")
+    except OSError as error:
+        raise AuditWriteError(str(error), payload) from error
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        fsync_directory(path.parent)
+    except BaseException:
+        with suppress(OSError):
+            temp_path.unlink()
+        raise
+
+
+def fsync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = getattr(os, "O_DIRECTORY", 0) | os.O_RDONLY
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(directory, flags)
+        os.fsync(descriptor)
+    except OSError as error:
+        unsupported = {errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL), getattr(errno, "EOPNOTSUPP", errno.EINVAL)}
+        if error.errno not in unsupported:
+            raise
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:

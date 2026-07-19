@@ -6,10 +6,10 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil.bridge import reap_unmanaged_child
 from agentic_hil.config import display_path
 from agentic_hil.gdbmi import (
     GdbMiClient,
@@ -19,7 +19,14 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.report import logs_directory, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.report import (
+    AuditWriteError,
+    logs_directory,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_audit_json,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEBUG_MODES = ["attach", "reset_halt", "load"]
@@ -124,9 +131,24 @@ class GdbDebugSessions:
         except OSError as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
 
-        session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
-        self._start_output_readers(session)
+        try:
+            session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
+        except BaseException as error:
+            if reap_unmanaged_child(server):
+                error._agentic_hil_completion_confirmed = True
+            raise
         self.session = session
+        try:
+            self._start_output_readers(session)
+        except BaseException as error:
+            try:
+                cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            except BaseException as cleanup_error:
+                cleanup = getattr(cleanup_error, "_agentic_hil_cleanup_result", None)
+            if isinstance(cleanup, DebugCleanupResult) and not cleanup.resources_active:
+                self.session = None
+                error._agentic_hil_completion_confirmed = True
+            raise
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
             failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
@@ -138,7 +160,17 @@ class GdbDebugSessions:
             self.session = None
             return self._report(failure)
 
-        session.gdb = GdbMiClient(str(resolved_gdb["executable"]), self.config.work_dir)
+        try:
+            session.gdb = GdbMiClient(str(resolved_gdb["executable"]), self.config.work_dir)
+        except BaseException as error:
+            try:
+                cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            except BaseException as cleanup_error:
+                cleanup = getattr(cleanup_error, "_agentic_hil_cleanup_result", None)
+            if isinstance(cleanup, DebugCleanupResult) and not cleanup.resources_active and getattr(error, "_agentic_hil_completion_confirmed", False) is True:
+                self.session = None
+                error._agentic_hil_completion_confirmed = True
+            raise
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
             cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
@@ -149,8 +181,14 @@ class GdbDebugSessions:
             self.session = None
             return self._report({"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)})
 
+        halt_confirmation = self._confirm_initial_halt(session)
+        if not halt_confirmation["ok"]:
+            cleanup = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if not cleanup.resources_active:
+                self.session = None
+            halt_confirmation["cleanup"] = {"resources_active": cleanup.resources_active, "resource_errors": cleanup.resource_errors, "audit_errors": cleanup.audit_errors}
+            return self._report(halt_confirmation)
         session.status = "halted"
-        self._refresh_session_stop(session, INITIAL_STOP_POLL_TIMEOUT_S)
         self._write_session_log(session)
         result: JsonObject = {
             "ok": True,
@@ -168,6 +206,17 @@ class GdbDebugSessions:
         }
         result.update(target_stop_fields(session.stop_reason))
         return self._report(result)
+
+    def _confirm_initial_halt(self, session: GdbDebugSession) -> JsonObject:
+        stop = self._refresh_session_stop(session, INITIAL_STOP_POLL_TIMEOUT_S)
+        if stop is not None and stop.get("stop_reason") != "debugger_error":
+            return {"ok": True}
+        response = self._gdb_command(session, "-thread-info")
+        if response.ok and 'state="stopped"' in response.line and 'state="running"' not in response.line:
+            return {"ok": True}
+        session.status = "error"
+        session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "initial_halt_unconfirmed", "backend_error": response.error_message}
+        return {"ok": False, "tool": "debug_start_session", "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "Debug session started, but the initial target halt could not be confirmed.", "session": self._session_status(session), "stop": session.stop_reason, "log_path": display_path(self.config, session.log_path)}
 
     def stop_session(self, timeout_s: float | None = None) -> JsonObject:
         tool = "debug_stop_session"
@@ -189,7 +238,7 @@ class GdbDebugSessions:
         session.status = "stopped"
         self.session = None
         if cleanup.audit_errors:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "error_type": "audit_write_failed", "resources_stopped": True, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug resources were stopped, but the session log could not be written."})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "error_type": "audit_write_failed", "completion_confirmed": True, "resources_stopped": True, "audit_errors": cleanup.audit_errors, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug resources were stopped, but the session log could not be written."})
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
 
     def get_session_status(self) -> JsonObject:
@@ -210,10 +259,16 @@ class GdbDebugSessions:
         normalized = normalize_breakpoint_location(tool, location)
         if not normalized["ok"]:
             return self._report(normalized)
+        policy = self._validate_breakpoint_policy(normalized)
+        if policy is not None:
+            return self._report(policy)
         response = self._gdb_command(session, f"-break-insert {mi_string(normalized['gdb_location'])}")
         if not response.ok:
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
-        breakpoint = {"id": session.next_breakpoint_id, "backend_id": mi_field(response.line, "number"), "location": normalized["location"], "gdb_location": normalized["gdb_location"]}
+        backend_id = mi_field(response.line, "number")
+        if backend_id is None:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": "GDB confirmed breakpoint insertion without returning a removable breakpoint ID."})
+        breakpoint = {"id": session.next_breakpoint_id, "backend_id": backend_id, "location": normalized["location"], "gdb_location": normalized["gdb_location"]}
         session.next_breakpoint_id += 1
         session.breakpoints.append(breakpoint)
         self._write_session_log(session)
@@ -230,15 +285,29 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
-        for breakpoint in session.breakpoints:
+        cleared = 0
+        for breakpoint in list(session.breakpoints):
             if breakpoint.get("backend_id"):
                 response = self._gdb_command(session, f"-break-delete {breakpoint['backend_id']}")
                 if not response.ok:
-                    return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
-        cleared = len(session.breakpoints)
-        session.breakpoints = []
+                    failure = self._gdb_failure(tool, session, response.error_message, response.timed_out)
+                    failure.update({"cleared": cleared, "remaining": len(session.breakpoints), "breakpoints": list(session.breakpoints)})
+                    return self._report(failure)
+            session.breakpoints.remove(breakpoint)
+            cleared += 1
         self._write_session_log(session)
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared."})
+
+    def _validate_breakpoint_policy(self, normalized: JsonObject) -> JsonObject | None:
+        allowed_symbols = self.config.debug.allowed_symbols
+        if not allowed_symbols:
+            return None
+        location = normalized.get("location")
+        if isinstance(location, dict) and isinstance(location.get("symbol"), str):
+            if location["symbol"] in allowed_symbols:
+                return None
+            return self._permission_denied("debug_set_breakpoint", "Breakpoint symbol is not allowed by debug.allowed_symbols.")
+        return self._permission_denied("debug_set_breakpoint", "File/line breakpoints are disabled while debug.allowed_symbols is configured.")
 
     def continue_execution(self, timeout_s: float | None = None) -> JsonObject:
         tool = "debug_continue"
@@ -377,7 +446,7 @@ class GdbDebugSessions:
             session.status = "stopped"
             self.session = None
             if cleanup.audit_errors:
-                raise RuntimeError("Debug session log could not be written: " + "; ".join(cleanup.audit_errors))
+                raise AuditWriteError("Debug session log could not be written: " + "; ".join(cleanup.audit_errors), self._session_status(session))
         else:
             self.session = None
 
@@ -686,8 +755,6 @@ class GdbDebugSessions:
         }
 
     def _write_session_log(self, session: GdbDebugSession) -> None:
-        import json
-
         payload = {
             "session_id": session.session_id,
             "mode": session.mode,
@@ -698,15 +765,14 @@ class GdbDebugSessions:
             "server_stderr_tail": session.server_stderr,
             "gdb_commands": session.gdb.history() if session.gdb else [],
         }
-        with suppress(OSError):
-            Path(session.log_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_audit_json(session.log_path, payload)
 
     def _report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
 
 
 def public_artifact(artifact: JsonObject) -> JsonObject:
-    return {"source": artifact.get("source"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
+    return {"source": artifact.get("source"), "path": artifact.get("path"), "staging_path": artifact.get("staging_path"), "sha256": artifact.get("sha256")}
 
 
 def exception_type_from_stop_line(lower_line: str) -> str | None:

@@ -13,7 +13,14 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.config import display_path, resolve_work_path
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.report import (
+    logs_directory,
+    read_last_report,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_audit_json,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 PYOCD_NOT_FOUND: JsonObject = {
@@ -131,6 +138,8 @@ class PyOCDBackend:
         return self._write_action_report(result)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("reset_target", "Target reset is disabled because permissions.allow_probe is false.")
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
@@ -264,7 +273,7 @@ class PyOCDBackend:
         return write_report(self.config, result)
 
     def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+        write_audit_json(log_path, {"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr})
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

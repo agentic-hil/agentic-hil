@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable
-from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.backends.common import command_for_log, invocation
@@ -363,8 +362,7 @@ class AdapterService:
             session.cleanup_unconfirmed = True
             raise RuntimeError("Test adapter bridge remained active after close.")
         session.close_confirmed = True
-        with suppress(Exception):
-            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
