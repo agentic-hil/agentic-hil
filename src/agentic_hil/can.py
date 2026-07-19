@@ -22,17 +22,24 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.process import (
     cleanup_registered_processes,
+    current_process_owner,
     managed_process_owner,
     process_group_kwargs,
     spawn_managed_process,
 )
+from agentic_hil.provisional import (
+    cleanup_provisional_handles,
+    discharge_provisional_handle,
+    register_provisional_handle,
+)
 from agentic_hil.report import (
-    append_jsonl,
+    append_jsonl_audited,
     audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
     overall_success,
+    recommit_report_with_status,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -151,7 +158,19 @@ class CanBusService:
                 lease.quarantine("can_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
         adapter_session = opened["session"]
-        session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease)
+        adapter_provisional = register_provisional_handle(self.coordinator.owner_token, f"can-adapter:{bus_id}", adapter_session.close)
+        try:
+            session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease)
+        except BaseException as error:
+            try:
+                adapter_session.close()
+            except BaseException as close_error:
+                lease.quarantine("can_session_setup_cleanup_unconfirmed", close_error)
+                raise RuntimeError(f"CAN session setup failed and adapter cleanup remains unconfirmed: {close_error}") from error
+            discharge_provisional_handle(adapter_provisional)
+            lease.release()
+            raise
+        discharge_provisional_handle(adapter_provisional)
         self.sessions[bus_id] = session
         cleared: JsonObject = {"ok": True, "frames_drained": 0}
         if clear_rx_queue and self.config.permissions.allow_can_read:
@@ -181,8 +200,8 @@ class CanBusService:
                 self.sessions.pop(bus_id, None)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise error
-                return {**written, **session.lease.status()}
-        audit_error = append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
+                return recommit_report_with_status(self.config, written, session.lease.status())
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
         result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "frames_drained": cleared.get("frames_drained", 0), "session": self._session_status(session), "summary": "CAN bus session started."}
         if audit_error is not None:
             session.audit_broken = True
@@ -209,7 +228,7 @@ class CanBusService:
         if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
             return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True})
         self.sessions.pop(bus_id, None)
-        return {**written, **session.lease.status()}
+        return recommit_report_with_status(self.config, written, session.lease.status())
 
     def send(self, bus_id: str, payload: JsonObject) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_send")
@@ -235,10 +254,10 @@ class CanBusService:
             result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **sent}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
-            audit_error = append_jsonl(session.log_path, {"event": "error", "direction": "tx", **result})
+            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "tx", **result})
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         result = {"ok": True, "tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "adapter_result": public_backend_result(sent), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame sent."}
-        audit_error = append_jsonl(session.log_path, {"direction": "tx", **result})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
@@ -269,13 +288,13 @@ class CanBusService:
             result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
-            audit_error = append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
+            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         frames = normalize_received_frames(read.get("frames", []))
         if frames is None:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True})
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
-        audit_error = append_jsonl(session.log_path, {"direction": "rx", **result})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def close(self) -> None:
@@ -290,6 +309,7 @@ class CanBusService:
                 errors.append((bus_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
+        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_token))
         if self._owns_coordinator:
             errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
             if not errors:
@@ -336,7 +356,7 @@ class CanBusService:
     def _drain_rx_queue(self, session: CanBusSession) -> JsonObject:
         drained = 0
         deadline = time.monotonic() + CAN_DRAIN_TIMEOUT_S
-        audit_error = append_jsonl(session.log_path, {"event": "queue_clear_start", "bus_id": session.bus_id})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "queue_clear_start", "bus_id": session.bus_id})
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("can_queue_clear_audit_broken", audit_error, audit_broken=True)
@@ -358,7 +378,7 @@ class CanBusService:
         return self._audit_queue_clear_result(session, {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_limit", "summary": "CAN receive queue did not become empty within the bounded drain limit.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0})
 
     def _audit_queue_clear_result(self, session: CanBusSession, result: JsonObject) -> JsonObject:
-        audit_error = append_jsonl(session.log_path, {"event": "queue_clear_complete", **result})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "queue_clear_complete", **result})
         if audit_error is None:
             return result
         session.audit_broken = True
@@ -376,7 +396,7 @@ class CanBusService:
         session.active = False
         session.safe_state_confirmed = close_result.get("safe_state_confirmed") is True
         session.process_reaped = close_result.get("process_reaped") is True
-        audit_error = append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "stop", "reason": reason})
         if audit_error is not None or session.audit_broken:
             session.audit_broken = True
             session.lease.quarantine("can_audit_broken", audit_error, audit_broken=True)
@@ -413,7 +433,7 @@ class CanBusService:
             return write_report(self.config, {**written, **lease.status()})
         if release_if_safe and not lease.release():
             return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "CAN lease release remained unconfirmed."})
-        return {**written, **lease.status()}
+        return recommit_report_with_status(self.config, written, lease.status())
 
     def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None) -> JsonObject:
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
@@ -485,16 +505,20 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+        shutdown = getattr(bus, "shutdown", None)
+        provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
         try:
             session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
         except BaseException as primary_error:
             try:
-                shutdown = getattr(bus, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
             except BaseException as cleanup_error:
+                # Keep the raw bus registered for a retried service.close().
                 raise RuntimeError(f"CAN session construction failed and raw bus cleanup remains unconfirmed: {cleanup_error}") from primary_error
+            discharge_provisional_handle(provisional)
             raise
+        discharge_provisional_handle(provisional)
         return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}

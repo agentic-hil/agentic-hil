@@ -15,13 +15,19 @@ from agentic_hil.process import (
     process_group_kwargs,
     spawn_managed_process,
 )
+from agentic_hil.provisional import (
+    cleanup_provisional_handles,
+    discharge_provisional_handle,
+    register_provisional_handle,
+)
 from agentic_hil.report import (
-    append_jsonl,
+    append_jsonl_audited,
     audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
     overall_success,
+    recommit_report_with_status,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -113,18 +119,22 @@ class AdapterService:
                 lease.quarantine("adapter_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
         bridge = opened["session"]
+        bridge_provisional = register_provisional_handle(self.coordinator.owner_token, f"adapter-bridge:{adapter_id}", bridge.close)
         try:
             session = AdapterSession(adapter_id, adapter["adapter_config"], bridge, log_path, lease)
         except BaseException as error:
             try:
                 bridge.close()
             except BaseException as close_error:
+                # The bridge stays registered so service.close() retries it.
                 lease.quarantine("adapter_session_setup_cleanup_unconfirmed", close_error)
                 raise RuntimeError(f"Test adapter session setup failed and bridge cleanup remains unconfirmed: {close_error}") from error
+            discharge_provisional_handle(bridge_provisional)
             lease.release()
             raise
+        discharge_provisional_handle(bridge_provisional)
         self.sessions[adapter_id] = session
-        audit_error = append_jsonl(session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "adapter_id": adapter_id, "executable": session.adapter_config.executable})
         result = {"ok": True, "tool": "adapter_session_start", "adapter_id": adapter_id, "already_active": False, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "Test adapter session started."}
         if audit_error is not None:
             session.audit_broken = True
@@ -151,7 +161,7 @@ class AdapterService:
         if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
             return self._write_report(self._close_failure("adapter_session_stop", adapter_id, RuntimeError("Lease release remained unconfirmed.")))
         self.sessions.pop(adapter_id, None)
-        return {**written, **session.lease.status()}
+        return recommit_report_with_status(self.config, written, session.lease.status())
 
     def set_value(self, adapter_id: str, payload: JsonObject) -> JsonObject:
         tool = "adapter_set_value"
@@ -250,6 +260,7 @@ class AdapterService:
                 errors.append((adapter_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
+        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_token))
         if self._owns_coordinator:
             errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
             if not errors:
@@ -273,7 +284,7 @@ class AdapterService:
             result.setdefault("summary", "Test adapter bridge reported an error.")
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
-            audit_error = append_jsonl(session.log_path, {"event": "error", "method": method, **result})
+            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "method": method, **result})
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         allowed_fields = {
             "set_value": {"ok", "backend", "summary", "channel", "value", "unit"},
@@ -288,14 +299,14 @@ class AdapterService:
         valid_fault = "fault" not in response or response["fault"] is None or isinstance(response["fault"], str)
         if set(response) - allowed_fields or not valid_value or not valid_measurement or not valid_strings or not valid_fault:
             invalid = {"ok": False, "tool": tool, "adapter_id": session.adapter_id, "error_type": "adapter_bridge_invalid_response", "summary": f"Test adapter bridge returned an invalid {method} response.", "side_effect_status": "unknown", "cleanup_required": True}
-            audit_error = append_jsonl(session.log_path, {"event": "error", "method": method, **invalid})
+            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "method": method, **invalid})
             return self._write_report(mark_audit_failure(invalid, audit_error) if audit_error is not None else invalid)
         result = {"ok": True, "tool": tool, "adapter_id": session.adapter_id, **params, "adapter_result": public_backend_result(response), "log_path": display_path(self.config, session.log_path), "summary": f"Test adapter {method} completed."}
         if "value" in response:
             result["value"] = response["value"]
         if "unit" in response:
             result["unit"] = response["unit"]
-        audit_error = append_jsonl(session.log_path, {"event": method, **params, "adapter_result": public_backend_result(response)})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": method, **params, "adapter_result": public_backend_result(response)})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def _configured_adapter(self, adapter_id: str, tool: str) -> JsonObject:
@@ -377,7 +388,7 @@ class AdapterService:
         session.active = False
         session.safe_state_confirmed = close_result.get("safe_state_confirmed") is True
         session.process_reaped = close_result.get("process_reaped") is True
-        audit_error = append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "stop", "reason": reason})
         if audit_error is not None or session.audit_broken:
             session.audit_broken = True
             session.lease.quarantine("adapter_audit_broken", audit_error, audit_broken=True)
@@ -424,7 +435,7 @@ class AdapterService:
             return write_report(self.config, {**written, **lease.status()})
         if release_if_safe and not lease.release():
             return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "Adapter lease release remained unconfirmed."})
-        return {**written, **lease.status()}
+        return recommit_report_with_status(self.config, written, lease.status())
 
     def _permission_denied(self, tool: str, summary: str, adapter_id: str | None = None) -> JsonObject:
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

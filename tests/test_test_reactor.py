@@ -255,6 +255,49 @@ def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
     assert rejected.value.details["workspace_root"] == str(workspace.resolve())
 
 
+def test_reactor_schema_rejects_traversal_breakpoint_file(tmp_path: Path) -> None:
+    path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: dut, action: run_until_breakpoint, location: {file: ../evil.c, line: 10}}\n",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_test_config(str(path), str(tmp_path))
+    assert excinfo.value.error_type == "test_config_invalid"
+
+
+def test_reactor_schema_accepts_windows_drive_breakpoint_file(tmp_path: Path) -> None:
+    path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: dut, action: run_until_breakpoint, location: {file: 'C:/src/main.c', line: 10}}\n",
+    )
+    loaded = load_test_config(str(path), str(tmp_path))
+    assert loaded.steps[0].arguments["location"] == {"file": "C:/src/main.c", "line": 10}
+
+
+def test_preflight_contract_rejects_bad_step_before_any_backend_call(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import TestConfig, TestStep
+
+    config = load_config(str(write_config(tmp_path, allow_all_symbols=True, devices_yaml="devices:\n  dut:\n    debugger: true\n")))
+    service = RecordingService()
+    # Bypass the schema loader to prove the preflight contract validators are an
+    # independent gate: a traversal breakpoint file must fail before debug_start.
+    plan = TestConfig(
+        path=str(tmp_path / "plan.yaml"),
+        name="direct",
+        steps=[
+            TestStep("dut", "debug_start", {"image_path": "build/app.elf"}),
+            TestStep("dut", "run_until_breakpoint", {"location": {"file": "../evil.c", "line": 10}}),
+        ],
+    )
+
+    result = TestReactor(config, service).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    assert result["failed_step"] == 2
+    assert service.calls == []
+
+
 def test_preflight_rejects_late_unknown_device_before_flash(tmp_path: Path) -> None:
     config = load_config(
         str(

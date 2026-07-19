@@ -19,7 +19,15 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
-from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success, read_last_report, write_report
+from agentic_hil.provisional import cleanup_provisional_handles
+from agentic_hil.report import (
+    attach_canonical_audit_evidence,
+    audit_unavailable,
+    ensure_audit_ready,
+    overall_success,
+    read_last_report,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
@@ -152,7 +160,15 @@ class AgenticHILToolService:
         return result
 
     def debug_get_session_status(self) -> JsonObject:
-        return self.backend.debug_get_session_status()
+        return self._status_result(self.backend.debug_get_session_status())
+
+    def _status_result(self, result: JsonObject) -> JsonObject:
+        """Status reads must feed the same lease-quarantine path as effects when
+        they surface a broken audit latch."""
+        if result.get("audit_ok") is False and self._debug_lease is not None and self._debug_lease.audit_ok:
+            self._debug_lease.quarantine("debug_audit_broken", audit_broken=True)
+            return {**result, **self._debug_lease.status()}
+        return result
 
     def debug_set_breakpoint(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -165,7 +181,7 @@ class AgenticHILToolService:
         return self.backend.debug_set_breakpoint({"location": location})
 
     def debug_list_breakpoints(self) -> JsonObject:
-        return self.backend.debug_list_breakpoints()
+        return self._status_result(self.backend.debug_list_breakpoints())
 
     def debug_clear_breakpoints(self) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -183,7 +199,7 @@ class AgenticHILToolService:
         return self.backend.debug_halt(number_argument((payload or {}).get("timeout_s")))
 
     def debug_get_stop_reason(self) -> JsonObject:
-        return self.backend.debug_get_stop_reason()
+        return self._status_result(self.backend.debug_get_stop_reason())
 
     def debug_symbol_info(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -212,7 +228,7 @@ class AgenticHILToolService:
         report = read_last_report(self.config)
         if report.get("ok") is not True and report.get("tool") == "get_last_report":
             return report
-        return {"ok": True, "tool": "get_last_report", "report": report}
+        return {"ok": True, "tool": "get_last_report", "report": attach_canonical_audit_evidence(self.config, report)}
 
     def classify_last_error(self) -> JsonObject:
         return self.backend.classify_last_error()
@@ -297,6 +313,9 @@ class AgenticHILToolService:
             except BaseException as error:
                 if name in audited_hardware_tools() or name in containment_tools():
                     poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
+                    # Report the quarantine state that actually holds instead of a
+                    # hardcoded claim: a poison failure must not fake protection.
+                    quarantined_now = self.coordinator.blocked or any(item.state in {"cleanup_required", "quarantined"} for item in self.coordinator.leases.values())
                     if not isinstance(error, Exception):
                         if poison_error is not None:
                             error.args = (*error.args, f"Quarantine error: {poison_error}")
@@ -309,7 +328,7 @@ class AgenticHILToolService:
                         "side_effect_status": "unknown",
                         "retry_safe": False,
                         "cleanup_required": True,
-                        "quarantined": True,
+                        "quarantined": quarantined_now,
                         "quarantine_id": self.coordinator.quarantine_id,
                         "backend_error": str(error),
                     }
@@ -320,7 +339,8 @@ class AgenticHILToolService:
                     written = write_report(self.config, result)
                     if written.get("audit_ok") is False:
                         self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
-                    return {**written, "cleanup_required": True, "quarantined": True, "quarantine_id": self.coordinator.quarantine_id}
+                        quarantined_now = self.coordinator.blocked or quarantined_now
+                    return {**written, "cleanup_required": True, "quarantined": quarantined_now, "quarantine_id": self.coordinator.quarantine_id}
                 if isinstance(error, ConfigError):
                     return {"tool": name, **error.to_dict()}
                 raise
@@ -404,7 +424,7 @@ class AgenticHILToolService:
             written = self._lease_result(result, lease)
             if not requires_quarantine and written.get("audit_ok") is not False and lease.state == "active":
                 lease.release()
-            return {**written, **lease.status()}
+            return self._recommit_lease_report(written, lease)
         if starts_session:
             retain_lease = False
             if result.get("ok") is True or result.get("cleanup_required") is True:
@@ -422,7 +442,7 @@ class AgenticHILToolService:
                 retain_lease = True
             if not retain_lease and lease.state == "active":
                 lease.release()
-            return {**written, **lease.status()}
+            return self._recommit_lease_report(written, lease)
         if name == "debug_stop_session":
             if overall_success(result):
                 lease.resolve_retryable_cleanup("debug_session_cleanup_unconfirmed")
@@ -431,11 +451,11 @@ class AgenticHILToolService:
                 written = self._lease_result(result, lease)
                 if lease.state == "active" and written.get("audit_ok") is not False and lease.release():
                     self._debug_lease = None
-                return {**written, **lease.status()}
+                return self._recommit_lease_report(written, lease)
             else:
                 lease.quarantine("debug_session_cleanup_unconfirmed", audit_broken=result.get("audit_ok") is False)
             return self._lease_result(result, lease)
-        if name == "debug_clear_breakpoints" and overall_success(result):
+        if name == "debug_clear_breakpoints" and overall_success(result) and result.get("backend_reconciled") is True:
             lease.resolve_retryable_cleanup("debug_breakpoint_cleanup_unconfirmed")
         if name == "debug_halt" and overall_success(result):
             lease.resolve_retryable_cleanup("debug_target_state_unconfirmed")
@@ -451,6 +471,22 @@ class AgenticHILToolService:
             lease.quarantine("debug_coordination_report_audit_broken", audit_broken=True)
             written = write_report(self.config, {**written, **lease.status()})
         return {**written, **lease.status()}
+
+    def _recommit_lease_report(self, written: JsonObject, lease: HardwareLease) -> JsonObject:
+        """Re-commit the report after a terminal lease transition so the persisted
+        report evidence carries the same lease_state as the returned result."""
+        status = lease.status()
+        if written.get("lease_state") == status.get("lease_state"):
+            return {**written, **status}
+        final = write_report(self.config, {**written, **status})
+        if final.get("audit_ok") is False:
+            if lease.state == "released":
+                self._poison_quietly("lease_release_report_audit_broken", audit_broken=True)
+                return {**final, "ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": self.coordinator.quarantine_id}
+            if lease.audit_ok:
+                lease.quarantine("debug_coordination_report_audit_broken", audit_broken=True)
+                final = write_report(self.config, {**final, **lease.status()})
+        return {**final, **lease.status()}
 
     def _result_requires_quarantine(self, result: JsonObject) -> bool:
         if result.get("audit_ok") is False or result.get("cleanup_required") is True:
@@ -500,7 +536,7 @@ class AgenticHILToolService:
                 errors.append((name, error))
                 if name == "backend" and self._debug_lease is not None:
                     debug_sessions = getattr(self.backend, "_debug", None)
-                    audit_broken = getattr(debug_sessions, "_audit_error", None) is not None
+                    audit_broken = getattr(debug_sessions, "_audit_broken", None) is not None
                     try:
                         self._debug_lease.quarantine("debug_backend_cleanup_exception", error, audit_broken=audit_broken)
                     except BaseException as quarantine_error:
@@ -539,6 +575,8 @@ class AgenticHILToolService:
                             interrupt = error
                     else:
                         self._debug_lease = None
+        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_token):
+            errors.append(("provisional_handle", RuntimeError(provisional_error)))
         process_errors = cleanup_registered_processes(owner_token=self.coordinator.owner_token)
         errors.extend(("process_registry", RuntimeError(error)) for error in process_errors)
         if not errors:

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,12 +32,19 @@ from agentic_hil.config import (
     load_authoritative_config,
     load_config,
     project_state_directory,
+    trusted_state_directory,
+    validated_state_root,
 )
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import (
+    append_canonical_audit_log,
     append_jsonl,
+    attach_canonical_audit_evidence,
+    canonical_audit_evidence,
+    canonical_audit_log_path,
     ensure_audit_ready,
+    logs_directory,
     read_last_failure,
     read_last_report,
     report_lock_path,
@@ -106,6 +114,69 @@ def test_group_writable_state_root_is_rejected(tmp_path: Path) -> None:
         assert excinfo.value.error_type == "unsafe_configured_path"
     finally:
         root.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sticky-bit and mode semantics")
+def test_sticky_world_writable_final_state_root_is_rejected(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "shared-root"
+    root.mkdir()
+    root.chmod(0o1777)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            validated_state_root(str(root), workspace, str(tmp_path / "config.yaml"))
+        assert excinfo.value.error_type == "unsafe_configured_path"
+        assert excinfo.value.details["field"] == "state_root"
+    finally:
+        root.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sticky-bit and mode semantics")
+def test_operator_owned_state_root_under_sticky_ancestor_is_accepted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sticky_parent = tmp_path / "tmp-like"
+    sticky_parent.mkdir()
+    sticky_parent.chmod(0o1777)
+    owned = sticky_parent / "operator-owned-0700"
+    owned.mkdir(mode=0o700)
+    try:
+        resolved = validated_state_root(str(owned), workspace, str(tmp_path / "config.yaml"))
+        assert resolved == owned.resolve()
+    finally:
+        sticky_parent.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode semantics")
+def test_world_writable_derived_state_dir_is_rejected(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    foreign = Path(config.state_root) / "coordination"
+    foreign.mkdir(parents=True)
+    foreign.chmod(0o777)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            trusted_state_directory(config.state_root, "coordination")
+        assert excinfo.value.error_type == "unsafe_configured_path"
+        assert excinfo.value.details["field"] == "state_root"
+    finally:
+        foreign.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode semantics")
+def test_world_writable_lock_dir_blocks_coordinator_construction(tmp_path: Path) -> None:
+    from agentic_hil.coordination import HardwareCoordinator
+
+    config = load_config(str(write_config(tmp_path)))
+    locks = Path(config.state_root) / "coordination" / "locks"
+    locks.mkdir(parents=True)
+    locks.chmod(0o777)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            HardwareCoordinator(config, "owner")
+        assert excinfo.value.error_type == "unsafe_configured_path"
+    finally:
+        locks.chmod(0o700)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
@@ -295,7 +366,10 @@ def test_com_reader_start_failure_reports_before_lease_release(tmp_path: Path, m
 
     assert result["error_type"] == "com_reader_start_failed"
     assert result["lease_state"] == "released"
-    assert read_last_report(config)["lease_state"] == "active"
+    # The persisted report must prove the SAME terminal lease_state it returned;
+    # the action-time snapshot is no longer left behind under report_path.
+    assert read_last_report(config)["lease_state"] == "released"
+    assert result["report_path"] == read_last_report(config)["report_path"]
     assert service.sessions == {}
 
 
@@ -403,6 +477,78 @@ def test_can_session_constructor_failure_shuts_down_raw_bus(tmp_path: Path, monk
 
     assert result["ok"] is False
     assert bus.closed is True
+
+
+def test_com_double_failure_keeps_raw_handle_reachable_for_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.provisional import provisional_handle_count
+
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    close_calls = {"count": 0}
+
+    def flaky_close() -> None:
+        close_calls["count"] += 1
+        if close_calls["count"] == 1:
+            raise OSError("first close failed")
+
+    handle = SimpleNamespace(close=flaky_close)
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
+    monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
+
+    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace())
+
+    assert result["ok"] is False
+    assert provisional_handle_count(service.coordinator.owner_token) == 1
+    service.close()
+    assert close_calls["count"] == 2
+    assert provisional_handle_count(service.coordinator.owner_token) == 0
+
+
+def test_can_inner_double_failure_keeps_raw_bus_reachable_for_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.can import open_python_can_adapter
+    from agentic_hil.process import managed_process_owner
+    from agentic_hil.provisional import cleanup_provisional_handles, provisional_handle_count
+
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    shutdown_calls = {"count": 0}
+
+    def flaky_shutdown() -> None:
+        shutdown_calls["count"] += 1
+        if shutdown_calls["count"] == 1:
+            raise OSError("first shutdown failed")
+
+    bus = SimpleNamespace(shutdown=flaky_shutdown)
+    monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus))
+    monkeypatch.setattr("agentic_hil.can.PythonCanAdapterSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
+
+    owner = "owner-token-under-test"
+    with managed_process_owner(owner):
+        result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+    assert result["ok"] is False
+    assert provisional_handle_count(owner) == 1
+
+    assert cleanup_provisional_handles(owner) == []
+    assert shutdown_calls["count"] == 2
+    assert provisional_handle_count(owner) == 0
+
+
+def test_can_outer_session_constructor_failure_closes_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.provisional import provisional_handle_count
+
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    service = CanBusService(config)
+    adapter = SimpleNamespace(closed=False, adapter_name="fake", status=lambda: {"active": True})
+    adapter.close = lambda: setattr(adapter, "closed", True)
+    monkeypatch.setattr("agentic_hil.can.open_adapter", lambda *args, **kwargs: {"ok": True, "session": adapter})
+    monkeypatch.setattr("agentic_hil.can.CanBusSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("outer construct failed")))
+
+    with pytest.raises(RuntimeError, match="outer construct failed"):
+        service.session_start("bench", clear_rx_queue=False)
+
+    assert adapter.closed is True
+    assert provisional_handle_count(service.coordinator.owner_token) == 0
+    assert service.coordinator.blocked is False
+    service.close()
 
 
 def test_active_can_session_drains_more_than_one_buffer_batch(tmp_path: Path) -> None:
@@ -519,6 +665,85 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX select-based reader poll")
+def test_stdin_reader_stops_without_external_input_on_posix(tmp_path: Path) -> None:
+    from agentic_hil.comstdio import start_stdin_reader, stop_stdin_reader
+
+    read_fd, write_fd = os.pipe()
+
+    class PipeStream:
+        def fileno(self) -> int:
+            return read_fd
+
+        def read(self, size: int) -> bytes:  # pragma: no cover - fallback path only
+            return os.read(read_fd, size)
+
+    reader = start_stdin_reader(PipeStream())
+    try:
+        # No byte is ever written to the pipe; the reader must still observe the
+        # stop event via its poll timeout rather than staying parked in read().
+        errors = stop_stdin_reader(reader, 0.5)
+        assert errors == []
+        assert not reader.thread.is_alive()
+    finally:
+        os.close(write_fd)
+        with suppress(OSError):
+            os.close(read_fd)
+
+
+def test_stdin_reader_start_failure_closes_dup_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil import comstdio
+
+    closed: list[int] = []
+    real_close = os.close
+    monkeypatch.setattr(comstdio.os, "dup", lambda fd: 4242)
+    monkeypatch.setattr(comstdio.os, "close", lambda fd: closed.append(fd))
+
+    def failing_start(self) -> None:
+        raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(comstdio.threading.Thread, "start", failing_start)
+
+    class FdStream:
+        def fileno(self) -> int:
+            return 0
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        comstdio.start_stdin_reader(FdStream())
+
+    assert 4242 in closed, "the dup'd stdin fd must be closed when the reader thread fails to start"
+    real_close  # noqa: B018 - keep reference so monkeypatch teardown restores cleanly
+
+
+def test_com_stdio_completes_cleanup_when_reader_teardown_interrupts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    events: list[str] = []
+
+    class TrackingService(StubComPortService):
+        def read_bytes(self, port_id: str, max_bytes: int, wait_timeout_s: float, tool: str) -> dict:
+            # Break the relay loop immediately so the cleanup path is reached.
+            return {"ok": False, "error_type": "serial_read_failed"}
+
+        def session_stop(self, port_id: str) -> dict:
+            events.append("session_stop")
+            return {"ok": True}
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", TrackingService)
+
+    def interrupting_stop(reader, timeout_s):
+        raise KeyboardInterrupt("reader teardown interrupted")
+
+    monkeypatch.setattr("agentic_hil.comstdio.stop_stdin_reader", interrupting_stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_com_stdio(config, "dut", input_stream=BlockingStdin(), output_stream=StringIO(), error_stream=StringIO())
+
+    assert events == ["session_stop", "close"], "session/service cleanup must still run after an interrupt in reader teardown"
 
 
 def test_com_stdio_propagates_stdin_reader_error_after_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1339,6 +1564,7 @@ def test_gdbmi_close_always_runs_process_tree_cleanup(monkeypatch: pytest.Monkey
 def test_debug_server_cleanup_runs_after_leader_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     child = SimpleNamespace(poll=lambda: 0)
     sessions = object.__new__(GdbDebugSessions)
+    sessions._audit_broken = None
     sessions._write_session_log = lambda session: None
     session = SimpleNamespace(gdb=None, server=child)
     calls: list[object] = []
@@ -1678,3 +1904,113 @@ def test_flash_releases_private_backend_stage(tmp_path: Path) -> None:
         assert list(staging_root.iterdir()) == []
     finally:
         service.close()
+
+
+def test_canonical_audit_log_written_under_state_root(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-effect.jsonl")
+
+    assert append_jsonl(workspace_log, {"direction": "tx", "hex": "01"}, config) is None
+
+    canonical = canonical_audit_log_path(config, workspace_log)
+    assert canonical.exists()
+    workspace_root = Path(config.workspace_root).resolve()
+    assert workspace_root not in canonical.resolve().parents
+    evidence = canonical_audit_evidence(config, workspace_log)
+    assert evidence["canonical_log_present"] is True
+    assert evidence["log_sequence"] == 1
+    assert evidence["workspace_log_verified"] is True
+
+
+def test_workspace_audit_log_tampering_is_detected(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-effect.jsonl")
+    assert append_jsonl(workspace_log, {"direction": "tx", "hex": "0a0b"}, config) is None
+    canonical = canonical_audit_log_path(config, workspace_log)
+    canonical_before = canonical.read_bytes()
+
+    # The agent is assumed able to edit any workspace file; rewrite the log.
+    Path(workspace_log).write_text('{"direction": "tx", "hex": "ffff"}\n', encoding="utf-8")
+    tampered = canonical_audit_evidence(config, workspace_log)
+    assert tampered["canonical_log_present"] is True
+    assert tampered["workspace_log_verified"] is False
+    assert canonical.read_bytes() == canonical_before
+
+    # Deletion is likewise detected, canonical evidence still intact.
+    Path(workspace_log).unlink()
+    deleted = canonical_audit_evidence(config, workspace_log)
+    assert deleted["canonical_log_present"] is True
+    assert deleted["workspace_log_verified"] is False
+    assert canonical.read_bytes() == canonical_before
+
+
+def test_canonical_evidence_tolerates_extra_passive_workspace_lines(tmp_path: Path) -> None:
+    # Effect events are mirrored canonically; passive COM RX feedback is written
+    # to the workspace log only. Verification must treat the canonical log as an
+    # ordered subset of the workspace log, not require byte equality.
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-mixed.jsonl")
+    assert append_jsonl(workspace_log, {"event": "start"}, config) is None  # mirrored
+    assert append_jsonl(workspace_log, {"direction": "rx", "hex": "aa"}) is None  # workspace only
+    assert append_jsonl(workspace_log, {"direction": "tx", "hex": "bb"}, config) is None  # mirrored
+    assert append_jsonl(workspace_log, {"direction": "rx", "hex": "cc"}) is None  # workspace only
+
+    evidence = canonical_audit_evidence(config, workspace_log)
+    assert evidence["canonical_log_present"] is True
+    assert evidence["workspace_log_verified"] is True
+
+    # Deleting a mirrored effect line is still detected despite the RX lines.
+    lines = [line for line in Path(workspace_log).read_text(encoding="utf-8").splitlines() if '"tx"' not in line]
+    Path(workspace_log).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tampered = canonical_audit_evidence(config, workspace_log)
+    assert tampered["workspace_log_verified"] is False
+
+
+def test_canonical_evidence_detects_reordered_effect_lines(tmp_path: Path) -> None:
+    # Reordering effect records breaks the ordered-subsequence check, so an
+    # attacker cannot hide an effect by shuffling the workspace log.
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-reorder.jsonl")
+    assert append_jsonl(workspace_log, {"event": "start", "seq": 1}, config) is None
+    assert append_jsonl(workspace_log, {"direction": "tx", "seq": 2}, config) is None
+    assert append_jsonl(workspace_log, {"event": "stop", "seq": 3}, config) is None
+
+    original = [line for line in Path(workspace_log).read_text(encoding="utf-8").splitlines() if line]
+    reordered = [original[2], original[0], original[1]]
+    Path(workspace_log).write_text("\n".join(reordered) + "\n", encoding="utf-8")
+
+    assert canonical_audit_evidence(config, workspace_log)["workspace_log_verified"] is False
+
+
+def test_canonical_audit_sequence_is_monotonic_under_parallel_appends(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-parallel.jsonl")
+    total = 40
+
+    def append(index: int) -> Exception | None:
+        return append_canonical_audit_log(config, workspace_log, json.dumps({"seq": index}) + "\n")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(append, range(total)))
+
+    assert all(result is None for result in results)
+    evidence = canonical_audit_evidence(config, workspace_log)
+    assert evidence["log_sequence"] == total
+    canonical = canonical_audit_log_path(config, workspace_log)
+    lines = [line for line in canonical.read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) == total
+
+
+def test_report_api_surfaces_canonical_audit_evidence(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    workspace_log = str(Path(logs_directory(config)) / "com-report.jsonl")
+    assert append_jsonl(workspace_log, {"direction": "tx", "hex": "01"}, config) is None
+    from agentic_hil.config import display_path
+
+    result = {"ok": True, "tool": "com_write", "log_path": display_path(config, workspace_log)}
+    enriched = attach_canonical_audit_evidence(config, result)
+    assert enriched["canonical_audit"]["workspace_log_verified"] is True
+
+    Path(workspace_log).write_text("tampered\n", encoding="utf-8")
+    retampered = attach_canonical_audit_evidence(config, result)
+    assert retampered["canonical_audit"]["workspace_log_verified"] is False

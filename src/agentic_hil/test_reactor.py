@@ -19,6 +19,7 @@ from agentic_hil.config import (
     reject_nonfinite_numbers,
     safe_read_text,
 )
+from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
@@ -489,6 +490,9 @@ class TestReactor:
             device = self.devices.get(step.device)
             if device is None:
                 return preflight_error(index, step, "device", "Test step references an unknown device.")
+            contract_error = self._preflight_tool_contract(index, step)
+            if contract_error is not None:
+                return contract_error
             if step.action in DEBUGGER_DEVICE_ACTIONS and not device.config.debugger:
                 return preflight_error(index, step, "device", "Device does not configure the debugger capability.")
             if step.action in {"uart_open", "uart_close"}:
@@ -584,6 +588,17 @@ class TestReactor:
                         )
         return None
 
+    def _preflight_tool_contract(self, index: int, step: TestStep) -> JsonObject | None:
+        # Validate every later step's derived tool arguments against the exact
+        # MCP contract validators, so a step the reactor schema accepted but the
+        # tool contract rejects (e.g. a traversal path) fails before any backend
+        # call builds hardware or process state.
+        for tool, arguments in step_tool_arguments(step):
+            error = validate_tool_arguments(tool, arguments)
+            if error is not None:
+                return preflight_error(index, step, error.get("field", "arguments"), f"Step arguments are rejected by the {tool} contract: {error.get('summary', 'invalid argument')}", {"tool": tool, "validation": error})
+        return None
+
     def _preflight_artifact(self, index: int, step: TestStep, require_elf: bool) -> JsonObject | None:
         if not hasattr(self.service, "artifacts"):
             return None
@@ -600,6 +615,27 @@ class TestReactor:
         if require_elf and Path(image_path).suffix.lower() != ".elf":
             return preflight_error(index, step, "image_path", "Debug sessions require an ELF artifact with debug symbols.")
         return None
+
+
+def step_tool_arguments(step: TestStep) -> list[tuple[str, JsonObject]]:
+    """Every MCP tool call a step will make, as (tool, arguments), so preflight
+    can validate them against the same contracts the dispatcher enforces."""
+    action = step.action
+    arguments = step.arguments
+    if action == "flash":
+        return [("flash_firmware", arguments)]
+    if action == "debug_start":
+        return [("debug_start_session", arguments)]
+    if action == "run_until_breakpoint":
+        calls: list[tuple[str, JsonObject]] = [("debug_set_breakpoint", {"location": arguments.get("location")})]
+        if arguments.get("timeout_s") is not None:
+            calls.append(("debug_continue", {"timeout_s": arguments.get("timeout_s")}))
+        return calls
+    if action == "dump_memory":
+        return [("debug_dump_symbol_ihex", arguments)]
+    if action == "debug_stop":
+        return [("debug_stop_session", arguments)]
+    return []
 
 
 def breakpoint_symbol(location: object) -> str | None:

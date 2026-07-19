@@ -53,7 +53,7 @@
           "additionalProperties": false,
           "required": ["file", "line"],
           "properties": {
-            "file": { "type": "string", "pattern": "^[A-Za-z0-9_./\\\\-]+$" },
+            "file": { "type": "string", "pattern": "^[A-Za-z0-9_./\\\\:-]+$", "not": { "pattern": "(?:^|[/\\\\])\\.\\.(?:$|[/\\\\])" } },
             "line": { "type": "integer", "minimum": 1 }
           }
         }

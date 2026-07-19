@@ -40,6 +40,10 @@ def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
         raise
 
 
+def current_process_owner() -> str | None:
+    return _PROCESS_OWNER.get()
+
+
 @contextmanager
 def managed_process_owner(owner_token: str):
     reset_token = _PROCESS_OWNER.set(owner_token)
@@ -352,6 +356,7 @@ def managed_processes() -> list[ManagedProcessRecord]:
 
 def cleanup_registered_processes(timeout_s: float = CHILD_REAP_TIMEOUT_S, *, owner_token: str | None = None) -> list[str]:
     errors: list[str] = []
+    interrupt: KeyboardInterrupt | SystemExit | None = None
     records = managed_processes()
     candidates = [item for item in records if item.owner_token == owner_token] if owner_token is not None else [item for item in records if item.state == "cleanup_pending"]
     for record in candidates:
@@ -362,6 +367,12 @@ def cleanup_registered_processes(timeout_s: float = CHILD_REAP_TIMEOUT_S, *, own
             detail = f"pid {record.child.pid}: {type(error).__name__}: {error}"
             record.cleanup_errors.append(detail)
             errors.append(detail)
+            if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                interrupt = error
+    if interrupt is not None:
+        # Every candidate was still attempted above; only now, after the full
+        # best-effort sweep, is the interrupt propagated instead of masked.
+        raise interrupt
     return errors
 
 

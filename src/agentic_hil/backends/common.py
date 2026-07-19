@@ -45,6 +45,10 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
             terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
             stdout, stderr = child.communicate(timeout=CHILD_REAP_TIMEOUT_S)
             timed_out = True
+        except (KeyboardInterrupt, SystemExit):
+            # Preserve the interrupt after the best-effort reap above ran, rather
+            # than masking it as a generic cleanup RuntimeError.
+            raise
         except BaseException as cleanup_error:
             raise RuntimeError(f"Timed-out command cleanup remains unconfirmed: {cleanup_error}") from cleanup_error
     except BaseException as primary_error:

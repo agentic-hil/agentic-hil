@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import select
 import sys
 import threading
 import time
@@ -93,7 +94,14 @@ def run_com_stdio(
         primary_error = error
     cleanup_errors: list[BaseException] = []
     if stdin_reader is not None:
-        cleanup_errors.extend(stop_stdin_reader(stdin_reader, max(0.1, eof_idle_timeout_s)))
+        # An interrupt from the reader teardown must not skip the session/service
+        # cleanup below; record it and re-raise only after everything has run.
+        try:
+            cleanup_errors.extend(stop_stdin_reader(stdin_reader, max(0.1, eof_idle_timeout_s)))
+        except BaseException as error:
+            cleanup_errors.append(error)
+            if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                primary_error = error
     if started_ok:
         try:
             stopped = service.session_stop(port_id)
@@ -102,10 +110,14 @@ def run_com_stdio(
                 write_error(error_stream, stopped)
         except BaseException as error:
             cleanup_errors.append(error)
+            if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                primary_error = error
     try:
         service.close()
     except BaseException as error:
         cleanup_errors.append(error)
+        if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+            primary_error = error
     if primary_error is not None:
         if cleanup_errors:
             primary_error.args = (*primary_error.args, "Cleanup errors: " + "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors))
@@ -129,7 +141,18 @@ def start_stdin_reader(input_stream: BinaryIO) -> StdinReader:
             while not stop.is_set():
                 with fd_lock:
                     descriptor = owned_fd[0]
-                data = os.read(descriptor, STDIN_CHUNK_BYTES) if descriptor is not None else input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
+                if descriptor is not None and os.name != "nt":
+                    # Poll with a short timeout so a shutdown observed via `stop`
+                    # unblocks the reader instead of leaving it parked in a
+                    # blocking read that closing the fd does not interrupt.
+                    ready, _, _ = select.select([descriptor], [], [], STDIN_POLL_TIMEOUT_S)
+                    if not ready:
+                        continue
+                    data = os.read(descriptor, STDIN_CHUNK_BYTES)
+                elif descriptor is not None:
+                    data = os.read(descriptor, STDIN_CHUNK_BYTES)
+                else:
+                    data = input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
                 if stop.is_set():
                     return
                 if not data:
@@ -143,7 +166,15 @@ def start_stdin_reader(input_stream: BinaryIO) -> StdinReader:
             close_owned_stdin_fd(owned_fd, fd_lock)
 
     thread = threading.Thread(target=pump, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        # A failed start must not leak the thread or its dup fd: signal stop so a
+        # pathologically-started thread self-terminates, and close the fd here in
+        # case the thread never ran its own finally.
+        stop.set()
+        close_owned_stdin_fd(owned_fd, fd_lock)
+        raise
     return StdinReader(messages, thread, stop, input_stream, owned_fd, fd_lock)
 
 
