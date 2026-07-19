@@ -459,3 +459,18 @@ def test_debug_start_audit_failure_does_not_destroy_active_session(tmp_path: Pat
         assert status["active"] is True, "an audit failure on a no-op start must not tear down the live session"
     finally:
         service.close()
+
+
+def test_unconfirmed_initial_halt_fails_the_session_start(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="initial_running")
+    try:
+        result = start_debug_session(service, mode="attach")
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "hardware_state_unconfirmed"
+        assert result["completion_unconfirmed"] is True
+        assert service.backend.has_active_session() is False, "the unconfirmed session must be torn down"
+        status = service.call("debug_get_session_status")
+        assert status["error_type"] == "hardware_state_unconfirmed"  # instance is poisoned fail-closed
+    finally:
+        service.close()

@@ -2230,3 +2230,332 @@ def test_bridge_close_uses_configured_timeout() -> None:
     assert session.close_timeout_s == 7.5
     clamped = ProcessBridgeSession(child, close_timeout_s=0.2)
     assert clamped.close_timeout_s == 1.0
+
+
+def test_one_shot_debugger_tools_are_blocked_during_typed_debug_session(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend()
+    backend.active = True
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "debug_session_active"
+    assert backend.probe_calls == 0
+
+
+def test_uninspectable_debug_session_state_blocks_one_shot_tools(tmp_path: Path) -> None:
+    class UninspectableBackend(OperationBackend):
+        def has_active_session(self) -> bool:
+            raise RuntimeError("probe state unknown")
+
+    config = load_test_config(tmp_path)
+    backend = UninspectableBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    result = service.call("probe_target")
+
+    # The preflight state inspection catches the failure before the
+    # debug-session interlock even runs and fail-closes the instance.
+    assert result["error_type"] == "hardware_state_unconfirmed"
+    assert backend.probe_calls == 0
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_hardware_cleanup_failed_result_poisons_and_quarantines(tmp_path: Path) -> None:
+    class CleanupFailingStopBackend(OperationBackend):
+        def debug_stop_session(self, timeout_s=None) -> dict:
+            return {"ok": False, "tool": "debug_stop_session", "error_type": "hardware_cleanup_failed"}
+
+    config = load_test_config(tmp_path)
+    backend = CleanupFailingStopBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    result = service.call("debug_stop_session")
+
+    assert result["error_type"] == "hardware_cleanup_failed"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+    blocked = service.call("probe_target")
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+    assert backend.probe_calls == 0
+
+
+def test_bridge_close_request_uses_configured_timeout() -> None:
+    child = SimpleNamespace(stdout=[], stderr=[], stdin=None, poll=lambda: 0)
+    session = ProcessBridgeSession(child, close_timeout_s=7.5)
+    recorded: list[float] = []
+
+    def fake_request(method: str, params: dict, timeout_s: float) -> dict:
+        recorded.append(timeout_s)
+        return {"ok": True, "safe_state_confirmed": True}
+
+    session.request = fake_request
+    result = session.close()
+
+    assert recorded == [7.5]
+    assert result.safe_state_confirmed is True
+
+
+def test_bridge_sessions_receive_the_configured_close_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.adapters import open_adapter_bridge
+    from agentic_hil.can import open_process_adapter
+
+    captured: dict[str, float] = {}
+
+    def fake_popen(*_args, **_kwargs):
+        return SimpleNamespace(stdout=[], stderr=[], stdin=None, poll=lambda: 0, terminate=lambda: None, wait=lambda timeout=None: 0)
+
+    class AdapterRecorder:
+        def __init__(self, child, close_timeout_s=None):
+            captured["adapter"] = close_timeout_s
+            raise RuntimeError("recorded")
+
+    class CanRecorder:
+        def __init__(self, child, close_timeout_s=None):
+            captured["can"] = close_timeout_s
+            raise RuntimeError("recorded")
+
+    adapter_yaml = ADAPTER_YAML.replace('executable: "python"', 'executable: "python"\n    timeout_s: 9.0')
+    config = load_test_config(tmp_path, adapters_yaml=adapter_yaml)
+    monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", AdapterRecorder)
+    with pytest.raises(RuntimeError, match="recorded"):
+        open_adapter_bridge(config, "ntc", config.adapters["ntc"])
+
+    can_yaml = CAN_BUS_YAML + "    timeout_s: 11.0\n"
+    can_config = load_test_config(tmp_path, can_buses_yaml=can_yaml)
+    monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
+    monkeypatch.setattr("agentic_hil.can.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", CanRecorder)
+    with pytest.raises(RuntimeError, match="recorded"):
+        open_process_adapter(can_config, "bench", can_config.can_buses["bench"], False)
+
+    assert captured == {"adapter": 9.0, "can": 11.0}
+
+
+def test_failed_quarantine_write_still_leaves_the_project_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    monkeypatch.setattr(lock, "_write_state", lambda *_: (_ for _ in ()).throw(HardwareLockError("disk full")))
+    with pytest.raises(HardwareLockError):
+        lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+
+    with pytest.raises(HardwareQuarantinedError):
+        ProjectHardwareLock(config.config_path).acquire()
+    recovery = ProjectHardwareLock(config.config_path)
+    assert recovery.acquire(recovery=True, source="recovery") is True
+    recovery.release_os_lock()
+
+
+def test_can_stop_log_audit_failure_creates_recoverable_tombstone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "stop-audit.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    can_buses.sessions["bench"] = CanBusSession("bench", config.can_buses["bench"], SafeClosingBridge(), str(log_path))
+    service = AgenticHILToolService(config, can_buses=can_buses, reload_config=False)
+    monkeypatch.setattr("agentic_hil.can.append_jsonl", raise_audit_error)
+
+    result = service.call("can_session_stop", {"bus_id": "bench"})
+
+    assert result["error_type"] == "audit_write_failed"
+    assert result["completion_confirmed"] is True
+    assert "bench" not in can_buses.sessions
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_can_queue_clear_transport_failure_with_confirmed_close_stays_confirmed(tmp_path: Path) -> None:
+    class TimeoutReadBridge(SafeClosingBridge):
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": False, "error_type": "can_adapter_timeout", "summary": "bridge read timed out"}
+
+        def request(self, method: str, params: dict, timeout_s: float) -> dict:
+            return {"ok": True, "safe_state_confirmed": True}
+
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "queue-clear.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def register(session_obj) -> None:
+        can_buses.sessions["bench"] = CanBusSession("bench", config.can_buses["bench"], session_obj, str(log_path))
+
+    bridge = TimeoutReadBridge()
+
+    def monkeypatch_open(*args, **kwargs):
+        return {"ok": True, "session": bridge}
+
+    import agentic_hil.can as can_module
+
+    original_open = can_module.open_adapter
+    can_module.open_adapter = monkeypatch_open
+    try:
+        service = AgenticHILToolService(config, can_buses=can_buses, reload_config=False)
+        result = service.call("can_session_start", {"bus_id": "bench", "clear_rx_queue": True})
+    finally:
+        can_module.open_adapter = original_open
+
+    assert result["ok"] is False
+    assert result["completion_confirmed"] is True
+    assert "bench" not in can_buses.sessions
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_operation_exception_plus_lease_failure_keeps_original_error_and_poisons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend(reset_error=OSError("probe io failed"))
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+    monkeypatch.setattr(service._hardware_lock, "quarantine_and_release", lambda **_: (_ for _ in ()).throw(HardwareLockError("marker write denied")))
+
+    with pytest.raises(OSError, match="probe io failed"):
+        service.call("reset_target", {"mode": "run"})
+
+    blocked = service.call("probe_target")
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+    assert backend.probe_calls == 0
+
+
+def test_mixed_cleanup_errors_are_not_audit_only() -> None:
+    from agentic_hil.tools import cleanup_error_is_audit_only
+
+    mixed = HardwareCleanupError([
+        ("com", AuditWriteError("log", None, "confirmed")),
+        ("can", RuntimeError("adapter still active")),
+    ])
+    assert cleanup_error_is_audit_only(mixed) is False
+
+
+def test_stale_hardware_owner_is_rejected(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False, hardware_owner="not-an-active-owner")
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "hardware_owner_invalid"
+    assert backend.probe_calls == 0
+
+
+def test_reconfigure_failure_rolls_back_and_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    config_file = Path(config.config_path)
+    config_file.write_text(config_file.read_text(encoding="utf-8").replace('name: "example-target"', 'name: "renamed-target"'), encoding="utf-8")
+    monkeypatch.setattr(service.com_ports, "reconfigure", lambda *_: (_ for _ in ()).throw(RuntimeError("com reconfigure exploded")))
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "config_reconfigure_failed"
+    assert result["hardware_state_unconfirmed"] is True
+    assert backend.probe_calls == 0
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_staged_copy_with_matching_size_but_different_content_is_restaged(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    firmware = build / "app.elf"
+    firmware.write_bytes(b"\x7fELF" + b"\x11" * 12)
+
+    first = manager.validate_local_path("build/app.elf")
+    assert first["ok"] is True
+    staged_path = Path(first["artifact"]["resolved_path"])
+    staging_root = tmp_path / ".agentic-hil" / "artifacts"
+    assert staging_root in staged_path.parents, "resolved_path must point into the immutable staging area"
+
+    staged_path.write_bytes(b"\x7fELF" + b"\x99" * 12)  # same size, different content
+    second = manager.validate_local_path("build/app.elf")
+
+    assert second["ok"] is True
+    assert Path(second["artifact"]["resolved_path"]).read_bytes() == firmware.read_bytes()
+
+
+def test_identical_content_under_two_names_is_staged_once(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    payload = b"\x7fELF" + b"\x42" * 12
+    (build / "one.elf").write_bytes(payload)
+    (build / "two.elf").write_bytes(payload)
+
+    first = manager.validate_local_path("build/one.elf")
+    second = manager.validate_local_path("build/two.elf")
+
+    assert first["ok"] is True and second["ok"] is True
+    assert first["artifact"]["resolved_path"] == second["artifact"]["resolved_path"]
+    sha_dir = Path(first["artifact"]["resolved_path"]).parent
+    assert len([item for item in sha_dir.iterdir() if item.is_file()]) == 1
+
+
+def test_failed_gdb_client_constructor_ledgers_the_orphan_in_the_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    debug = GdbDebugSessions(
+        config,
+        "openocd",
+        lambda: {"ok": True, "executable_path": "server"},
+        lambda *_: ["server-cmd"],
+        lambda _output: "unknown_debugger_error",
+    )
+    server_child = SimpleNamespace(
+        poll=lambda: 0,
+        stdout=None,
+        stderr=None,
+        terminate=lambda: None,
+        wait=lambda timeout=None: 0,
+    )
+    orphan_gdb = UnkillableChild()
+
+    def failing_gdb_client(*_args, **_kwargs):
+        error = RuntimeError("reader threads failed")
+        error._agentic_hil_orphan_child = orphan_gdb
+        raise error
+
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.subprocess.Popen", lambda *_a, **_k: server_child)
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.wait_for_tcp_port", lambda *_a, **_k: True)
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.reserve_tcp_port", lambda: 45999)
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GdbMiClient", failing_gdb_client)
+
+    with pytest.raises(RuntimeError, match="reader threads failed") as raised:
+        debug.start_session({"resolved_path": str(tmp_path / "app.elf"), "path": "app.elf", "sha256": "x"}, mode="attach")
+
+    assert getattr(raised.value, "_agentic_hil_completion_confirmed", False) is False
+    assert [name for name, _ in debug.orphan_processes] == ["gdb"]
+    assert debug.has_active_session() is True
+
+    blocked = debug.stop_session()
+    assert blocked["ok"] is False
+    assert blocked["error_type"] == "hardware_cleanup_failed"
+
+    orphan_gdb.alive = False
+    recovered = debug.stop_session()
+    assert recovered["ok"] is True
+    assert debug.has_active_session() is False
+
+
+def test_com_stdio_confirmed_audit_write_failure_does_not_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class WritableIdleSerialHandle(IdleSerialHandle):
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    serial_handle = WritableIdleSerialHandle()
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial_handle))
+
+    def tx_log_fails(log_path, event):
+        if event.get("direction") == "tx":
+            raise AuditWriteError("tx log full")
+
+    monkeypatch.setattr("agentic_hil.comports.append_jsonl", tx_log_fails)
+    errors = StringIO()
+
+    with pytest.raises(AuditWriteError):
+        run_com_stdio(config, "dut", input_stream=BytesIO(b"x"), output_stream=StringIO(), error_stream=errors)
+
+    assert serial_handle.is_open is False
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False

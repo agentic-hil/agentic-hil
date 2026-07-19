@@ -731,7 +731,8 @@ class AgenticHILToolService:
         self._unconfirmed_operations.append(operation)
         self._known_incident_errors.add(json.dumps(operation, sort_keys=True, default=str))
         self._incident_persisted = False
-        self._poisoned_state = {"error_type": "hardware_state_unconfirmed", "active_resources": [], "inspection_errors": [*self._unconfirmed_operations]}
+        previously_active = self._poisoned_state["active_resources"] if self._poisoned_state else []
+        self._poisoned_state = {"error_type": "hardware_state_unconfirmed", "active_resources": previously_active, "inspection_errors": [*self._unconfirmed_operations]}
 
     def _poison(self, state: JsonObject) -> None:
         self._poisoned_state = {

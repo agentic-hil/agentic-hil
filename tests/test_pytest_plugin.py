@@ -87,7 +87,7 @@ def test_b_sees_fresh_adapter_state(agentic_hil):
     result.assert_outcomes(passed=2)
 
 
-def test_cli_config_option_is_anchored_to_the_invocation_cwd(tmp_path, monkeypatch):
+def test_cli_config_option_is_anchored_to_the_invocation_dir_not_ambient_cwd(tmp_path, monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -95,13 +95,72 @@ def test_cli_config_option_is_anchored_to_the_invocation_cwd(tmp_path, monkeypat
 
     (tmp_path / "sub").mkdir()
     (tmp_path / "custom").mkdir()
-    monkeypatch.chdir(tmp_path / "sub")
+    (tmp_path / "elsewhere").mkdir()
+    # A test that chdirs before the fixture instantiates must not change the anchor.
+    monkeypatch.chdir(tmp_path / "elsewhere")
     fake_config = SimpleNamespace(
         getoption=lambda name: "../custom/config.yaml",
         getini=lambda name: None,
         rootpath=tmp_path,
+        invocation_params=SimpleNamespace(dir=tmp_path / "sub"),
     )
 
     resolved = Path(resolve_plugin_config_path(fake_config)).resolve()
 
     assert resolved == (tmp_path / "custom" / "config.yaml").resolve()
+
+
+def test_unsafe_cleanup_failure_fails_the_suite(pytester: pytest.Pytester) -> None:
+    write_config(pytester.path, adapters_yaml=NTC_ADAPTER_YAML)
+    pytester.makepyfile("""
+def test_leaves_an_unstoppable_session(agentic_hil):
+    class StuckBridge:
+        last_close_result = None
+
+        def status(self):
+            return {"active": True}
+
+        def close(self):
+            raise RuntimeError("bridge stuck")
+
+    from agentic_hil.adapters import AdapterSession
+    from agentic_hil.types import AdapterConfig
+
+    adapter_config = AdapterConfig(executable="python", args=[], timeout_s=1.0, channels=["t"], faults=["f"])
+    agentic_hil.adapters.sessions["stuck"] = AdapterSession("stuck", adapter_config, StuckBridge(), "stuck.jsonl")
+    assert True
+""")
+    result = pytester.runpytest(*PLUGIN_ARGS)
+    result.assert_outcomes(passed=1, errors=1)
+
+
+def test_audit_only_cleanup_failure_warns_instead_of_failing(pytester: pytest.Pytester) -> None:
+    write_config(pytester.path, adapters_yaml=NTC_ADAPTER_YAML)
+    pytester.makepyfile("""
+def test_confirmed_audit_failure_only(agentic_hil):
+    from agentic_hil.report import AuditWriteError
+
+    def audit_failing_close():
+        raise AuditWriteError("log full", None, "confirmed")
+
+    agentic_hil.backend.close = audit_failing_close
+    assert True
+""")
+    result = pytester.runpytest(*PLUGIN_ARGS, "-W", "ignore::pytest.PytestUnraisableExceptionWarning")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*cleanup audit records could not be written*"])
+
+
+def test_custom_layout_config_keeps_the_rootdir_policy_anchor(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+    generated = write_config(pytester.path / "generated", adapters_yaml=NTC_ADAPTER_YAML)
+    custom = pytester.path / "hil-config.yaml"
+    custom.write_text(generated.read_text(encoding="utf-8"), encoding="utf-8")
+    test_file = pytester.makepyfile(ADAPTER_LOOP_TEST)
+    subdir = pytester.mkdir("sub")
+    monkeypatch.chdir(subdir)
+
+    result = pytester.runpytest(*PLUGIN_ARGS, "--agentic-hil-config", str(custom), str(test_file))
+
+    result.assert_outcomes(passed=1)
+    assert (pytester.path / ".agentic-hil" / "reports" / "last-report.json").exists(), "policy must anchor at rootdir, not the ambient cwd"
+    assert not (subdir / ".agentic-hil").exists()

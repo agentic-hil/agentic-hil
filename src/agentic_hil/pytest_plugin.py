@@ -44,10 +44,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def resolve_plugin_config_path(config: pytest.Config) -> str:
     option = config.getoption("--agentic-hil-config")
     if option:
-        # Command-line paths stay relative to the invocation cwd; resolve them
-        # here so load_config cannot re-anchor them somewhere else.
+        # Command-line paths anchor at pytest's true invocation directory (not
+        # a possibly-chdir'd cwd at fixture time) so load_config cannot
+        # re-anchor them somewhere else.
         requested = Path(str(option)).expanduser()
-        return str(requested if requested.is_absolute() else Path.cwd() / requested)
+        if requested.is_absolute():
+            return str(requested)
+        invocation_dir = Path(str(getattr(getattr(config, "invocation_params", None), "dir", Path.cwd())))
+        return str(invocation_dir / requested)
     ini_value = config.getini("agentic_hil_config")
     if ini_value:
         return rootdir_anchored(config, str(ini_value))
@@ -68,11 +72,13 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
     from agentic_hil.config import ConfigError, load_config
 
     config_path = resolve_plugin_config_path(request.config)
+    # Standard layout (<project>/.agentic-hil/config.yaml): no work_dir override,
+    # so the policy anchors at the config's project directory exactly like the
+    # MCP server and CLI. Custom layouts keep the deterministic rootdir anchor
+    # instead of an ambient (possibly chdir'd) cwd.
+    work_dir = None if Path(config_path).parent.name == ".agentic-hil" else str(request.config.rootpath)
     try:
-        # No work_dir override: like the MCP server and CLI, the effective
-        # policy anchors at the config file's own project directory, so the
-        # same config yields the same allowed roots and report paths everywhere.
-        return load_config(config_path)
+        return load_config(config_path, work_dir=work_dir)
     except ConfigError as error:
         if error.error_type == "config_file_not_found":
             pytest.skip(f"Agentic HIL configuration unavailable: {error.summary} [path: {config_path}]")

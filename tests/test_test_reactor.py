@@ -892,3 +892,45 @@ tests:
     assert result["tests"][0]["cleanup_audit_write_failed"] is True
     flash_calls = sum(service.calls.count("flash_firmware") for service in services)
     assert flash_calls == 1, "no further hardware action may run after an unconfirmed step"
+
+
+def test_lease_observability_failure_does_not_fail_a_healthy_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    monkeypatch.setattr(ProjectHardwareLock, "update_active_state", lambda self, **_: (_ for _ in ()).throw(HardwareLockError("marker busy")))
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is True, result
+    assert result["lease_update_errors"], "bookkeeping failures must be surfaced as warnings"
+
+
+def test_confirm_safe_failure_is_reported_as_unsafe_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock
+
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    monkeypatch.setattr(ProjectHardwareLock, "confirm_safe", lambda self: (_ for _ in ()).throw(HardwareLockError("delete denied")))
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["hardware_state_unconfirmed"] is True
+    assert "state_error" in result
+
+
+def test_report_write_failure_degrades_to_structured_report_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+    monkeypatch.setattr("agentic_hil.test_reactor.write_report", lambda *_: (_ for _ in ()).throw(OSError("reports full")))
+
+    result = Reactor(config, service_factory=lambda _: RecordingService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_reactor_report_failed"
+    lock = ProjectTestLock(config.config_path)
+    assert lock.acquire() is True
+    lock.confirm_safe_and_release()

@@ -154,6 +154,8 @@ class CanBusService:
                             self.sessions.pop(bus_id, None)
                             result["completion_confirmed"] = True
                             result["cleanup_error"] = str(cleanup_error)
+                            if not isinstance(cleanup_error, Exception):
+                                cleanup_error._agentic_hil_completion_confirmed = True
                         else:
                             result.update({"completion_unconfirmed": True, "hardware_state_unconfirmed": True, "cleanup_error": str(cleanup_error)})
                         if not isinstance(cleanup_error, Exception):
@@ -511,11 +513,13 @@ def open_python_can_adapter(
         if on_started is not None:
             on_started(session)
     except BaseException as error:
-        session.active = False
         try:
             shutdown = getattr(bus, "shutdown", None)
             if callable(shutdown):
                 shutdown()
+            # Only a completed shutdown may mark the session inactive; setting it
+            # earlier would let the caller derive a fabricated confirmed close.
+            session.active = False
             error._agentic_hil_completion_confirmed = True
         except BaseException:
             pass

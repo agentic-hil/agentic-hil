@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.hardware_lock import replace_with_sharing_retry
 from agentic_hil.report import fsync_directory, safe_filename
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -267,7 +268,7 @@ class ArtifactManager:
             temp_path = upload_directory / f"upload-{uuid.uuid4().hex}.tmp"
             try:
                 temp_path.write_bytes(data)
-                os.replace(temp_path, stored_path)
+                replace_with_sharing_retry(os.replace, temp_path, stored_path)
             except BaseException:
                 with suppress(OSError):
                     temp_path.unlink()

@@ -404,7 +404,7 @@ class TestReactor:
             self._project_lock = None
         assert response is not None
         if self._lease_update_errors:
-            response.setdefault("lease_update_errors", self._lease_update_errors)
+            response.setdefault("lease_update_errors", list(self._lease_update_errors))
         if pending_base_exception is not None:
             raise pending_base_exception
         return response
@@ -494,6 +494,8 @@ class TestReactor:
         }
 
     def _finalize(self, response: JsonObject) -> JsonObject:
+        if self._lease_update_errors:
+            response.setdefault("lease_update_errors", list(self._lease_update_errors))
         try:
             return write_report(self.config, response)
         except Exception as error:

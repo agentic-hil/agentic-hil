@@ -347,7 +347,7 @@ class ProjectHardwareLock:
                 os.fsync(handle.fileno())
             if os.name != "nt":
                 temp_path.chmod(0o600)
-            _replace_with_sharing_retry(os.replace, temp_path, self.state_path)
+            replace_with_sharing_retry(os.replace, temp_path, self.state_path)
             fsync_directory(self.state_path.parent)
         except (OSError, TypeError, ValueError) as error:
             with suppress(OSError):
@@ -356,7 +356,7 @@ class ProjectHardwareLock:
 
     def _delete_state(self) -> None:
         try:
-            _replace_with_sharing_retry(os.unlink, self.state_path)
+            replace_with_sharing_retry(os.unlink, self.state_path)
             fsync_directory(self.state_path.parent)
         except FileNotFoundError:
             return
@@ -506,7 +506,7 @@ class ProjectHardwareLock:
             self.handle = None
 
 
-def _replace_with_sharing_retry(operation, *args) -> None:
+def replace_with_sharing_retry(operation, *args) -> None:
     """Retry rename/unlink briefly on Windows sharing violations.
 
     A concurrent hardware-status poll holds the state file open for a moment;
