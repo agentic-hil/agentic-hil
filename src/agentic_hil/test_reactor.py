@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from agentic_hil.config import ConfigError, UniqueKeyLoader, load_config
 from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.report import write_report
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, cleanup_error_is_audit_only
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
 
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
@@ -200,7 +200,11 @@ class Device:
         try:
             self.service.close()
         except Exception as error:
-            return exception_result("device_close_exception", "Device service cleanup raised an exception.", error)
+            result = exception_result("device_close_exception", "Device service cleanup raised an exception.", error)
+            if cleanup_error_is_audit_only(error):
+                result["error_type"] = "audit_write_failed"
+                result["completion_confirmed"] = True
+            return result
         return {"ok": True}
 
     def hardware_state(self) -> JsonObject:
@@ -553,7 +557,8 @@ class TestReactor:
         finally:
             close_results = self.close()
         cleanup_ok = all(item["result"].get("ok") is True for item in close_results)
-        if not cleanup_ok:
+        cleanup_safe = all(cleanup_resource_safe(item["result"]) for item in close_results)
+        if not cleanup_safe:
             unsafe_state = True
         ok = len(results) == len(plan.tests) and all(result.get("ok") is True for result in results) and cleanup_ok
         failed_tests = [str(result["name"]) for result in results if result.get("ok") is not True]
@@ -570,11 +575,15 @@ class TestReactor:
         if unsafe_state:
             response["error_type"] = "unsafe_test_state"
             response["summary"] = "Test reactor stopped because cleanup could not establish a safe state."
-            if not cleanup_ok:
+            if not cleanup_safe:
                 response["cleanup_error_type"] = "device_close_failed"
         elif policy_changed:
             response["error_type"] = "policy_changed"
             response["summary"] = "Test reactor stopped because project policy changed during execution."
+        elif not cleanup_ok:
+            response["error_type"] = "audit_write_failed"
+            response["hardware_state_unconfirmed"] = False
+            response["summary"] = "Test reactor cleanup confirmed a safe hardware state, but one or more audit records could not be written."
         elif not ok:
             response["error_type"] = "test_failed"
         return response
@@ -700,10 +709,11 @@ class TestReactor:
         finally:
             cleanup = device.cleanup()
         cleanup_ok = all(item["result"].get("ok") is True for item in cleanup)
+        cleanup_safe = all(cleanup_resource_safe(item["result"]) for item in cleanup)
         ok = failed_step is None and cleanup_ok
         result: JsonObject = {"ok": ok, "name": test.name, "device": test.device, "steps": steps, "cleanup": cleanup}
         if not cleanup_ok:
-            result["error_type"] = "cleanup_failed"
+            result["error_type"] = "cleanup_failed" if not cleanup_safe else "audit_write_failed"
             if failed_step is not None:
                 result["failed_step"] = failed_step
                 result["step_error_type"] = steps[-1]["result"].get("error_type", "step_failed")
@@ -751,6 +761,17 @@ def validation_error(test: TestCase, index: int | None, field: str, summary: str
     prefix = f"tests.{test.name}"
     location = f"{prefix}.steps[{index}].{field}" if index is not None else f"{prefix}.{field}"
     return {"test": test.name, "device": test.device, "field": location, "summary": summary}
+
+
+def cleanup_resource_safe(result: JsonObject) -> bool:
+    """True when a cleanup result proves the physical resource is safe, even if its audit record failed."""
+    if result.get("ok") is True:
+        return True
+    return (
+        result.get("completion_confirmed") is True
+        and result.get("hardware_state_unconfirmed") is not True
+        and result.get("completion_unconfirmed") is not True
+    )
 
 
 def capability_error(device: str, action: str, capability: str) -> JsonObject:

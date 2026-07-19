@@ -288,10 +288,22 @@ def run_test_reactor(config_path: str | None, test_config_path: str) -> JsonObje
     return TestReactor(config).run(plan)
 
 
+def resolve_hardware_config_path(config_path: str | None) -> str:
+    """Resolve the lock/marker identity exactly like load_config, but without parsing the policy file.
+
+    Incident inspection and recovery must keep working when the project config is
+    invalid, unreadable, or deleted.
+    """
+    from agentic_hil.config import resolve_config_path
+
+    requested = Path(resolve_config_path(config_path)).expanduser()
+    resolved = requested if requested.is_absolute() else Path.cwd().resolve() / requested
+    return str(resolved.resolve())
+
+
 def hardware_status(config_path: str | None = None) -> JsonObject:
-    config = load_config(config_path)
     try:
-        hardware_lock = ProjectHardwareLock(config.config_path)
+        hardware_lock = ProjectHardwareLock(resolve_hardware_config_path(config_path))
         status = hardware_lock.status()
     except HardwareLockError as error:
         return {"ok": False, "tool": "hardware_status", "error_type": "hardware_status_failed", "backend_error": str(error), "summary": "Project hardware lock state could not be inspected."}
@@ -301,13 +313,16 @@ def hardware_status(config_path: str | None = None) -> JsonObject:
 
 
 def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False, quarantine_id: str | None = None, force_live_owner: bool = False) -> JsonObject:
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except ConfigError:
+        config = None
     if not acknowledge_hardware_checked:
         return {"ok": False, "tool": "hardware_recover", "error_type": "acknowledgement_required", "summary": "Use --acknowledge-hardware-checked after confirming hardware is safe."}
     if not quarantine_id:
         return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Use --quarantine-id from hardware-status after confirming the exact hardware state is safe."}
     try:
-        hardware_lock = ProjectHardwareLock(config.config_path)
+        hardware_lock = ProjectHardwareLock(resolve_hardware_config_path(config_path))
         acquired = hardware_lock.acquire(recovery=True, source="hardware_recover")
     except HardwareLockError as error:
         result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired for recovery.", "backend_error": str(error)}
@@ -336,9 +351,25 @@ def hardware_recover(config_path: str | None = None, acknowledge_hardware_checke
         hardware_lock.release_os_lock()
 
 
-def write_hardware_recovery_report(config: AgenticHILConfig, result: JsonObject) -> JsonObject:
+def write_hardware_recovery_report(config: AgenticHILConfig | None, result: JsonObject) -> JsonObject:
+    if config is None:
+        return write_hardware_recovery_state_audit(result)
     try:
         return write_report(config, result)
+    except Exception as error:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "audit_write_failed", "operation_result": result, "backend_error": str(error), "summary": "Hardware recovery result could not be written."}
+
+
+def write_hardware_recovery_state_audit(result: JsonObject) -> JsonObject:
+    """Project config is unusable: audit the recovery into the user state directory instead."""
+    from agentic_hil.hardware_lock import hardware_state_directory
+    from agentic_hil.report import atomic_write_text, timestamp_for_filename
+
+    try:
+        audit_path = hardware_state_directory() / f"recovery-{timestamp_for_filename()}.json"
+        enriched = {**result, "report_path": str(audit_path), "report_note": "Project config was not loadable; recovery was audited into the user state directory."}
+        atomic_write_text(audit_path, json.dumps(enriched, indent=2) + "\n")
+        return enriched
     except Exception as error:
         return {"ok": False, "tool": "hardware_recover", "error_type": "audit_write_failed", "operation_result": result, "backend_error": str(error), "summary": "Hardware recovery result could not be written."}
 

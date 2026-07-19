@@ -14,10 +14,37 @@ from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 class AuditWriteError(OSError):
-    def __init__(self, message: str, operation_result: JsonObject | None = None):
+    """An audit record (report, session log, JSONL event) could not be written.
+
+    completion_state describes the underlying hardware operation, never the audit
+    write itself: "confirmed" only when the hardware side was already known
+    complete when the audit write failed. The default "unknown" is treated as
+    unconfirmed by the tool service.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        operation_result: JsonObject | None = None,
+        completion_state: str = "unknown",
+    ):
         super().__init__(message)
         self.operation_result = operation_result
-        self._agentic_hil_completion_confirmed = True
+        self.completion_state = completion_state
+
+
+def audit_completion_state(result: JsonObject) -> str:
+    if result.get("ok") is True or result.get("completion_confirmed") is True:
+        return "confirmed"
+    return "unknown"
+
+
+def annotate_audit_error(error: AuditWriteError, operation_result: JsonObject) -> AuditWriteError:
+    if error.operation_result is None:
+        error.operation_result = operation_result
+    if error.completion_state == "unknown":
+        error.completion_state = audit_completion_state(operation_result)
+    return error
 
 
 def utc_now_iso() -> str:
@@ -122,8 +149,24 @@ def read_last_report(config: AgenticHILConfig) -> JsonObject:
             "summary": "No Agentic HIL report has been written yet.",
         }
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "tool": "get_last_report",
+            "error_type": "report_not_found",
+            "summary": "No Agentic HIL report has been written yet.",
+        }
+    except OSError as error:
+        return {
+            "ok": False,
+            "tool": "get_last_report",
+            "error_type": "report_unreadable",
+            "summary": "Last Agentic HIL report could not be read.",
+            "backend_error": str(error),
+            "report_path": display_path(config, report_path),
+        }
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return {
             "ok": False,
             "tool": "get_last_report",
@@ -131,3 +174,12 @@ def read_last_report(config: AgenticHILConfig) -> JsonObject:
             "summary": "Last Agentic HIL report is not valid JSON.",
             "report_path": display_path(config, report_path),
         }
+    if not isinstance(loaded, dict):
+        return {
+            "ok": False,
+            "tool": "get_last_report",
+            "error_type": "config_invalid",
+            "summary": "Last Agentic HIL report is not a JSON object.",
+            "report_path": display_path(config, report_path),
+        }
+    return loaded

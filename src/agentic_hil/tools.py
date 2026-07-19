@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import threading
 from collections.abc import Callable
@@ -70,6 +71,16 @@ INDETERMINATE_TRANSPORT_ERRORS = {
 }
 DEBUG_SESSION_CONFLICT_TOOLS = {"probe_target", "flash_firmware", "reset_target"}
 CLEANUP_TOOLS = {"debug_stop_session", "com_session_stop", "can_session_stop", "adapter_session_stop"}
+SAFE_DIAGNOSTIC_TOOLS = {"get_last_report", "classify_last_error"}
+NO_HARDWARE_ERROR_TYPES = {
+    "permission_denied", "invalid_argument", "unknown_tool", "not_supported", "hardware_busy",
+    "session_not_active", "session_already_active", "debug_session_active", "stop_reason_not_available",
+    "com_port_not_configured", "can_bus_not_configured", "adapter_not_configured",
+    "serial_backend_not_available", "can_backend_not_available", "can_adapter_not_found", "adapter_bridge_not_found",
+    "debugger_not_found", "gdb_not_found", "debugger_config_not_found", "report_not_found",
+    "artifact_validation_failed", "artifact_not_found", "artifact_too_large", "artifact_staging_failed",
+    "output_validation_failed", "config_invalid",
+}
 TOOL_ARGUMENTS: dict[str, set[str]] = {
     "debugger_info": set(), "debugger_probes_list": {"debugger"}, "probe_target": set(), "artifact_upload": {"image_path", "filename", "data_base64"},
     "flash_firmware": {"image_path", "artifact_id", "reset_after_flash"}, "reset_target": {"mode"},
@@ -124,6 +135,7 @@ class AgenticHILToolService:
         self._poisoned_state: JsonObject | None = None
         self._incident_persisted = False
         self._incident_id: str | None = None
+        self._known_incident_errors: set[str] = set()
 
     def debugger_info(self) -> JsonObject:
         return self.backend.info()
@@ -238,7 +250,7 @@ class AgenticHILToolService:
 
     def get_last_report(self) -> JsonObject:
         report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") in {"report_not_found", "config_invalid"}:
+        if not report.get("ok") and report.get("error_type") in {"report_not_found", "report_unreadable", "config_invalid"}:
             return report
         return {"ok": True, "tool": "get_last_report", "report": report}
 
@@ -301,11 +313,17 @@ class AgenticHILToolService:
         validation_error = validate_tool_arguments(name, args)
         if validation_error is not None:
             return validation_error
+        if self._poisoned_state is not None and name not in CLEANUP_TOOLS:
+            # A poisoned instance must not reload policy or touch backends; only
+            # incident cleanup and purely local diagnostics remain available.
+            if name in SAFE_DIAGNOSTIC_TOOLS:
+                return self._dispatch(name, args)
+            return self._poisoned_error(name)
         hardware_error = self._acquire_hardware(name)
         if hardware_error is not None:
             return hardware_error
         try:
-            reload_error = self._reload_config(name)
+            reload_error = None if (name in CLEANUP_TOOLS or self._poisoned_state is not None) else self._reload_config(name)
             if reload_error is not None:
                 return reload_error
             if name in HARDWARE_TOOLS:
@@ -395,16 +413,18 @@ class AgenticHILToolService:
                     if marker is not None and marker.get("quarantine_id") == self._incident_id:
                         try:
                             if self._hardware_lock.acquire(recovery=True, source="poisoned_service_cleanup"):
-                                return None
+                                # Bind the cleanup atomically to the expected incident:
+                                # the id read under the OS lock must still match.
+                                if self._hardware_lock.recovery_incident_id == self._incident_id:
+                                    return None
+                                self._hardware_lock.release_os_lock()
+                                result = self._poisoned_error(tool)
+                                result["error_type"] = "incident_changed"
+                                result["summary"] = "The hardware incident changed after this service instance was poisoned; recover it with the current quarantine id."
+                                return result
                         except HardwareLockError:
                             pass
-            return {
-                "ok": False,
-                "tool": tool,
-                "error_type": "hardware_state_unconfirmed",
-                "summary": "This Agentic HIL service instance observed an unconfirmed hardware state and must be restarted.",
-                "local_state": self._poisoned_state,
-            }
+            return self._poisoned_error(tool)
         local_state = self.hardware_state()
         if local_state["inspection_errors"]:
             self._poison(local_state)
@@ -520,7 +540,8 @@ class AgenticHILToolService:
                 except BaseException as rollback_error:
                     rollback_errors.append(f"{name}: {type(rollback_error).__name__}: {rollback_error}")
             self.config = old_config
-            if isinstance(error, AuditWriteError) and not rollback_errors:
+            audit_confirmed = isinstance(error, AuditWriteError) and (error.completion_state == "confirmed" or getattr(error, "_agentic_hil_completion_confirmed", False) is True)
+            if audit_confirmed and not rollback_errors:
                 result = tool_error(tool, "audit_write_failed", "Project policy reload closed sessions safely, but a cleanup audit record could not be written.")
                 result["completion_confirmed"] = True
                 result["backend_error"] = str(error)
@@ -582,7 +603,12 @@ class AgenticHILToolService:
     def _finish_hardware_lease(self) -> None:
         if self._incident_persisted and self._hardware_lock.handle is None:
             current = self._session_hardware_state()
-            if not current["active_resources"]:
+            new_inspection_errors = [
+                item
+                for item in current["inspection_errors"]
+                if json.dumps(item, sort_keys=True, default=str) not in self._known_incident_errors
+            ]
+            if not current["active_resources"] and not new_inspection_errors:
                 return
             if self._hardware_lock.quarantine_info() is not None:
                 return
@@ -622,25 +648,31 @@ class AgenticHILToolService:
             result = action()
             if not isinstance(result, dict):
                 raise TypeError("Hardware tool returned a non-object result.")
-            error_type = str(result.get("error_type", ""))
-            completion_unconfirmed = (
-                result.get("completion_unconfirmed") is True
-                or result.get("hardware_state_unconfirmed") is True
-                or error_type == "hardware_cleanup_failed"
-                or (result.get("completion_confirmed") is not True and ((error_type == "timeout" and tool in INDETERMINATE_TIMEOUT_TOOLS) or error_type in INDETERMINATE_TRANSPORT_ERRORS))
-            )
-            if completion_unconfirmed:
+            if result_completion_unconfirmed(tool, result):
                 self._record_unconfirmed_operation(tool, operation["started_at"], None, result.get("error_type"))
             elif self.hardware_owner is None and self._hardware_lock.mode == "normal":
                 state = self._session_hardware_state()
                 self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=None)
             return result
         except AuditWriteError as error:
-            result = tool_error(tool, "audit_write_failed", "Hardware completion was confirmed, but its audit record could not be written.")
-            result["completion_confirmed"] = True
-            result["backend_error"] = str(error)
-            if error.operation_result is not None:
-                result["operation_result"] = error.operation_result
+            underlying = error.operation_result if isinstance(error.operation_result, dict) else {}
+            state_confirmed = error.completion_state == "confirmed" or getattr(error, "_agentic_hil_completion_confirmed", False) is True
+            embedded_unconfirmed = bool(underlying) and result_completion_unconfirmed(tool, underlying)
+            embedded_confirmed = (
+                underlying.get("ok") is True
+                or underlying.get("completion_confirmed") is True
+                or str(underlying.get("error_type", "")) in NO_HARDWARE_ERROR_TYPES
+            )
+            if embedded_unconfirmed or (not state_confirmed and not embedded_confirmed):
+                self._record_unconfirmed_operation(tool, operation["started_at"], error, underlying.get("error_type") or "audit_write_failed")
+                result = tool_error(tool, "hardware_state_unconfirmed", "Hardware completion could not be confirmed and its audit record could not be written.")
+                result.update({"hardware_state_unconfirmed": True, "completion_unconfirmed": True, "audit_error": str(error)})
+            else:
+                result = tool_error(tool, "audit_write_failed", "Hardware completion was confirmed, but its audit record could not be written.")
+                result["completion_confirmed"] = True
+                result["backend_error"] = str(error)
+            if underlying:
+                result["operation_result"] = underlying
             return result
         except BaseException as error:
             if getattr(error, "_agentic_hil_completion_confirmed", False) is not True:
@@ -659,6 +691,7 @@ class AgenticHILToolService:
             "summary": "Hardware operation completion was not confirmed.",
         }
         self._unconfirmed_operations.append(operation)
+        self._known_incident_errors.add(json.dumps(operation, sort_keys=True, default=str))
         self._incident_persisted = False
         self._poisoned_state = {"error_type": "hardware_state_unconfirmed", "active_resources": [], "inspection_errors": [*self._unconfirmed_operations]}
 
@@ -668,10 +701,49 @@ class AgenticHILToolService:
             "active_resources": state["active_resources"],
             "inspection_errors": state["inspection_errors"],
         }
+        for item in state["inspection_errors"]:
+            self._known_incident_errors.add(json.dumps(item, sort_keys=True, default=str))
+
+    def _poisoned_error(self, tool: str) -> JsonObject:
+        return {
+            "ok": False,
+            "tool": tool,
+            "error_type": "hardware_state_unconfirmed",
+            "summary": "This Agentic HIL service instance observed an unconfirmed hardware state and must be restarted.",
+            "local_state": self._poisoned_state,
+        }
 
 
 def adapter_payload(args: JsonObject) -> JsonObject:
     return {key: value for key, value in args.items() if key != "adapter_id"}
+
+
+def cleanup_error_is_audit_only(error: BaseException) -> bool:
+    """True when a cleanup failure is purely an audit-write failure after confirmed hardware completion."""
+    if is_confirmed_audit_error(error):
+        return True
+    if isinstance(error, HardwareCleanupError):
+        return bool(error.errors) and all(is_confirmed_audit_error(item) for _, item in error.errors)
+    return False
+
+
+def is_confirmed_audit_error(error: BaseException) -> bool:
+    if not isinstance(error, AuditWriteError):
+        return False
+    return error.completion_state == "confirmed" or getattr(error, "_agentic_hil_completion_confirmed", False) is True
+
+
+def result_completion_unconfirmed(tool: str, result: JsonObject) -> bool:
+    error_type = str(result.get("error_type", ""))
+    return (
+        result.get("completion_unconfirmed") is True
+        or result.get("hardware_state_unconfirmed") is True
+        or error_type == "hardware_cleanup_failed"
+        or (
+            result.get("completion_confirmed") is not True
+            and ((error_type == "timeout" and tool in INDETERMINATE_TIMEOUT_TOOLS) or error_type in INDETERMINATE_TRANSPORT_ERRORS)
+        )
+    )
 
 
 def validate_tool_arguments(tool: str, args: JsonObject) -> JsonObject | None:

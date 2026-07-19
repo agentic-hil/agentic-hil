@@ -101,7 +101,8 @@
         "upload_directory": { "type": "string", "default": ".agentic-hil/artifacts" },
         "allowed_extensions": { "type": "array", "items": { "type": "string" }, "default": [".elf", ".hex", ".bin"] },
         "max_upload_size_mb": { "type": "integer", "default": 64 },
-        "allow_upload": { "type": "boolean", "default": true }
+        "allow_upload": { "type": "boolean", "default": true },
+        "max_local_artifact_size_mb": { "type": "integer", "minimum": 1, "default": 256 }
       }
     },
     "com_ports": {

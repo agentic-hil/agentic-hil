@@ -67,6 +67,17 @@ def run_com_stdio(
             stdin_chunks = start_stdin_reader(input_stream)
             while not failed:
                 chunk = next_stdin_chunk(stdin_chunks)
+                if isinstance(chunk, StdinReadFailure):
+                    failed = True
+                    error_result = {
+                        "ok": False,
+                        "tool": "com_stdio",
+                        "error_type": "stdin_read_failed",
+                        "port_id": port_id,
+                        "backend_error": str(chunk.error),
+                        "summary": "COM stdio input stream failed; the session was stopped.",
+                    }
+                    break
                 if chunk:
                     write_in_flight = {"type": "operation", "tool": "com_stdio_write", "port_id": port_id, "started_at": utc_now_iso()}
                     written = service.write_bytes(port_id, chunk, "com_stdio_write")
@@ -195,27 +206,44 @@ def run_com_stdio(
     return exit_code
 
 
-def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:
-    """Read stdin on a daemon thread so a blocked terminal read cannot stall serial output relaying."""
-    chunks: queue.Queue[bytes] = queue.Queue()
+class StdinReadFailure:
+    """Terminal queue event: the stdin pump thread died with an error."""
+
+    def __init__(self, error: BaseException):
+        self.error = error
+
+
+def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[object]:
+    """Read stdin on a daemon thread so a blocked terminal read cannot stall serial output relaying.
+
+    The pump always ends with a terminal event (EOF bytes or StdinReadFailure) so
+    the main loop can never wait forever on a dead reader.
+    """
+    chunks: queue.Queue[object] = queue.Queue()
 
     def pump() -> None:
-        while True:
-            data = input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
-            chunks.put(bytes(data))
-            if not data:
-                return
+        try:
+            while True:
+                data = input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
+                chunks.put(bytes(data))
+                if not data:
+                    return
+        except BaseException as error:
+            chunks.put(StdinReadFailure(error))
 
     threading.Thread(target=pump, daemon=True).start()
     return chunks
 
 
-def next_stdin_chunk(chunks: queue.Queue[bytes]) -> bytes | None:
-    """Return the next stdin chunk, b"" on EOF, or None when nothing is pending."""
+def next_stdin_chunk(chunks: queue.Queue[object]) -> bytes | StdinReadFailure | None:
+    """Return the next stdin chunk, b"" on EOF, a StdinReadFailure on reader death, or None when nothing is pending."""
     try:
-        return chunks.get(timeout=STDIN_POLL_TIMEOUT_S)
+        item = chunks.get(timeout=STDIN_POLL_TIMEOUT_S)
     except queue.Empty:
         return None
+    if isinstance(item, StdinReadFailure):
+        return item
+    return item if isinstance(item, bytes) else bytes(item)
 
 
 def write_error(output: TextIO, result: JsonObject) -> None:

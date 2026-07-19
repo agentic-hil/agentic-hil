@@ -80,6 +80,10 @@ class GdbMiClient:
                     self.child.wait(timeout=GDB_EXIT_COMMAND_TIMEOUT_S)
             if self.child.poll() is not None:
                 error._agentic_hil_completion_confirmed = True
+            else:
+                # The spawned GDB process could not be reaped and no client object
+                # exists to track it: expose it so the caller can ledger it.
+                error._agentic_hil_orphan_child = self.child
             raise
 
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
@@ -262,6 +266,8 @@ def parse_gdb_integer(value: str | None) -> int | None:
 
 
 def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> None:
+    from agentic_hil.report import atomic_write_text
+
     lines: list[str] = []
     upper_address: int | None = None
     for offset in range(0, len(data), INTEL_HEX_BYTES_PER_RECORD):
@@ -272,7 +278,7 @@ def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> No
             upper_address = chunk_upper
         lines.append(intel_hex_record(absolute & 0xFFFF, 0x00, data[offset : offset + INTEL_HEX_BYTES_PER_RECORD]))
     lines.append(INTEL_HEX_EOF_RECORD)
-    file_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii")
 
 
 def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:

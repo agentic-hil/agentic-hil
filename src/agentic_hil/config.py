@@ -326,6 +326,7 @@ def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
         allowed_extensions=[item.lower() for item in string_list(raw.get("allowed_extensions"), [".elf", ".hex", ".bin"])],
         max_upload_size_mb=int(raw.get("max_upload_size_mb", 64)),
         allow_upload=bool(raw.get("allow_upload", True)),
+        max_local_artifact_size_mb=int(raw.get("max_local_artifact_size_mb", 256)),
     )
 
 

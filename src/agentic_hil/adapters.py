@@ -8,6 +8,8 @@ from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result, reap_unmanaged_child
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
     append_jsonl,
     logs_directory,
     safe_filename,
@@ -265,14 +267,20 @@ class AdapterService:
             result = {"tool": tool, "adapter_id": session.adapter_id, "log_path": display_path(self.config, session.log_path), **response}
             result.setdefault("error_type", "adapter_bridge_error")
             result.setdefault("summary", "Test adapter bridge reported an error.")
-            append_jsonl(session.log_path, {"event": "error", "method": method, **result})
+            try:
+                append_jsonl(session.log_path, {"event": "error", "method": method, **result})
+            except AuditWriteError as audit_error:
+                raise annotate_audit_error(audit_error, result) from audit_error
             return self._write_report(result)
         result = {"ok": True, "tool": tool, "adapter_id": session.adapter_id, **params, "adapter_result": public_backend_result(response), "log_path": display_path(self.config, session.log_path), "summary": f"Test adapter {method} completed."}
         if "value" in response:
             result["value"] = response["value"]
         if "unit" in response:
             result["unit"] = response["unit"]
-        append_jsonl(session.log_path, {"event": method, **params, "adapter_result": public_backend_result(response)})
+        try:
+            append_jsonl(session.log_path, {"event": method, **params, "adapter_result": public_backend_result(response)})
+        except AuditWriteError as audit_error:
+            raise annotate_audit_error(audit_error, result) from audit_error
         return self._write_report(result)
 
     def _configured_adapter(self, adapter_id: str, tool: str) -> JsonObject:
@@ -362,7 +370,12 @@ class AdapterService:
             session.cleanup_unconfirmed = True
             raise RuntimeError("Test adapter bridge remained active after close.")
         session.close_confirmed = True
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        try:
+            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        except AuditWriteError as error:
+            if error.completion_state == "unknown":
+                error.completion_state = "confirmed"
+            raise
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

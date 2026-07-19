@@ -46,6 +46,7 @@ class ArtifactsConfig:
     allowed_extensions: list[str]
     max_upload_size_mb: int
     allow_upload: bool
+    max_local_artifact_size_mb: int = 256
 
 
 @dataclass(frozen=True)

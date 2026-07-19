@@ -13,6 +13,8 @@ from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession, public_backend_result, reap_unmanaged_child
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
     append_jsonl,
     logs_directory,
     safe_filename,
@@ -213,10 +215,16 @@ class CanBusService:
         sent = session.adapter_session.send(frame)
         if not sent["ok"]:
             result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **sent}
-            append_jsonl(session.log_path, {"event": "error", "direction": "tx", **result})
+            try:
+                append_jsonl(session.log_path, {"event": "error", "direction": "tx", **result})
+            except AuditWriteError as audit_error:
+                raise annotate_audit_error(audit_error, result) from audit_error
             return self._write_report(result)
         result = {"ok": True, "tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "adapter_result": public_backend_result(sent), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame sent."}
-        append_jsonl(session.log_path, {"direction": "tx", **result})
+        try:
+            append_jsonl(session.log_path, {"direction": "tx", **result})
+        except AuditWriteError as audit_error:
+            raise annotate_audit_error(audit_error, result) from audit_error
         return self._write_report(result)
 
     def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
@@ -239,11 +247,25 @@ class CanBusService:
         read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, 60.0)))
         if not read["ok"]:
             result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
-            append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
+            try:
+                append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
+            except AuditWriteError as audit_error:
+                raise annotate_audit_error(audit_error, result) from audit_error
             return self._write_report(result)
-        frames = normalize_received_frames(read.get("frames", []))
+        normalized = normalize_received_frames(read.get("frames", []), session.bus_config)
+        if not normalized["ok"]:
+            result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **normalized}
+            try:
+                append_jsonl(session.log_path, {"event": "error", "direction": "rx", **result})
+            except AuditWriteError as audit_error:
+                raise annotate_audit_error(audit_error, result) from audit_error
+            return self._write_report(result)
+        frames = normalized["frames"]
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
-        append_jsonl(session.log_path, {"direction": "rx", **result})
+        try:
+            append_jsonl(session.log_path, {"direction": "rx", **result})
+        except AuditWriteError as audit_error:
+            raise annotate_audit_error(audit_error, result) from audit_error
         return self._write_report(result)
 
     def close(self) -> None:
@@ -353,7 +375,12 @@ class CanBusService:
             session.cleanup_unconfirmed = True
             raise RuntimeError("CAN adapter remained active after close.")
         session.close_confirmed = True
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        try:
+            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        except AuditWriteError as error:
+            if error.completion_state == "unknown":
+                error.completion_state = "confirmed"
+            raise
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)
@@ -625,17 +652,44 @@ def bridge_frame(frame: CanFrame) -> JsonObject:
     return frame_result(frame)
 
 
-def normalize_received_frames(raw_frames: object) -> list[JsonObject]:
+def normalize_received_frames(raw_frames: object, bus_config: CanBusConfig) -> JsonObject:
+    """Strictly validate adapter RX feedback. Malformed feedback must never look like a successful (or empty) read."""
     if not isinstance(raw_frames, list):
-        return []
+        return invalid_frames_response("frames", "Adapter frames must be an array.")
     frames: list[JsonObject] = []
-    for raw in raw_frames:
-        if isinstance(raw, dict):
-            frame_id = parse_can_id(raw.get("id", raw.get("frame_id")))
-            data = parse_hex_bytes(str(raw.get("data_hex", raw.get("hex", ""))))
-            if frame_id is not None and data is not None:
-                frames.append({"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": bool(raw.get("extended", False)), "rtr": bool(raw.get("rtr", False)), "data_hex": data.hex(), "dlc": len(data)})
-    return frames
+    for index, raw in enumerate(raw_frames):
+        field = f"frames[{index}]"
+        if not isinstance(raw, dict):
+            return invalid_frames_response(field, "Frame must be an object.")
+        frame_id = parse_can_id(raw.get("id", raw.get("frame_id")))
+        if frame_id is None:
+            return invalid_frames_response(f"{field}.id", "Frame id must be an integer or hexadecimal string.")
+        extended = raw.get("extended", False)
+        rtr = raw.get("rtr", False)
+        if not isinstance(extended, bool) or not isinstance(rtr, bool):
+            return invalid_frames_response(f"{field}.extended", "extended and rtr must be booleans.")
+        max_id = 0x1FFFFFFF if extended else 0x7FF
+        if frame_id < 0 or frame_id > max_id:
+            return invalid_frames_response(f"{field}.id", "Frame id is out of range for the frame format.")
+        raw_data = raw.get("data_hex", raw.get("hex", ""))
+        if not isinstance(raw_data, str):
+            return invalid_frames_response(f"{field}.data_hex", "data_hex must be a string.")
+        data = parse_hex_bytes(raw_data)
+        if data is None:
+            return invalid_frames_response(f"{field}.data_hex", "data_hex must contain valid hexadecimal bytes.")
+        if len(data) > (64 if bus_config.fd else 8):
+            return invalid_frames_response(f"{field}.data_hex", "Frame data exceeds the maximum length for this bus.")
+        frames.append({"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": rtr, "data_hex": data.hex(), "dlc": len(data)})
+    return {"ok": True, "frames": frames}
+
+
+def invalid_frames_response(field: str, summary: str) -> JsonObject:
+    return {
+        "ok": False,
+        "error_type": "can_adapter_invalid_response",
+        "field": field,
+        "summary": f"CAN adapter returned malformed frame feedback: {summary}",
+    }
 
 
 def is_windows_peak_channel(channel: str) -> bool:

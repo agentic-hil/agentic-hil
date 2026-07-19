@@ -14,6 +14,8 @@ from agentic_hil.backends.common import (
 )
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
     logs_directory,
     read_last_report,
     timestamp_for_filename,
@@ -127,10 +129,22 @@ class PyOCDBackend:
 
         reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
         if not reset.get("ok"):
+            underlying_error_type = str(reset.get("error_type", "reset_failed"))
+            completion_unconfirmed = (
+                reset.get("completion_unconfirmed") is True
+                or reset.get("hardware_state_unconfirmed") is True
+                or underlying_error_type == "timeout"
+            )
             reset["artifact"] = self._artifact_summary(artifact)
             reset["verify"] = True
             reset["reset_after_flash"] = False
+            reset["phase"] = "post_flash_reset"
+            reset["flash_confirmed"] = True
+            reset["reset_confirmed"] = False
+            reset["underlying_error_type"] = underlying_error_type
             reset["error_type"] = "reset_failed"
+            if completion_unconfirmed:
+                reset["completion_unconfirmed"] = True
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
             return self._write_action_report(reset)
         result["reset_after_flash"] = reset_after_flash
@@ -235,16 +249,22 @@ class PyOCDBackend:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **PYOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
-        if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
         output = f"{completed.stdout}{completed.stderr}"
-        if completed.returncode == 0:
+        if completed.timed_out:
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+        elif completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                result = self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+            else:
+                result = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
+        else:
+            result = self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+        try:
+            self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        except AuditWriteError as error:
+            raise annotate_audit_error(error, result) from error
+        return result
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []

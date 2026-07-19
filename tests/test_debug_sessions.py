@@ -407,3 +407,31 @@ def test_write_intel_hex_file_emits_extended_address_and_eof(tmp_path: Path) -> 
     assert lines[0] == ":020000042000DA"
     assert lines[1].startswith(":10" + "06F0" + "00")
     assert lines[-1] == ":00000001FF"
+
+
+def test_breakpoint_insert_audit_failure_keeps_local_state_consistent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.report import AuditWriteError
+
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        def raise_audit_error(*_args, **_kwargs):
+            raise AuditWriteError("disk full")
+
+        with monkeypatch.context() as patched:
+            patched.setattr("agentic_hil.backends.gdbdebug.write_audit_json", raise_audit_error)
+            result = service.call("debug_set_breakpoint", {"location": "test_done"})
+
+        assert result["error_type"] == "audit_write_failed"
+        assert result["completion_confirmed"] is True
+        assert result["operation_result"]["breakpoint"]["backend_id"] == "1"
+
+        listed = service.call("debug_list_breakpoints")
+        assert len(listed["breakpoints"]) == 1
+
+        cleared = service.call("debug_clear_breakpoints")
+        assert cleared["ok"] is True, cleared
+        assert cleared["cleared"] == 1
+    finally:
+        service.close()

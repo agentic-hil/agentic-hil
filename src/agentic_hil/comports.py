@@ -8,6 +8,8 @@ from pathlib import Path
 
 from agentic_hil.config import display_path
 from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
     append_jsonl,
     logs_directory,
     safe_filename,
@@ -235,10 +237,17 @@ class ComPortService:
                 flush()
         except Exception as error:
             result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
-            append_jsonl(session.log_path, {"event": "error", **result})
+            try:
+                append_jsonl(session.log_path, {"event": "error", **result})
+            except AuditWriteError as audit_error:
+                raise annotate_audit_error(audit_error, result) from audit_error
             return result
-        append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
-        return {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        try:
+            append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
+        except AuditWriteError as audit_error:
+            raise annotate_audit_error(audit_error, result) from audit_error
+        return result
 
     def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
         return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
@@ -411,7 +420,12 @@ class ComPortService:
         session.serial_handle.close()
         if bool(getattr(session.serial_handle, "is_open", False)):
             raise RuntimeError("COM port remained open after close.")
-        append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        try:
+            append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        except AuditWriteError as error:
+            if error.completion_state == "unknown":
+                error.completion_state = "confirmed"
+            raise
 
     def _write_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, result)

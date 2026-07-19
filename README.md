@@ -235,7 +235,9 @@ Quarantine is created when cleanup cannot prove that debugger, COM, CAN, or adap
 
 Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN resources free, adapter faults and relays reset, and DUT outputs in a safe state. Then use the exact `quarantine_id` reported by status so a stale acknowledgement cannot clear a newer unsafe state. Recovery refuses with `owner_process_still_running` while the Agentic HIL process that wrote the marker is still alive on this machine; stop that process first, or pass `--force-live-owner` only after independently stopping or isolating it. Recovery clears persistent state only; restart any existing MCP, pytest, or CLI service process before further hardware access because locally poisoned instances remain blocked.
 
-The lease is project-scoped by configuration path. Two projects that name the same physical probe, COM port, CAN channel, or adapter do not share a global resource lock; operators must avoid concurrent access across projects.
+The lease is project-scoped by configuration path. Two projects that name the same physical probe, COM port, CAN channel, or adapter do not share a global resource lock; operators must avoid concurrent access across projects. Two further known limits: JSONL event logs are flushed but not fsynced per event, so a host crash can lose the final buffered log lines (the state marker and reports are written atomically and fsynced), and bridge cleanup terminates the direct child process only — bridge executables must not detach their own worker processes.
+
+`hardware-status` and `hardware-recover` intentionally do not parse the project policy file: they resolve the marker from the configuration path alone, so an operator can always inspect and recover an incident even when the config that caused it is invalid or deleted. Session-stop tools likewise skip the policy reload, so an active session can always be shut down safely under the last validated policy.
 
 ## pytest Plugin
 

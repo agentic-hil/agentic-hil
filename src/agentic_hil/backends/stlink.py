@@ -15,6 +15,8 @@ from agentic_hil.backends.common import (
 )
 from agentic_hil.config import display_path, resolve_work_path
 from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
     logs_directory,
     read_last_report,
     timestamp_for_filename,
@@ -226,19 +228,26 @@ class STLinkBackend:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **STLINK_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
-        if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
         output = f"{completed.stdout}{completed.stderr}"
-        if completed.returncode == 0:
+        if completed.timed_out:
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+        elif completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
-            confirmation = self._confirm_operation_success(output, tool)
-            if not confirmation["confirmed"]:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]})
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                result = self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+            else:
+                confirmation = self._confirm_operation_success(output, tool)
+                if not confirmation["confirmed"]:
+                    result = self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]})
+                else:
+                    result = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}
+        else:
+            result = self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+        try:
+            self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        except AuditWriteError as error:
+            raise annotate_audit_error(error, result) from error
+        return result
 
     def _connection_args(self) -> list[str]:
         args = ["-c", f"port={self.config.debugger.interface}"]

@@ -14,12 +14,22 @@ import pytest
 from conftest import write_config
 
 from agentic_hil.adapters import AdapterService, AdapterSession
+from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import BridgeCloseResult, ProcessBridgeSession
-from agentic_hil.can import CanBusService, CanBusSession, open_python_can_adapter, parse_can_id, payload_frame
+from agentic_hil.can import (
+    CanBusService,
+    CanBusSession,
+    normalize_received_frames,
+    open_python_can_adapter,
+    parse_can_id,
+    payload_frame,
+)
 from agentic_hil.cli import hardware_recover, hardware_status
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
+from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.hardware_lock import (
     HardwareLockError,
     HardwareQuarantinedError,
@@ -27,6 +37,7 @@ from agentic_hil.hardware_lock import (
     hardware_state_directory,
 )
 from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.report import AuditWriteError
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
 from agentic_hil.types import AdapterConfig, CanBusConfig
@@ -1567,3 +1578,389 @@ def test_mcp_tool_schemas_match_service_argument_validation() -> None:
         for one_of in schema.get("oneOf", []):
             mcp_required |= set(one_of.get("required", []))
         assert service_required <= mcp_required, f"{name}: service requires arguments MCP treats as optional"
+
+
+class WriteFailingSerialHandle(IdleSerialHandle):
+    def write(self, data: bytes) -> int:
+        raise OSError("device gone")
+
+
+class UnkillableChild:
+    def __init__(self) -> None:
+        self.alive = True
+        self.pid = 4242
+        self.stdin = None
+        self.stdout = None
+        self.stderr = None
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def terminate(self) -> None:
+        raise OSError("access denied")
+
+    def kill(self) -> None:
+        raise OSError("access denied")
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("child", timeout or 0)
+
+
+def raise_audit_error(*_args, **_kwargs):
+    raise AuditWriteError("disk full")
+
+
+def com_service_with_session(tmp_path: Path, serial_handle) -> AgenticHILToolService:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = AgenticHILToolService(config, reload_config=False)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "audit-com.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], serial_handle, str(log_path), start_reader=False)
+    service.com_ports.sessions["dut"] = session
+    return service
+
+
+def test_serial_write_failure_plus_audit_failure_stays_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = com_service_with_session(tmp_path, WriteFailingSerialHandle())
+    monkeypatch.setattr("agentic_hil.comports.append_jsonl", raise_audit_error)
+
+    result = service.call("com_write", {"port_id": "dut", "text": "x"})
+
+    assert result["error_type"] == "hardware_state_unconfirmed"
+    assert result["completion_unconfirmed"] is True
+    assert result["operation_result"]["error_type"] == "serial_write_failed"
+    assert hardware_status(service.config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_stop_event_audit_failure_after_confirmed_close_is_audit_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    serial_handle = IdleSerialHandle()
+    service = com_service_with_session(tmp_path, serial_handle)
+    monkeypatch.setattr("agentic_hil.comports.append_jsonl", raise_audit_error)
+
+    result = service.call("com_session_stop", {"port_id": "dut"})
+
+    assert result["error_type"] == "audit_write_failed"
+    assert result["completion_confirmed"] is True
+    assert serial_handle.is_open is False
+    assert hardware_status(service.config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_confirmed_success_plus_report_failure_is_audit_only(tmp_path: Path) -> None:
+    class AuditReportFailingBackend(OperationBackend):
+        def probe_target(self) -> dict:
+            raise AuditWriteError("report write failed", {"ok": True, "tool": "probe_target", "summary": "Target detected."}, "confirmed")
+
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, backend=AuditReportFailingBackend(), reload_config=False)
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "audit_write_failed"
+    assert result["completion_confirmed"] is True
+    assert result["operation_result"]["ok"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_debugger_timeout_plus_log_failure_stays_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, debugger_type="pyocd")
+    completed = SimpleNamespace(not_found=False, timed_out=True, stdout="", stderr="", returncode=None)
+    monkeypatch.setattr("agentic_hil.backends.pyocd.spawn_command", lambda *_a, **_k: completed)
+    monkeypatch.setattr("agentic_hil.backends.pyocd.write_audit_json", raise_audit_error)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "hardware_state_unconfirmed"
+    assert result["completion_unconfirmed"] is True
+    assert result["operation_result"]["error_type"] == "timeout"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_pyocd_post_flash_reset_timeout_stays_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, debugger_type="pyocd")
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    responses = [
+        SimpleNamespace(not_found=False, timed_out=False, stdout="Programmed 8192 bytes @ 0x08000000", stderr="", returncode=0),
+        SimpleNamespace(not_found=False, timed_out=True, stdout="", stderr="", returncode=None),
+    ]
+    monkeypatch.setattr("agentic_hil.backends.pyocd.spawn_command", lambda *_a, **_k: responses.pop(0))
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call("flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})
+
+    assert result["error_type"] == "reset_failed"
+    assert result["underlying_error_type"] == "timeout"
+    assert result["phase"] == "post_flash_reset"
+    assert result["flash_confirmed"] is True
+    assert result["reset_confirmed"] is False
+    assert result["completion_unconfirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_gdb_orphan_processes_block_completion_and_recover_via_stop(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    debug = GdbDebugSessions(config, "openocd", lambda: {"ok": True, "executable_path": "x"}, lambda *_: [], lambda _output: "unknown_debugger_error")
+    child = UnkillableChild()
+    debug.orphan_processes.append(("gdb", child))
+
+    assert debug.has_active_session() is True
+    blocked = debug.stop_session()
+    assert blocked["ok"] is False
+    assert blocked["error_type"] == "hardware_cleanup_failed"
+    with pytest.raises(RuntimeError, match="Unregistered debug child processes"):
+        debug.close()
+
+    child.alive = False
+    recovered = debug.stop_session()
+    assert recovered["ok"] is True
+    assert debug.has_active_session() is False
+
+
+def test_gdbmi_reader_start_failure_exposes_unreapable_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    child = UnkillableChild()
+    monkeypatch.setattr(
+        "agentic_hil.gdbmi.subprocess",
+        SimpleNamespace(Popen=lambda *_a, **_k: child, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+
+    class BoomThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("no threads")
+
+    monkeypatch.setattr("agentic_hil.gdbmi.threading", SimpleNamespace(Thread=BoomThread, Lock=threading.Lock, Event=threading.Event))
+
+    with pytest.raises(RuntimeError, match="no threads") as raised:
+        GdbMiClient("gdb", str(tmp_path))
+
+    assert raised.value._agentic_hil_orphan_child is child
+    assert getattr(raised.value, "_agentic_hil_completion_confirmed", False) is False
+
+
+def test_poisoned_service_nonhardware_calls_do_not_reload_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend(reset_error=KeyboardInterrupt())
+    service = AgenticHILToolService(config, backend=backend)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.call("reset_target", {"mode": "run"})
+
+    def boom(_tool: str):
+        raise AssertionError("a poisoned service must not reload project policy")
+
+    monkeypatch.setattr(service, "_reload_config", boom)
+
+    blocked = service.call("debugger_info")
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+    report = service.call("get_last_report")
+    assert report["error_type"] == "report_not_found"
+
+
+def test_poisoned_cleanup_cannot_cross_incident_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    backend = OperationBackend(reset_error=KeyboardInterrupt())
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+    with pytest.raises(KeyboardInterrupt):
+        service.call("reset_target", {"mode": "run"})
+    first_id = hardware_status(config.config_path)["quarantine_id"]
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first_id), force_live_owner=True)["ok"] is True
+    other_lock = ProjectHardwareLock(config.config_path)
+    assert other_lock.acquire(source="second_incident") is True
+    second = other_lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+
+    stale = service.call("com_session_stop", {"port_id": "dut"})
+    assert stale["error_type"] == "hardware_state_unconfirmed"
+    assert hardware_status(config.config_path)["quarantine_id"] == second["quarantine_id"]
+
+    monkeypatch.setattr(service._hardware_lock, "quarantine_info", lambda: {"quarantine_id": service._incident_id})
+    changed = service.call("com_session_stop", {"port_id": "dut"})
+    assert changed["error_type"] == "incident_changed"
+    assert hardware_status(config.config_path)["quarantine_id"] == second["quarantine_id"]
+
+
+def test_cleanup_tool_succeeds_after_config_becomes_invalid(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = AgenticHILToolService(config)
+    serial_handle = IdleSerialHandle()
+    log_path = tmp_path / ".agentic-hil" / "logs" / "cleanup-config.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    service.com_ports.sessions["dut"] = ComPortSession("dut", config.com_ports["dut"], serial_handle, str(log_path), start_reader=False)
+    Path(config.config_path).write_text("::: not yaml", encoding="utf-8")
+
+    stopped = service.call("com_session_stop", {"port_id": "dut"})
+    started = service.call("com_session_start", {"port_id": "dut"})
+
+    assert stopped["ok"] is True, stopped
+    assert serial_handle.is_open is False
+    assert started["ok"] is False
+    assert started["error_type"] == "config_invalid"
+    service.close()
+
+
+def test_post_recovery_new_inspection_failure_creates_new_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config, adapters=InspectionOnlySubsystem(), reload_config=False)
+    assert service.call("probe_target")["error_type"] == "hardware_state_unconfirmed"
+    first_id = hardware_status(config.config_path)["quarantine_id"]
+    assert hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(first_id), force_live_owner=True)["ok"] is True
+
+    monkeypatch.setattr(service.backend, "has_active_session", lambda: (_ for _ in ()).throw(RuntimeError("state inspection failed")))
+    service.close()
+
+    status = hardware_status(config.config_path)
+    assert status["hardware_state_unconfirmed"] is True
+    assert status["quarantine_id"] != first_id
+
+
+def test_artifact_staging_requires_regular_file_and_size_limit(tmp_path: Path) -> None:
+    from dataclasses import replace as dataclass_replace
+
+    config = load_test_config(tmp_path)
+    limited = dataclass_replace(config, artifacts=dataclass_replace(config.artifacts, max_local_artifact_size_mb=1))
+    manager = ArtifactManager(limited)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+
+    (build / "dir.elf").mkdir()
+    directory_result = manager.validate_local_path("build/dir.elf")
+    assert directory_result["ok"] is False
+    assert directory_result["validation"]["regular_file"] is False
+
+    big = build / "big.elf"
+    big.write_bytes(b"\x7fELF" + b"\x00" * (2 * 1024 * 1024))
+    oversize = manager.validate_local_path("build/big.elf")
+    assert oversize["ok"] is False
+    assert oversize["error_type"] == "artifact_staging_failed"
+    assert "max_local_artifact_size_mb" in str(oversize["backend_error"])
+
+    good = build / "app.elf"
+    good.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    assert manager.validate_local_path("build/app.elf")["ok"] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="FIFOs are POSIX-only")
+def test_artifact_staging_rejects_fifo(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    os.mkfifo(build / "fifo.elf")
+
+    result = manager.validate_local_path("build/fifo.elf")
+
+    assert result["ok"] is False
+    assert result["validation"]["regular_file"] is False
+
+
+def test_normalize_received_frames_rejects_malformed_feedback() -> None:
+    bus = CanBusConfig(
+        adapter="process", channel="vcan0", bitrate=500000, fd=False, data_bitrate=None,
+        pcanbasic_dll=None, executable=None, args=[], timeout_s=1.0, poll_interval_ms=10,
+        receive_own_messages=False, listen_only=False, max_buffer_frames=16, max_frame_data_bytes=8,
+    )
+
+    assert normalize_received_frames("not-a-list", bus)["ok"] is False
+    assert normalize_received_frames(["not-a-dict"], bus)["ok"] is False
+    assert normalize_received_frames([{"id": 1, "extended": "false", "data_hex": "00"}], bus)["error_type"] == "can_adapter_invalid_response"
+    assert normalize_received_frames([{"id": 1, "rtr": 1, "data_hex": "00"}], bus)["ok"] is False
+    assert normalize_received_frames([{"id": 0x800, "data_hex": "00"}], bus)["ok"] is False
+    assert normalize_received_frames([{"id": 1, "data_hex": "zz"}], bus)["ok"] is False
+    assert normalize_received_frames([{"id": 1, "data_hex": "00" * 9}], bus)["ok"] is False
+
+    valid = normalize_received_frames([{"id": 1, "data_hex": "0011"}], bus)
+    assert valid["ok"] is True
+    assert valid["frames"][0]["dlc"] == 2
+
+
+def test_can_read_marks_malformed_bridge_feedback_unconfirmed(tmp_path: Path) -> None:
+    class GarbageFramesAdapter:
+        adapter_name = "process"
+        last_close_result = None
+
+        def status(self) -> dict:
+            return {"active": True}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": True, "frames": [{"id": 1, "extended": "false", "data_hex": "00"}]}
+
+        def close(self) -> None:
+            return None
+
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "garbage-can.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    can_buses.sessions["bench"] = CanBusSession("bench", config.can_buses["bench"], GarbageFramesAdapter(), str(log_path))
+    service = AgenticHILToolService(config, can_buses=can_buses, reload_config=False)
+
+    result = service.call("can_read", {"bus_id": "bench"})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "can_adapter_invalid_response"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+
+
+def test_hardware_status_and_recover_work_without_parsable_config(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="incident") is True
+    marker = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+    Path(config.config_path).write_text("::: not yaml", encoding="utf-8")
+
+    status = hardware_status(config.config_path)
+    assert status["quarantined"] is True
+    assert status["quarantine_id"] == marker["quarantine_id"]
+
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(marker["quarantine_id"]), force_live_owner=True)
+    assert recovered["ok"] is True
+    assert recovered["recovered"] is True
+    assert "report_note" in recovered
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_com_stdio_input_reader_error_stops_and_releases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class ExplodingStdin:
+        def read(self, size: int) -> bytes:
+            raise OSError("stdin dead")
+
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    serial_handle = IdleSerialHandle()
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial_handle))
+    errors = StringIO()
+
+    exit_code = run_com_stdio(config, "dut", input_stream=ExplodingStdin(), output_stream=StringIO(), error_stream=errors)
+
+    assert exit_code == 1
+    payload = json.loads(errors.getvalue())
+    assert payload["error_type"] == "stdin_read_failed"
+    assert serial_handle.is_open is False
+    second_lock = ProjectHardwareLock(config.config_path)
+    assert second_lock.acquire() is True
+    second_lock.confirm_safe_and_release()
+
+
+def test_mcp_shutdown_audit_only_cleanup_is_reported_as_audit_write_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    errors = StringIO()
+
+    class AuditOnlyCleanupService:
+        def __init__(self, _config) -> None:
+            pass
+
+        def close(self) -> None:
+            raise HardwareCleanupError([("com", AuditWriteError("stop log", None, "confirmed"))])
+
+        def hardware_state(self) -> dict:
+            return {"active": False, "active_resources": [], "inspection_errors": []}
+
+    monkeypatch.setattr("agentic_hil.stdio.AgenticHILToolService", AuditOnlyCleanupService)
+
+    assert run_stdio_server(config, input_stream=StringIO(""), output_stream=StringIO(), error_stream=errors) == 1
+
+    result = json.loads(errors.getvalue())
+    assert result["error_type"] == "audit_write_failed"
+    assert result["hardware_state_unconfirmed"] is False

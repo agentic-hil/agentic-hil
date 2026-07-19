@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import os
 import re
+import stat
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -73,6 +74,12 @@ class ArtifactManager:
 
         if not validation["exists"]:
             return self._validation_error("Firmware artifact does not exist and cannot be staged.", validation, "artifact_not_found")
+        try:
+            validation["regular_file"] = stat.S_ISREG(resolved.stat().st_mode)
+        except OSError:
+            validation["regular_file"] = False
+        if not validation["regular_file"]:
+            return self._validation_error("Firmware artifact must be a regular file.", validation)
         staged = self._stage_artifact(resolved)
         if not staged["ok"]:
             return staged
@@ -110,12 +117,15 @@ class ArtifactManager:
         temp_path = staging_directory / f"staging-{uuid.uuid4().hex}.tmp"
         digest = hashlib.sha256()
         size_bytes = 0
+        max_bytes = max(1, self.config.artifacts.max_local_artifact_size_mb) * 1024 * 1024
         try:
             staging_directory.mkdir(parents=True, exist_ok=True)
-            with source.open("rb") as source_handle, temp_path.open("xb") as staged_handle:
+            with open_regular_file(source) as source_handle, temp_path.open("xb") as staged_handle:
                 for chunk in iter(lambda: source_handle.read(SHA256_CHUNK_BYTES), b""):
                     digest.update(chunk)
                     size_bytes += len(chunk)
+                    if size_bytes > max_bytes:
+                        raise OSError(f"Firmware artifact exceeds artifacts.max_local_artifact_size_mb ({self.config.artifacts.max_local_artifact_size_mb} MB).")
                     staged_handle.write(chunk)
                 staged_handle.flush()
                 os.fsync(staged_handle.fileno())
@@ -295,6 +305,19 @@ class ArtifactManager:
 
 
 SHA256_CHUNK_BYTES = 1024 * 1024
+
+
+def open_regular_file(path: Path):
+    """Open for reading without blocking on special files and re-verify the file type on the open descriptor (TOCTOU)."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("Firmware artifact must be a regular file.")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return os.fdopen(descriptor, "rb")
 
 
 def sha256_file(file_path: Path) -> str:

@@ -811,3 +811,26 @@ tests:
 
     assert excinfo.value.error_type == "test_config_invalid"
     assert "duplicate key 'device'" in excinfo.value.details["backend_error"]
+
+
+class AuditOnlyCloseService(RecordingService):
+    def close(self) -> None:
+        from agentic_hil.report import AuditWriteError
+
+        self.closed = True
+        raise AuditWriteError("stop log", None, "confirmed")
+
+
+def test_reactor_audit_only_cleanup_failure_is_not_unsafe_state(tmp_path: Path) -> None:
+    config = load_config(str(multi_device_config(tmp_path)), str(tmp_path))
+    plan = load_test_config(str(serial_plan(tmp_path)), str(tmp_path))
+
+    result = Reactor(config, service_factory=lambda _: AuditOnlyCloseService(ConcurrencyTracker())).run(plan)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "audit_write_failed"
+    assert result.get("hardware_state_unconfirmed") is not True
+    assert "quarantine" not in result
+    lock = ProjectTestLock(config.config_path)
+    assert lock.acquire() is True
+    lock.confirm_safe_and_release()

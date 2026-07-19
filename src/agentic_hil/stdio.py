@@ -6,8 +6,7 @@ from typing import TextIO
 
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
-from agentic_hil.report import AuditWriteError
-from agentic_hil.tools import AgenticHILToolService, HardwareCleanupError
+from agentic_hil.tools import AgenticHILToolService, cleanup_error_is_audit_only
 from agentic_hil.types import AgenticHILConfig
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
@@ -95,14 +94,6 @@ def run_stdio_server(
             raise cleanup_error
         return 1
     return 0
-
-
-def cleanup_error_is_audit_only(error: BaseException) -> bool:
-    if isinstance(error, AuditWriteError):
-        return True
-    if isinstance(error, HardwareCleanupError):
-        return bool(error.errors) and all(isinstance(item, AuditWriteError) for _, item in error.errors)
-    return False
 
 
 def drain_oversized_line(input_stream: TextIO, limit: int) -> None:
