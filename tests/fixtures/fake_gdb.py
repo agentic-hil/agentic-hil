@@ -68,6 +68,7 @@ def main() -> int:
     emit('=thread-group-added,id="i1"')
     emit("(gdb)")
     next_breakpoint = 1
+    live_breakpoints: set[int] = set()
     reset_count = 0
     for raw_line in sys.stdin:
         match = COMMAND_PATTERN.match(raw_line.strip())
@@ -107,9 +108,18 @@ def main() -> int:
                 emit(f'{token}^error,msg="Reset failed"')
                 continue
             emit(f"{token}^done")
-        elif command.startswith(("-gdb-set", "-break-delete")):
+        elif command.startswith("-gdb-set"):
             emit(f"{token}^done")
+        elif command.startswith("-break-delete"):
+            for number_text in command[len("-break-delete") :].split():
+                if number_text.isdigit():
+                    live_breakpoints.discard(int(number_text))
+            emit(f"{token}^done")
+        elif command.startswith("-break-list"):
+            body = ",".join(f'bkpt={{number="{number}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}' for number in sorted(live_breakpoints))
+            emit(f'{token}^done,BreakpointTable={{nr_rows="{len(live_breakpoints)}",nr_cols="6",body=[{body}]}}')
         elif command.startswith("-break-insert"):
+            live_breakpoints.add(next_breakpoint)
             emit(f'{token}^done,bkpt={{number="{next_breakpoint}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}')
             next_breakpoint += 1
         elif command.startswith("-exec-continue"):

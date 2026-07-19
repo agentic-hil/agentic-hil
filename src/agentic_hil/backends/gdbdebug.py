@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from agentic_hil.config import ConfigError, display_path, safe_configured_directory, safe_write_text
+from agentic_hil.config import ConfigError, display_path, safe_configured_directory
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -24,6 +24,7 @@ from agentic_hil.report import (
     mark_side_effect,
     timestamp_for_filename,
     utc_now_iso,
+    write_audit_log,
     write_report,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -76,6 +77,22 @@ class GdbDebugSession:
         self.firmware_load_status = "not_started"
 
 
+class _AuditRefusedResponse:
+    """Failed-command view returned when the permanent audit latch refuses a new
+    MI command (executed=False) or invalidates one whose evidence write failed
+    right after execution (executed=True)."""
+
+    def __init__(self, error: Exception, original: object | None = None):
+        self.executed = original is not None and bool(getattr(original, "ok", False))
+        self.line = str(getattr(original, "line", "")) if original is not None else ""
+        self.records = list(getattr(original, "records", [])) if original is not None else []
+        self.result_class = "error"
+        self.timed_out = False
+        self.error_message = f"Debug audit write failed; further hardware commands are blocked: {error}"
+        self.ok = False
+        self.audit_failure = True
+
+
 class GdbDebugSessions:
     """Typed GDB/MI debug sessions against a gdbserver-providing debugger process (e.g. OpenOCD)."""
 
@@ -93,7 +110,9 @@ class GdbDebugSessions:
         self._build_server_args = build_server_args
         self._classify_server_output = classify_server_output
         self.session: GdbDebugSession | None = None
-        self._audit_error: Exception | None = None
+        # Permanent audit latch: once evidence persistence breaks, it stays
+        # broken for this service instance; it is never consumed by reporting.
+        self._audit_broken: Exception | None = None
 
     def start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
         tool = "debug_start_session"
@@ -104,6 +123,8 @@ class GdbDebugSessions:
         permission = self._start_permission(tool, mode)
         if not permission["ok"]:
             return self._report(permission)
+        if self._audit_broken is not None:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "audit_broken", "summary": "Debug audit evidence is broken; resolve the recorded incident before starting new sessions.", "cleanup_required": True, "quarantined": True, "side_effect_committed": False, "side_effect_status": "not_started"})
         resolved_server = self._resolve_server()
         if not resolved_server.get("ok"):
             return self._report({"tool": tool, **resolved_server})
@@ -256,7 +277,7 @@ class GdbDebugSessions:
         if session is not None and session.status == "cleanup_required":
             result.update({"cleanup_required": True, "hardware_state": "unknown", "quarantined": True})
         result.update(target_stop_fields(session.stop_reason if session else None))
-        return result
+        return self._status_report(result)
 
     def set_breakpoint(self, location: JsonObject | str) -> JsonObject:
         tool = "debug_set_breakpoint"
@@ -281,18 +302,33 @@ class GdbDebugSessions:
                 "summary": "File and line breakpoints require debug.allow_all_symbols.",
             })
         response = self._gdb_command(session, f"-break-insert {mi_string(normalized['gdb_location'])}")
-        if not response.ok:
-            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
-        breakpoint = {"id": session.next_breakpoint_id, "backend_id": mi_field(response.line, "number"), "location": normalized["location"], "gdb_location": normalized["gdb_location"]}
-        session.next_breakpoint_id += 1
-        session.breakpoints.append(breakpoint)
-        self._write_session_log(session)
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "breakpoint": breakpoint, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Breakpoint set."})
+        backend_id = mi_field(response.line, "number")
+        valid_backend_id = isinstance(backend_id, str) and backend_id.isdigit()
+        if response.ok and valid_backend_id:
+            breakpoint = {"id": session.next_breakpoint_id, "backend_id": backend_id, "location": normalized["location"], "gdb_location": normalized["gdb_location"]}
+            session.next_breakpoint_id += 1
+            session.breakpoints.append(breakpoint)
+            self._write_session_log(session)
+            if self._audit_broken is not None:
+                return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "audit_broken", "summary": "Breakpoint was set but its audit evidence could not be persisted.", "cleanup_required": True, "quarantined": True, "side_effect_committed": True, "side_effect_status": "unknown", "breakpoint": breakpoint, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+            return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "breakpoint": breakpoint, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Breakpoint set."})
+        # Lost ACK, unparsable backend ID, or post-execution audit break: the
+        # breakpoint may exist on the target, so it is tracked provisionally and
+        # only backend reconciliation may later prove it gone.
+        effect_unconfirmed = response.timed_out or bool(getattr(response, "executed", False)) or (response.ok and not valid_backend_id)
+        if effect_unconfirmed:
+            provisional = {"id": session.next_breakpoint_id, "backend_id": backend_id if valid_backend_id else None, "location": normalized["location"], "gdb_location": normalized["gdb_location"], "provisional": True}
+            session.next_breakpoint_id += 1
+            session.breakpoints.append(provisional)
+            self._write_session_log(session)
+            failure = {**self._gdb_failure(tool, session, response.error_message or "Breakpoint insert was not confirmed by the backend.", response.timed_out, response=response), "side_effect_status": "unknown", "cleanup_required": True, "provisional_breakpoint": provisional}
+            return self._report(failure)
+        return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
 
     def list_breakpoints(self) -> JsonObject:
         session = self.session
         active = session is not None and session.status != "stopped"
-        return {"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []}
+        return self._status_report({"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []})
 
     def clear_breakpoints(self) -> JsonObject:
         tool = "debug_clear_breakpoints"
@@ -300,16 +336,38 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
+        # Reconcile from the backend's authoritative list FIRST and delete only
+        # numbers GDB actually reports. Driving deletes from the local list would
+        # re-issue `-break-delete N` for an id GDB already removed after a lost
+        # ACK, and real GDB answers "No breakpoint number N", wedging every retry.
+        remaining = self._backend_breakpoint_numbers(session)
+        if remaining is None:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "breakpoint_reconciliation_failed", "summary": "Backend breakpoint list could not be read; cleanup remains unconfirmed.", "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
         cleared = 0
-        for breakpoint in list(session.breakpoints):
-            if breakpoint.get("backend_id"):
-                response = self._gdb_command(session, f"-break-delete {breakpoint['backend_id']}")
-                if not response.ok:
-                    return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
-            session.breakpoints.remove(breakpoint)
+        for number in remaining:
+            response = self._gdb_command(session, f"-break-delete {number}")
+            if not response.ok and not _is_missing_breakpoint_error(response):
+                return self._report({**self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response), "side_effect_status": "unknown", "cleanup_required": True})
             cleared += 1
+        confirm = self._backend_breakpoint_numbers(session)
+        if confirm is None or confirm:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "breakpoint_reconciliation_failed", "summary": "Backend still reports breakpoints after cleanup.", "remaining_backend_breakpoints": confirm, "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+        # The backend is authoritatively empty; only now is the local list safe
+        # to drop, including provisional entries whose ACK was lost.
+        session.breakpoints.clear()
         self._write_session_log(session)
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared."})
+        result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "backend_reconciled": True, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared and reconciled with the backend."}
+        if self._audit_broken is not None:
+            result.update({"ok": False, "error_type": "audit_broken", "cleanup_required": True, "quarantined": True})
+        return self._report(result)
+
+    def _backend_breakpoint_numbers(self, session: GdbDebugSession) -> list[str] | None:
+        response = self._gdb_command(session, "-break-list")
+        if not response.ok:
+            return None
+        # Only top-level breakpoint numbers; multi-location rows use N.M ids that
+        # the plain-integer capture deliberately skips.
+        return re.findall(r'number="(\d+)"', response.line)
 
     def continue_execution(self, timeout_s: float | None = None) -> JsonObject:
         tool = "debug_continue"
@@ -324,13 +382,18 @@ class GdbDebugSessions:
         session.status = "running"
         session.stop_reason = None
         response = self._gdb_command(session, "-exec-continue", min(timeout, CONTINUE_COMMAND_TIMEOUT_CAP_S))
-        if response.result_class not in {"running", "done"}:
+        # A post-execution audit break (executed=True) means the target is now
+        # running: fall through to the wait/interrupt containment below so it is
+        # not abandoned free-running. The broken audit is still reported by
+        # `_report`, and the lease quarantines on audit_ok=False.
+        audit_refused_running = bool(getattr(response, "audit_failure", False) and getattr(response, "executed", False))
+        if response.result_class not in {"running", "done"} and not audit_refused_running:
             session.status = "error"
-            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
+            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
         if stop.timed_out:
-            interrupt = self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s))
+            interrupt = self._gdb_command(session, "-exec-interrupt --all", min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s), containment=True)
             confirmed = session.gdb.wait_for_stop(min(CONTINUE_COMMAND_TIMEOUT_CAP_S, self.config.debugger.timeout_s)) if interrupt.ok else GdbMiStopResult(line="", reason="timeout", timed_out=True)
             halt_confirmed = not confirmed.timed_out and confirmed.reason != "debugger_error"
             if halt_confirmed:
@@ -361,9 +424,9 @@ class GdbDebugSessions:
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
-        response = self._gdb_command(session, "-exec-interrupt --all", timeout)
+        response = self._gdb_command(session, "-exec-interrupt --all", timeout, containment=True)
         if not response.ok:
-            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
+            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
@@ -385,10 +448,10 @@ class GdbDebugSessions:
         session = session_result["session"]
         self._refresh_session_stop(session)
         if session.stop_reason is None:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."}
+            return self._status_report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "stop_reason_not_available", "summary": "No stop reason has been recorded yet. Run debug_continue or debug_halt first."})
         result = {"ok": True, "tool": tool, "backend": self.backend_name, "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session)}
         result.update(target_stop_fields(session.stop_reason))
-        return result
+        return self._status_report(result)
 
     def symbol_info(self, symbol: str) -> JsonObject:
         tool = "debug_symbol_info"
@@ -480,30 +543,30 @@ class GdbDebugSessions:
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
-                return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out), **self._startup_effect_fields(session, response.timed_out)}
+                return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out)}
         session.load_phase = "target_connect_started"
         target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
         if not target.ok:
-            return {**self._gdb_failure("debug_start_session", session, target.error_message, target.timed_out), **self._startup_effect_fields(session, target.timed_out)}
+            return {**self._gdb_failure("debug_start_session", session, target.error_message, target.timed_out, response=target), **self._startup_effect_fields(session, target.timed_out)}
         session.load_phase = "target_connected"
         if session.mode != "attach":
             session.load_phase = "pre_load_reset_started"
             reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not reset.ok:
-                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out), **self._startup_effect_fields(session, reset.timed_out)}
+                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
             session.load_phase = "pre_load_reset_confirmed"
         if session.mode == "load":
             session.load_phase = "download_started"
             session.firmware_load_status = "partial_or_unknown"
             download = self._gdb_command(session, "-target-download", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not download.ok:
-                return {**self._gdb_failure("debug_start_session", session, download.error_message, download.timed_out), **self._startup_effect_fields(session, download.timed_out)}
+                return {**self._gdb_failure("debug_start_session", session, download.error_message, download.timed_out, response=download), **self._startup_effect_fields(session, download.timed_out)}
             session.load_phase = "download_confirmed"
             session.firmware_load_status = "committed"
             session.load_phase = "post_load_reset_started"
             reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not reset.ok:
-                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out), **self._startup_effect_fields(session, reset.timed_out)}
+                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
             session.load_phase = "post_load_reset_confirmed"
         return {"ok": True, "load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
 
@@ -524,16 +587,43 @@ class GdbDebugSessions:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first."}
         return {"ok": True, "session": session}
 
-    def _gdb_command(self, session: GdbDebugSession, command: str, timeout_s: float | None = None):
+    def _gdb_command(self, session: GdbDebugSession, command: str, timeout_s: float | None = None, *, containment: bool = False):
+        # Non-containment commands are refused before reaching the target once
+        # the audit latch is set; containment (halt/interrupt) stays available
+        # but never lifts the latch.
+        if self._audit_broken is not None and not containment:
+            return _AuditRefusedResponse(self._audit_broken)
         assert session.gdb is not None
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S) if timeout_s is None else timeout_s
         response = session.gdb.command(command, timeout)
         self._write_session_log(session)
         if not response.ok:
             session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "timeout" if response.timed_out else "error", "backend_error": response.error_message}
+            return response
+        if self._audit_broken is not None and not containment:
+            # The command executed but its evidence write failed: surface the
+            # audit break synchronously so no multi-command path continues.
+            return _AuditRefusedResponse(self._audit_broken, response)
         return response
 
-    def _gdb_failure(self, tool: str, session: GdbDebugSession, message: str | None, timed_out: bool) -> JsonObject:
+    def _gdb_failure(self, tool: str, session: GdbDebugSession, message: str | None, timed_out: bool, response: object | None = None) -> JsonObject:
+        if response is not None and getattr(response, "audit_failure", False):
+            executed = bool(getattr(response, "executed", False))
+            return {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "audit_broken",
+                "backend_error_type": "audit_write_failed",
+                "summary": message or "Debug audit write failed; further hardware commands are blocked.",
+                "cleanup_required": True,
+                "quarantined": True,
+                "side_effect_committed": executed,
+                "side_effect_status": "unknown" if executed else "not_started",
+                "retry_safe": False,
+                "session": self._session_status(session),
+                "log_path": display_path(self.config, session.log_path),
+            }
         error_type = "timeout" if timed_out else "debugger_error"
         backend_error_type = "gdb_timeout" if timed_out else "gdb_error"
         return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "backend_error_type": backend_error_type, "summary": message or "GDB/MI command failed.", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)}
@@ -707,13 +797,9 @@ class GdbDebugSessions:
             errors.append(("debug_server", error))
             if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                 interrupt = error
-        prior_audit_error = getattr(self, "_audit_error", None)
-        self._audit_error = None
         self._write_session_log(session)
-        cleanup_audit_error = self._audit_error or prior_audit_error
-        if cleanup_audit_error is not None:
-            self._audit_error = cleanup_audit_error
-            errors.append(("audit", cleanup_audit_error))
+        if self._audit_broken is not None:
+            errors.append(("audit", self._audit_broken))
         if interrupt is not None:
             interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors))
             raise interrupt
@@ -772,20 +858,37 @@ class GdbDebugSessions:
             "server_stdout_tail": session.server_stdout,
             "server_stderr_tail": session.server_stderr,
             "gdb_commands": session.gdb.history() if session.gdb else [],
+            "breakpoints": list(session.breakpoints),
             "load_phase": session.load_phase,
             "firmware_load_status": session.firmware_load_status,
         }
-        try:
-            safe_write_text(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
-        except (ConfigError, OSError) as error:
-            self._audit_error = error
+        error = write_audit_log(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
+        if error is not None:
+            self._audit_broken = error
 
     def _report(self, result: JsonObject) -> JsonObject:
         result = mark_side_effect(result)
-        if self._audit_error is not None:
-            result = mark_audit_failure(result, self._audit_error)
-            self._audit_error = None
+        if self._audit_broken is not None:
+            # The latch is deliberately not cleared: every later result keeps
+            # carrying the audit break until the incident is recovered.
+            result = mark_audit_failure(result, self._audit_broken)
         return write_report(self.config, result)
+
+    def _status_report(self, result: JsonObject) -> JsonObject:
+        """Read-only status paths share the audit gate: with a broken latch they
+        must fail closed and persist the evidence instead of returning ok."""
+        if self._audit_broken is None:
+            return result
+        return self._report({**result, "ok": False, "error_type": "audit_broken", "cleanup_required": True, "quarantined": True})
+
+
+def _is_missing_breakpoint_error(response: object) -> bool:
+    """A `-break-delete N` that fails because GDB already removed N (e.g. after a
+    lost ACK) is proof of deletion, not a cleanup failure."""
+    if getattr(response, "audit_failure", False) or getattr(response, "timed_out", False):
+        return False
+    message = (getattr(response, "error_message", "") or "").lower()
+    return "no breakpoint number" in message
 
 
 def public_artifact(artifact: JsonObject) -> JsonObject:
