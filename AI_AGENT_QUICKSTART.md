@@ -1,6 +1,6 @@
 # AI Agent Quickstart
 
-Use Agentic Hardware-in-the-Loop (Agentic HIL) as the local MCP server for embedded firmware development and embedded hardware actions. HardCI adapters are the reference hardware.
+Use Agentic Hardware-in-the-Loop (Agentic HIL) as the local MCP server for embedded firmware development and embedded hardware actions. An STM32 Nucleo-F446RE with on-board ST-Link and OpenOCD is the reference hardware.
 
 This file is for agents. Humans should start with `README.md` and use `TROUBLESHOOTING.md` for operator-facing diagnostics.
 

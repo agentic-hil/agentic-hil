@@ -39,7 +39,7 @@ The primary risks are:
 - Every frontend acquires service-owned, cross-process leases for the project and each physical resource before backend effects. Lease records contain random owner tokens, PID/start metadata, config identity, and resource keys. Live leases cannot be stolen; stale or uncertain leases become quarantined.
 - Process-bridge protocol v2 requires `ok: true` and `safe_state_confirmed: true`; bridge process reap is verified separately. Both conditions plus intact audit state are required before ownership is released.
 - Canonical reports and lease records live under the user state root, namespaced by config and workspace identity. Workspace report files are untrusted write-only views.
-- Tool input schemas are enforced before dispatch, non-finite numbers are rejected, and composite success requires `ok: true`, `target_ok` not false, and `audit_ok` not false.
+- Tool input schemas are enforced before dispatch, non-finite numbers are rejected, and composite success requires `ok: true`; `target_ok`, `audit_ok`, and `cleanup_ok` not false; `cleanup_required` and `quarantined` not true; `lease_state` neither `cleanup_required` nor `quarantined`; `side_effect_status` neither `unknown` nor `partial`; and `hardware_state` not `unknown`.
 - Config, report/log, and artifact paths use nonblocking special-file-resistant opens. Artifact size, digest, and format checks use one verified descriptor before private staging.
 
 ## Cryptography Scope

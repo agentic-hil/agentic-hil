@@ -8,11 +8,11 @@ This repository uses file-based controls for dependency monitoring and release i
 - CI runs ruff and the full test suite across Linux/macOS/Windows and Python 3.10–3.13; a single `Required CI` gate aggregates the matrix for branch protection.
 - Configuration and permission bypasses are treated as security vulnerabilities (see `SECURITY.md`).
 
-Recommended additions as the project grows:
+Additional controls already in place:
 
-- `.github/CODEOWNERS` routing ownership to the maintainer.
-- CodeQL scanning for Python.
-- Dependency Review on pull requests and an OSSF Scorecard workflow.
+- `.github/CODEOWNERS` routes ownership to the maintainer.
+- CodeQL scans Python on pushes and pull requests.
+- Dependency Review runs on pull requests and an OSSF Scorecard workflow runs on the default branch.
 
 ## Branch Protection
 

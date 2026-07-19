@@ -49,7 +49,7 @@ Likely cause: the automatically discovered config is missing, a legacy `.agentic
 
 Fix: run `agentic-hil init` for new projects, or `agentic-hil migrate-config --from .agentic-hil/config.yaml` for 0.2.3 projects. Review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
-## 3. `config_required` / Workspace Binding Failure
+## 3. `config_invalid` / Workspace Binding Failure
 
 Symptom: `mcp-stdio` exits before serving tools with one of these `error_type` values.
 

@@ -1,6 +1,6 @@
 # Agentic HIL
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server that gives AI agents safe, permission-gated access to real embedded hardware: flashing, serial, and CAN. HardCI adapters are the reference hardware.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server that gives AI agents safe, permission-gated access to real embedded hardware: flashing, serial, and CAN. An STM32 Nucleo-F446RE with on-board ST-Link and OpenOCD is the reference hardware.
 
 Canonical setup request: `Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.`
 

@@ -43,6 +43,14 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["function"],
+          "properties": {
+            "function": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["file", "line"],
           "properties": {
             "file": { "type": "string", "pattern": "^[A-Za-z0-9_./\\\\-]+$" },
