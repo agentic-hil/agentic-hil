@@ -94,7 +94,10 @@ class CanBusService:
             self._stop_session(existing, "restart")
             self.sessions.pop(bus_id, None)
         bus_config = bus["bus_config"]
-        log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
+        except OSError as error:
+            return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "log_directory_unavailable", "summary": "Configured logs directory could not be created; no CAN session was started.", "backend_error": str(error)})
         provisional: CanBusSession | None = None
 
         def register_provisional(adapter_session: ProcessCanAdapterSession) -> None:
@@ -147,7 +150,12 @@ class CanBusService:
                     try:
                         self._stop_session(session, "queue_clear_failed")
                     except BaseException as cleanup_error:
-                        result.update({"completion_unconfirmed": True, "hardware_state_unconfirmed": True, "cleanup_error": str(cleanup_error)})
+                        if session.close_confirmed:
+                            self.sessions.pop(bus_id, None)
+                            result["completion_confirmed"] = True
+                            result["cleanup_error"] = str(cleanup_error)
+                        else:
+                            result.update({"completion_unconfirmed": True, "hardware_state_unconfirmed": True, "cleanup_error": str(cleanup_error)})
                         if not isinstance(cleanup_error, Exception):
                             raise
                     else:
@@ -359,6 +367,11 @@ class CanBusService:
         return True
 
     def _stop_session(self, session: CanBusSession, reason: str) -> None:
+        if session.close_confirmed:
+            # The physical close was already confirmed (a later audit append may
+            # have failed); re-driving a dead adapter would fabricate an unsafe
+            # state out of a bookkeeping tombstone.
+            return
         session.active = False
         try:
             close_result = session.adapter_session.close()
@@ -493,11 +506,12 @@ def open_python_can_adapter(
         bus = can.Bus(**bus_options)
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
+    session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.fd, bus_config.fd and bus_config.data_bitrate is not None)
     try:
-        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.fd, bus_config.fd and bus_config.data_bitrate is not None)
         if on_started is not None:
             on_started(session)
     except BaseException as error:
+        session.active = False
         try:
             shutdown = getattr(bus, "shutdown", None)
             if callable(shutdown):
@@ -539,9 +553,10 @@ def open_process_adapter(
     except OSError as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error)}
     try:
-        session = ProcessCanAdapterSession(child)
-    except BaseException:
-        reap_unmanaged_child(child)
+        session = ProcessCanAdapterSession(child, close_timeout_s=bus_config.timeout_s)
+    except BaseException as error:
+        if reap_unmanaged_child(child):
+            error._agentic_hil_completion_confirmed = True
         raise
     try:
         if on_started is not None:

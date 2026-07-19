@@ -26,7 +26,7 @@
         "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
         "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },
         "flash_address": { "type": ["string", "null"], "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$", "default": null },
-        "timeout_s": { "type": "number", "default": 60.0 }
+        "timeout_s": { "type": "number", "exclusiveMinimum": 0, "default": 60.0 }
       }
     },
     "debuggers": {
@@ -50,7 +50,7 @@
           "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
           "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },
           "flash_address": { "type": ["string", "null"], "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$", "default": null },
-          "timeout_s": { "type": "number", "default": 60.0 }
+          "timeout_s": { "type": "number", "exclusiveMinimum": 0, "default": 60.0 }
         }
       },
       "default": {}
@@ -158,7 +158,7 @@
           "receive_own_messages": { "type": "boolean", "default": false },
           "listen_only": { "type": "boolean", "default": false },
           "max_buffer_frames": { "type": "integer", "minimum": 1, "default": 1024 },
-          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 }
+          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "description": "Defaults to 8 on classic CAN buses and 64 on CAN FD buses." }
         }
       },
       "default": {}

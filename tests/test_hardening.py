@@ -921,7 +921,7 @@ def test_malformed_hardware_result_stays_quarantined(tmp_path: Path) -> None:
     config = load_test_config(tmp_path)
     service = AgenticHILToolService(config, backend=MalformedResultBackend(), reload_config=False)
 
-    with pytest.raises(TypeError, match="non-object"):
+    with pytest.raises(RuntimeError, match="non-object"):
         service.call("reset_target", {"mode": "run"})
 
     assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
@@ -1194,7 +1194,7 @@ def test_adapter_open_failure_reflects_cleanup_confirmation(tmp_path: Path, monk
     bridge = OpenFailingBridge(safe_close)
     monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
     monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: FakeChild())
-    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: bridge)
+    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_args, **_kwargs: bridge)
     service = AgenticHILToolService(config, reload_config=False)
 
     result = service.call("adapter_session_start", {"adapter_id": "ntc"})
@@ -1212,7 +1212,7 @@ def test_process_can_open_failure_reflects_cleanup_confirmation(tmp_path: Path, 
     bridge = OpenFailingBridge(safe_close)
     monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
     monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: FakeChild())
-    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: bridge)
+    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_args, **_kwargs: bridge)
     service = AgenticHILToolService(config, reload_config=False)
 
     result = service.call("can_session_start", {"bus_id": "bench"})
@@ -1231,13 +1231,13 @@ def test_bridge_open_failure_with_safe_close_exception_releases_lease(tmp_path: 
         config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
         monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
         monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: FakeChild())
-        monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: bridge)
+        monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_args, **_kwargs: bridge)
         tool, arguments = "adapter_session_start", {"adapter_id": "ntc"}
     else:
         config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
         monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
         monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: FakeChild())
-        monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: bridge)
+        monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_args, **_kwargs: bridge)
         tool, arguments = "can_session_start", {"bus_id": "bench"}
     service = AgenticHILToolService(config, reload_config=False)
 
@@ -1247,34 +1247,36 @@ def test_bridge_open_failure_with_safe_close_exception_releases_lease(tmp_path: 
     assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
-def test_adapter_bridge_constructor_interrupt_reaps_child_and_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adapter_bridge_constructor_interrupt_reaps_child_without_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A confirmed-reaped child from a failed constructor is a proven-safe state, like the gdb ledger paths."""
     config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
     child = FakeChild()
     monkeypatch.setattr("agentic_hil.adapters.resolve_work_path", lambda *_: sys.executable)
     monkeypatch.setattr("agentic_hil.adapters.subprocess.Popen", lambda *args, **kwargs: child)
-    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr("agentic_hil.adapters.AdapterBridgeSession", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
     service = AgenticHILToolService(config, reload_config=False)
 
     with pytest.raises(KeyboardInterrupt):
         service.call("adapter_session_start", {"adapter_id": "ntc"})
 
     assert child.terminated is True
-    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
-def test_process_can_constructor_interrupt_reaps_child_and_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_can_constructor_interrupt_reaps_child_without_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A confirmed-reaped child from a failed constructor is a proven-safe state, like the gdb ledger paths."""
     config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
     child = FakeChild()
     monkeypatch.setattr("agentic_hil.can.resolve_work_path", lambda *_: sys.executable)
     monkeypatch.setattr("agentic_hil.can.subprocess.Popen", lambda *args, **kwargs: child)
-    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr("agentic_hil.can.ProcessCanAdapterSession", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
     service = AgenticHILToolService(config, reload_config=False)
 
     with pytest.raises(KeyboardInterrupt):
         service.call("can_session_start", {"bus_id": "bench"})
 
     assert child.terminated is True
-    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_python_can_registration_interrupt_closes_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2068,3 +2070,163 @@ def test_gdbmi_attribute_failure_after_spawn_reaps_or_ledgers_child(tmp_path: Pa
         GdbMiClient("gdb", str(tmp_path))
     assert reaped.value._agentic_hil_completion_confirmed is True
     assert getattr(reaped.value, "_agentic_hil_orphan_child", None) is None
+
+
+def test_quarantine_release_frees_lock_even_when_marker_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    monkeypatch.setattr(lock, "_write_state", lambda *_: (_ for _ in ()).throw(HardwareLockError("disk full")))
+
+    with pytest.raises(HardwareLockError):
+        lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+
+    assert lock.handle is None, "the OS lock must be released even when the quarantine marker cannot be written"
+    recovery = ProjectHardwareLock(config.config_path)
+    assert recovery.acquire(recovery=True, source="recovery") is True
+    recovery.release_os_lock()
+
+
+def test_lease_reconcile_failure_returns_structured_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+    monkeypatch.setattr(service._hardware_lock, "confirm_safe_and_release", lambda: (_ for _ in ()).throw(HardwareLockError("unlink denied")))
+
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "hardware_state_unconfirmed"
+    assert result["operation_result"]["ok"] is True
+    blocked = service.call("probe_target")
+    assert blocked["error_type"] == "hardware_state_unconfirmed"
+
+
+def test_lease_bookkeeping_failure_before_operation_does_not_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    backend = OperationBackend()
+    service = AgenticHILToolService(config, backend=backend, reload_config=False)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(service._hardware_lock, "update_active_state", lambda **_: (_ for _ in ()).throw(HardwareLockError("marker busy")))
+        result = service.call("probe_target")
+
+    assert result["error_type"] == "hardware_lock_failed"
+    assert backend.probe_calls == 0, "the operation must not run when its lease bookkeeping fails"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+    assert service.call("probe_target")["ok"] is True
+
+
+def test_stop_session_is_idempotent_after_confirmed_close(tmp_path: Path) -> None:
+    class ForbiddenBridge:
+        adapter_name = "process"
+        last_close_result = None
+
+        def status(self) -> dict:
+            return {"active": False}
+
+        def close(self):
+            raise AssertionError("a confirmed-closed session must never re-drive its bridge")
+
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    can_buses = CanBusService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "tombstone.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = CanBusSession("bench", config.can_buses["bench"], ForbiddenBridge(), str(log_path))
+    session.close_confirmed = True
+    can_buses.sessions["bench"] = session
+
+    can_buses._stop_session(session, "restart")
+
+    from dataclasses import replace as dataclass_replace
+
+    revoked = dataclass_replace(config, permissions=dataclass_replace(config.permissions, allow_can_read=False, allow_can_write=False))
+    can_buses.reconfigure(revoked)
+    assert "bench" not in can_buses.sessions
+
+
+def test_adapter_stop_session_is_idempotent_after_confirmed_close(tmp_path: Path) -> None:
+    class ForbiddenBridge:
+        last_close_result = None
+
+        def status(self) -> dict:
+            return {"active": False}
+
+        def close(self):
+            raise AssertionError("a confirmed-closed session must never re-drive its bridge")
+
+    config = load_test_config(tmp_path, adapters_yaml=ADAPTER_YAML)
+    adapters = AdapterService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "adapter-tombstone.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = AdapterSession("ntc", config.adapters["ntc"], ForbiddenBridge(), str(log_path))
+    session.close_confirmed = True
+    adapters.sessions["ntc"] = session
+
+    adapters._stop_session(session, "restart")
+
+
+def test_session_start_reports_unavailable_log_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML)
+    service = AgenticHILToolService(config, reload_config=False)
+    monkeypatch.setattr("agentic_hil.can.logs_directory", lambda *_: (_ for _ in ()).throw(OSError("access denied")))
+
+    result = service.call("can_session_start", {"bus_id": "bench"})
+
+    assert result["error_type"] == "log_directory_unavailable"
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_output_path_mkdir_failure_is_structured(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    (build / "blocker").write_bytes(b"not a directory")
+
+    result = manager.validate_output_path("build/blocker/dump.hex", "debug_dump_symbol_ihex")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "output_validation_failed"
+    assert "backend_error" in result
+
+
+def test_uploaded_artifact_id_content_mismatch_is_rejected(tmp_path: Path) -> None:
+    import base64
+
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    uploaded = manager.upload({"filename": "app.bin", "data_base64": base64.b64encode(b"\x01\x02\x03\x04").decode()})
+    assert uploaded["ok"] is True, uploaded
+    artifact_id = uploaded["artifact_id"]
+    stored = Path(config.work_dir) / ".agentic-hil" / "artifacts" / artifact_id
+    stored.write_bytes(b"\x09\x09\x09\x09")
+
+    result = manager.resolve_artifact_id(artifact_id)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "artifact_validation_failed"
+    assert "sha256" in result
+
+
+def test_rejected_artifact_does_not_keep_a_staged_copy(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path)
+    manager = ArtifactManager(config)
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    bad = build / "bad.elf"
+    bad.write_bytes(b"NOPE-not-an-elf")
+
+    result = manager.validate_local_path("build/bad.elf")
+
+    assert result["ok"] is False
+    staging = tmp_path / ".agentic-hil" / "artifacts"
+    leftovers = [item for item in staging.rglob("*") if item.is_file()] if staging.exists() else []
+    assert leftovers == [], "a rejected artifact must not accumulate staged copies"
+
+
+def test_bridge_close_uses_configured_timeout() -> None:
+    child = SimpleNamespace(stdout=[], stderr=[], stdin=None, poll=lambda: 0)
+    session = ProcessBridgeSession(child, close_timeout_s=7.5)
+    assert session.close_timeout_s == 7.5
+    clamped = ProcessBridgeSession(child, close_timeout_s=0.2)
+    assert clamped.close_timeout_s == 1.0

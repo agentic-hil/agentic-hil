@@ -67,7 +67,10 @@ class AdapterService:
         if existing:
             self._stop_session(existing, "restart")
             self.sessions.pop(adapter_id, None)
-        log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"adapter-{timestamp_for_filename()}-{safe_filename(adapter_id, 'adapter')}.jsonl")
+        except OSError as error:
+            return self._write_report({"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "log_directory_unavailable", "summary": "Configured logs directory could not be created; no adapter session was started.", "backend_error": str(error)})
         provisional: AdapterSession | None = None
 
         def register_provisional(bridge: AdapterBridgeSession) -> None:
@@ -354,6 +357,11 @@ class AdapterService:
         return True
 
     def _stop_session(self, session: AdapterSession, reason: str) -> None:
+        if session.close_confirmed:
+            # The physical close was already confirmed (a later audit append may
+            # have failed); re-driving a dead bridge would fabricate an unsafe
+            # state out of a bookkeeping tombstone.
+            return
         session.active = False
         try:
             close_result = session.bridge.close()
@@ -402,9 +410,10 @@ def open_adapter_bridge(
     except OSError as error:
         return {"ok": False, "tool": "adapter_session_start", "adapter_id": adapter_id, "error_type": "adapter_bridge_process_start_failed", "summary": "Test adapter bridge process could not be started.", "backend_error": str(error)}
     try:
-        session = AdapterBridgeSession(child)
-    except BaseException:
-        reap_unmanaged_child(child)
+        session = AdapterBridgeSession(child, close_timeout_s=adapter_config.timeout_s)
+    except BaseException as error:
+        if reap_unmanaged_child(child):
+            error._agentic_hil_completion_confirmed = True
         raise
     try:
         if on_started is not None:

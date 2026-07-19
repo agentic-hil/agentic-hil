@@ -237,7 +237,7 @@ Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN
 
 The lease is project-scoped by configuration path. Two projects that name the same physical probe, COM port, CAN channel, or adapter do not share a global resource lock; operators must avoid concurrent access across projects. Two further known limits: JSONL event logs are flushed but not fsynced per event, so a host crash can lose the final buffered log lines (the state marker and reports are written atomically and fsynced), and bridge cleanup terminates the direct child process only — bridge executables must not detach their own worker processes.
 
-`hardware-status` and `hardware-recover` intentionally do not parse the project policy file: they resolve the marker from the configuration path alone, so an operator can always inspect and recover an incident even when the config that caused it is invalid or deleted. Session-stop tools likewise skip the policy reload, so an active session can always be shut down safely under the last validated policy.
+`hardware-status` and `hardware-recover` resolve the marker from the configuration path alone, so an operator can always inspect and recover an incident even when the config that caused it is invalid or deleted (`hardware-recover` still tries to parse the config, but only to pick the audit-report destination; on failure the recovery audit goes to the user state directory instead). Session-stop tools likewise skip the policy reload, so an active session can always be shut down safely under the last validated policy.
 
 ## pytest Plugin
 

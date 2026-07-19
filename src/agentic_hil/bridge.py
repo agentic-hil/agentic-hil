@@ -51,13 +51,16 @@ class ProcessBridgeSession:
     error_prefix = "bridge"
     bridge_label = "Bridge"
 
-    def __init__(self, child: subprocess.Popen[str]):
+    def __init__(self, child: subprocess.Popen[str], close_timeout_s: float = 5.0):
         self.child = child
         self.pending: dict[int, queue.Queue[JsonObject]] = {}
         self.next_request_id = 1
         self.lock = threading.Lock()
         self.closed = False
         self.stderr = ""
+        # A bridge may need real time to drive outputs into a physical safe
+        # state; killing it after a fixed short window would abort mid-sequence.
+        self.close_timeout_s = max(1.0, close_timeout_s)
         self.last_close_result: BridgeCloseResult | None = None
         threading.Thread(target=self._stdout_reader, daemon=True).start()
         threading.Thread(target=self._stderr_reader, daemon=True).start()
@@ -66,7 +69,7 @@ class ProcessBridgeSession:
         close_response: JsonObject | None = None
         pending_base_exception: BaseException | None = None
         try:
-            close_response = self.request("close", {}, 1)
+            close_response = self.request("close", {}, self.close_timeout_s)
         except BaseException as error:
             pending_base_exception = error
         process_reaped, errors, reap_base_exception = self._reap_child()

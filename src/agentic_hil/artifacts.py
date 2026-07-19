@@ -95,6 +95,9 @@ class ArtifactManager:
             key for key in ["elf_header", "hex_parseable", "bin_size_plausible"] if validation.get(key) is False
         ]
         if failed_plausibility:
+            if staged.get("newly_staged"):
+                with suppress(OSError):
+                    staged_path.unlink()
             return self._validation_error("Firmware artifact failed basic format plausibility checks.", validation)
 
         return {
@@ -133,13 +136,17 @@ class ArtifactManager:
             content_directory = staging_directory / sha256
             staged_name = safe_filename(source.stem, "artifact") + source.suffix.lower()
             staged_path = content_directory / staged_name
-            if staged_path.exists() and sha256_file(staged_path) == sha256 and staged_path.stat().st_size == size_bytes:
+            newly_staged = False
+            existing = existing_staged_copy(content_directory, staged_path, sha256, size_bytes)
+            if existing is not None:
+                staged_path = existing
                 temp_path.unlink()
             else:
                 content_directory.mkdir(parents=True, exist_ok=True)
                 os.replace(temp_path, staged_path)
                 fsync_directory(content_directory)
-            return {"ok": True, "resolved_path": str(staged_path), "sha256": sha256, "size_bytes": size_bytes}
+                newly_staged = True
+            return {"ok": True, "resolved_path": str(staged_path), "sha256": sha256, "size_bytes": size_bytes, "newly_staged": newly_staged}
         except OSError as error:
             with suppress(OSError):
                 temp_path.unlink()
@@ -150,6 +157,10 @@ class ArtifactManager:
                 "summary": "Firmware artifact could not be copied into immutable content-addressed staging.",
                 "backend_error": str(error),
             }
+        except BaseException:
+            with suppress(OSError):
+                temp_path.unlink()
+            raise
 
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
@@ -184,6 +195,15 @@ class ArtifactManager:
             validation["tool"] = tool
             return validation
         artifact = validation["artifact"]
+        if artifact_id.split(".")[0] != artifact.get("sha256"):
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "artifact_validation_failed",
+                "summary": "Uploaded artifact content does not match the sha256 in its artifact_id.",
+                "artifact_id": artifact_id,
+                "sha256": artifact.get("sha256"),
+            }
         artifact["source"] = "upload"
         artifact["artifact_id"] = artifact_id
         return {"ok": True, "artifact": artifact, "validation": validation["validation"]}
@@ -202,7 +222,12 @@ class ArtifactManager:
             return self._output_validation_error(tool, "Output path is outside allowed artifact roots.", validation)
         if not validation["allowed_extension"]:
             return self._output_validation_error(tool, "Output path extension is not allowed for this debug dump.", validation)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            failure = self._output_validation_error(tool, "Output directory could not be created.", validation)
+            failure["backend_error"] = str(error)
+            return failure
         return {
             "ok": True,
             "output": {"path": display_path(self.config, output_path), "resolved_path": str(resolved)},
@@ -236,9 +261,25 @@ class ArtifactManager:
         digest = hashlib.sha256(data).hexdigest()
         artifact_id = f"{digest}{Path(filename).suffix.lower()}"
         upload_directory = Path(resolve_work_path(self.config, self.config.artifacts.upload_directory))
-        upload_directory.mkdir(parents=True, exist_ok=True)
         stored_path = upload_directory / artifact_id
-        stored_path.write_bytes(data)
+        try:
+            upload_directory.mkdir(parents=True, exist_ok=True)
+            temp_path = upload_directory / f"upload-{uuid.uuid4().hex}.tmp"
+            try:
+                temp_path.write_bytes(data)
+                os.replace(temp_path, stored_path)
+            except BaseException:
+                with suppress(OSError):
+                    temp_path.unlink()
+                raise
+        except OSError as error:
+            return {
+                "ok": False,
+                "tool": "artifact_upload",
+                "error_type": "artifact_staging_failed",
+                "summary": "Uploaded artifact could not be stored.",
+                "backend_error": str(error),
+            }
 
         validation = self.validate_local_path(str(stored_path))
         if not validation["ok"]:
@@ -305,6 +346,20 @@ class ArtifactManager:
 
 
 SHA256_CHUNK_BYTES = 1024 * 1024
+
+
+def existing_staged_copy(content_directory: Path, preferred_path: Path, sha256: str, size_bytes: int) -> Path | None:
+    """Return an already-staged copy of this content (any basename) so identical content is never stored twice."""
+    candidates = [preferred_path]
+    if content_directory.is_dir():
+        candidates.extend(sorted(item for item in content_directory.iterdir() if item.is_file()))
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and candidate.stat().st_size == size_bytes and sha256_file(candidate) == sha256:
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def open_regular_file(path: Path):

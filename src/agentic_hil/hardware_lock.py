@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import threading
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -75,13 +76,21 @@ class ProjectHardwareLock:
                 raise HardwareLockError("Hardware lock mode cannot change while held.")
             return True
         self.owner_token = uuid.uuid4().hex
-        with self._owners_guard:
-            if str(self.path) in self._owners:
-                return False
-            self._owners[str(self.path)] = self.owner_token
         try:
+            with self._owners_guard:
+                if str(self.path) in self._owners:
+                    return False
+                self._owners[str(self.path)] = self.owner_token
             self._open_handle()
-            if not self._acquire_os_lock():
+            # A hardware-status probe momentarily takes the exclusive lock;
+            # retry briefly so a read-only poll cannot bounce a real acquire.
+            acquired_os = self._acquire_os_lock()
+            for _ in range(2):
+                if acquired_os:
+                    break
+                time.sleep(0.025)
+                acquired_os = self._acquire_os_lock()
+            if not acquired_os:
                 self._close_handle()
                 self._clear_owner_reservation()
                 return False
@@ -151,8 +160,14 @@ class ProjectHardwareLock:
         inspection_errors: list[JsonObject],
     ) -> JsonObject:
         with self._instance_guard:
-            marker = self.mark_quarantined(reason=reason, source=source, active_resources=active_resources, inspection_errors=inspection_errors)
-            self._release_os_lock()
+            # Release the OS lock even when the quarantine marker cannot be
+            # written: the previous "active" marker stays on disk, so the next
+            # acquire (including hardware-recover from another process) still
+            # fails closed. Keeping the lock would dead-end recovery instead.
+            try:
+                marker = self.mark_quarantined(reason=reason, source=source, active_resources=active_resources, inspection_errors=inspection_errors)
+            finally:
+                self._release_os_lock()
             return marker
 
     def status(self) -> JsonObject:
@@ -332,7 +347,7 @@ class ProjectHardwareLock:
                 os.fsync(handle.fileno())
             if os.name != "nt":
                 temp_path.chmod(0o600)
-            os.replace(temp_path, self.state_path)
+            _replace_with_sharing_retry(os.replace, temp_path, self.state_path)
             fsync_directory(self.state_path.parent)
         except (OSError, TypeError, ValueError) as error:
             with suppress(OSError):
@@ -341,7 +356,7 @@ class ProjectHardwareLock:
 
     def _delete_state(self) -> None:
         try:
-            self.state_path.unlink()
+            _replace_with_sharing_retry(os.unlink, self.state_path)
             fsync_directory(self.state_path.parent)
         except FileNotFoundError:
             return
@@ -489,6 +504,23 @@ class ProjectHardwareLock:
             with suppress(OSError):
                 self.handle.close()
             self.handle = None
+
+
+def _replace_with_sharing_retry(operation, *args) -> None:
+    """Retry rename/unlink briefly on Windows sharing violations.
+
+    A concurrent hardware-status poll holds the state file open for a moment;
+    without the retry that read would fail the service's marker update.
+    """
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            operation(*args)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.02)
 
 
 def hardware_state_directory() -> Path:

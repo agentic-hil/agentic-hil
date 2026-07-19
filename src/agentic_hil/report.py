@@ -88,7 +88,10 @@ def last_report_path(config: AgenticHILConfig) -> str:
 
 
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
-    report_path = last_report_path(config)
+    try:
+        report_path = last_report_path(config)
+    except OSError as error:
+        raise AuditWriteError(str(error), dict(report)) from error
     enriched = dict(report)
     enriched.setdefault("report_path", display_path(config, report_path))
     try:
@@ -140,7 +143,16 @@ def fsync_directory(directory: Path) -> None:
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:
-    report_path = last_report_path(config)
+    try:
+        report_path = last_report_path(config)
+    except OSError as error:
+        return {
+            "ok": False,
+            "tool": "get_last_report",
+            "error_type": "report_unreadable",
+            "summary": "Configured reports directory is not accessible.",
+            "backend_error": str(error),
+        }
     path = Path(report_path)
     if not path.exists():
         return {

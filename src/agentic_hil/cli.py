@@ -18,6 +18,7 @@ from agentic_hil.report import write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import TestReactor, load_test_config, test_config_schema_text
 from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import HardwareCleanupError as AgenticHILRuntimeCleanupError
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
@@ -55,6 +56,7 @@ artifacts:
     - ".bin"
   max_upload_size_mb: 64
   allow_upload: true
+  max_local_artifact_size_mb: 256
 
 com_ports: {}
 
@@ -118,13 +120,22 @@ def entrypoint(argv: list[str] | None = None) -> int:
     if not getattr(args, "command", None):
         parser.print_help(sys.stderr)
         return 2
+    # mcp-stdio owns stdout as the JSON-RPC channel and com-stdio owns it as the
+    # serial data channel; their errors must never be printed in-band.
+    error_to_stderr = args.command in {"mcp-stdio", "com-stdio"}
     try:
         result = dispatch(args)
     except ConfigError as error:
-        print_json(error.to_dict())
-        return 1
+        print_json(error.to_dict(), to_stderr=error_to_stderr)
+        return 2 if error_to_stderr else 1
     except HardwareLockError as error:
-        print_json({"ok": False, "error_type": "hardware_lock_failed", "backend_error": str(error), "summary": "Project hardware state storage is unavailable."})
+        print_json({"ok": False, "error_type": "hardware_lock_failed", "backend_error": str(error), "summary": "Project hardware state storage is unavailable."}, to_stderr=error_to_stderr)
+        return 1
+    except AgenticHILRuntimeCleanupError as error:
+        print_json({"ok": False, "error_type": "hardware_cleanup_failed", "backend_error": str(error), "summary": "Hardware cleanup failed; check hardware-status before further hardware access."}, to_stderr=error_to_stderr)
+        return 1
+    except OSError as error:
+        print_json({"ok": False, "error_type": "io_error", "backend_error": str(error), "summary": "A filesystem operation failed."}, to_stderr=error_to_stderr)
         return 1
     except KeyboardInterrupt:
         return 130
@@ -542,5 +553,6 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
     return {"updated": False}
 
 
-def print_json(value: JsonObject) -> None:
-    sys.stdout.write(json.dumps(value, indent=2) + "\n")
+def print_json(value: JsonObject, to_stderr: bool = False) -> None:
+    stream = sys.stderr if to_stderr else sys.stdout
+    stream.write(json.dumps(value, indent=2) + "\n")

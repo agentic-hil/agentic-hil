@@ -79,7 +79,7 @@ NO_HARDWARE_ERROR_TYPES = {
     "serial_backend_not_available", "can_backend_not_available", "can_adapter_not_found", "adapter_bridge_not_found",
     "debugger_not_found", "gdb_not_found", "debugger_config_not_found", "report_not_found",
     "artifact_validation_failed", "artifact_not_found", "artifact_too_large", "artifact_staging_failed",
-    "output_validation_failed", "config_invalid",
+    "output_validation_failed", "config_invalid", "hardware_lock_failed", "log_directory_unavailable",
 }
 TOOL_ARGUMENTS: dict[str, set[str]] = {
     "debugger_info": set(), "debugger_probes_list": {"debugger"}, "probe_target": set(), "artifact_upload": {"image_path", "filename", "data_base64"},
@@ -323,42 +323,63 @@ class AgenticHILToolService:
         if hardware_error is not None:
             return hardware_error
         try:
-            reload_error = None if (name in CLEANUP_TOOLS or self._poisoned_state is not None) else self._reload_config(name)
-            if reload_error is not None:
-                return reload_error
-            if name in HARDWARE_TOOLS:
-                def invoke() -> JsonObject:
-                    try:
-                        if name in DEBUG_SESSION_CONFLICT_TOOLS:
-                            try:
-                                debug_active = self.backend.has_active_session()
-                            except Exception as error:
-                                return {"ok": False, "tool": name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": f"Debug-session state could not be inspected: {error}"}
-                            if debug_active:
-                                return tool_error(name, "debug_session_active", "Stop the typed debug session before starting a one-shot debugger operation.")
-                        return self._dispatch(name, args)
-                    except BaseException as error:
-                        # An AuditWriteError means the hardware side already ran to a
-                        # classified result; tearing the backend down here would destroy
-                        # a healthy (possibly pre-existing) session over a log failure.
-                        if name == "debug_start_session" and not isinstance(error, AuditWriteError):
-                            cleanup_confirmed = False
-                            try:
-                                self.backend.close()
-                                cleanup_confirmed = not self.backend.has_active_session()
-                            except BaseException:
-                                pass
-                            if cleanup_confirmed:
-                                error._agentic_hil_completion_confirmed = True
-                        raise
+            result = self._execute_call(name, args)
+        except BaseException:
+            # The original exception wins; a lease bookkeeping failure on top of
+            # it still poisons the instance, and the on-disk marker stays
+            # fail-closed for the next acquire.
+            try:
+                self._finalize_call_lease(name)
+            except HardwareLockError as lease_error:
+                self._record_unconfirmed_operation(name, utc_now_iso(), lease_error, "hardware_lease_failed")
+            raise
+        try:
+            self._finalize_call_lease(name)
+        except HardwareLockError as lease_error:
+            self._record_unconfirmed_operation(name, utc_now_iso(), lease_error, "hardware_lease_failed")
+            failure = tool_error(name, "hardware_state_unconfirmed", "Hardware lease bookkeeping failed after the operation; restart this service and recover the incident.")
+            failure.update({"hardware_state_unconfirmed": True, "backend_error": str(lease_error), "operation_result": result})
+            return failure
+        return result
 
-                return self._invoke_hardware_operation(name, invoke)
-            return self._dispatch(name, args)
-        finally:
-            if self._poisoned_state is not None and name in CLEANUP_TOOLS and self._hardware_lock.mode == "recovery":
-                self._hardware_lock.release_os_lock()
-            else:
-                self._reconcile_hardware_lease()
+    def _execute_call(self, name: str, args: JsonObject) -> JsonObject:
+        reload_error = None if (name in CLEANUP_TOOLS or self._poisoned_state is not None) else self._reload_config(name)
+        if reload_error is not None:
+            return reload_error
+        if name in HARDWARE_TOOLS:
+            def invoke() -> JsonObject:
+                try:
+                    if name in DEBUG_SESSION_CONFLICT_TOOLS:
+                        try:
+                            debug_active = self.backend.has_active_session()
+                        except Exception as error:
+                            return {"ok": False, "tool": name, "error_type": "hardware_state_unconfirmed", "completion_unconfirmed": True, "summary": f"Debug-session state could not be inspected: {error}"}
+                        if debug_active:
+                            return tool_error(name, "debug_session_active", "Stop the typed debug session before starting a one-shot debugger operation.")
+                    return self._dispatch(name, args)
+                except BaseException as error:
+                    # An AuditWriteError means the hardware side already ran to a
+                    # classified result; tearing the backend down here would destroy
+                    # a healthy (possibly pre-existing) session over a log failure.
+                    if name == "debug_start_session" and not isinstance(error, AuditWriteError):
+                        cleanup_confirmed = False
+                        try:
+                            self.backend.close()
+                            cleanup_confirmed = not self.backend.has_active_session()
+                        except BaseException:
+                            pass
+                        if cleanup_confirmed:
+                            error._agentic_hil_completion_confirmed = True
+                    raise
+
+            return self._invoke_hardware_operation(name, invoke)
+        return self._dispatch(name, args)
+
+    def _finalize_call_lease(self, name: str) -> None:
+        if self._poisoned_state is not None and name in CLEANUP_TOOLS and self._hardware_lock.mode == "recovery":
+            self._hardware_lock.release_os_lock()
+        else:
+            self._reconcile_hardware_lease()
 
     def _dispatch(self, name: str, args: JsonObject) -> JsonObject:
         dispatch = {
@@ -647,15 +668,29 @@ class AgenticHILToolService:
         try:
             if self.hardware_owner is None and self._hardware_lock.mode == "normal":
                 state = self._session_hardware_state()
-                self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=operation)
+                try:
+                    self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=operation)
+                except HardwareLockError as error:
+                    # Nothing has touched hardware yet: fail the call as a lock
+                    # error instead of quarantining an untouched rig.
+                    result = tool_error(tool, "hardware_lock_failed", "Hardware lease bookkeeping could not record the operation; nothing was executed.")
+                    result["backend_error"] = str(error)
+                    result["completion_confirmed"] = True
+                    return result
             result = action()
             if not isinstance(result, dict):
-                raise TypeError("Hardware tool returned a non-object result.")
+                raise RuntimeError("Hardware tool returned a non-object result.")
             if result_completion_unconfirmed(tool, result):
                 self._record_unconfirmed_operation(tool, operation["started_at"], None, result.get("error_type"))
             elif self.hardware_owner is None and self._hardware_lock.mode == "normal":
                 state = self._session_hardware_state()
-                self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=None)
+                try:
+                    self._hardware_lock.update_active_state(source=tool, active_resources=state["active_resources"], operation=None)
+                except HardwareLockError as error:
+                    # The operation itself is complete and classified; a failed
+                    # observability update must not discard that verdict. The
+                    # stale marker stays fail-closed on disk.
+                    result["lease_update_error"] = str(error)
             return result
         except AuditWriteError as error:
             underlying = error.operation_result if isinstance(error.operation_result, dict) else {}
@@ -774,8 +809,11 @@ def validate_tool_arguments(tool: str, args: JsonObject) -> JsonObject | None:
         return tool_error(tool, "invalid_argument", "Provide exactly one of image_path or artifact_id.")
     if tool == "artifact_upload":
         local = "image_path" in args
-        encoded = "filename" in args and "data_base64" in args
-        if local == encoded or (not local and set(args) & {"filename", "data_base64"} != {"filename", "data_base64"}):
+        encoded_fields = {"filename", "data_base64"} & set(args)
+        if local:
+            if encoded_fields:
+                return tool_error(tool, "invalid_argument", "Provide image_path or filename with data_base64, not both.")
+        elif encoded_fields != {"filename", "data_base64"}:
             return tool_error(tool, "invalid_argument", "Provide image_path or both filename and data_base64.")
     if tool == "com_write" and ("text" in args) == ("hex" in args):
         return tool_error(tool, "invalid_argument", "Provide exactly one of text or hex.")

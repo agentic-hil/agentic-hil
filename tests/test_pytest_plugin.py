@@ -85,3 +85,23 @@ def test_b_sees_fresh_adapter_state(agentic_hil):
 """)
     result = pytester.runpytest(*PLUGIN_ARGS)
     result.assert_outcomes(passed=2)
+
+
+def test_cli_config_option_is_anchored_to_the_invocation_cwd(tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from agentic_hil.pytest_plugin import resolve_plugin_config_path
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "custom").mkdir()
+    monkeypatch.chdir(tmp_path / "sub")
+    fake_config = SimpleNamespace(
+        getoption=lambda name: "../custom/config.yaml",
+        getini=lambda name: None,
+        rootpath=tmp_path,
+    )
+
+    resolved = Path(resolve_plugin_config_path(fake_config)).resolve()
+
+    assert resolved == (tmp_path / "custom" / "config.yaml").resolve()

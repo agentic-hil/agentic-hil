@@ -44,7 +44,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def resolve_plugin_config_path(config: pytest.Config) -> str:
     option = config.getoption("--agentic-hil-config")
     if option:
-        return str(option)  # command-line paths stay relative to the invocation cwd
+        # Command-line paths stay relative to the invocation cwd; resolve them
+        # here so load_config cannot re-anchor them somewhere else.
+        requested = Path(str(option)).expanduser()
+        return str(requested if requested.is_absolute() else Path.cwd() / requested)
     ini_value = config.getini("agentic_hil_config")
     if ini_value:
         return rootdir_anchored(config, str(ini_value))
@@ -66,7 +69,10 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
 
     config_path = resolve_plugin_config_path(request.config)
     try:
-        return load_config(config_path, work_dir=str(request.config.rootpath))
+        # No work_dir override: like the MCP server and CLI, the effective
+        # policy anchors at the config file's own project directory, so the
+        # same config yields the same allowed roots and report paths everywhere.
+        return load_config(config_path)
     except ConfigError as error:
         if error.error_type == "config_file_not_found":
             pytest.skip(f"Agentic HIL configuration unavailable: {error.summary} [path: {config_path}]")
@@ -78,13 +84,20 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
 
 @pytest.fixture(scope="session")
 def _agentic_hil_service(agentic_hil_config: AgenticHILConfig) -> Iterator[AgenticHILToolService]:
-    from agentic_hil.tools import AgenticHILToolService
+    import warnings
+
+    from agentic_hil.tools import AgenticHILToolService, cleanup_error_is_audit_only
 
     service = AgenticHILToolService(agentic_hil_config)
     try:
         yield service
     finally:
-        service.close()
+        try:
+            service.close()
+        except Exception as error:
+            if not cleanup_error_is_audit_only(error):
+                raise
+            warnings.warn(f"Agentic HIL hardware is confirmed safe, but cleanup audit records could not be written: {error}", stacklevel=1)
 
 
 @pytest.fixture()
@@ -95,7 +108,16 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
     adapter, COM, and CAN sessions opened during a test are stopped afterwards
     so injected faults and stimulus state cannot leak between tests.
     """
+    import warnings
+
+    from agentic_hil.tools import cleanup_error_is_audit_only
+
     try:
         yield _agentic_hil_service
     finally:
-        _agentic_hil_service.cleanup_test_sessions()
+        try:
+            _agentic_hil_service.cleanup_test_sessions()
+        except Exception as error:
+            if not cleanup_error_is_audit_only(error):
+                raise
+            warnings.warn(f"Agentic HIL hardware is confirmed safe, but cleanup audit records could not be written: {error}", stacklevel=1)

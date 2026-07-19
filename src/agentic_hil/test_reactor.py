@@ -255,6 +255,7 @@ class TestReactor:
         self._step_in_flight: JsonObject | None = None
         self._execution_inspection_errors: list[JsonObject] = []
         self._project_lock: ProjectHardwareLock | None = None
+        self._lease_update_errors: list[str] = []
         self._has_run = False
 
     def run(self, plan: TestPlan) -> JsonObject:
@@ -402,6 +403,8 @@ class TestReactor:
                     project_lock.release_os_lock()
             self._project_lock = None
         assert response is not None
+        if self._lease_update_errors:
+            response.setdefault("lease_update_errors", self._lease_update_errors)
         if pending_base_exception is not None:
             raise pending_base_exception
         return response
@@ -430,6 +433,16 @@ class TestReactor:
                 "summary": "Test reactor device initialization failed; no tests were executed.",
             }
         return None
+
+    def _update_lease_observability(self, test: TestCase, index: int, operation: JsonObject | None) -> None:
+        """Best-effort marker update; a bookkeeping failure must not fail or quarantine a healthy step."""
+        if self._project_lock is None:
+            return
+        try:
+            state = self._collect_hardware_state()
+            self._project_lock.update_active_state(source=f"test_reactor:{test.name}:{index}", active_resources=state["active_resources"], operation=operation)
+        except HardwareLockError as error:
+            self._lease_update_errors.append(f"{test.name}:{index}: {error}")
 
     def _collect_hardware_state(self) -> JsonObject:
         active_resources: list[JsonObject] = []
@@ -671,9 +684,7 @@ class TestReactor:
             for index, step in enumerate(test.steps, start=1):
                 self._step_in_flight = {"type": "operation", "test": test.name, "device": test.device, "step": index, "action": step.action}
                 try:
-                    if self._project_lock is not None:
-                        state = self._collect_hardware_state()
-                        self._project_lock.update_active_state(source=f"test_reactor:{test.name}:{index}", active_resources=state["active_resources"], operation=self._step_in_flight)
+                    self._update_lease_observability(test, index, self._step_in_flight)
                     result = device.execute(step)
                 except Exception as error:
                     completion_confirmed = getattr(error, "_agentic_hil_completion_confirmed", False) is True
@@ -698,9 +709,7 @@ class TestReactor:
                     if result.get("completion_unconfirmed") is True or result.get("hardware_state_unconfirmed") is True or step_error_type in {"hardware_state_unconfirmed", "hardware_cleanup_failed"}:
                         self._execution_inspection_errors.append({**self._step_in_flight, "error_type": step_error_type or "completion_unconfirmed", "summary": "Test reactor step completion was not confirmed."})
                         result = {**result, "ok": False, "error_type": step_error_type or "hardware_state_unconfirmed", "hardware_state_unconfirmed": True}
-                    if self._project_lock is not None:
-                        state = self._collect_hardware_state()
-                        self._project_lock.update_active_state(source=f"test_reactor:{test.name}:{index}", active_resources=state["active_resources"], operation=None)
+                    self._update_lease_observability(test, index, None)
                     self._step_in_flight = None
                 steps.append({"index": index, "action": step.action, "result": result})
                 if result.get("ok") is not True:
