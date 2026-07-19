@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,8 +16,15 @@ from conftest import write_config
 from agentic_hil.adapters import AdapterService
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames
+from agentic_hil.cli import debugger_probes, entrypoint
 from agentic_hil.config import ConfigError, load_config
-from agentic_hil.coordination import CoordinationError, HardwareCoordinator, _LifetimeLock
+from agentic_hil.coordination import (
+    DEBUGGER_DISCOVERY_RESOURCE,
+    CoordinationError,
+    HardwareCoordinator,
+    _LifetimeLock,
+    resource_digest,
+)
 from agentic_hil.mcp import call_tool
 from agentic_hil.process import (
     cleanup_registered_processes,
@@ -25,7 +33,7 @@ from agentic_hil.process import (
     spawn_managed_process,
     terminate_process_tree,
 )
-from agentic_hil.report import read_last_report, report_state_path, write_report
+from agentic_hil.report import overall_success, read_last_report, report_state_path, write_report
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -46,6 +54,51 @@ def test_live_owner_blocks_second_coordinator_before_resource_use(tmp_path: Path
         lease.release()
         first.close()
         second.close()
+
+
+def test_pinned_state_root_coordinates_processes_with_different_environments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = write_config(tmp_path)
+    ready = tmp_path / "owner-ready"
+    stop = tmp_path / "owner-stop"
+    script = """
+import sys, time
+from pathlib import Path
+from agentic_hil.config import load_config
+from agentic_hil.coordination import HardwareCoordinator
+config = load_config(sys.argv[1])
+coordinator = HardwareCoordinator(config, 'child')
+lease = coordinator.acquire('physical:shared-environment')
+Path(sys.argv[2]).write_text('ready', encoding='utf-8')
+while not Path(sys.argv[3]).exists():
+    time.sleep(0.02)
+lease.release()
+coordinator.close()
+"""
+    environment = os.environ.copy()
+    environment["LOCALAPPDATA"] = str(tmp_path / "child-state")
+    environment["XDG_STATE_HOME"] = str(tmp_path / "child-state")
+    dependency_root = str(Path(yaml.__file__).resolve().parents[1])
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join([dependency_root, source_root, environment.get("PYTHONPATH", "")])
+    child = subprocess.Popen([sys.executable, "-c", script, str(config_path), str(ready), str(stop)], env=environment)
+    try:
+        assert wait_for_file(ready, child), "child did not acquire pinned-root lease"
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "parent-state"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "parent-state"))
+        coordinator = HardwareCoordinator(load_config(str(config_path)), "parent")
+        with pytest.raises(CoordinationError) as excinfo:
+            coordinator.acquire("physical:shared-environment")
+        assert excinfo.value.result["error_type"] == "resource_busy"
+    finally:
+        stop.write_text("stop", encoding="utf-8")
+        child.wait(timeout=10)
+
+
+def wait_for_file(path: Path, child: subprocess.Popen, timeout_s: float = 10) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while not path.exists() and child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return path.exists()
 
 
 def test_different_projects_conflict_on_same_physical_resource(tmp_path: Path) -> None:
@@ -94,7 +147,7 @@ def test_stale_resource_keeps_project_cleanup_required(tmp_path: Path) -> None:
     assert status["blocked"] is True
     assert status["record"]["state"] == "cleanup_required"
     assert status["record"]["resources"] == [resource]
-    assert coordinator.recover(safe_state_confirmed=True)["ok"] is True
+    assert coordinator.recover(safe_state_confirmed=True, quarantine_id=status["quarantine_id"])["ok"] is True
 
 
 def test_process_cleanup_is_scoped_to_service_owner() -> None:
@@ -111,6 +164,37 @@ def test_process_cleanup_is_scoped_to_service_owner() -> None:
             terminate_process_tree(first, 5)
         if second.poll() is None:
             terminate_process_tree(second, 5)
+
+
+@pytest.mark.parametrize(
+    ("service_type", "patch_target"),
+    [
+        (CanBusService, "agentic_hil.can.cleanup_registered_processes"),
+        (AdapterService, "agentic_hil.adapters.cleanup_registered_processes"),
+    ],
+)
+def test_direct_process_service_reaps_owned_orphans_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service_type,
+    patch_target: str,
+) -> None:
+    service = service_type(config_for(tmp_path))
+    owners: list[str | None] = []
+
+    def fail_cleanup(*, owner_token: str | None = None) -> list[str]:
+        owners.append(owner_token)
+        return ["orphan remained"]
+
+    monkeypatch.setattr(patch_target, fail_cleanup)
+    with pytest.raises(RuntimeError, match="orphan remained"):
+        service.close()
+    assert owners == [service.coordinator.owner_token]
+    assert service.coordinator._state == "open"
+
+    monkeypatch.setattr(patch_target, lambda *, owner_token=None: [])
+    service.close()
+    assert service.coordinator._state == "closed"
 
 
 def test_killed_owner_requires_explicit_recovery(tmp_path: Path) -> None:
@@ -149,7 +233,8 @@ time.sleep(60)
 
     denied = coordinator.recover(safe_state_confirmed=False)
     assert denied["error_type"] == "operator_confirmation_required"
-    recovered = coordinator.recover(safe_state_confirmed=True)
+    quarantine_id = coordinator.status()["quarantine_id"]
+    recovered = coordinator.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
     assert recovered["ok"] is True
     lease = coordinator.acquire("physical:crash-test")
     assert lease.release() is True
@@ -259,7 +344,7 @@ def test_tool_validation_blocks_backend_before_audit(tmp_path: Path, monkeypatch
     assert called is False
 
 
-def test_mcp_marks_audit_and_target_failures_as_errors() -> None:
+def test_mcp_marks_unsafe_results_as_errors() -> None:
     class Tools:
         def __init__(self, result: dict):
             self.result = result
@@ -267,7 +352,17 @@ def test_mcp_marks_audit_and_target_failures_as_errors() -> None:
         def call(self, name: str, arguments: dict) -> dict:
             return self.result
 
-    for result in ({"ok": True, "audit_ok": False}, {"ok": True, "target_ok": False}):
+    for result in (
+        {"ok": True, "audit_ok": False},
+        {"ok": True, "target_ok": False},
+        {"ok": True, "cleanup_ok": False},
+        {"ok": True, "cleanup_required": True},
+        {"ok": True, "quarantined": True},
+        {"ok": True, "lease_state": "cleanup_required"},
+        {"ok": True, "side_effect_status": "unknown"},
+        {"ok": True, "side_effect_status": "partial"},
+        {"ok": True, "hardware_state": "unknown"},
+    ):
         response = call_tool({"name": "probe_target", "arguments": {}}, Tools(result))  # type: ignore[arg-type]
         assert response["isError"] is True
         assert response["structuredContent"] == result
@@ -314,7 +409,7 @@ def test_report_state_namespaces_config_and_workspace(tmp_path: Path) -> None:
     assert read_last_report(second)["error_type"] == "report_not_found"
 
 
-def test_unknown_can_effect_poisons_session_until_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_can_effect_remains_quarantined_after_session_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = config_for(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
 
     class Adapter:
@@ -348,9 +443,13 @@ def test_unknown_can_effect_poisons_session_until_cleanup(tmp_path: Path, monkey
         assert first["cleanup_required"] is True
         assert second["error_type"] == "resource_quarantined"
         assert adapter.send_calls == 1
-        assert service.session_stop("bench")["ok"] is True
+        stopped = service.session_stop("bench")
+        assert stopped["ok"] is False
+        assert stopped["cleanup_required"] is True
     finally:
-        service.close()
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
 
 
 def test_malformed_can_frames_quarantine_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,7 +483,9 @@ def test_malformed_can_frames_quarantine_session(tmp_path: Path, monkeypatch: py
         assert result["cleanup_required"] is True
         assert service.coordinator.blocked is True
     finally:
-        service.close()
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
 
 
 def test_normalize_received_frames_accepts_python_can_id_hex() -> None:
@@ -409,7 +510,9 @@ def test_adapter_malformed_measurement_quarantines_and_shutdown_reports(tmp_path
         assert result["error_type"] == "adapter_bridge_invalid_response"
         assert result["cleanup_required"] is True
     finally:
-        service.close()
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
     report = read_last_report(config)
     assert report["tool"] == "adapter_session_stop"
     assert report["lease_state"] == "cleanup_required"
@@ -434,3 +537,390 @@ def test_pyocd_does_not_reset_after_flash_audit_failure(tmp_path: Path, monkeypa
     assert len(calls) == 1
     assert result["reset_after_flash"] is False
     assert result["reset_skipped_reason"] == "audit_failed"
+
+
+def test_closed_coordinator_invalidates_stale_lease(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    coordinator = HardwareCoordinator(config, "stale")
+    lease = coordinator.acquire("physical:stale-lease")
+    coordinator.close()
+    record_before = coordinator._read_record(coordinator.project_key)
+
+    assert lease.release() is False
+    assert lease.state == "stale"
+    assert coordinator._read_record(coordinator.project_key) == record_before
+    with pytest.raises(CoordinationError, match="closed"):
+        coordinator.acquire("physical:new")
+
+
+def test_quarantined_lease_cannot_release_incident(tmp_path: Path) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:quarantine-release")
+    lease.quarantine("unknown_effect")
+    record_before = coordinator._read_record(coordinator.project_key)
+
+    assert lease.release() is False
+    assert lease.state == "cleanup_required"
+    assert coordinator._read_record(coordinator.project_key) == record_before
+    coordinator.close()
+
+
+def test_close_retries_lock_release_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:close-retry")
+    lock = lease.locks[0]
+    original_release = lock.release
+    monkeypatch.setattr(lock, "release", lambda: (_ for _ in ()).throw(OSError("close failed")))
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        coordinator.close()
+    assert coordinator._state == "cleanup_required"
+    assert lease.lease_id in coordinator.leases
+
+    monkeypatch.setattr(lock, "release", original_release)
+    coordinator.close()
+    assert coordinator._state == "closed"
+
+
+def test_stale_multi_resource_incident_marks_every_resource_for_recovery(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    setup = HardwareCoordinator(config, "setup")
+    resources = ["physical:first", "physical:second"]
+    active = setup._base_record("active", resources)
+    for resource in resources:
+        setup._write_record(resource, active)
+    setup._write_record(setup.project_key, setup._base_record("released", []))
+
+    with pytest.raises(CoordinationError):
+        setup.acquire(resources[0])
+
+    status = setup.status()
+    for resource in resources:
+        marker = setup._read_record(resource)
+        assert marker["state"] == "quarantined"
+        assert marker["resources"] == resources
+        assert marker["quarantine_id"] == status["quarantine_id"]
+    assert setup.recover(safe_state_confirmed=True, quarantine_id=status["quarantine_id"])["ok"] is True
+
+
+def test_foreign_project_incident_is_not_rewritten(tmp_path: Path) -> None:
+    first_config = config_for(tmp_path / "first")
+    second_config = config_for(tmp_path / "second")
+    first = HardwareCoordinator(first_config, "first")
+    lease = first.acquire("physical:foreign")
+    lease.quarantine("first_incident")
+    first.close()
+    marker_before = first._read_record("physical:foreign")
+    second = HardwareCoordinator(second_config, "second")
+
+    with pytest.raises(CoordinationError) as excinfo:
+        second.acquire("physical:foreign")
+
+    assert excinfo.value.result["error_type"] == "resource_quarantined"
+    assert second._read_record("physical:foreign") == marker_before
+
+
+def test_service_close_is_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path))
+    calls = 0
+
+    def probe() -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    monkeypatch.setattr(service.backend, "probe_target", probe)
+    service.close()
+    result = service.call("probe_target")
+
+    assert result["error_type"] == "service_closed"
+    assert calls == 0
+    service.close()
+
+
+def test_dispatch_depth_is_thread_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path, permissions_yaml="permissions:\n  allow_probe: true\n  allow_reset: false\n")
+    service = AgenticHILToolService(config)
+    calls = 0
+
+    def reset(mode: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    monkeypatch.setattr(service.backend, "reset_target", reset)
+    service._dispatch_depth = 1
+    results: list[dict] = []
+    worker = threading.Thread(target=lambda: results.append(service.reset_target()))
+    worker.start()
+    worker.join()
+    service._dispatch_depth = 0
+    service.close()
+
+    assert results[0]["error_type"] == "permission_denied"
+    assert calls == 0
+
+
+def test_recovery_requires_current_quarantine_id(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:incident")
+    lease.quarantine("test_incident")
+    incident_a = owner.status()["quarantine_id"]
+    owner.close()
+    recovery = HardwareCoordinator(config, "recovery")
+
+    wrong = recovery.recover(safe_state_confirmed=True, quarantine_id="wrong")
+    assert wrong["error_type"] == "quarantine_changed"
+    assert recovery.recover(safe_state_confirmed=True, quarantine_id=incident_a)["ok"] is True
+
+    lease_b = recovery.acquire("physical:incident")
+    lease_b.quarantine("new_incident")
+    incident_b = recovery.status()["quarantine_id"]
+    recovery.close()
+    next_recovery = HardwareCoordinator(config, "next-recovery")
+    assert incident_b != incident_a
+    assert next_recovery.recover(safe_state_confirmed=True, quarantine_id=incident_a)["error_type"] == "quarantine_changed"
+    assert next_recovery.recover(safe_state_confirmed=True, quarantine_id=incident_b)["ok"] is True
+
+
+def quarantined_coordinator(tmp_path: Path) -> tuple[HardwareCoordinator, str, str]:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    resource = "physical:incident"
+    lease = owner.acquire(resource)
+    lease.quarantine("test_incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    owner.close()
+    return HardwareCoordinator(config, "recovery"), resource, quarantine_id
+
+
+def test_recovery_rejects_changed_resource_set(tmp_path: Path) -> None:
+    recovery, resource, quarantine_id = quarantined_coordinator(tmp_path)
+    marker = recovery._read_record(resource)
+    assert marker is not None
+    recovery._write_record(resource, {**marker, "resources": []})
+
+    result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+
+    assert result["error_type"] == "quarantine_changed"
+    assert recovery.status()["blocked"] is True
+
+
+def test_recovery_audit_failure_keeps_incident_quarantined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recovery, resource, quarantine_id = quarantined_coordinator(tmp_path)
+    monkeypatch.setattr("agentic_hil.coordination.safe_append_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("audit denied")))
+
+    result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+
+    assert result["error_type"] == "recovery_audit_failed"
+    assert result["audit_ok"] is False
+    assert recovery._read_record(resource)["quarantine_id"] == quarantine_id
+    assert recovery.status()["blocked"] is True
+
+
+def test_only_one_parallel_recovery_can_release_incident(tmp_path: Path) -> None:
+    first, _, quarantine_id = quarantined_coordinator(tmp_path)
+    second = HardwareCoordinator(first.config, "second-recovery")
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+
+    def recover(coordinator: HardwareCoordinator) -> None:
+        barrier.wait()
+        results.append(coordinator.recover(safe_state_confirmed=True, quarantine_id=quarantine_id))
+
+    workers = [threading.Thread(target=recover, args=(coordinator,)) for coordinator in (first, second)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sum(result.get("ok") is True for result in results) == 1
+    assert {result.get("error_type") for result in results if not result.get("ok")} <= {"resource_busy", "resource_not_quarantined"}
+
+
+@pytest.mark.parametrize("arguments", [["lease-status"], ["recover", "--confirm-safe-state", "--quarantine-id", "incident"]])
+def test_coordination_cli_structures_corrupt_marker_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+) -> None:
+    config = config_for(tmp_path)
+    coordinator = HardwareCoordinator(config, "setup")
+    coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
+
+    exit_code = entrypoint(arguments)
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "coordination_state_invalid"
+    probe = _LifetimeLock(coordinator.lock_directory / f"{resource_digest(coordinator.project_key)}.lock")
+    probe.acquire()
+    probe.release()
+
+
+@pytest.mark.parametrize("unsafe", [{"cleanup_required": True}, {"quarantined": True}, {"cleanup_ok": False}, {"side_effect_status": "unknown"}, {"side_effect_status": "partial"}, {"lease_state": "cleanup_required"}, {"lease_state": "stale"}, {"hardware_state": "unknown"}])
+def test_overall_success_rejects_unsafe_state(unsafe: dict) -> None:
+    assert overall_success({"ok": True, **unsafe}) is False
+
+
+def test_discovery_gate_conflicts_with_debug_effects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    gate = owner.acquire(DEBUGGER_DISCOVERY_RESOURCE)
+    service = AgenticHILToolService(config)
+    called = False
+
+    def probe() -> dict:
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr(service.backend, "probe_target", probe)
+    result = service.call("probe_target")
+    assert result["error_type"] == "resource_busy"
+    assert called is False
+    gate.release()
+    owner.close()
+    service.close()
+
+
+def test_cli_discovery_gate_blocks_before_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "debug-owner")
+    lease = owner.acquire(DEBUGGER_DISCOVERY_RESOURCE)
+    called = False
+
+    def list_probes() -> dict:
+        nonlocal called
+        called = True
+        return {"ok": True, "probes": []}
+
+    backend = SimpleNamespace(list_probes=list_probes, close=lambda: None)
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda workspace: config)
+    monkeypatch.setattr("agentic_hil.tools.create_debugger_backend", lambda loaded: backend)
+    try:
+        result = debugger_probes()
+
+        assert result["error_type"] == "resource_busy"
+        assert called is False
+    finally:
+        lease.release()
+        owner.close()
+
+
+def test_discovery_stops_when_audit_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path))
+    called = False
+
+    def list_probes() -> dict:
+        nonlocal called
+        called = True
+        return {"ok": True, "probes": []}
+
+    monkeypatch.setattr(service.backend, "list_probes", list_probes)
+    monkeypatch.setattr("agentic_hil.tools.ensure_audit_ready", lambda config: (_ for _ in ()).throw(OSError("audit denied")))
+    try:
+        result = service.call("debugger_probes_list")
+
+        assert result["error_type"] == "audit_unavailable"
+        assert result["side_effect_committed"] is False
+        assert called is False
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), KeyboardInterrupt("stop"), SystemExit("exit")])
+@pytest.mark.parametrize(
+    ("service_name", "method", "tool", "arguments"),
+    [
+        ("com_ports", "write", "com_write", {"port_id": "dut", "text": "x"}),
+        ("can_buses", "send", "can_send", {"bus_id": "bench", "frame_id": "0x123", "data_hex": "01"}),
+        ("adapters", "set_value", "adapter_set_value", {"adapter_id": "fixture", "channel": "input", "value": 1.0}),
+    ],
+)
+def test_unknown_hardware_exception_poisons_active_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    service_name: str,
+    method: str,
+    tool: str,
+    arguments: dict,
+) -> None:
+    config = config_for(
+        tmp_path,
+        com_ports_yaml='com_ports:\n  dut:\n    device: "COM_TEST"\n',
+        can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n',
+        adapters_yaml=f'adapters:\n  fixture:\n    executable: "{Path(sys.executable).as_posix()}"\n    channels: ["input"]\n',
+    )
+    service = AgenticHILToolService(config)
+    lease = service.coordinator.acquire("physical:exception")
+    monkeypatch.setattr(getattr(service, service_name), method, lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    try:
+        if isinstance(error, Exception):
+            result = service.call(tool, arguments)
+            assert result["error_type"] == "hardware_action_exception"
+            assert result["quarantined"] is True
+        else:
+            with pytest.raises(type(error)):
+                service.call(tool, arguments)
+        assert lease.state == "cleanup_required"
+        assert service.coordinator.blocked is True
+        assert service.call(tool, arguments)["error_type"] == "resource_quarantined"
+    finally:
+        service.close()
+    next_owner = HardwareCoordinator(config, "next-owner")
+    with pytest.raises(CoordinationError) as excinfo:
+        next_owner.acquire("physical:exception")
+    assert excinfo.value.result["error_type"] == "resource_quarantined"
+    quarantine_id = next_owner.status()["quarantine_id"]
+    assert next_owner.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)["ok"] is True
+
+
+def test_foreign_project_marker_is_not_adopted_by_new_owner(tmp_path: Path) -> None:
+    resource = "physical:shared-instrument"
+    first = HardwareCoordinator(config_for(tmp_path / "first"), "first")
+    first.acquire(resource).quarantine("first_incident")
+    first_quarantine_id = str(first.status()["quarantine_id"])
+    first.close()
+
+    second = HardwareCoordinator(config_for(tmp_path / "second"), "second")
+    with pytest.raises(CoordinationError) as excinfo:
+        second.acquire(resource)
+    assert excinfo.value.result["error_type"] == "resource_quarantined"
+    assert excinfo.value.result["quarantine_id"] == first_quarantine_id
+    marker = second._read_record(resource)
+    assert marker["project_resource"] == first.project_key
+    assert marker["quarantine_id"] == first_quarantine_id
+    assert second.status()["blocked"] is False
+    second.close()
+
+    recovery = HardwareCoordinator(first.config, "first-recovery")
+    assert recovery.recover(safe_state_confirmed=True, quarantine_id=first_quarantine_id)["ok"] is True
+    recovery.close()
+    third = HardwareCoordinator(config_for(tmp_path / "second"), "third")
+    lease = third.acquire(resource)
+    assert lease.release() is True
+    third.close()
+
+
+def test_hardware_exception_with_busy_project_lock_stays_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path, com_ports_yaml='com_ports:\n  dut:\n    device: "COM_TEST"\n')
+    other = HardwareCoordinator(config, "other-owner")
+    other.acquire("physical:other")
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr(service.com_ports, "write", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    try:
+        result = service.call("com_write", {"port_id": "dut", "text": "x"})
+
+        assert result["error_type"] == "hardware_action_exception"
+        assert result["quarantined"] is True
+        assert "quarantine_error" in result
+        assert service.coordinator.blocked is True
+        assert service.call("com_write", {"port_id": "dut", "text": "x"})["error_type"] == "resource_quarantined"
+    finally:
+        service.close()
+        other.close()

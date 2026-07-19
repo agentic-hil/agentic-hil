@@ -79,6 +79,7 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched.setdefault("audit_ok", True)
     try:
         report_path = last_report_path(config)
+        display_report_path = display_path(config, report_path)
         with safe_file_lock(report_lock_path(config)):
             state = load_or_initialize_report_state(config)
             snapshot_allowed = True
@@ -89,7 +90,7 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     enriched = mark_audit_failure(enriched, error)
                     snapshot_allowed = False
             if snapshot_allowed:
-                snapshot = {**enriched, "report_path": display_path(config, report_path)}
+                snapshot = {**enriched, "report_path": display_report_path}
                 try:
                     safe_write_text(config, report_path, json.dumps(snapshot, indent=2) + "\n")
                 except (ConfigError, OSError, ValueError) as error:
@@ -102,7 +103,9 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                 state["last_failure"] = enriched
             write_report_state(config, state)
     except (ConfigError, OSError, ValueError) as error:
-        return mark_audit_failure(enriched, error)
+        failed = mark_audit_failure(enriched, error)
+        failed.pop("report_path", None)
+        return failed
     return enriched
 
 
@@ -239,7 +242,17 @@ def is_failure_report(report: JsonObject) -> bool:
 
 
 def overall_success(result: JsonObject) -> bool:
-    return result.get("ok") is True and result.get("target_ok") is not False and result.get("audit_ok") is not False
+    return (
+        result.get("ok") is True
+        and result.get("target_ok") is not False
+        and result.get("audit_ok") is not False
+        and result.get("cleanup_ok") is not False
+        and result.get("cleanup_required") is not True
+        and result.get("quarantined") is not True
+        and result.get("lease_state") in {None, "active", "released"}
+        and result.get("side_effect_status") not in {"unknown", "partial"}
+        and result.get("hardware_state") != "unknown"
+    )
 
 
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:
@@ -248,7 +261,7 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
         return report
     if not report.get("ok") and report.get("error_type") == "report_not_found":
         return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL failure has been recorded yet."}
-    if report.get("ok") is True and report.get("target_ok") is not False and report.get("audit_ok") is not False:
+    if overall_success(report):
         return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL failure record did not contain an error."}
     error_type = str(report.get("target_error_type") or report.get("error_type") or ("audit_failed" if report.get("audit_ok") is False else "unknown_debugger_error"))
     result = {

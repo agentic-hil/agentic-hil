@@ -27,8 +27,9 @@ Names: the Python distribution/install target and CLI command use `agentic-hil`.
 pipx install agentic-hil
 agentic-hil init
 # Copy agentic-hil.config.example.yaml's contents into that external file.
-# Replace workspace_root with this directory's absolute path and adjust
-# com_ports.dut_uart.device (for example /dev/ttyACM0 or COM5), then:
+# Replace workspace_root with this directory's absolute path, keep state_root
+# absolute and outside this workspace, and adjust com_ports.dut_uart.device
+# (for example /dev/ttyACM0 or COM5), then:
 agentic-hil doctor
 ```
 

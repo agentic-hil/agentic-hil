@@ -85,6 +85,7 @@ Run `agentic-hil init` from the project root. It creates the automatically disco
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
+state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
 target:
   name: "sensor-board"
@@ -132,6 +133,7 @@ permissions:
   allow_reset: true
   allow_com_read: true
   allow_com_write: true
+  allow_can_read: true
   allow_can_write: true
   allow_adapter_read: true
   allow_adapter_write: true
@@ -139,7 +141,7 @@ permissions:
   allow_mass_erase: false
 ```
 
-The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on debugger, COM, CAN, or adapter entries when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease.
+The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on debugger, COM, CAN, or adapter entries when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease.
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
@@ -206,8 +208,8 @@ See [`examples/testconfig.example.yaml`](examples/testconfig.example.yaml) for t
 - Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
 - All actions log to `.agentic-hil/logs/` and write a structured report to `.agentic-hil/reports/`.
 - Every frontend acquires persistent owner-token leases under the user state directory before touching hardware. A second process receives `resource_busy`; owner crashes, unknown effects, audit failures, or unconfirmed cleanup quarantine resources instead of silently releasing them.
-- Process bridges implement protocol version 2. Resource release requires both `safe_state_confirmed: true` from device-specific cleanup and verified process-tree reap. Operators inspect `agentic-hil lease-status` and may run `agentic-hil recover --confirm-safe-state` only after physically confirming recovery.
-- Canonical report and lease state lives under `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX. Workspace report files are write-only compatibility snapshots and never bootstrap trusted state.
+- Process bridges implement protocol version 2. Resource release requires both `safe_state_confirmed: true` from device-specific cleanup and verified process-tree reap. Operators inspect `agentic-hil lease-status`, physically confirm recovery for its current `quarantine_id`, then run `agentic-hil recover --confirm-safe-state --quarantine-id <id>`. An old incident ID cannot release a newer quarantine.
+- Canonical report and lease state lives under the absolute `state_root` pinned in the authoritative config. `agentic-hil init` chooses `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX and persists that path. Workspace report files are write-only compatibility snapshots and never bootstrap trusted state.
 
 ## pytest Plugin
 

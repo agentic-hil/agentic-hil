@@ -29,14 +29,16 @@ Workflow:
 5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
 6. Read structured results after every hardware action.
 7. Use configured COM port, CAN bus, and test-adapter ids only.
-8. Continue only when ok is true, target_ok is not false, and audit_ok is not false.
+8. Continue only when ok is true; target_ok, audit_ok, and cleanup_ok are not false; cleanup_required and quarantined are not true; lease_state is neither cleanup_required nor quarantined; side_effect_status is neither unknown nor partial; and hardware_state is not unknown.
 9. On any composite failure, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
+10. For quarantined hardware, stop effects and ask the operator to inspect lease-status, physically confirm the current quarantine_id, and run recover --confirm-safe-state --quarantine-id <id>.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
 - Do not request arbitrary shell access for hardware actions.
 - Do not flash files outside configured artifact roots.
 - Treat permission_denied as authoritative and stop.
+- Never delete coordination state or retry around cleanup_required, quarantine, partial effects, or unknown hardware state.
 """
 
 MCP_PROMPTS = [{"name": "agentic_hil_embedded_workflow", "description": "Safe workflow for using Agentic HIL hardware tools from an AI agent."}]

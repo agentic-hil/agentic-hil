@@ -403,6 +403,33 @@ def test_doctor_succeeds_when_debugger_check_is_disabled(tmp_path: Path, monkeyp
     assert result["config_path"] == str(config_path.resolve())
 
 
+def test_doctor_closes_tool_service_after_debugger_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    lifecycle: list[str] = []
+
+    class DoctorService:
+        def __init__(self, config, frontend: str) -> None:
+            assert frontend == "doctor"
+            lifecycle.append("created")
+
+        def call(self, name: str) -> dict:
+            assert name == "debugger_info"
+            lifecycle.append("called")
+            return {"ok": True}
+
+        def close(self) -> None:
+            lifecycle.append("closed")
+
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("agentic_hil.cli.AgenticHILToolService", DoctorService)
+
+    result = doctor()
+
+    assert result["ok"] is True
+    assert lifecycle == ["created", "called", "closed"]
+
+
 def test_com_stdio_uses_authoritative_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     config_path = write_authoritative_config(

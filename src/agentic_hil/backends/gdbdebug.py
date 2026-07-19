@@ -71,6 +71,9 @@ class GdbDebugSession:
         self.gdb: GdbMiClient | None = None
         self.server_stdout = ""
         self.server_stderr = ""
+        self.server_readers: list[threading.Thread] = []
+        self.load_phase = "not_started"
+        self.firmware_load_status = "not_started"
 
 
 class GdbDebugSessions:
@@ -130,6 +133,7 @@ class GdbDebugSessions:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
+        session.load_phase = "server_spawned"
         self.session = session
         try:
             self._start_output_readers(session)
@@ -147,7 +151,10 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
             else:
-                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
+                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
+                if result.get("cleanup_required") is True:
+                    session.status = "cleanup_required"
+                    self.session = session
             return self._report(result)
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
@@ -158,9 +165,13 @@ class GdbDebugSessions:
                 failure["cleanup_required"] = True
                 session.status = "cleanup_required"
             else:
-                failure.update({"cleanup_confirmed": True, "side_effect_committed": False})
-                self.session = None
+                failure.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, timed_out=True)})
+                if failure.get("cleanup_required") is True:
+                    session.status = "cleanup_required"
+                else:
+                    self.session = None
             return self._report(failure)
+        session.load_phase = "server_ready"
 
         try:
             session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
@@ -178,7 +189,10 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
             else:
-                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
+                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
+                if result.get("cleanup_required") is True:
+                    session.status = "cleanup_required"
+                    self.session = session
             return self._report(result)
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
@@ -189,8 +203,13 @@ class GdbDebugSessions:
                 result["cleanup_required"] = True
                 session.status = "cleanup_required"
             else:
-                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
-                self.session = None
+                result["cleanup_confirmed"] = True
+                if result.get("side_effect_status") not in {"unknown", "partial"}:
+                    result.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+                    self.session = None
+                else:
+                    result["cleanup_required"] = True
+                    session.status = "cleanup_required"
             return self._report(result)
 
         session.status = "halted"
@@ -457,22 +476,45 @@ class GdbDebugSessions:
         return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"]}
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
-        commands = [
-            "-gdb-set pagination off",
-            "-gdb-set confirm off",
-            f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}",
-            f"-target-select extended-remote localhost:{session.gdb_port}",
-        ]
-        if session.mode != "attach":
-            commands.append('-interpreter-exec console "monitor reset halt"')
-        if session.mode == "load":
-            commands.append("-target-download")
-            commands.append('-interpreter-exec console "monitor reset halt"')
+        commands = ["-gdb-set pagination off", "-gdb-set confirm off", f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
-                return self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out)
-        return {"ok": True}
+                return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out), **self._startup_effect_fields(session, response.timed_out)}
+        session.load_phase = "target_connect_started"
+        target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
+        if not target.ok:
+            return {**self._gdb_failure("debug_start_session", session, target.error_message, target.timed_out), **self._startup_effect_fields(session, target.timed_out)}
+        session.load_phase = "target_connected"
+        if session.mode != "attach":
+            session.load_phase = "pre_load_reset_started"
+            reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
+            if not reset.ok:
+                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out), **self._startup_effect_fields(session, reset.timed_out)}
+            session.load_phase = "pre_load_reset_confirmed"
+        if session.mode == "load":
+            session.load_phase = "download_started"
+            session.firmware_load_status = "partial_or_unknown"
+            download = self._gdb_command(session, "-target-download", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
+            if not download.ok:
+                return {**self._gdb_failure("debug_start_session", session, download.error_message, download.timed_out), **self._startup_effect_fields(session, download.timed_out)}
+            session.load_phase = "download_confirmed"
+            session.firmware_load_status = "committed"
+            session.load_phase = "post_load_reset_started"
+            reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
+            if not reset.ok:
+                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out), **self._startup_effect_fields(session, reset.timed_out)}
+            session.load_phase = "post_load_reset_confirmed"
+        return {"ok": True, "load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
+
+    def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False) -> JsonObject:
+        fields: JsonObject = {"load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
+        if session.mode == "attach" and session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+            return {**fields, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        if session.load_phase in {"download_started", "download_confirmed", "post_load_reset_started", "post_load_reset_confirmed"}:
+            status = "unknown" if timed_out else "partial"
+            return {**fields, "side_effect_committed": True, "side_effect_status": status, "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, "command_timed_out": timed_out}
+        return {**fields, "side_effect_status": "unknown", "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, "command_timed_out": timed_out}
 
     def _require_session(self, tool: str) -> JsonObject:
         session = self.session
@@ -655,6 +697,12 @@ class GdbDebugSessions:
             terminate_process_tree(session.server, timeout_s)
             if session.server.poll() is None:
                 raise RuntimeError("Debug server remained active after kill.")
+            readers = getattr(session, "server_readers", [])
+            for reader in readers:
+                if reader.ident is not None:
+                    reader.join(timeout=timeout_s)
+            if any(reader.is_alive() for reader in readers):
+                raise RuntimeError("Debug server output readers remained active after process cleanup.")
         except BaseException as error:
             errors.append(("debug_server", error))
             if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
@@ -691,8 +739,12 @@ class GdbDebugSessions:
             for line in stream:
                 setattr(session, attribute, (getattr(session, attribute) + line)[-OUTPUT_TAIL_CHARS:])
 
-        threading.Thread(target=read, args=(session.server.stdout, "server_stdout"), daemon=True).start()
-        threading.Thread(target=read, args=(session.server.stderr, "server_stderr"), daemon=True).start()
+        session.server_readers = [
+            threading.Thread(target=read, args=(session.server.stdout, "server_stdout"), daemon=True),
+            threading.Thread(target=read, args=(session.server.stderr, "server_stderr"), daemon=True),
+        ]
+        for reader in session.server_readers:
+            reader.start()
 
     def _session_status(self, session: GdbDebugSession) -> JsonObject:
         return {
@@ -704,6 +756,8 @@ class GdbDebugSessions:
             "breakpoints": list(session.breakpoints),
             "stop_reason": session.stop_reason,
             "gdb_port": session.gdb_port,
+            "load_phase": session.load_phase,
+            "firmware_load_status": session.firmware_load_status,
         }
 
     def _write_session_log(self, session: GdbDebugSession) -> None:
@@ -718,6 +772,8 @@ class GdbDebugSessions:
             "server_stdout_tail": session.server_stdout,
             "server_stderr_tail": session.server_stderr,
             "gdb_commands": session.gdb.history() if session.gdb else [],
+            "load_phase": session.load_phase,
+            "firmware_load_status": session.firmware_load_status,
         }
         try:
             safe_write_text(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")

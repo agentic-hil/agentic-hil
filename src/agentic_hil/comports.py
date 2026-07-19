@@ -67,6 +67,7 @@ class ComPortSession:
         self.overflow_bytes = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
+        self.io_lock = threading.Lock()
         self.reader: threading.Thread | None = None
         self.audit_broken = False
         self.lease = lease or DetachedHardwareLease()
@@ -77,25 +78,32 @@ class ComPortSession:
         if self.reader is not None:
             return
         reader = threading.Thread(target=self._reader_loop, daemon=True)
-        reader.start()
         self.reader = reader
+        try:
+            reader.start()
+        except BaseException:
+            if not reader.is_alive():
+                self.reader = None
+            raise
 
     def _reader_loop(self) -> None:
         while self.active:
             try:
-                waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
-                read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
-                data = self.serial_handle.read(read_size)
+                with self.io_lock:
+                    waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
+                    read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
+                    data = self.serial_handle.read(read_size)
+                    if data:
+                        chunk = bytes(data)
+                        with self.lock:
+                            self.buffer.extend(chunk)
+                            overflow = len(self.buffer) - self.port_config.max_buffer_bytes
+                            if overflow > 0:
+                                del self.buffer[:overflow]
+                                self.overflow_bytes += overflow
                 if not data:
                     time.sleep(0.01)
                     continue
-                chunk = bytes(data)
-                with self.lock:
-                    self.buffer.extend(chunk)
-                    overflow = len(self.buffer) - self.port_config.max_buffer_bytes
-                    if overflow > 0:
-                        del self.buffer[:overflow]
-                        self.overflow_bytes += overflow
                 audit_error = append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
                 if audit_error is not None:
                     self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
@@ -163,8 +171,9 @@ class ComPortService:
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
             if clear_buffer:
-                with existing.lock:
-                    existing.buffer.clear()
+                cleared = self._clear_buffers(existing)
+                if not cleared["ok"]:
+                    return self._write_report(cleared)
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
         if existing:
             try:
@@ -201,6 +210,20 @@ class ComPortService:
                 self._stop_session(session, "audit_failed")
             result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "cleanup_required": True, "summary": "COM port opened, but audit initialization failed; resource is quarantined."}
             return self._write_report(mark_audit_failure(result, audit_error))
+        if clear_buffer:
+            cleared = self._clear_buffers(session)
+            if not cleared["ok"]:
+                try:
+                    self._stop_session(session, "buffer_clear_failed", defer_release=True)
+                except BaseException as close_error:
+                    return self._write_report(self._close_failure("com_session_start", port_id, close_error))
+                written = self._write_report({**cleared, "cleanup_confirmed": True})
+                if written.get("audit_ok") is not False:
+                    session.lease.resolve_retryable_cleanup("com_buffer_clear_unconfirmed")
+                    if not session.lease.release():
+                        return {**written, **session.lease.status()}
+                    self.sessions.pop(port_id, None)
+                return {**written, **session.lease.status()}
         try:
             session.start_reader()
         except BaseException as error:
@@ -271,7 +294,7 @@ class ComPortService:
             flush = getattr(session.serial_handle, "flush", None)
             if callable(flush):
                 flush()
-        except Exception as error:
+        except BaseException as error:
             result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
             session.lease.quarantine("com_write_effect_unconfirmed", error)
             result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
@@ -280,6 +303,8 @@ class ComPortService:
                 session.audit_broken = True
                 session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
                 return mark_audit_failure(result, audit_error)
+            if not isinstance(error, Exception):
+                raise
             return result
         audit_error = append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
         result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
@@ -353,7 +378,15 @@ class ComPortService:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
-            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)}
+            try:
+                session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
+            except BaseException as primary_error:
+                try:
+                    serial_handle.close()
+                except BaseException as cleanup_error:
+                    raise RuntimeError(f"COM session construction failed and raw handle cleanup remains unconfirmed: {cleanup_error}") from primary_error
+                raise
+            return {"ok": True, "session": session}
         except Exception as error:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
 
@@ -396,6 +429,27 @@ class ComPortService:
         if session.reader_error is not None:
             return False
         return session.active and bool(getattr(session.serial_handle, "is_open", True))
+
+    def _clear_buffers(self, session: ComPortSession) -> JsonObject:
+        reset_started = False
+        try:
+            with session.io_lock:
+                reset = getattr(session.serial_handle, "reset_input_buffer", None)
+                if callable(reset):
+                    reset_started = True
+                    reset()
+                with session.lock:
+                    session.buffer.clear()
+                    session.overflow_bytes = 0
+        except BaseException as error:
+            result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": session.port_id, "error_type": "com_buffer_clear_failed", "summary": "COM input buffers could not be cleared.", "backend_error": str(error), "side_effect_committed": reset_started, "side_effect_status": "unknown" if reset_started else "not_started", "retry_safe": not reset_started}
+            if reset_started:
+                session.lease.quarantine("com_buffer_clear_unconfirmed", error)
+                result.update({"cleanup_required": True, "quarantined": True})
+            if not isinstance(error, Exception):
+                raise
+            return result
+        return {"ok": True}
 
     def _stop_session(self, session: ComPortSession, reason: str, *, defer_release: bool = False) -> Exception | None:
         session.active = False

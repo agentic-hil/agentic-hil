@@ -29,10 +29,10 @@ from agentic_hil.config import (
     pin_configured_paths,
     project_config_path,
     safe_read_text,
+    user_state_root,
     validate_config_schema,
 )
-from agentic_hil.coordination import HardwareCoordinator
-from agentic_hil.debugger import create_debugger_backend
+from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
@@ -142,6 +142,9 @@ def entrypoint(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         print_json(error.to_dict())
         return 1
+    except CoordinationError as error:
+        print_json(error.result)
+        return 1
     if isinstance(result, int):
         return result
     if result is not None:
@@ -189,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
     recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
+    recover_parser.add_argument("--quarantine-id", required=True)
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
@@ -227,7 +231,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
-        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state)
+        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "mcp-config":
@@ -244,7 +248,7 @@ def init_config(config_path: str | None = None, force: bool = False) -> JsonObje
     if target_path.exists() and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(f"workspace_root: {json.dumps(str(workspace))}\n\n{DEFAULT_CONFIG_TEMPLATE}", encoding="utf-8")
+    target_path.write_text(f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}", encoding="utf-8")
     previous = os.environ.pop(CONFIG_ENV, None)
     try:
         load_authoritative_config(workspace)
@@ -302,6 +306,7 @@ def migrate_config(source: str) -> JsonObject:
     debug = require_migration_mapping(migrated, "debug")
     artifacts = require_migration_mapping(migrated, "artifacts")
     migrated["workspace_root"] = str(workspace)
+    migrated["state_root"] = str(user_state_root())
     debug["allow_all_symbols"] = False
     artifacts["allow_upload"] = False
     migrated["permissions"] = deny_all_permissions()
@@ -601,11 +606,22 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result["tool"] = "agentic_hil_doctor"
         return result
     if config.permissions.allow_probe:
-        backend = create_debugger_backend(config)
+        service = AgenticHILToolService(config, frontend="doctor")
+        primary_error: BaseException | None = None
         try:
-            debugger_info = backend.info()
-        finally:
-            backend.close()
+            debugger_info = service.call("debugger_info")
+        except BaseException as error:
+            primary_error = error
+            debugger_info = {"ok": False}
+        try:
+            service.close()
+        except BaseException as cleanup_error:
+            if primary_error is not None:
+                primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+            else:
+                raise
+        if primary_error is not None:
+            raise primary_error
     else:
         debugger_info = {
             "ok": True,

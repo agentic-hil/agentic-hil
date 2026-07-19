@@ -8,7 +8,7 @@ from conftest import FAKE_GDB, write_authoritative_config, write_config
 
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
-from agentic_hil.test_reactor import TestReactor, load_test_config
+from agentic_hil.test_reactor import TestReactor, load_test_config, merge_result_status
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -108,6 +108,17 @@ def write_test_config(tmp_path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def test_reactor_flattens_and_deduplicates_all_audit_errors() -> None:
+    first = {"audit_ok": False, "audit_error": {"error_type": "first"}, "audit_errors": [{"error_type": "first"}, {"error_type": "second"}]}
+    cleanup = {"audit_ok": False, "audit_error": {"error_type": "cleanup"}, "audit_errors": [{"error_type": "second"}, {"error_type": "cleanup"}]}
+
+    result = merge_result_status({"ok": False}, first, cleanup)
+
+    assert result["audit_error"] == {"error_type": "first"}
+    assert result["audit_errors"] == [{"error_type": "first"}, {"error_type": "second"}, {"error_type": "cleanup"}]
+    assert result["retry_safe"] is False
 
 
 def test_reactor_runs_flash_uart_breakpoint_and_memory_dump(tmp_path: Path) -> None:

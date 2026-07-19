@@ -9,7 +9,12 @@ from agentic_hil.backends.common import command_for_log, invocation
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession, public_backend_result
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_append_text
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, HardwareLease, adapter_resource
-from agentic_hil.process import managed_process_owner, process_group_kwargs, spawn_managed_process
+from agentic_hil.process import (
+    cleanup_registered_processes,
+    managed_process_owner,
+    process_group_kwargs,
+    spawn_managed_process,
+)
 from agentic_hil.report import (
     append_jsonl,
     audit_unavailable,
@@ -245,8 +250,10 @@ class AdapterService:
                 errors.append((adapter_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        if self._owns_coordinator and not errors:
-            self.coordinator.close()
+        if self._owns_coordinator:
+            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
+            if not errors:
+                self.coordinator.close()
         if interrupt is not None:
             interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(f"{adapter_id}: {type(error).__name__}: {error}" for adapter_id, error in errors))
             raise interrupt
@@ -255,7 +262,11 @@ class AdapterService:
             raise RuntimeError(f"Test adapter cleanup failed: {details}") from errors[0][1]
 
     def _bridge_action(self, session: AdapterSession, tool: str, method: str, params: JsonObject) -> JsonObject:
-        response = session.bridge.request(method, params, session.adapter_config.timeout_s)
+        try:
+            response = session.bridge.request(method, params, session.adapter_config.timeout_s)
+        except BaseException as error:
+            session.lease.quarantine("adapter_effect_unconfirmed", error)
+            raise
         if not response.get("ok"):
             result = {"tool": tool, "adapter_id": session.adapter_id, "log_path": display_path(self.config, session.log_path), **response}
             result.setdefault("error_type", "adapter_bridge_error")

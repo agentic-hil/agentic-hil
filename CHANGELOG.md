@@ -8,7 +8,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
-- Added cross-process hardware leases, persistent crash quarantine, `lease-status`, and explicit operator-confirmed `recover --confirm-safe-state` handling.
+- Added cross-process hardware leases, persistent crash quarantine, `lease-status`, and incident-bound operator recovery through `recover --confirm-safe-state --quarantine-id <id>`.
 - Versioned process bridges at protocol v2 with mandatory physical safe-state acknowledgement before resource release.
 - Added `agentic-hil migrate-config --from <path>` to move 0.2.3 workspace-local configs into the external authoritative policy location with all hardware permissions forced back to deny-by-default for operator review.
 - Added a permission-gated test reactor with configured `Device` bindings, semantic preflight, duplicate-key rejection, and YAML/JSON sequences for flashing, UART lifecycle, run-to-breakpoint, and Intel HEX symbol dumps with exception-safe cleanup.
@@ -17,11 +17,13 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Fixed
 
 - Made audit/target status part of overall tool success, validated MCP and direct tool arguments against one strict contract, and blocked later effects after unknown or unaudited outcomes.
+- Pinned mandatory trusted `state_root` outside the workspace and made coordinator/service lifecycles terminal across threads and stale lease references.
 - Moved canonical report state into config-and-workspace-namespaced user state, stopped importing workspace snapshots, and made process/session cleanup retryable across partial failures and interrupts.
 - Reworked artifact/config/log I/O around bounded, nonblocking, single-descriptor checks and rejected non-finite configuration timeouts.
 - Preserved final test-reactor failure reports after successful cleanup and kept `classify_last_error` anchored to the latest failure instead of later read-only status calls.
 - Created nested debug-dump output directories only during real dump execution, while keeping test-reactor preflight read-only.
 - Prevented COM, CAN, and adapter sessions from leaking when audit log paths become unavailable during session start.
+- Made Windows directory-chain pinning sharing-compatible so concurrent Agentic HIL operations keep their rename/delete protection, made the Windows report-state lock block like the POSIX branch, kept coordination-poisoning failures from masking primary hardware errors, expanded `~` in state-root environment overrides before use, and released private staging directories after local artifact uploads.
 
 ### Security
 
@@ -54,7 +56,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Python package metadata and install guidance were prepared for the Agentic HIL migration; the CLI command, MCP server name, and repository URL use `agentic-hil`.
 - Public project URLs, setup docs, issue templates, and release guidance were prepared for the canonical Agentic HIL repository.
-- CLI setup hints and Codex skill-registration text use Agentic HIL naming instead of legacy Agentic HIL command/prose.
+- CLI setup hints and Codex skill-registration text use Agentic HIL naming instead of the legacy project command/prose.
 - CI, CodeQL, and Scorecards workflows now run for the `master` default branch.
 
 ## [0.2.0] - 2026-07-06

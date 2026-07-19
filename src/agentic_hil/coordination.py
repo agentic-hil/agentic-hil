@@ -14,14 +14,15 @@ from agentic_hil.config import (
     _windows_hold_directory_chain,
     _windows_open_regular_file,
     atomic_write_text,
+    safe_append_text,
     safe_directory,
     safe_read_bytes,
     safe_read_text,
-    user_state_root,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
-LEASE_VERSION = 1
+LEASE_VERSION = 2
+DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
 
@@ -75,23 +76,24 @@ class _LifetimeLock:
     def release(self) -> None:
         errors: list[BaseException] = []
         if self.descriptor >= 0:
+            descriptor = self.descriptor
             try:
                 if self.locked and os.name == "nt":
                     import msvcrt
 
-                    os.lseek(self.descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(self.descriptor, msvcrt.LK_UNLCK, 1)
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
                 elif self.locked:
                     import fcntl
 
-                    fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             except BaseException as error:
                 errors.append(error)
             try:
-                os.close(self.descriptor)
+                os.close(descriptor)
             except BaseException as error:
                 errors.append(error)
-            finally:
+            else:
                 self.descriptor = -1
                 self.locked = False
         try:
@@ -100,8 +102,9 @@ class _LifetimeLock:
             errors.append(error)
         finally:
             self.directory_handles.clear()
-            with _LOCAL_LOCKS_GUARD:
-                _LOCAL_LOCKS.discard(self.local_key)
+            if self.descriptor < 0:
+                with _LOCAL_LOCKS_GUARD:
+                    _LOCAL_LOCKS.discard(self.local_key)
         if errors:
             raise errors[0]
 
@@ -117,6 +120,8 @@ class HardwareLease:
         self.processes_reaped = False
         self.audit_ok = True
         self.errors: list[JsonObject] = []
+        self.quarantine_id: str | None = None
+        self.valid = True
 
     def release(self, *, safe_state_confirmed: bool = True, processes_reaped: bool = True, audit_ok: bool = True) -> bool:
         return self.coordinator.release_lease(
@@ -142,6 +147,7 @@ class HardwareLease:
             "audit_ok": self.audit_ok,
             "cleanup_required": self.state in {"cleanup_required", "quarantined"},
             "quarantined": self.state in {"cleanup_required", "quarantined"},
+            "quarantine_id": self.quarantine_id,
         }
 
 
@@ -173,13 +179,16 @@ class HardwareCoordinator:
         self.owner_token = secrets.token_hex(32)
         self.owner_started_at = utc_now_iso()
         self.config_sha256 = hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
-        self.root = safe_directory(user_state_root() / "coordination")
+        self.root = safe_directory(Path(config.state_root) / "coordination")
         self.lock_directory = safe_directory(self.root / "locks")
         self.record_directory = safe_directory(self.root / "records")
         self.project_key = project_resource(config)
         self.project_lock: _LifetimeLock | None = None
         self.leases: dict[str, HardwareLease] = {}
         self.blocked = False
+        self.quarantine_id: str | None = None
+        self.incident_resources: set[str] = set()
+        self._state = "open"
         self._guard = threading.RLock()
 
     def acquire(self, *resources: str) -> HardwareLease:
@@ -187,6 +196,7 @@ class HardwareCoordinator:
         if not normalized:
             raise ValueError("At least one physical resource is required.")
         with self._guard:
+            self._require_open()
             if self.blocked:
                 raise CoordinationError(self._quarantined_result(normalized, "Current owner has unresolved cleanup or audit state."))
             acquired_project = False
@@ -200,8 +210,11 @@ class HardwareCoordinator:
                     self.project_lock = None
                     raise
                 if stale is not None and stale.get("state") not in {None, "released"}:
-                    stale = {**stale, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release"}
+                    stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or normalized
+                    self._adopt_incident(stale, stale_resources)
+                    stale = {**stale, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
                     self._write_record(self.project_key, stale)
+                    self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
                     self.blocked = True
                     self.project_lock.release()
                     self.project_lock = None
@@ -213,10 +226,16 @@ class HardwareCoordinator:
                     locks.append(lock)
                     stale = self._read_record(resource)
                     if stale is not None and stale.get("state") not in {None, "released"}:
-                        stale = {**stale, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release"}
-                        self._write_record(resource, stale)
+                        if not self._record_matches_config(stale):
+                            raise CoordinationError({"ok": False, "error_type": "resource_quarantined", "summary": "Physical resource belongs to another unresolved project incident.", "resource": resource, "cleanup_required": True, "quarantined": True, "retry_safe": False, "quarantine_id": stale.get("quarantine_id")})
+                        stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or [resource]
+                        self._adopt_incident(stale, stale_resources)
                         self.blocked = True
-                        self._persist_project("cleanup_required", normalized)
+                        self._persist_project("cleanup_required", stale_resources)
+                        for held in reversed(locks):
+                            held.release()
+                        locks.clear()
+                        self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
                         raise CoordinationError(self._quarantined_result(normalized, "Physical resource requires explicit safe-state recovery."))
                 lease = HardwareLease(self, secrets.token_hex(16), normalized, locks)
                 self.leases[lease.lease_id] = lease
@@ -228,7 +247,7 @@ class HardwareCoordinator:
                     lock.release()
                 if acquired_project and not self.leases and self.project_lock is not None:
                     state = "cleanup_required" if self.blocked else "released"
-                    self._persist_project(state, normalized)
+                    self._persist_project(state, sorted(self.incident_resources) if self.blocked else normalized)
                     self.project_lock.release()
                     self.project_lock = None
                 raise
@@ -242,8 +261,12 @@ class HardwareCoordinator:
         audit_ok: bool,
     ) -> bool:
         with self._guard:
-            if lease.lease_id not in self.leases:
-                return lease.state == "released"
+            if not self._valid_lease(lease):
+                lease.valid = False
+                lease.state = "stale"
+                return False
+            if lease.state != "active":
+                return False
             lease.safe_state_confirmed = safe_state_confirmed
             lease.processes_reaped = processes_reaped
             lease.audit_ok = lease.audit_ok and audit_ok
@@ -257,7 +280,11 @@ class HardwareCoordinator:
                 lock.release()
             lease.locks.clear()
             self.leases.pop(lease.lease_id, None)
+            lease.valid = False
             self.blocked = any(item.state in {"cleanup_required", "quarantined"} for item in self.leases.values())
+            if not self.blocked:
+                self.quarantine_id = None
+                self.incident_resources.clear()
             if not self.leases:
                 self._persist_project("released")
                 if self.project_lock is not None:
@@ -269,80 +296,129 @@ class HardwareCoordinator:
 
     def quarantine_lease(self, lease: HardwareLease, reason: str, error: object | None = None, *, audit_broken: bool = False) -> None:
         with self._guard:
-            if lease.state == "released":
+            if not self._valid_lease(lease):
+                lease.valid = False
+                lease.state = "stale"
                 return
-            lease.state = "cleanup_required"
-            lease.audit_ok = lease.audit_ok and not audit_broken
-            details: JsonObject = {"reason": reason, "time": utc_now_iso()}
-            if error is not None:
-                details.update({"error_type": type(error).__name__, "summary": str(error)})
-            lease.errors.append(details)
-            self.blocked = True
-            self._persist_lease(lease)
-            self._persist_project("cleanup_required")
+            self._quarantine_registered_lease(lease, reason, error, audit_broken=audit_broken)
 
     def resolve_retryable_cleanup(self, lease: HardwareLease, allowed_reasons: set[str] | None = None) -> bool:
         with self._guard:
+            if not self._valid_lease(lease):
+                lease.valid = False
+                lease.state = "stale"
+                return False
             retryable_reasons = allowed_reasons or {"debug_session_result_unconfirmed"}
             if lease.state != "cleanup_required" or not lease.audit_ok or any(error.get("reason") not in retryable_reasons for error in lease.errors):
                 return False
             lease.state = "active"
             lease.errors.clear()
+            lease.quarantine_id = None
             self.blocked = any(item.state in {"cleanup_required", "quarantined"} for item in self.leases.values())
+            if not self.blocked:
+                self.quarantine_id = None
+                self.incident_resources.clear()
             self._persist_lease(lease)
             self._persist_project("cleanup_required" if self.blocked else "active")
             return True
 
-    def status(self) -> JsonObject:
-        record = self._read_record(self.project_key)
-        owner_active = self.project_lock is not None
-        if not owner_active:
-            probe = _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
-            try:
-                probe.acquire()
-            except (BlockingIOError, OSError):
-                owner_active = True
-            else:
-                try:
-                    if record is not None and record.get("state") == "active":
-                        record = {**record, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release"}
-                        self._write_record(self.project_key, record)
-                finally:
-                    probe.release()
-        blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined"})
-        return {
-            "ok": True,
-            "tool": "hardware_lease_status",
-            "project_resource": self.project_key,
-            "owner_active": owner_active,
-            "blocked": self.blocked or blocked_state,
-            "record": record,
-            "leases": [lease.status() for lease in self.leases.values()],
-        }
+    def poison(self, reason: str, error: object | None = None, *, audit_broken: bool = False, resources: list[str] | None = None) -> None:
+        with self._guard:
+            self._require_open()
+            if self.leases:
+                for lease in list(self.leases.values()):
+                    if lease.valid and lease.state != "released":
+                        self._quarantine_registered_lease(lease, reason, error, audit_broken=audit_broken)
+                return
+            if self.quarantine_id is None:
+                self.quarantine_id = secrets.token_hex(16)
+            self.blocked = True
+            self.incident_resources.update(resources or [])
+            if self.project_lock is None:
+                self.project_lock = self._acquire_lock(self.project_key, resources or [self.project_key])
+            self._persist_project("cleanup_required", sorted(self.incident_resources))
 
-    def recover(self, *, safe_state_confirmed: bool) -> JsonObject:
+    def status(self) -> JsonObject:
+        with self._guard:
+            record = self._read_record(self.project_key)
+            owner_active = self.project_lock is not None
+            if not owner_active:
+                probe = _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
+                try:
+                    probe.acquire()
+                except (BlockingIOError, OSError):
+                    owner_active = True
+                else:
+                    try:
+                        if record is not None and record.get("state") == "active":
+                            stale_resources = [item for item in record.get("resources", []) if isinstance(item, str)]
+                            self._adopt_incident(record, stale_resources)
+                            record = {**record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
+                            self._write_record(self.project_key, record)
+                            self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
+                    finally:
+                        probe.release()
+            blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined"})
+            return {
+                "ok": True,
+                "tool": "hardware_lease_status",
+                "project_resource": self.project_key,
+                "owner_active": owner_active,
+                "blocked": self.blocked or blocked_state,
+                "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
+                "lifecycle_state": self._state,
+                "record": record,
+                "leases": [lease.status() for lease in self.leases.values()],
+            }
+
+    def recover(self, *, safe_state_confirmed: bool, quarantine_id: str | None = None) -> JsonObject:
         if not safe_state_confirmed:
             return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state."}
+        if not quarantine_id:
+            return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Recovery requires the current quarantine_id from lease-status."}
         with self._guard:
+            self._require_open()
             if self.project_lock is not None or self.leases:
                 return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources."}
             try:
                 project_lock = self._acquire_lock(self.project_key, [self.project_key])
             except CoordinationError as error:
                 return error.result
-            record = self._read_record(self.project_key) or {}
-            resources = [item for item in record.get("resources", []) if isinstance(item, str)]
             locks: list[_LifetimeLock] = []
             try:
+                record = self._read_record(self.project_key) or {}
+                if record.get("state") not in {"cleanup_required", "quarantined"}:
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "resource_not_quarantined", "summary": "Project has no quarantined incident to recover."}
+                if record.get("quarantine_id") != quarantine_id or not self._record_matches_config(record):
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine incident changed; inspect lease-status and confirm the current incident."}
+                resources = [item for item in record.get("resources", []) if isinstance(item, str)]
+                if len(resources) != len(set(resources)):
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "coordination_state_invalid", "summary": "Quarantine resource markers are inconsistent."}
                 for resource in sorted(set(resources)):
                     locks.append(self._acquire_lock(resource, resources))
+                    marker = self._read_record(resource)
+                    marker_resources = [item for item in (marker or {}).get("resources", []) if isinstance(item, str)]
+                    if (
+                        marker is None
+                        or marker.get("state") not in {"cleanup_required", "quarantined"}
+                        or marker.get("quarantine_id") != quarantine_id
+                        or not self._record_matches_config(marker)
+                        or sorted(marker_resources) != sorted(resources)
+                    ):
+                        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine resource markers changed; recovery remains blocked.", "resource": resource}
+                try:
+                    safe_append_text(self.root / "recovery.jsonl", json.dumps({"event": "recovery", "quarantine_id": quarantine_id, "resources": resources, "workspace": self.config.workspace_root, "config_path": self.config.config_path, "time": utc_now_iso()}) + "\n")
+                except BaseException as error:
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_audit_failed", "summary": "Recovery audit could not be persisted; quarantine remains active.", "backend_error": str(error), "audit_ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id}
                 released = self._base_record("released", resources)
-                released.update({"recovered_at": utc_now_iso(), "safe_state_confirmed": True})
+                released.update({"recovered_at": utc_now_iso(), "safe_state_confirmed": True, "recovered_quarantine_id": quarantine_id})
                 for resource in resources:
                     self._write_record(resource, released)
                 self._write_record(self.project_key, released)
                 self.blocked = False
-                return {"ok": True, "tool": "hardware_recover", "resources": resources, "safe_state_confirmed": True, "summary": "Quarantined hardware resources were released after operator-confirmed recovery."}
+                self.quarantine_id = None
+                self.incident_resources.clear()
+                return {"ok": True, "tool": "hardware_recover", "resources": resources, "safe_state_confirmed": True, "recovered_quarantine_id": quarantine_id, "summary": "Quarantined hardware resources were released after operator-confirmed recovery."}
             finally:
                 for lock in reversed(locks):
                     lock.release()
@@ -350,19 +426,41 @@ class HardwareCoordinator:
 
     def close(self) -> None:
         with self._guard:
+            if self._state == "closed":
+                return
+            self._state = "closing"
+            errors: list[BaseException] = []
             for lease in list(self.leases.values()):
                 if lease.state not in {"cleanup_required", "quarantined"}:
-                    self.quarantine_lease(lease, "owner_closed_with_active_lease")
+                    self._quarantine_registered_lease(lease, "owner_closed_with_active_lease")
                 lease.state = "quarantined"
                 self._persist_lease(lease)
+                remaining: list[_LifetimeLock] = []
                 for lock in reversed(lease.locks):
-                    lock.release()
-                lease.locks.clear()
+                    try:
+                        lock.release()
+                    except BaseException as error:
+                        if lock.descriptor >= 0:
+                            remaining.append(lock)
+                            errors.append(error)
+                lease.locks = list(reversed(remaining))
+                lease.valid = False
             if self.leases:
                 self._persist_project("quarantined")
+            self.leases = {lease_id: lease for lease_id, lease in self.leases.items() if lease.locks}
             if self.project_lock is not None:
-                self.project_lock.release()
-                self.project_lock = None
+                try:
+                    self.project_lock.release()
+                except BaseException as error:
+                    if self.project_lock.descriptor >= 0:
+                        errors.append(error)
+                if self.project_lock.descriptor < 0:
+                    self.project_lock = None
+            if errors:
+                self._state = "cleanup_required"
+                raise RuntimeError("Hardware coordinator lock cleanup failed: " + "; ".join(str(error) for error in errors)) from errors[0]
+            self.leases.clear()
+            self._state = "closed"
 
     def _acquire_lock(self, resource: str, requested: list[str]) -> _LifetimeLock:
         lock = _LifetimeLock(self.lock_directory / f"{resource_digest(resource)}.lock")
@@ -390,6 +488,7 @@ class HardwareCoordinator:
                 "processes_reaped": lease.processes_reaped,
                 "audit_ok": lease.audit_ok,
                 "errors": list(lease.errors),
+                "quarantine_id": lease.quarantine_id,
             }
         )
         for resource in lease.resources:
@@ -397,9 +496,11 @@ class HardwareCoordinator:
 
     def _persist_project(self, state: str, resources: list[str] | None = None) -> None:
         if resources is None:
-            resources = sorted({resource for lease in self.leases.values() for resource in lease.resources})
+            resources = sorted({resource for lease in self.leases.values() for resource in lease.resources} | (self.incident_resources if state in {"cleanup_required", "quarantined"} else set()))
         record = self._base_record(state, resources)
         record["leases"] = [lease.status() for lease in self.leases.values()]
+        if state in {"cleanup_required", "quarantined"}:
+            record["quarantine_id"] = self.quarantine_id
         self._write_record(self.project_key, record)
 
     def _base_record(self, state: str, resources: list[str]) -> JsonObject:
@@ -426,8 +527,12 @@ class HardwareCoordinator:
             value = json.loads(safe_read_text(self._record_path(resource)))
         except FileNotFoundError:
             return None
-        if not isinstance(value, dict) or value.get("version") != LEASE_VERSION:
+        if not isinstance(value, dict) or value.get("version") not in {1, LEASE_VERSION}:
             raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery."})
+        if value.get("version") == 1:
+            value = {**value, "version": LEASE_VERSION}
+            if value.get("state") in {"cleanup_required", "quarantined"}:
+                value["quarantine_id"] = legacy_quarantine_id(value)
         return value
 
     def _write_record(self, resource: str, record: JsonObject) -> None:
@@ -442,7 +547,68 @@ class HardwareCoordinator:
             "cleanup_required": True,
             "quarantined": True,
             "retry_safe": False,
+            "quarantine_id": self.quarantine_id,
         }
+
+    def _require_open(self) -> None:
+        if self._state != "open":
+            raise CoordinationError({"ok": False, "error_type": "coordination_closed", "summary": "Hardware coordinator is closed.", "side_effect_committed": False})
+
+    def _valid_lease(self, lease: HardwareLease) -> bool:
+        return (
+            self._state == "open"
+            and lease.valid
+            and self.leases.get(lease.lease_id) is lease
+            and lease.coordinator is self
+            and self.project_lock is not None
+            and self.project_lock.locked
+            and all(lock.locked for lock in lease.locks)
+        )
+
+    def _adopt_incident(self, record: JsonObject, resources: list[str]) -> None:
+        incident = record.get("quarantine_id")
+        self.quarantine_id = incident if isinstance(incident, str) and incident else secrets.token_hex(16)
+        self.incident_resources.update(resources)
+        self.blocked = True
+
+    def _quarantine_registered_lease(self, lease: HardwareLease, reason: str, error: object | None = None, *, audit_broken: bool = False) -> None:
+        if self.quarantine_id is None:
+            self.quarantine_id = secrets.token_hex(16)
+        self.incident_resources.update(lease.resources)
+        lease.state = "cleanup_required"
+        lease.quarantine_id = self.quarantine_id
+        lease.audit_ok = lease.audit_ok and not audit_broken
+        details: JsonObject = {"reason": reason, "time": utc_now_iso(), "quarantine_id": self.quarantine_id}
+        if error is not None:
+            details.update({"error_type": type(error).__name__, "summary": str(error)})
+        if not any(item.get("reason") == reason and item.get("summary") == details.get("summary") for item in lease.errors):
+            lease.errors.append(details)
+        self.blocked = True
+        self._persist_lease(lease)
+        self._persist_project("cleanup_required")
+
+    def _record_matches_config(self, record: JsonObject) -> bool:
+        return (
+            record.get("project_resource") == self.project_key
+            and record.get("workspace") == str(Path(self.config.work_dir).resolve())
+            and record.get("config_path") == str(Path(self.config.config_path).resolve())
+            and record.get("config_sha256") == self.config_sha256
+        )
+
+    def _mark_incident_resources(self, resources: list[str], reason: str, *, expected_project: str) -> None:
+        locks: list[_LifetimeLock] = []
+        try:
+            for resource in sorted(set(resources)):
+                lock = self._acquire_lock(resource, resources)
+                locks.append(lock)
+                marker = self._read_record(resource)
+                if marker is not None and marker.get("state") not in {None, "released"} and marker.get("project_resource") != expected_project:
+                    raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Physical resource marker belongs to a different unresolved project incident.", "resource": resource})
+                incident = {**self._base_record("quarantined", resources), "quarantined_at": utc_now_iso(), "reason": reason, "quarantine_id": self.quarantine_id}
+                self._write_record(resource, incident)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
 
 def project_resource(config: AgenticHILConfig) -> str:
@@ -455,6 +621,10 @@ def debugger_resource(config: AgenticHILConfig) -> str:
         return f"physical:{os.path.normcase(config.debugger.resource_id)}"
     identity = config.debugger.probe_id or config.debugger.executable or config.debugger.type
     return f"probe:{os.path.normcase(str(identity))}"
+
+
+def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, str]:
+    return DEBUGGER_DISCOVERY_RESOURCE, debugger_resource(config)
 
 
 def com_resource(config: AgenticHILConfig, port_id: str) -> str:
@@ -474,6 +644,11 @@ def adapter_resource(config: AgenticHILConfig, adapter_id: str) -> str:
 
 def resource_digest(resource: str) -> str:
     return hashlib.sha256(resource.encode("utf-8")).hexdigest()
+
+
+def legacy_quarantine_id(record: JsonObject) -> str:
+    identity = "\0".join(str(record.get(field, "")) for field in ("owner_token", "owner_started_at", "project_resource"))
+    return "legacy-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
 def utc_now_iso() -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from pathlib import Path
 
 from agentic_hil.adapters import AdapterService
@@ -9,7 +10,13 @@ from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError
 from agentic_hil.contracts import validate_tool_arguments
-from agentic_hil.coordination import CoordinationError, HardwareCoordinator, HardwareLease, debugger_resource
+from agentic_hil.coordination import (
+    DEBUGGER_DISCOVERY_RESOURCE,
+    CoordinationError,
+    HardwareCoordinator,
+    HardwareLease,
+    debugger_effect_resources,
+)
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success, read_last_report, write_report
@@ -37,7 +44,18 @@ class AgenticHILToolService:
         self.adapters = adapters or AdapterService(self.config, self.coordinator)
         self._debug_artifact: JsonObject | None = None
         self._debug_lease: HardwareLease | None = None
+        self._lifecycle_lock = threading.RLock()
+        self._dispatch_local = threading.local()
+        self._state = "open"
         self._dispatch_depth = 0
+
+    @property
+    def _dispatch_depth(self) -> int:
+        return int(getattr(self._dispatch_local, "depth", 0))
+
+    @_dispatch_depth.setter
+    def _dispatch_depth(self, value: int) -> None:
+        self._dispatch_local.depth = value
 
     def debugger_info(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
@@ -45,9 +63,14 @@ class AgenticHILToolService:
         return self.backend.info()
 
     def debugger_probes_list(self) -> JsonObject:
+        if self._dispatch_depth == 0:
+            return self.call("debugger_probes_list")
         if not self.config.permissions.allow_probe:
             return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.")
-        return self.backend.list_probes()
+        result = self.backend.list_probes()
+        if result.get("cleanup_required") is not True and result.get("side_effect_status") not in {"unknown", "partial"}:
+            result = {**result, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        return result
 
     def probe_target(self) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -110,7 +133,7 @@ class AgenticHILToolService:
             return staged
         try:
             result = self.backend.debug_start_session(staged["artifact"], str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
-        except Exception:
+        except BaseException:
             self.artifacts.release_stage(staged["artifact"])
             raise
         if result.get("ok") or result.get("cleanup_required"):
@@ -195,6 +218,12 @@ class AgenticHILToolService:
         return self.backend.classify_last_error()
 
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
+        with self._lifecycle_lock:
+            if self._state != "open":
+                return {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
+            return self._call_unlocked(name, arguments)
+
+    def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
             args: JsonObject = {}
         elif not isinstance(arguments, dict):
@@ -265,38 +294,48 @@ class AgenticHILToolService:
                         return permission_failure
                     return self._coordinated_debug_call(name, lambda: self._invoke_dispatch(dispatch[name]))
                 return self._invoke_dispatch(dispatch[name])
-            except (ConfigError, OSError) as error:
+            except BaseException as error:
                 if name in audited_hardware_tools() or name in containment_tools():
-                    return {
+                    poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
+                    if not isinstance(error, Exception):
+                        if poison_error is not None:
+                            error.args = (*error.args, f"Quarantine error: {poison_error}")
+                        raise
+                    result: JsonObject = {
                         "ok": False,
                         "tool": name,
-                        "error_type": "audit_failed_after_action",
-                        "summary": "Hardware action ran, but its audit result could not be completed.",
-                        "side_effect_status": "unknown",
-                        "retry_safe": False,
-                        "audit_ok": False,
-                        "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)},
-                    }
-                if isinstance(error, ConfigError):
-                    return {"tool": name, **error.to_dict()}
-                raise
-            except Exception as error:
-                if name in audited_hardware_tools() or name in containment_tools():
-                    return {
-                        "ok": False,
-                        "tool": name,
-                        "error_type": "hardware_action_exception",
-                        "summary": "Hardware action raised an exception; cleanup state is unconfirmed.",
+                        "error_type": "audit_failed_after_action" if isinstance(error, (ConfigError, OSError)) else "hardware_action_exception",
+                        "summary": "Hardware action failed and its physical state is unconfirmed.",
                         "side_effect_status": "unknown",
                         "retry_safe": False,
                         "cleanup_required": True,
+                        "quarantined": True,
+                        "quarantine_id": self.coordinator.quarantine_id,
                         "backend_error": str(error),
                     }
+                    if poison_error is not None:
+                        result["quarantine_error"] = str(poison_error)
+                    if isinstance(error, (ConfigError, OSError)):
+                        result.update({"audit_ok": False, "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)}})
+                    written = write_report(self.config, result)
+                    if written.get("audit_ok") is False:
+                        self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
+                    return {**written, "cleanup_required": True, "quarantined": True, "quarantine_id": self.coordinator.quarantine_id}
+                if isinstance(error, ConfigError):
+                    return {"tool": name, **error.to_dict()}
                 raise
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
 
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
+
+    def _poison_quietly(self, reason: str, error: object | None = None, *, audit_broken: bool = False) -> Exception | None:
+        """Quarantine the coordinator without letting a coordination failure mask the primary hardware error."""
+        try:
+            self.coordinator.poison(reason, error, audit_broken=audit_broken)
+        except Exception as poison_error:
+            return poison_error
+        return None
 
     def _invoke_dispatch(self, callback) -> JsonObject:
         self._dispatch_depth += 1
@@ -316,6 +355,8 @@ class AgenticHILToolService:
             return self._invoke_dispatch(lambda: self.reset_target(args.get("mode", "run")))
         if name == "probe_target" and not self.config.permissions.allow_probe:
             return self._invoke_dispatch(self.probe_target)
+        if name == "debugger_probes_list" and not self.config.permissions.allow_probe:
+            return self._invoke_dispatch(self.debugger_probes_list)
         if name == "debug_start_session":
             mode = args.get("mode", "attach")
             permissions = self.config.permissions
@@ -330,7 +371,7 @@ class AgenticHILToolService:
         return None
 
     def _coordinated_debug_call(self, name: str, callback) -> JsonObject:
-        one_shot = name in {"probe_target", "flash_firmware", "reset_target"}
+        one_shot = name in {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
         if one_shot or starts_session:
@@ -342,7 +383,8 @@ class AgenticHILToolService:
                     return self._lease_result(result, lease)
                 return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
             try:
-                lease = self.coordinator.acquire(debugger_resource(self.config))
+                resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
+                lease = self.coordinator.acquire(*resources)
             except CoordinationError as error:
                 return {"tool": name, "side_effect_committed": False, **error.result}
         try:
@@ -431,6 +473,18 @@ class AgenticHILToolService:
         return result.get("error_type") is not None and result.get("side_effect_committed") is not False and result.get("side_effect_status") != "committed"
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            if self._state == "closed":
+                return
+            self._state = "closing"
+            try:
+                self._close_unlocked()
+            except BaseException:
+                self._state = "cleanup_required"
+                raise
+            self._state = "closed"
+
+    def _close_unlocked(self) -> None:
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
         for name, resource in [
@@ -519,7 +573,7 @@ def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
 
 def audited_hardware_tools() -> set[str]:
     return {
-        "probe_target", "flash_firmware", "reset_target", "debug_start_session",
+        "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
         "adapter_session_start", "adapter_set_value", "adapter_inject_fault", "adapter_measure",
@@ -535,6 +589,6 @@ def containment_tools() -> set[str]:
 
 def debugger_effect_tools() -> set[str]:
     return {
-        "probe_target", "flash_firmware", "reset_target", "debug_start_session",
+        "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_halt", "debug_clear_breakpoints", "debug_symbol_info", "debug_dump_symbol_ihex",
     }

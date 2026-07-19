@@ -37,12 +37,21 @@ class ProcessBridgeSession:
         self.process_reaped = False
         self.close_result: JsonObject | None = None
         self.stderr = ""
+        self.reader_threads = [
+            threading.Thread(target=self._stdout_reader, daemon=True),
+            threading.Thread(target=self._stderr_reader, daemon=True),
+        ]
         try:
-            threading.Thread(target=self._stdout_reader, daemon=True).start()
-            threading.Thread(target=self._stderr_reader, daemon=True).start()
+            for reader in self.reader_threads:
+                reader.start()
         except BaseException as primary_error:
             try:
                 terminate_process_tree(self.child, CHILD_REAP_TIMEOUT_S)
+                for reader in self.reader_threads:
+                    if reader.ident is not None:
+                        reader.join(timeout=CHILD_REAP_TIMEOUT_S)
+                if any(reader.is_alive() for reader in self.reader_threads):
+                    raise RuntimeError("Bridge reader threads remained active after process cleanup.")
             except BaseException as cleanup_error:
                 raise RuntimeError(f"Bridge reader setup failed and process cleanup remains unconfirmed: {cleanup_error}") from primary_error
             raise
@@ -72,8 +81,14 @@ class ProcessBridgeSession:
         try:
             terminate_process_tree(self.child, CHILD_REAP_TIMEOUT_S)
             self.process_reaped = True
+            for reader in self.reader_threads:
+                if reader.ident is not None:
+                    reader.join(timeout=CHILD_REAP_TIMEOUT_S)
+            if any(reader.is_alive() for reader in self.reader_threads):
+                raise RuntimeError("Bridge reader threads remained active after process cleanup.")
         except BaseException as error:
             reap_error = error
+            self.process_reaped = False
         result: JsonObject = {
             "ok": self.safe_state_confirmed and self.process_reaped,
             "protocol_version": BRIDGE_PROTOCOL_VERSION,

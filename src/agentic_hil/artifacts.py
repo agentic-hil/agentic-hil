@@ -289,8 +289,7 @@ class ArtifactManager:
                 "backend_error": str(error),
             }
         finally:
-            with suppress(OSError):
-                staged_path.unlink()
+            self.release_stage(staged["artifact"])
         return self._store_uploaded_data(data, Path(image_path).name, display_path(self.config, image_path))
 
     def _store_uploaded_data(self, data: bytes, filename: str, source_path: str | None = None) -> JsonObject:

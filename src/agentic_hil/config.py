@@ -195,6 +195,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             "Configured workspace_root does not match the requested work directory.",
             {"workspace_root": str(workspace), "expected_workspace": str(Path(work_dir).resolve())},
         )
+    state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path)
 
     target_raw = mapping(raw.get("target"), "target")
     devices_raw = mapping(raw.get("devices"), "devices")
@@ -225,6 +226,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         config_path=resolved_config_path,
         work_dir=str(workspace),
         workspace_root=str(workspace),
+        state_root=str(state_root),
         target=target_config(target_raw),
         devices=devices,
         debugger=debugger_config(debugger_raw, debugger_type),
@@ -304,9 +306,14 @@ def project_config_path(workspace: str | Path) -> Path:
 
 def user_state_root() -> Path:
     if os.name == "nt":
-        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        value = os.environ.get("LOCALAPPDATA")
+        root = Path(value) if value is not None else Path.home() / "AppData" / "Local"
     else:
-        root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+        value = os.environ.get("XDG_STATE_HOME")
+        root = Path(value) if value is not None else Path.home() / ".local" / "state"
+    root = root.expanduser()
+    if not root.is_absolute():
+        raise ConfigError("config_invalid", "Agentic HIL state root environment path must be absolute.", {"path": str(root)})
     return safe_directory(root / "agentic-hil")
 
 
@@ -318,7 +325,153 @@ def project_state_directory(config: AgenticHILConfig) -> Path:
         ]
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-    return safe_directory(user_state_root() / "projects" / digest)
+    return safe_directory(Path(config.state_root) / "projects" / digest)
+
+
+def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
+    requested = Path(value).expanduser()
+    if not requested.is_absolute():
+        raise ConfigError("config_invalid", "state_root must be an absolute path.", {"path": config_path, "field": "state_root", "value": value})
+    lexical = absolute_without_symlinks(requested)
+    if is_path_within_frozen(lexical, workspace) or is_path_within_frozen(workspace, lexical):
+        raise ConfigError("config_invalid", "state_root and workspace_root must not overlap.", {"path": config_path, "field": "state_root", "state_root": str(lexical), "workspace_root": str(workspace)})
+    root = safe_directory(lexical)
+    if os.name == "nt":
+        validate_windows_state_root(root)
+    else:
+        for index, candidate in enumerate((root, *root.parents)):
+            opened = os.stat(candidate, follow_symlinks=False)
+            mode = stat.S_IMODE(opened.st_mode)
+            unsafe_write = bool(mode & 0o022) and not bool(mode & stat.S_ISVTX)
+            if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
+                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user and have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
+    return root
+
+
+def validate_windows_state_root(root: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    owner_sid = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    token = wintypes.HANDLE()
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
+    get_security.restype = wintypes.DWORD
+    result = get_security(str(root), 1, 0x00000005, ctypes.byref(owner_sid), None, ctypes.byref(dacl), None, ctypes.byref(security_descriptor))
+    if result:
+        raise ConfigError("unsafe_configured_path", "state_root Windows ownership and ACL could not be inspected.", {"field": "state_root", "path": str(root), "winerror": result})
+
+    open_token = advapi32.OpenProcessToken
+    open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    open_token.restype = wintypes.BOOL
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    get_token_information = advapi32.GetTokenInformation
+    get_token_information.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    get_token_information.restype = wintypes.BOOL
+    equal_sid = advapi32.EqualSid
+    equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    equal_sid.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+    try:
+        if not open_token(get_current_process(), 0x0008, ctypes.byref(token)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        required = wintypes.DWORD()
+        get_token_information(token, 1, None, 0, ctypes.byref(required))
+        token_info = ctypes.create_string_buffer(required.value)
+        if not get_token_information(token, 1, token_info, required, ctypes.byref(required)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        current_sid = ctypes.c_void_p.from_buffer(token_info).value
+        if not equal_sid(owner_sid, current_sid):
+            raise ConfigError("unsafe_configured_path", "state_root must be owned by the current Windows user.", {"field": "state_root", "path": str(root)})
+        if not dacl.value or windows_acl_grants_untrusted_access(advapi32, dacl, current_sid, 0x500D0116):
+            raise ConfigError("unsafe_configured_path", "state_root must not grant write access to other Windows principals.", {"field": "state_root", "path": str(root)})
+        for ancestor in root.parents:
+            ancestor_dacl = ctypes.c_void_p()
+            ancestor_descriptor = ctypes.c_void_p()
+            result = get_security(str(ancestor), 1, 0x00000004, None, None, ctypes.byref(ancestor_dacl), None, ctypes.byref(ancestor_descriptor))
+            if result:
+                raise ConfigError("unsafe_configured_path", "state_root ancestor ACL could not be inspected.", {"field": "state_root", "path": str(ancestor), "winerror": result})
+            try:
+                if not ancestor_dacl.value or windows_acl_grants_untrusted_access(advapi32, ancestor_dacl, current_sid, 0x100D0040, include_inherit_only=False):
+                    raise ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", {"field": "state_root", "path": str(ancestor)})
+            finally:
+                if ancestor_descriptor:
+                    local_free(ancestor_descriptor)
+    except OSError as error:
+        raise ConfigError("unsafe_configured_path", "state_root Windows ownership and ACL could not be inspected.", {"field": "state_root", "path": str(root), "backend_error": str(error)}) from error
+    finally:
+        if token:
+            close_handle(token)
+        if security_descriptor:
+            local_free(security_descriptor)
+
+
+def windows_acl_grants_untrusted_access(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = [("ace_count", wintypes.DWORD), ("bytes_in_use", wintypes.DWORD), ("bytes_free", wintypes.DWORD)]
+
+    class AceHeader(ctypes.Structure):
+        _fields_ = [("ace_type", ctypes.c_ubyte), ("ace_flags", ctypes.c_ubyte), ("ace_size", wintypes.WORD)]
+
+    get_acl_information = advapi32.GetAclInformation
+    get_acl_information.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+    get_acl_information.restype = wintypes.BOOL
+    create_well_known_sid = advapi32.CreateWellKnownSid
+    create_well_known_sid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    create_well_known_sid.restype = wintypes.BOOL
+    get_ace = advapi32.GetAce
+    get_ace.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    get_ace.restype = wintypes.BOOL
+    equal_sid = advapi32.EqualSid
+    equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    equal_sid.restype = wintypes.BOOL
+    info = AclSizeInformation()
+    if not get_acl_information(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
+        raise ctypes.WinError(ctypes.get_last_error())
+    trusted_sids: list[ctypes.Array] = []
+    for sid_type in (3, 22, 26, 71):
+        size = wintypes.DWORD(68)
+        sid = ctypes.create_string_buffer(size.value)
+        if not create_well_known_sid(sid_type, None, sid, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        trusted_sids.append(sid)
+    for index in range(info.ace_count):
+        ace = ctypes.c_void_p()
+        if not get_ace(dacl, index, ctypes.byref(ace)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        address = int(ace.value)
+        header = AceHeader.from_address(address)
+        if header.ace_type not in {0, 5, 9, 11}:
+            continue
+        if header.ace_flags & 0x08 and not include_inherit_only:
+            continue
+        mask = ctypes.c_uint32.from_address(address + 4).value
+        if not mask & access_mask:
+            continue
+        sid_offset = 8
+        if header.ace_type in {5, 11}:
+            flags = ctypes.c_uint32.from_address(address + 8).value
+            sid_offset = 12 + (16 if flags & 1 else 0) + (16 if flags & 2 else 0)
+        sid = ctypes.c_void_p(address + sid_offset)
+        if equal_sid(sid, current_sid) or any(equal_sid(sid, trusted_sid) for trusted_sid in trusted_sids):
+            continue
+        return True
+    return False
 
 
 def pin_configured_paths(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -671,10 +824,18 @@ def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None
                 raise ConfigError("unsafe_configured_path", "Lock file changed while it was being opened.", {"path": str(path)})
             if opened.st_size == 0:
                 os.write(descriptor, b"0")
-            os.lseek(descriptor, 0, os.SEEK_SET)
             import msvcrt
 
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            # LK_LOCK gives up after ~10 seconds; keep retrying so the Windows
+            # branch blocks like the POSIX flock(LOCK_EX) branch does.
+            while True:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in {errno.EACCES, errno.EDEADLK}:
+                        raise
             try:
                 yield
             finally:
@@ -713,7 +874,7 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
     get_info.restype = wintypes.BOOL
     invalid_handle = ctypes.c_void_p(-1).value
     file_read_attributes = 0x80
-    delete_access = 0x10000
+    file_list_directory = 0x1
     file_share_read_write = 0x1 | 0x2
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
@@ -732,10 +893,13 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
     try:
         for component in components:
             if create and not component.exists():
-                component.mkdir()
+                component.mkdir(exist_ok=True)
+            # FILE_LIST_DIRECTORY participates in sharing checks, so this handle
+            # blocks renames of the component while coexisting with other holders;
+            # attributes-only handles are excluded from sharing and cannot pin.
             handle = create_file(
                 str(component),
-                file_read_attributes | delete_access,
+                file_list_directory | file_read_attributes,
                 file_share_read_write,
                 None,
                 open_existing,
@@ -744,7 +908,7 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
             )
             if handle == invalid_handle:
                 error_code = ctypes.get_last_error()
-                if error_code not in {5, 32}:
+                if error_code != 5:
                     raise ctypes.WinError(error_code)
                 handle = create_file(
                     str(component),
@@ -765,7 +929,7 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
             if info.dwFileAttributes & file_attribute_reparse_point or not info.dwFileAttributes & file_attribute_directory:
                 raise ConfigError("unsafe_configured_path", "Configured path contains a Windows reparse point.", {"path": str(component)})
         return handles
-    except Exception:
+    except BaseException:
         _close_windows_handles(handles)
         raise
 

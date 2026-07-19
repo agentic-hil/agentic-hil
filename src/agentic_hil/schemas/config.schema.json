@@ -5,12 +5,17 @@
   "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["workspace_root"],
+  "required": ["workspace_root", "state_root"],
   "properties": {
     "workspace_root": {
       "type": "string",
       "minLength": 1,
       "description": "Absolute path of the workspace this configuration authorizes. It is the runtime working directory."
+    },
+    "state_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
     },
     "target": {
       "type": "object",
@@ -123,7 +128,7 @@
           "receive_own_messages": { "type": "boolean", "default": false },
           "listen_only": { "type": "boolean", "default": false },
           "max_buffer_frames": { "type": "integer", "minimum": 1, "default": 1024 },
-          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 },
+          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true." },
           "resource_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null }
         }
       },

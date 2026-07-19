@@ -129,6 +129,7 @@ class AgenticHILConfig:
     config_path: str
     work_dir: str
     workspace_root: str
+    state_root: str
     target: TargetConfig
     devices: dict[str, DeviceConfig]
     debugger: DebuggerConfig

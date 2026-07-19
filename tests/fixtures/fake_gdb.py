@@ -68,6 +68,7 @@ def main() -> int:
     emit('=thread-group-added,id="i1"')
     emit("(gdb)")
     next_breakpoint = 1
+    reset_count = 0
     for raw_line in sys.stdin:
         match = COMMAND_PATTERN.match(raw_line.strip())
         if match is None:
@@ -77,6 +78,8 @@ def main() -> int:
             emit(f"{token}^exit")
             return 0
         if command.startswith("-target-select"):
+            if behavior() == "target_select_timeout":
+                continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
@@ -89,7 +92,22 @@ def main() -> int:
             except OSError:
                 pass
             emit(f"{token}^done")
-        elif command.startswith(("-gdb-set", "-interpreter-exec", "-target-download", "-break-delete")):
+        elif command.startswith("-target-download"):
+            if behavior() == "download_timeout":
+                continue
+            if behavior() == "download_error":
+                emit(f'{token}^error,msg="Download failed"')
+                continue
+            emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec"):
+            reset_count += 1
+            if reset_count == 2 and behavior() == "post_load_reset_timeout":
+                continue
+            if reset_count == 2 and behavior() == "post_load_reset_error":
+                emit(f'{token}^error,msg="Reset failed"')
+                continue
+            emit(f"{token}^done")
+        elif command.startswith(("-gdb-set", "-break-delete")):
             emit(f"{token}^done")
         elif command.startswith("-break-insert"):
             emit(f'{token}^done,bkpt={{number="{next_breakpoint}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}')

@@ -215,6 +215,66 @@ def test_failed_debug_start_does_not_poison_retry(tmp_path: Path, monkeypatch: p
         service.close()
 
 
+@pytest.mark.parametrize(
+    ("behavior", "expected_status", "expected_phase", "timed_out"),
+    [
+        ("download_error", "partial", "download_started", False),
+        ("post_load_reset_error", "partial", "post_load_reset_started", False),
+        ("download_timeout", "unknown", "download_started", True),
+        ("post_load_reset_timeout", "unknown", "post_load_reset_started", True),
+    ],
+)
+def test_debug_load_failure_retains_quarantined_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    behavior: str,
+    expected_status: str,
+    expected_phase: str,
+    timed_out: bool,
+) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior=behavior)
+    if timed_out:
+        monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", 0.1)
+    try:
+        result = start_debug_session(service)
+
+        assert result["ok"] is False, result
+        assert result.get("side_effect_committed") is True, result
+        assert result["side_effect_status"] == expected_status
+        assert result["load_phase"] == expected_phase
+        assert result["firmware_load_status"] in {"partial_or_unknown", "committed"}
+        assert result["retry_safe"] is False
+        assert result["hardware_state"] == "unknown"
+        assert result["cleanup_required"] is True
+        assert result["lease_state"] == "cleanup_required"
+        assert result.get("command_timed_out", False) is timed_out
+        assert service.coordinator.blocked is True
+        blocked = service.call("probe_target")
+        assert blocked["error_type"] == "resource_quarantined"
+    finally:
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+def test_attach_target_connect_timeout_retains_quarantined_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="target_select_timeout")
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", 0.1)
+    try:
+        result = start_debug_session(service, mode="attach")
+
+        assert result["ok"] is False
+        assert result["load_phase"] == "target_connect_started"
+        assert result["side_effect_status"] == "unknown"
+        assert result["cleanup_required"] is True
+        assert result["lease_state"] == "cleanup_required"
+        assert service.coordinator.blocked is True
+    finally:
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
 def test_debug_symbol_info_reports_missing_symbol(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:
@@ -369,6 +429,7 @@ def test_empty_symbol_allowlist_denies_all_symbols(tmp_path: Path) -> None:
 def test_active_debug_log_symlink_is_rejected(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     log_path: Path | None = None
+    audit_poisoned = False
     try:
         started = start_debug_session(service)
         assert started["ok"] is True
@@ -386,12 +447,18 @@ def test_active_debug_log_symlink_is_rejected(tmp_path: Path) -> None:
         assert result["ok"] is True
         assert result["side_effect_committed"] is True
         assert result["audit_ok"] is False
+        audit_poisoned = True
         assert result["retry_safe"] is False
         assert outside.read_text(encoding="utf-8") == "unchanged\n"
     finally:
         if log_path is not None and log_path.is_symlink():
             log_path.unlink()
-        service.close()
+        if audit_poisoned:
+            with pytest.raises(RuntimeError):
+                service.close()
+            service.coordinator.close()
+        else:
+            service.close()
 
 
 def test_debug_reset_modes_require_reset_permission(tmp_path: Path) -> None:

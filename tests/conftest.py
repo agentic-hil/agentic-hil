@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ def write_config(
     allowed_symbols: list[str] | None = None,
     allow_all_symbols: bool | None = None,
     workspace_root: Path | None = None,
+    state_root: Path | None = None,
     max_dump_size_bytes: int = 1048576,
     devices_yaml: str = "devices: {}\n",
     com_ports_yaml: str = "com_ports: {}\n",
@@ -49,6 +51,7 @@ def write_config(
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     workspace_root = (workspace_root or directory).resolve()
+    state_root = (state_root or Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME") or directory.parent / "user-state") / "agentic-hil").resolve()
     if debugger_executable is None:
         fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD}
         debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
@@ -72,6 +75,7 @@ def write_config(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         f"""workspace_root: {workspace_root.as_posix()!r}
+state_root: {state_root.as_posix()!r}
 target:
   name: "example-target"
   controller: "stm32f4"

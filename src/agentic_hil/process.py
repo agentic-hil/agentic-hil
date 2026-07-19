@@ -28,7 +28,16 @@ def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
     child = subprocess.Popen(args, **kwargs)
     with _PROCESS_RECORDS_LOCK:
         _PROCESS_RECORDS[id(child)] = ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get())
-    return register_process_group(child)
+    try:
+        return register_process_group(child)
+    except BaseException as primary_error:
+        if os.name == "nt":
+            raise
+        try:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+        except BaseException as cleanup_error:
+            primary_error.args = (*primary_error.args, f"Process registration cleanup error: {cleanup_error}")
+        raise
 
 
 @contextmanager

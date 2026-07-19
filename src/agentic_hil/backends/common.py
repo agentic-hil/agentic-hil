@@ -51,6 +51,9 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
         try:
             terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
         except BaseException as cleanup_error:
+            if isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+                raise primary_error from cleanup_error
             raise RuntimeError(f"Command failed and cleanup remains unconfirmed: {cleanup_error}") from primary_error
         raise
     return CompletedCommand(

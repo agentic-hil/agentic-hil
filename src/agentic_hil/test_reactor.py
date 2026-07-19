@@ -19,7 +19,7 @@ from agentic_hil.config import (
     reject_nonfinite_numbers,
     safe_read_text,
 )
-from agentic_hil.report import overall_success
+from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
 
@@ -56,9 +56,14 @@ def propagate_result_status(aggregate: JsonObject, sources: list[JsonObject]) ->
     audit_failures = [source for source in sources if source.get("audit_ok") is False]
     if audit_failures:
         aggregate["audit_ok"] = False
-        if "audit_error" in audit_failures[0]:
-            aggregate["audit_error"] = audit_failures[0]["audit_error"]
-        aggregate["audit_errors"] = [source["audit_error"] for source in audit_failures if "audit_error" in source]
+        flattened: list[JsonObject] = []
+        for source in audit_failures:
+            for error in audit_errors(source):
+                if error not in flattened:
+                    flattened.append(error)
+        if flattened:
+            aggregate["audit_error"] = flattened[0]
+        aggregate["audit_errors"] = flattened
         aggregate["retry_safe"] = audit_failures[0].get("retry_safe", False)
     target_failures = [source for source in sources if source.get("target_ok") is False]
     if target_failures:

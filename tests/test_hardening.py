@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, 
 
 from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
@@ -28,6 +30,7 @@ from agentic_hil.config import (
     _windows_hold_directory_chain,
     load_authoritative_config,
     load_config,
+    project_state_directory,
 )
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.mcp import handle_mcp_message
@@ -62,6 +65,63 @@ def wait_until(predicate, timeout_s: float = WAIT_TIMEOUT_S) -> bool:
             return True
         time.sleep(POLL_INTERVAL_S)
     return predicate()
+
+
+def test_state_root_is_pinned_and_outside_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    original = project_state_directory(config)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "changed"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "changed"))
+
+    assert project_state_directory(config) == original
+    assert not original.is_relative_to(tmp_path)
+
+
+def test_state_root_inside_workspace_is_rejected(tmp_path: Path) -> None:
+    path = write_config(tmp_path, state_root=tmp_path / "state")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(path))
+    assert excinfo.value.details["field"] == "state_root"
+
+
+def test_relative_state_root_is_rejected(tmp_path: Path) -> None:
+    path = write_config(tmp_path)
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"^state_root:.*$", "state_root: relative-state", text, flags=re.MULTILINE)
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(path))
+    assert excinfo.value.details["field"] == "state_root"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode semantics")
+def test_group_writable_state_root_is_rejected(tmp_path: Path) -> None:
+    path = write_config(tmp_path)
+    config = load_config(str(path))
+    root = Path(config.state_root)
+    root.chmod(0o770)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(str(path))
+        assert excinfo.value.error_type == "unsafe_configured_path"
+    finally:
+        root.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
+def test_broadly_writable_windows_state_root_is_rejected(tmp_path: Path) -> None:
+    path = write_config(tmp_path)
+    config = load_config(str(path))
+    root = Path(config.state_root)
+    grant = subprocess.run(["icacls", str(root), "/grant", "*S-1-1-0:(OI)(CI)M"], capture_output=True, text=True, check=False)
+    if grant.returncode != 0:
+        pytest.skip(f"could not set temporary test ACL: {grant.stderr}")
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(str(path))
+        assert excinfo.value.error_type == "unsafe_configured_path"
+    finally:
+        subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
 
 
 def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> None:
@@ -239,6 +299,172 @@ def test_com_reader_start_failure_reports_before_lease_release(tmp_path: Path, m
     assert service.sessions == {}
 
 
+def test_com_reader_started_then_start_raises_is_joined_before_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+
+    class BlockingHandle:
+        is_open = True
+        in_waiting = 0
+
+        def __init__(self) -> None:
+            self.closed = threading.Event()
+
+        def read(self, size: int) -> bytes:
+            self.closed.wait()
+            return b""
+
+        def close(self) -> None:
+            self.is_open = False
+            self.closed.set()
+
+    handle = BlockingHandle()
+    captured: list[ComPortSession] = []
+
+    def opened(port_id, port_config, log_path, lease):
+        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False)
+        captured.append(session)
+        return {"ok": True, "session": session}
+
+    original_start = threading.Thread.start
+
+    def start_then_raise(thread: threading.Thread) -> None:
+        original_start(thread)
+        raise RuntimeError("start failed after launch")
+
+    monkeypatch.setattr(service, "_open_serial", opened)
+    monkeypatch.setattr(threading.Thread, "start", start_then_raise)
+
+    result = service.session_start("dut")
+
+    assert result["error_type"] == "com_reader_start_failed"
+    assert result["lease_state"] == "released"
+    assert captured[0].reader is not None
+    assert not captured[0].reader.is_alive()
+    assert handle.is_open is False
+
+
+def test_new_com_session_clears_os_and_memory_buffers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    reset_calls = 0
+
+    class BufferedHandle:
+        is_open = True
+
+        def reset_input_buffer(self) -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+
+        def close(self) -> None:
+            self.is_open = False
+
+    def opened(port_id, port_config, log_path, lease):
+        session = ComPortSession(port_id, port_config, BufferedHandle(), log_path, lease, start_reader=False)
+        session.buffer.extend(b"stale")
+        session.overflow_bytes = 3
+        session.start_reader = lambda: None
+        return {"ok": True, "session": session}
+
+    monkeypatch.setattr(service, "_open_serial", opened)
+    try:
+        result = service.session_start("dut", clear_buffer=True)
+
+        assert result["ok"] is True
+        assert reset_calls == 1
+        assert service.sessions["dut"].buffer == b""
+        assert service.sessions["dut"].overflow_bytes == 0
+    finally:
+        service.close()
+
+
+def test_com_session_constructor_failure_closes_raw_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    handle = SimpleNamespace(closed=False, close=lambda: setattr(handle, "closed", True))
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
+    monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
+
+    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace())
+
+    assert result["ok"] is False
+    assert handle.closed is True
+
+
+def test_can_session_constructor_failure_shuts_down_raw_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.can import open_python_can_adapter
+
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    bus = SimpleNamespace(closed=False, shutdown=lambda: setattr(bus, "closed", True))
+    monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus))
+    monkeypatch.setattr("agentic_hil.can.PythonCanAdapterSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert bus.closed is True
+
+
+def test_active_can_session_drains_more_than_one_buffer_batch(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    max_buffer_frames: 2\n')
+    service = CanBusService(config)
+
+    class QueuedAdapter:
+        adapter_name = "fake"
+
+        def __init__(self) -> None:
+            self.frames = [1, 2, 3, 4, 5]
+            self.reads = 0
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            self.reads += 1
+            batch = self.frames[:max_frames]
+            del self.frames[:max_frames]
+            return {"ok": True, "frames": [{"id": item} for item in batch]}
+
+        def status(self) -> dict:
+            return {"active": True}
+
+        def close(self) -> dict:
+            return {"safe_state_confirmed": True, "process_reaped": True}
+
+    adapter = QueuedAdapter()
+    session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can.jsonl"))
+    service.sessions["bench"] = session
+
+    result = service.session_start("bench", clear_rx_queue=True)
+
+    assert result["ok"] is True
+    assert result["already_active"] is True
+    assert adapter.frames == []
+    assert adapter.reads == 4
+
+
+def test_active_can_session_quarantines_when_queue_never_drains(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    max_buffer_frames: 2\n')
+    service = CanBusService(config)
+
+    class BusyAdapter:
+        adapter_name = "fake"
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": True, "frames": [{"id": 1}, {"id": 2}]}
+
+        def status(self) -> dict:
+            return {"active": True}
+
+    session = CanBusSession("bench", config.can_buses["bench"], BusyAdapter(), str(tmp_path / "can-limit.jsonl"))
+    service.sessions["bench"] = session
+
+    result = service.session_start("bench", clear_rx_queue=True)
+
+    assert result["error_type"] == "can_queue_clear_limit"
+    assert result["frames_drained"] > config.can_buses["bench"].max_buffer_frames
+    assert result["side_effect_committed"] is True
+    assert result["side_effect_status"] == "partial"
+    assert result["lease_state"] == "cleanup_required"
+
+
 class BlockingStdin:
     """Stdin stub that blocks like a cooked-mode TTY until released, then reports EOF."""
 
@@ -293,6 +519,59 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
+
+
+def test_com_stdio_propagates_stdin_reader_error_after_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", StubComPortService)
+
+    class ErrorStdin:
+        def read(self, size: int) -> bytes:
+            raise OSError("stdin failed")
+
+    with pytest.raises(OSError, match="stdin failed"):
+        run_com_stdio(config, "dut", input_stream=ErrorStdin(), output_stream=StringIO(), error_stream=StringIO())
+
+
+def test_com_stdio_cancels_and_joins_blocked_stdin_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+
+    class FailingReadService(StubComPortService):
+        def read_bytes(self, port_id: str, max_bytes: int, wait_timeout_s: float, tool: str) -> dict:
+            return {"ok": False, "error_type": "serial_read_failed"}
+
+    class CancelStdin:
+        def __init__(self) -> None:
+            self.cancelled = threading.Event()
+            self.finished = threading.Event()
+
+        def read(self, size: int) -> bytes:
+            self.cancelled.wait()
+            self.finished.set()
+            return b""
+
+        def cancel_read(self) -> None:
+            self.cancelled.set()
+
+    stdin = CancelStdin()
+    monkeypatch.setattr("agentic_hil.comstdio.ComPortService", FailingReadService)
+
+    result = run_com_stdio(config, "dut", input_stream=stdin, output_stream=StringIO(), error_stream=StringIO())
+
+    assert result == 1
+    assert stdin.cancelled.is_set()
+    assert stdin.finished.is_set()
+
+
+def test_spawn_command_preserves_interrupt_when_cleanup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = SimpleNamespace(communicate=lambda timeout: (_ for _ in ()).throw(KeyboardInterrupt("stop")))
+    monkeypatch.setattr("agentic_hil.backends.common.spawn_managed_process", lambda *args, **kwargs: child)
+    monkeypatch.setattr("agentic_hil.backends.common.terminate_process_tree", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("reap failed")))
+
+    with pytest.raises(KeyboardInterrupt, match="stop") as excinfo:
+        spawn_command(["tool"], str(Path.cwd()), 1)
+
+    assert "Cleanup error: reap failed" in str(excinfo.value.args)
 
 
 def test_artifact_upload_rejects_oversized_local_file(tmp_path: Path) -> None:
@@ -807,7 +1086,8 @@ def test_artifact_root_symlink_cannot_pivot_after_startup(tmp_path: Path) -> Non
 
     assert result["ok"] is False
     assert result["error_type"] == "artifact_validation_failed"
-    assert result["validation"]["allowed_root"] is False
+    assert result["validation"]["allowed_root"] is True
+    assert result["validation"]["regular_file"] is False
 
 
 def test_report_directory_symlink_is_rejected(tmp_path: Path) -> None:
@@ -827,7 +1107,7 @@ def test_report_directory_symlink_is_rejected(tmp_path: Path) -> None:
         service.close()
 
     assert result["ok"] is False
-    assert result["error_type"] == "unsafe_configured_path"
+    assert result["error_type"] == "report_not_found"
 
 
 def test_last_report_file_symlink_is_rejected_without_reading_target(tmp_path: Path) -> None:
@@ -848,7 +1128,7 @@ def test_last_report_file_symlink_is_rejected_without_reading_target(tmp_path: P
         service.close()
 
     assert result["ok"] is False
-    assert result["error_type"] == "unsafe_configured_path"
+    assert result["error_type"] == "report_not_found"
     assert "must-not-be-read" not in json.dumps(result)
 
 
@@ -861,6 +1141,35 @@ def test_parallel_jsonl_appends_keep_every_event_exactly_once(tmp_path: Path) ->
     events = [json.loads(line)["event_id"] for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert len(events) == 1000
     assert sorted(events) == list(range(1000))
+
+
+def test_report_path_is_not_claimed_when_canonical_state_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path)
+    monkeypatch.setattr("agentic_hil.report.write_report_state", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("state denied")))
+
+    result = write_report(config, {"ok": True, "tool": "probe_target"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+
+
+def test_report_path_is_not_claimed_when_workspace_snapshot_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    original_write = report_module.safe_write_text
+
+    def fail_snapshot(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("snapshot denied")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.report.safe_write_text", fail_snapshot)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:

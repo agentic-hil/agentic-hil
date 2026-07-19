@@ -65,12 +65,21 @@ class GdbMiClient:
         self.last_stop_line: str | None = None
         self.command_history: list[JsonObject] = []
         self.exited = threading.Event()
+        self.reader_threads = [
+            threading.Thread(target=self._stdout_reader, daemon=True),
+            threading.Thread(target=self._stderr_reader, daemon=True),
+        ]
         try:
-            threading.Thread(target=self._stdout_reader, daemon=True).start()
-            threading.Thread(target=self._stderr_reader, daemon=True).start()
+            for reader in self.reader_threads:
+                reader.start()
         except BaseException as primary_error:
             try:
                 terminate_process_tree(self.child, 5.0)
+                for reader in self.reader_threads:
+                    if reader.ident is not None:
+                        reader.join(timeout=5.0)
+                if any(reader.is_alive() for reader in self.reader_threads):
+                    raise RuntimeError("GDB reader threads remained active after process cleanup.")
             except BaseException as cleanup_error:
                 raise RuntimeError(f"GDB reader setup failed and process cleanup remains unconfirmed: {cleanup_error}") from primary_error
             raise
@@ -151,6 +160,12 @@ class GdbMiClient:
         terminate_process_tree(self.child, timeout_s)
         if self.child.poll() is None:
             raise RuntimeError("GDB process remained active after kill.")
+        readers = getattr(self, "reader_threads", [])
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(timeout=timeout_s)
+        if any(reader.is_alive() for reader in readers):
+            raise RuntimeError("GDB reader threads remained active after process cleanup.")
 
     def history(self) -> list[JsonObject]:
         with self.lock:

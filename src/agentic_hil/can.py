@@ -20,7 +20,12 @@ from agentic_hil.coordination import (
     HardwareLease,
     can_resource,
 )
-from agentic_hil.process import managed_process_owner, process_group_kwargs, spawn_managed_process
+from agentic_hil.process import (
+    cleanup_registered_processes,
+    managed_process_owner,
+    process_group_kwargs,
+    spawn_managed_process,
+)
 from agentic_hil.report import (
     append_jsonl,
     audit_unavailable,
@@ -36,6 +41,8 @@ from agentic_hil.report import (
 from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
 
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
+CAN_DRAIN_BATCH_LIMIT = 16
+CAN_DRAIN_TIMEOUT_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -99,9 +106,15 @@ class CanBusService:
             return self._write_report(bus)
         if not self.config.permissions.allow_can_read and not self.config.permissions.allow_can_write:
             return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by the authoritative config.", bus_id))
+        if clear_rx_queue and not self.config.permissions.allow_can_read:
+            return self._write_report(self._permission_denied("can_session_start", "Clearing the CAN receive queue requires allow_can_read.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
-            return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
+            if clear_rx_queue:
+                cleared = self._drain_rx_queue(existing)
+                if not cleared["ok"]:
+                    return self._write_report(cleared)
+            return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": True, "frames_drained": cleared.get("frames_drained", 0) if clear_rx_queue else 0, "session": self._session_status(existing), "summary": "CAN bus session is already active."})
         if existing:
             try:
                 self._stop_session(existing, "replaced")
@@ -120,7 +133,7 @@ class CanBusService:
             return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result})
         try:
             with managed_process_owner(self.coordinator.owner_token):
-                opened = open_adapter(self.config, bus_id, bus_config, clear_rx_queue)
+                opened = open_adapter(self.config, bus_id, bus_config, False)
         except BaseException as error:
             lease.quarantine("can_open_interrupted", error)
             raise
@@ -140,9 +153,10 @@ class CanBusService:
         adapter_session = opened["session"]
         session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease)
         self.sessions[bus_id] = session
+        cleared: JsonObject = {"ok": True, "frames_drained": 0}
         if clear_rx_queue and self.config.permissions.allow_can_read:
             try:
-                cleared = adapter_session.read(bus_config.max_buffer_frames, 0)
+                cleared = self._drain_rx_queue(session)
                 if not overall_success(cleared):
                     if cleared.get("audit_ok") is False:
                         session.audit_broken = True
@@ -158,7 +172,7 @@ class CanBusService:
                     if isinstance(close_error, (KeyboardInterrupt, SystemExit)):
                         raise
                     return written
-                failure = {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_open_failed", "summary": "CAN receive queue could not be cleared; the adapter was closed.", "backend_error": str(error), "cleanup_confirmed": True, "side_effect_committed": False}
+                failure = {**cleared, "ok": False, "tool": "can_session_start", "bus_id": bus_id, "summary": "CAN receive queue could not be cleared; the adapter was closed.", "backend_error": str(error), "cleanup_confirmed": True}
                 written = self._write_report(failure)
                 if written.get("audit_ok") is False:
                     return written
@@ -169,7 +183,7 @@ class CanBusService:
                     raise error
                 return {**written, **session.lease.status()}
         audit_error = append_jsonl(session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
-        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "session": self._session_status(session), "summary": "CAN bus session started."}
+        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "frames_drained": cleared.get("frames_drained", 0), "session": self._session_status(session), "summary": "CAN bus session started."}
         if audit_error is not None:
             session.audit_broken = True
             with suppress(BaseException):
@@ -212,7 +226,11 @@ class CanBusService:
             parsed["bus_id"] = bus_id
             return self._write_report(parsed)
         frame = parsed["frame"]
-        sent = session.adapter_session.send(frame)
+        try:
+            sent = session.adapter_session.send(frame)
+        except BaseException as error:
+            session.lease.quarantine("can_send_effect_unconfirmed", error)
+            raise
         if not sent["ok"]:
             result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **sent}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
@@ -242,7 +260,11 @@ class CanBusService:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "max_frames must be between 1 and configured max_buffer_frames.", "max_buffer_frames": session.bus_config.max_buffer_frames})
         if not math.isfinite(parsed_wait_timeout_s):
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."})
-        read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, session.bus_config.timeout_s, 60.0)))
+        try:
+            read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, session.bus_config.timeout_s, 60.0)))
+        except BaseException as error:
+            session.lease.quarantine("can_read_effect_unconfirmed", error)
+            raise
         if not read["ok"]:
             result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
@@ -268,8 +290,10 @@ class CanBusService:
                 errors.append((bus_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        if self._owns_coordinator and not errors:
-            self.coordinator.close()
+        if self._owns_coordinator:
+            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
+            if not errors:
+                self.coordinator.close()
         if interrupt is not None:
             interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(f"{bus_id}: {type(error).__name__}: {error}" for bus_id, error in errors))
             raise interrupt
@@ -309,6 +333,38 @@ class CanBusService:
         adapter_status = session.adapter_session.status()
         return session.active and adapter_status.get("active") is not False and adapter_status.get("cleanup_required") is not True
 
+    def _drain_rx_queue(self, session: CanBusSession) -> JsonObject:
+        drained = 0
+        deadline = time.monotonic() + CAN_DRAIN_TIMEOUT_S
+        audit_error = append_jsonl(session.log_path, {"event": "queue_clear_start", "bus_id": session.bus_id})
+        if audit_error is not None:
+            session.audit_broken = True
+            session.lease.quarantine("can_queue_clear_audit_broken", audit_error, audit_broken=True)
+            return mark_audit_failure({"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": "CAN receive queue clear could not be audited before execution.", "side_effect_committed": False, "side_effect_status": "not_started"}, audit_error)
+        for _ in range(CAN_DRAIN_BATCH_LIMIT):
+            if time.monotonic() >= deadline:
+                break
+            result = session.adapter_session.read(session.bus_config.max_buffer_frames, 0)
+            if not overall_success(result):
+                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": str(result.get("summary", "CAN receive queue could not be cleared.")), "backend_result": public_backend_result(result), "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
+                return self._audit_queue_clear_result(session, cleared)
+            frames = result.get("frames")
+            if not isinstance(frames, list):
+                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": "CAN adapter returned an invalid queue-drain response.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
+                return self._audit_queue_clear_result(session, cleared)
+            drained += len(frames)
+            if not frames:
+                return self._audit_queue_clear_result(session, {"ok": True, "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "committed" if drained else "not_started", "retry_safe": drained == 0})
+        return self._audit_queue_clear_result(session, {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_limit", "summary": "CAN receive queue did not become empty within the bounded drain limit.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0})
+
+    def _audit_queue_clear_result(self, session: CanBusSession, result: JsonObject) -> JsonObject:
+        audit_error = append_jsonl(session.log_path, {"event": "queue_clear_complete", **result})
+        if audit_error is None:
+            return result
+        session.audit_broken = True
+        session.lease.quarantine("can_queue_clear_audit_broken", audit_error, audit_broken=True)
+        return mark_audit_failure(result, audit_error)
+
     def _stop_session(self, session: CanBusSession, reason: str, *, defer_release: bool = False) -> Exception | None:
         try:
             close_result = session.adapter_session.close() or {"safe_state_confirmed": True, "process_reaped": True}
@@ -339,7 +395,7 @@ class CanBusService:
         bus_id = prepared.get("bus_id")
         session = self.sessions.get(bus_id) if isinstance(bus_id, str) else None
         unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
-        if session is not None and unsafe_effect:
+        if session is not None and unsafe_effect and prepared.get("cleanup_confirmed") is not True:
             session.lease.quarantine("can_effect_unconfirmed")
         if session is not None:
             prepared = {**prepared, **session.lease.status()}
@@ -429,7 +485,16 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
-        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+        try:
+            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+        except BaseException as primary_error:
+            try:
+                shutdown = getattr(bus, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            except BaseException as cleanup_error:
+                raise RuntimeError(f"CAN session construction failed and raw bus cleanup remains unconfirmed: {cleanup_error}") from primary_error
+            raise
         return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
