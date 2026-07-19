@@ -116,18 +116,22 @@ class PyOCDBackend:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debugger.flash_address.", "artifact": self._artifact_summary(artifact)}
             address_args = ["--base-address", self.config.debugger.flash_address]
 
-        result = self._run_pyocd("flash_firmware", ["flash", *self._connection_args(), *address_args, artifact_path])
+        # A command-log audit failure must not abort the requested hardware
+        # sequence (the reset would silently be skipped); collect it, finish the
+        # sequence, and re-raise it against the final classified result.
+        audit_errors: list[AuditWriteError] = []
+        result = self._run_pyocd_collecting_audit("flash_firmware", ["flash", *self._connection_args(), *address_args, artifact_path], audit_errors)
         result["artifact"] = self._artifact_summary(artifact)
         result["verify"] = True
         if not result.get("ok"):
             result["reset_after_flash"] = False
-            return self._write_action_report(result)
+            return self._finish_flash_report(result, audit_errors)
         if not reset_after_flash:
             result["reset_after_flash"] = False
             result["summary"] = "Firmware flashed and verified. Target was not reset."
-            return self._write_action_report(result)
+            return self._finish_flash_report(result, audit_errors)
 
-        reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
+        reset = self._run_pyocd_collecting_audit("flash_firmware", ["commander", "--command", "reset", *self._connection_args()], audit_errors)
         if not reset.get("ok"):
             underlying_error_type = str(reset.get("error_type", "reset_failed"))
             completion_unconfirmed = (
@@ -146,9 +150,24 @@ class PyOCDBackend:
             if completion_unconfirmed:
                 reset["completion_unconfirmed"] = True
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
-            return self._write_action_report(reset)
+            return self._finish_flash_report(reset, audit_errors)
         result["reset_after_flash"] = reset_after_flash
         result["summary"] = "Firmware flashed, verified, and target reset."
+        return self._finish_flash_report(result, audit_errors)
+
+    def _run_pyocd_collecting_audit(self, tool: str, action_args: list[str], audit_errors: list[AuditWriteError]) -> JsonObject:
+        try:
+            return self._run_pyocd(tool, action_args)
+        except AuditWriteError as error:
+            underlying = error.operation_result if isinstance(error.operation_result, dict) else None
+            if underlying is None or "ok" not in underlying:
+                raise
+            audit_errors.append(error)
+            return dict(underlying)
+
+    def _finish_flash_report(self, result: JsonObject, audit_errors: list[AuditWriteError]) -> JsonObject:
+        if audit_errors:
+            raise annotate_audit_error(audit_errors[0], result)
         return self._write_action_report(result)
 
     def reset_target(self, mode: str = "run") -> JsonObject:

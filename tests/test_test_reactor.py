@@ -834,3 +834,61 @@ def test_reactor_audit_only_cleanup_failure_is_not_unsafe_state(tmp_path: Path) 
     lock = ProjectTestLock(config.config_path)
     assert lock.acquire() is True
     lock.confirm_safe_and_release()
+
+
+class UnsafeStepAuditCleanupService(RecordingService):
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        self.calls.append(name)
+        if name == "flash_firmware":
+            return {"ok": False, "tool": name, "error_type": "hardware_state_unconfirmed", "hardware_state_unconfirmed": True, "summary": "Stimulus completion was not confirmed."}
+        if name == "com_session_stop":
+            return {"ok": False, "tool": name, "error_type": "audit_write_failed", "completion_confirmed": True, "resources_stopped": True, "summary": "Stop log could not be written."}
+        return {"ok": True, "tool": name}
+
+
+def test_unsafe_step_with_audit_only_cleanup_still_aborts_the_plan(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        devices_yaml="""devices:
+  controller_a:
+    debugger: "default"
+    uart: "dut"
+    target:
+      name: "controller-a"
+      controller: "stm32f4"
+""",
+        com_ports_yaml='com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n',
+    )
+    config = load_config(str(config_path), str(tmp_path))
+    plan_path = write_plan(
+        tmp_path,
+        """version: 1
+tests:
+  - name: test-a
+    device: controller_a
+    steps:
+      - {action: uart_open}
+      - {action: flash, image_path: build/a.elf}
+  - name: test-b
+    device: controller_a
+    steps:
+      - {action: flash, image_path: build/a.elf}
+""",
+    )
+    services: list[UnsafeStepAuditCleanupService] = []
+
+    def factory(_config):
+        service = UnsafeStepAuditCleanupService(ConcurrencyTracker())
+        services.append(service)
+        return service
+
+    result = Reactor(config, service_factory=factory).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsafe_test_state"
+    assert result["aborted_tests"] == ["test-b"]
+    assert len(result["tests"]) == 1
+    assert result["tests"][0]["error_type"] == "hardware_state_unconfirmed"
+    assert result["tests"][0]["cleanup_audit_write_failed"] is True
+    flash_calls = sum(service.calls.count("flash_firmware") for service in services)
+    assert flash_calls == 1, "no further hardware action may run after an unconfirmed step"

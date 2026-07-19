@@ -59,14 +59,14 @@ class GdbMiClient:
         except BaseException as error:
             error._agentic_hil_completion_confirmed = True
             raise
-        self.lock = threading.Lock()
-        self.next_token = 0
-        self.pending: JsonObject | None = None
-        self.pending_stop: JsonObject | None = None
-        self.last_stop_line: str | None = None
-        self.command_history: list[JsonObject] = []
-        self.exited = threading.Event()
         try:
+            self.lock = threading.Lock()
+            self.next_token = 0
+            self.pending: JsonObject | None = None
+            self.pending_stop: JsonObject | None = None
+            self.last_stop_line: str | None = None
+            self.command_history: list[JsonObject] = []
+            self.exited = threading.Event()
             threading.Thread(target=self._stdout_reader, daemon=True).start()
             threading.Thread(target=self._stderr_reader, daemon=True).start()
         except BaseException as error:

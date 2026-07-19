@@ -338,7 +338,10 @@ class AgenticHILToolService:
                                 return tool_error(name, "debug_session_active", "Stop the typed debug session before starting a one-shot debugger operation.")
                         return self._dispatch(name, args)
                     except BaseException as error:
-                        if name == "debug_start_session":
+                        # An AuditWriteError means the hardware side already ran to a
+                        # classified result; tearing the backend down here would destroy
+                        # a healthy (possibly pre-existing) session over a log failure.
+                        if name == "debug_start_session" and not isinstance(error, AuditWriteError):
                             cleanup_confirmed = False
                             try:
                                 self.backend.close()

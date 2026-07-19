@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,16 @@ class ComPortSession:
                         del self.buffer[:overflow]
                         self.overflow_bytes += overflow
                 append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+            except AuditWriteError as error:
+                # A log failure is not a hardware failure: report it as such and
+                # stop capturing rather than fabricating a serial fault.
+                if self.active:
+                    self.reader_error = {
+                        "error_type": "audit_write_failed",
+                        "summary": "COM port feedback log could not be written; feedback capture stopped.",
+                        "backend_error": str(error),
+                    }
+                break
             except Exception as error:  # serial backends raise implementation-specific exception classes
                 if self.active:
                     self.reader_error = {
@@ -89,7 +100,8 @@ class ComPortSession:
                         "backend_error": str(error),
                         "likely_causes": likely_causes("serial_read_failed"),
                     }
-                    append_jsonl(self.log_path, {"event": "error", **self.reader_error})
+                    with suppress(Exception):
+                        append_jsonl(self.log_path, {"event": "error", **self.reader_error})
                 break
 
 

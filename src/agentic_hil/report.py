@@ -40,8 +40,9 @@ def audit_completion_state(result: JsonObject) -> str:
 
 
 def annotate_audit_error(error: AuditWriteError, operation_result: JsonObject) -> AuditWriteError:
-    if error.operation_result is None:
-        error.operation_result = operation_result
+    # The classified tool result is more useful than any log payload the raise
+    # site attached, so it always wins.
+    error.operation_result = operation_result
     if error.completion_state == "unknown":
         error.completion_state = audit_completion_state(operation_result)
     return error

@@ -435,3 +435,27 @@ def test_breakpoint_insert_audit_failure_keeps_local_state_consistent(tmp_path: 
         assert cleared["cleared"] == 1
     finally:
         service.close()
+
+
+def test_debug_start_audit_failure_does_not_destroy_active_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.report import AuditWriteError
+
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service)["ok"] is True
+
+        def raise_audit_error(_config, report):
+            raise AuditWriteError("disk full", dict(report))
+
+        with monkeypatch.context() as patched:
+            patched.setattr("agentic_hil.backends.gdbdebug.write_report", raise_audit_error)
+            result = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load"})
+
+        assert result["error_type"] == "audit_write_failed"
+        assert result["completion_confirmed"] is True
+        assert result["operation_result"]["error_type"] == "session_already_active"
+
+        status = service.call("debug_get_session_status")
+        assert status["active"] is True, "an audit failure on a no-op start must not tear down the live session"
+    finally:
+        service.close()

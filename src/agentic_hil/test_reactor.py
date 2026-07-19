@@ -712,12 +712,14 @@ class TestReactor:
         cleanup_safe = all(cleanup_resource_safe(item["result"]) for item in cleanup)
         ok = failed_step is None and cleanup_ok
         result: JsonObject = {"ok": ok, "name": test.name, "device": test.device, "steps": steps, "cleanup": cleanup}
-        if not cleanup_ok:
-            result["error_type"] = "cleanup_failed" if not cleanup_safe else "audit_write_failed"
+        if not cleanup_safe:
+            result["error_type"] = "cleanup_failed"
             if failed_step is not None:
                 result["failed_step"] = failed_step
                 result["step_error_type"] = steps[-1]["result"].get("error_type", "step_failed")
         elif failed_step is not None:
+            # The step verdict decides the test outcome; an audit-only cleanup
+            # failure must never downgrade an unconfirmed hardware step.
             result["failed_step"] = failed_step
             step_result = steps[-1]["result"]
             step_error_type = step_result.get("error_type", "step_failed")
@@ -728,6 +730,10 @@ class TestReactor:
                 result["error_type"] = step_error_type
                 if step_result.get("completion_confirmed") is True:
                     result["completion_confirmed"] = True
+            if not cleanup_ok:
+                result["cleanup_audit_write_failed"] = True
+        elif not cleanup_ok:
+            result["error_type"] = "audit_write_failed"
         return result
 
     def close(self) -> list[JsonObject]:

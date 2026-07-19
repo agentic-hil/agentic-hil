@@ -10,6 +10,7 @@ from typing import BinaryIO, TextIO
 from agentic_hil.comports import ComPortService
 from agentic_hil.hardware_lock import HardwareLockError, HardwareQuarantinedError, ProjectHardwareLock
 from agentic_hil.report import utc_now_iso
+from agentic_hil.tools import is_confirmed_audit_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STDIN_CHUNK_BYTES = 4096
@@ -116,15 +117,18 @@ def run_com_stdio(
             exit_code = 1 if failed else 0
     except BaseException as error:
         if write_in_flight is not None:
-            unconfirmed_operations.append(
-                {
-                    **write_in_flight,
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                    "summary": "COM stdio write completion was not confirmed.",
-                }
-            )
-            write_in_flight = None
+            if is_confirmed_audit_error(error):
+                write_in_flight = None
+            else:
+                unconfirmed_operations.append(
+                    {
+                        **write_in_flight,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                        "summary": "COM stdio write completion was not confirmed.",
+                    }
+                )
+                write_in_flight = None
         pending_base_exception = error
     finally:
         if service is not None:

@@ -1964,3 +1964,107 @@ def test_mcp_shutdown_audit_only_cleanup_is_reported_as_audit_write_failed(tmp_p
     result = json.loads(errors.getvalue())
     assert result["error_type"] == "audit_write_failed"
     assert result["hardware_state_unconfirmed"] is False
+
+
+class KillableChild(UnkillableChild):
+    def terminate(self) -> None:
+        self.alive = False
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_annotate_audit_error_replaces_log_payload_with_tool_result() -> None:
+    from agentic_hil.report import annotate_audit_error
+
+    error = AuditWriteError("disk full", {"command": "log-payload"})
+    annotate_audit_error(error, {"ok": False, "error_type": "timeout"})
+    assert error.operation_result == {"ok": False, "error_type": "timeout"}
+    assert error.completion_state == "unknown"
+
+    confirmed = AuditWriteError("disk full")
+    annotate_audit_error(confirmed, {"ok": True})
+    assert confirmed.completion_state == "confirmed"
+
+
+def test_pyocd_flash_log_audit_failure_still_performs_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, debugger_type="pyocd")
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    spawn_calls: list[list[str]] = []
+    responses = [
+        SimpleNamespace(not_found=False, timed_out=False, stdout="Programmed 8192 bytes @ 0x08000000", stderr="", returncode=0),
+        SimpleNamespace(not_found=False, timed_out=False, stdout="Resetting target", stderr="", returncode=0),
+    ]
+
+    def fake_spawn(args, *rest, **kwargs):
+        spawn_calls.append(list(args))
+        return responses.pop(0)
+
+    monkeypatch.setattr("agentic_hil.backends.pyocd.spawn_command", fake_spawn)
+    monkeypatch.setattr("agentic_hil.backends.pyocd.write_audit_json", raise_audit_error)
+    service = AgenticHILToolService(config, reload_config=False)
+
+    result = service.call("flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})
+
+    assert len(spawn_calls) == 2, "the requested post-flash reset must still run after a flash-log audit failure"
+    assert result["error_type"] == "audit_write_failed"
+    assert result["completion_confirmed"] is True
+    assert result["operation_result"]["reset_after_flash"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
+
+
+def test_reader_log_failure_is_reported_as_audit_write_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class OneChunkSerialHandle(IdleSerialHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self._sent = False
+
+        def read(self, size: int) -> bytes:
+            if not self._sent:
+                self._sent = True
+                return b"AB"
+            time.sleep(POLL_INTERVAL_S)
+            return b""
+
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    monkeypatch.setattr("agentic_hil.comports.append_jsonl", raise_audit_error)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "reader-audit.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], OneChunkSerialHandle(), str(log_path))
+    service.sessions["dut"] = session
+
+    assert wait_until(lambda: session.reader_error is not None)
+    assert session.reader_error["error_type"] == "audit_write_failed"
+
+    result = service.read_bytes("dut", 16, 0.0)
+    assert result["error_type"] == "session_not_active"
+    assert result["reader_error"]["error_type"] == "audit_write_failed"
+
+
+def test_gdbmi_attribute_failure_after_spawn_reaps_or_ledgers_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def raising_lock():
+        raise RuntimeError("interrupted before readers")
+
+    unkillable = UnkillableChild()
+    monkeypatch.setattr(
+        "agentic_hil.gdbmi.subprocess",
+        SimpleNamespace(Popen=lambda *_a, **_k: unkillable, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr("agentic_hil.gdbmi.threading", SimpleNamespace(Thread=threading.Thread, Lock=raising_lock, Event=threading.Event))
+    with pytest.raises(RuntimeError, match="interrupted before readers") as raised:
+        GdbMiClient("gdb", str(tmp_path))
+    assert raised.value._agentic_hil_orphan_child is unkillable
+    assert getattr(raised.value, "_agentic_hil_completion_confirmed", False) is False
+
+    killable = KillableChild()
+    monkeypatch.setattr(
+        "agentic_hil.gdbmi.subprocess",
+        SimpleNamespace(Popen=lambda *_a, **_k: killable, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    with pytest.raises(RuntimeError, match="interrupted before readers") as reaped:
+        GdbMiClient("gdb", str(tmp_path))
+    assert reaped.value._agentic_hil_completion_confirmed is True
+    assert getattr(reaped.value, "_agentic_hil_orphan_child", None) is None
