@@ -10,7 +10,7 @@ Use Agentic HIL MCP tools for hardware actions. Do not bypass them with raw Open
 
 If an Agentic HIL tool returns `permission_denied`, stop and ask the operator to review the authoritative config. Do not bypass it or replace the operator-controlled environment or MCP host registration.
 
-Continue after a result only when `ok` is true, `target_ok`, `audit_ok`, and `cleanup_ok` are not false, `cleanup_required` and `quarantined` are not true, `lease_state` is not `cleanup_required` or `quarantined`, `side_effect_status` is not `unknown` or `partial`, and `hardware_state` is not `unknown`. For quarantined hardware, stop effects and ask the operator to inspect `agentic-hil lease-status`, physically confirm the current incident, and run `agentic-hil recover --confirm-safe-state --quarantine-id <id>`.
+Continue after a result only when `ok` is true, `target_ok`, `audit_ok`, and `cleanup_ok` are not false, `cleanup_required` and `quarantined` are not true, `lease_state` is one of `null`, `active`, or `released` (any other value, including `stale`, blocks success), `side_effect_status` is not `unknown` or `partial`, and `hardware_state` is not `unknown`. The public `overall_success()` helper in `agentic_hil.report` encodes exactly this predicate. For quarantined hardware, stop effects and ask the operator to inspect `agentic-hil lease-status`, physically confirm the current incident, and run `agentic-hil recover --confirm-safe-state --quarantine-id <id>`.
 
 Install or update the local agent setup skill with:
 

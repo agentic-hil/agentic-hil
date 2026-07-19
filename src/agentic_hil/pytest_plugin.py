@@ -2,9 +2,16 @@
 
 Usage in a configured firmware project:
 
+    from agentic_hil.report import overall_success
+
     def test_target_is_available(agentic_hil):
         result = agentic_hil.call("probe_target")
-        assert result["ok"] is True
+        assert overall_success(result)
+
+``result["ok"] is True`` alone is not success: a result can carry ``ok: true``
+together with ``audit_ok: false``, ``side_effect_status: unknown``, or
+``lease_state: stale``. Assert the composite ``overall_success()`` predicate
+instead of ``ok`` on any result from a hardware action.
 
 Tests using the fixtures are skipped when neither the canonical external config nor
 an ``AGENTIC_HIL_CONFIG`` override exists. An invalid configuration fails loudly

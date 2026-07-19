@@ -29,7 +29,7 @@ Workflow:
 5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
 6. Read structured results after every hardware action.
 7. Use configured COM port, CAN bus, and test-adapter ids only.
-8. Continue only when ok is true; target_ok, audit_ok, and cleanup_ok are not false; cleanup_required and quarantined are not true; lease_state is neither cleanup_required nor quarantined; side_effect_status is neither unknown nor partial; and hardware_state is not unknown.
+8. Continue only when ok is true; target_ok, audit_ok, and cleanup_ok are not false; cleanup_required and quarantined are not true; lease_state is one of null, active, or released (any other value, including stale, blocks success); side_effect_status is neither unknown nor partial; and hardware_state is not unknown.
 9. On any composite failure, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 10. For quarantined hardware, stop effects and ask the operator to inspect lease-status, physically confirm the current quarantine_id, and run recover --confirm-safe-state --quarantine-id <id>.
 
