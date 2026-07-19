@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,15 +14,19 @@ from agentic_hil.config import (
     atomic_write_text,
     display_path,
     project_state_directory,
+    resolve_work_path,
     safe_append_text,
     safe_configured_directory,
     safe_directory,
     safe_file_lock,
     safe_file_path,
+    safe_read_bytes,
     safe_read_text,
     safe_write_text,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
+
+_GENESIS_DIGEST = "0" * 64
 
 
 def utc_now_iso() -> str:
@@ -40,14 +45,168 @@ def logs_directory(config: AgenticHILConfig) -> str:
     return safe_configured_directory(config, config.logs.directory, "logs.directory")
 
 
-def append_jsonl(log_path: str, event: JsonObject) -> Exception | None:
+def append_jsonl(log_path: str, event: JsonObject, config: AgenticHILConfig | None = None) -> Exception | None:
     entry = dict(event)
     entry.setdefault("time", utc_now_iso())
+    line = json.dumps(entry) + "\n"
+    # The canonical trusted copy is written FIRST: if the untrusted workspace
+    # mirror is the only thing that succeeds we must still fail the audit, and
+    # if canonical write fails we never claim the effect was recorded.
+    if config is not None:
+        canonical_error = append_canonical_audit_log(config, log_path, line)
+        if canonical_error is not None:
+            return canonical_error
     try:
-        safe_append_text(log_path, json.dumps(entry) + "\n")
+        safe_append_text(log_path, line)
     except (ConfigError, OSError, ValueError) as error:
         return error
     return None
+
+
+def append_jsonl_audited(config: AgenticHILConfig, log_path: str, event: JsonObject) -> Exception | None:
+    """append_jsonl for agent-initiated hardware-effect events: mirrors the line
+    into the trusted canonical ledger under state_root as well as the untrusted
+    workspace log."""
+    return append_jsonl(log_path, event, config)
+
+
+def audit_logs_directory(config: AgenticHILConfig) -> Path:
+    return safe_directory(project_state_directory(config) / "audit-logs")
+
+
+def canonical_audit_log_path(config: AgenticHILConfig, log_path: str | Path) -> Path:
+    return audit_logs_directory(config) / safe_filename(Path(log_path).name)
+
+
+def _canonical_sidecar_path(canonical_path: Path) -> Path:
+    return canonical_path.with_name(canonical_path.name + ".digest")
+
+
+def _canonical_lock_path(config: AgenticHILConfig, canonical_path: Path) -> str:
+    return str(audit_logs_directory(config) / (canonical_path.name + ".lock"))
+
+
+def _read_canonical_sidecar(canonical_path: Path) -> JsonObject:
+    try:
+        text = safe_read_text(_canonical_sidecar_path(canonical_path))
+    except FileNotFoundError:
+        return {"sequence": 0, "chain_sha256": _GENESIS_DIGEST, "bytes": 0}
+    try:
+        data = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("coordination_state_invalid", "Canonical audit ledger is corrupted.", {"path": str(_canonical_sidecar_path(canonical_path))}) from error
+    if not isinstance(data, dict) or not isinstance(data.get("sequence"), int) or not isinstance(data.get("chain_sha256"), str):
+        raise ConfigError("coordination_state_invalid", "Canonical audit ledger has an invalid format.", {"path": str(_canonical_sidecar_path(canonical_path))})
+    return data
+
+
+def append_canonical_audit_log(config: AgenticHILConfig, log_path: str | Path, text: str) -> Exception | None:
+    """Append a line to the trusted canonical audit copy under state_root and
+    advance its tamper-evident hash chain and sequence. Returns an error instead
+    of raising so callers fold it into their existing audit-failure handling."""
+    canonical = canonical_audit_log_path(config, log_path)
+    try:
+        with safe_file_lock(_canonical_lock_path(config, canonical)):
+            sidecar = _read_canonical_sidecar(canonical)
+            try:
+                actual_size = os.path.getsize(canonical)
+            except FileNotFoundError:
+                actual_size = 0
+            if actual_size != int(sidecar["bytes"]):
+                # A prior append advanced the file but not the sidecar (or vice
+                # versa). Fail closed rather than extend a chain that no longer
+                # matches its own log.
+                raise ConfigError("coordination_state_invalid", "Canonical audit ledger size disagrees with its digest sidecar.", {"path": str(canonical), "recorded_bytes": int(sidecar["bytes"]), "actual_bytes": actual_size})
+            safe_append_text(str(canonical), text)
+            chain = hashlib.sha256((str(sidecar["chain_sha256"]) + text).encode("utf-8")).hexdigest()
+            atomic_write_text(
+                _canonical_sidecar_path(canonical),
+                json.dumps({"sequence": int(sidecar["sequence"]) + 1, "chain_sha256": chain, "bytes": int(sidecar["bytes"]) + len(text.encode("utf-8"))}, indent=2) + "\n",
+            )
+    except (ConfigError, OSError, ValueError) as error:
+        return error
+    return None
+
+
+def write_audit_log(config: AgenticHILConfig, log_path: str, content: str) -> Exception | None:
+    """Full-file audit log write (e.g. the GDB session snapshot) that also
+    refreshes the canonical trusted copy and its digest."""
+    canonical = canonical_audit_log_path(config, log_path)
+    try:
+        with safe_file_lock(_canonical_lock_path(config, canonical)):
+            sidecar = _read_canonical_sidecar(canonical)
+            # Canonical copy lives under the trusted state_root, so it is written
+            # with the state-root primitive, not the workspace-scoped one.
+            atomic_write_text(canonical, content)
+            chain = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            atomic_write_text(
+                _canonical_sidecar_path(canonical),
+                json.dumps({"sequence": int(sidecar["sequence"]) + 1, "chain_sha256": chain, "bytes": len(content.encode("utf-8"))}, indent=2) + "\n",
+            )
+        safe_write_text(config, log_path, content)
+    except (ConfigError, OSError, ValueError) as error:
+        return error
+    return None
+
+
+def _is_ordered_subsequence(needles: list[str], haystack: list[str]) -> bool:
+    """True when every element of `needles` appears in `haystack` in order."""
+    iterator = iter(haystack)
+    return all(any(candidate == needle for candidate in iterator) for needle in needles)
+
+
+def canonical_audit_evidence(config: AgenticHILConfig, log_path: str | Path) -> JsonObject:
+    """Trusted evidence pointer for a workspace log: canonical path, sequence,
+    chain digest, and whether the untrusted workspace mirror still matches.
+
+    The canonical copy is the trusted ledger of agent-initiated hardware EFFECTS.
+    The workspace mirror may legitimately hold extra passive lines (e.g. COM RX
+    feedback) that are not mirrored, so verification checks that every canonical
+    line is still present in the workspace log in order — deletion or alteration
+    of an effect record fails; extra passive lines are tolerated."""
+    canonical = canonical_audit_log_path(config, log_path)
+    canonical_exists = Path(canonical).exists()
+    try:
+        sidecar = _read_canonical_sidecar(canonical)
+        canonical_bytes = safe_read_bytes(canonical)
+    except FileNotFoundError:
+        return {"canonical_log_present": False, "workspace_log_verified": False}
+    except (ConfigError, OSError):
+        # The trusted anchor itself is unreadable/corrupt: report it distinctly
+        # from "no canonical log" so it is never mistaken for benign absence.
+        return {"canonical_log_present": canonical_exists, "canonical_log_corrupted": True, "workspace_log_verified": False}
+    evidence: JsonObject = {
+        "canonical_log_present": True,
+        "canonical_log_path": str(canonical),
+        "log_sequence": int(sidecar["sequence"]),
+        "log_chain_sha256": str(sidecar["chain_sha256"]),
+    }
+    try:
+        workspace_bytes = safe_read_bytes(Path(log_path))
+    except (FileNotFoundError, ConfigError, OSError):
+        evidence["workspace_log_verified"] = False
+        return evidence
+    canonical_lines = canonical_bytes.decode("utf-8", errors="replace").splitlines()
+    workspace_lines = workspace_bytes.decode("utf-8", errors="replace").splitlines()
+    evidence["workspace_log_verified"] = _is_ordered_subsequence(canonical_lines, workspace_lines)
+    return evidence
+
+
+def attach_canonical_audit_evidence(config: AgenticHILConfig, result: JsonObject) -> JsonObject:
+    """Attach trusted canonical-log evidence to a report/classification result so
+    callers can detect a missing or tampered workspace log and fall back to the
+    canonical copy under state_root."""
+    display_log = result.get("log_path")
+    if not isinstance(display_log, str) or not display_log:
+        return result
+    try:
+        workspace_log = resolve_work_path(config, display_log)
+    except (ConfigError, OSError, ValueError):
+        workspace_log = display_log
+    evidence = canonical_audit_evidence(config, workspace_log)
+    if not evidence.get("canonical_log_present"):
+        return result
+    return {**result, "canonical_audit": evidence}
 
 
 def safe_filename(value: str, fallback: str = "item") -> str:
@@ -104,9 +263,22 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
             write_report_state(config, state)
     except (ConfigError, OSError, ValueError) as error:
         failed = mark_audit_failure(enriched, error)
+        # Neither pointer can be trusted after a failed commit: strip both so the
+        # result never advertises a path whose persisted content it cannot prove.
         failed.pop("report_path", None)
+        failed.pop("state_path", None)
         return failed
     return enriched
+
+
+def recommit_report_with_status(config: AgenticHILConfig, written: JsonObject, status: JsonObject) -> JsonObject:
+    """After a terminal lease transition, re-commit the report so the persisted
+    evidence carries the same lease_state as the returned result. A no-op when
+    the state is already consistent."""
+    if written.get("lease_state") == status.get("lease_state"):
+        return {**written, **status}
+    final = write_report(config, {**written, **status})
+    return {**final, **status}
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:
@@ -280,7 +452,7 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
         result["failed_step"] = report["failed_step"]
     if "step_error_type" in report:
         result["step_error_type"] = report["step_error_type"]
-    return result
+    return attach_canonical_audit_evidence(config, result)
 
 
 def ensure_audit_ready(config: AgenticHILConfig) -> None:
