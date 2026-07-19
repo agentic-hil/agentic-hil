@@ -369,7 +369,7 @@ class ComPortService:
                 errors.append((port_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_token):
+        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_marker):
             errors.append(("provisional_handle", RuntimeError(provisional_error)))
         if self._owns_coordinator and not errors:
             self.coordinator.close()
@@ -387,7 +387,7 @@ class ComPortService:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
-            provisional = register_provisional_handle(self.coordinator.owner_token, f"com:{port_id}", serial_handle.close)
+            provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
             try:
                 session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
             except BaseException as primary_error:

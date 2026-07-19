@@ -19,19 +19,19 @@ _COUNTER = 0
 
 
 class _ProvisionalHandle(NamedTuple):
-    owner_token: str | None
+    owner_marker: str | None
     label: str
     close: Callable[[], object]
 
 
-def register_provisional_handle(owner_token: str | None, label: str, close: Callable[[], object]) -> int:
+def register_provisional_handle(owner_marker: str | None, label: str, close: Callable[[], object]) -> int:
     """Register a raw handle's closer and return a token used to discharge it
     once a session has taken durable ownership."""
     global _COUNTER
     with _GUARD:
         _COUNTER += 1
         token = _COUNTER
-        _HANDLES[token] = _ProvisionalHandle(owner_token, label, close)
+        _HANDLES[token] = _ProvisionalHandle(owner_marker, label, close)
     return token
 
 
@@ -42,13 +42,13 @@ def discharge_provisional_handle(token: int) -> None:
         _HANDLES.pop(token, None)
 
 
-def cleanup_provisional_handles(owner_token: str) -> list[str]:
+def cleanup_provisional_handles(owner_marker: str) -> list[str]:
     """Close every still-registered provisional handle for an owner. Entries
     whose close succeeds are removed; entries that still fail stay registered so
     a later call retries them. Returns one error string per failed handle."""
     errors: list[str] = []
     with _GUARD:
-        targets = [(token, entry) for token, entry in _HANDLES.items() if entry.owner_token == owner_token]
+        targets = [(token, entry) for token, entry in _HANDLES.items() if entry.owner_marker == owner_marker]
     for token, entry in targets:
         try:
             entry.close()
@@ -60,10 +60,10 @@ def cleanup_provisional_handles(owner_token: str) -> list[str]:
     return errors
 
 
-def provisional_handle_count(owner_token: str | None = None) -> int:
+def provisional_handle_count(owner_marker: str | None = None) -> int:
     """Number of outstanding provisional handles (optionally for one owner).
     Test/diagnostic helper."""
     with _GUARD:
-        if owner_token is None:
+        if owner_marker is None:
             return len(_HANDLES)
-        return sum(1 for entry in _HANDLES.values() if entry.owner_token == owner_token)
+        return sum(1 for entry in _HANDLES.values() if entry.owner_marker == owner_marker)

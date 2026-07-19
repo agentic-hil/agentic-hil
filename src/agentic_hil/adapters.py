@@ -100,7 +100,7 @@ class AdapterService:
         except CoordinationError as error:
             return self._write_report({"tool": "adapter_session_start", "adapter_id": adapter_id, "side_effect_committed": False, **error.result})
         try:
-            with managed_process_owner(self.coordinator.owner_token):
+            with managed_process_owner(self.coordinator.owner_marker):
                 opened = open_adapter_bridge(self.config, adapter_id, adapter["adapter_config"])
         except BaseException as error:
             lease.quarantine("adapter_open_interrupted", error)
@@ -119,7 +119,7 @@ class AdapterService:
                 lease.quarantine("adapter_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
         bridge = opened["session"]
-        bridge_provisional = register_provisional_handle(self.coordinator.owner_token, f"adapter-bridge:{adapter_id}", bridge.close)
+        bridge_provisional = register_provisional_handle(self.coordinator.owner_marker, f"adapter-bridge:{adapter_id}", bridge.close)
         try:
             session = AdapterSession(adapter_id, adapter["adapter_config"], bridge, log_path, lease)
         except BaseException as error:
@@ -260,9 +260,9 @@ class AdapterService:
                 errors.append((adapter_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_token))
+        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_marker))
         if self._owns_coordinator:
-            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
+            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_marker=self.coordinator.owner_marker))
             if not errors:
                 self.coordinator.close()
         if interrupt is not None:

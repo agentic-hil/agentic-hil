@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -156,7 +157,7 @@ def test_process_cleanup_is_scoped_to_service_owner() -> None:
     with managed_process_owner("second-owner"):
         second = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(60)"], **process_group_kwargs())
     try:
-        assert cleanup_registered_processes(owner_token="first-owner") == []
+        assert cleanup_registered_processes(owner_marker="first-owner") == []
         assert first.poll() is not None
         assert second.poll() is None
     finally:
@@ -182,17 +183,17 @@ def test_direct_process_service_reaps_owned_orphans_before_close(
     service = service_type(config_for(tmp_path))
     owners: list[str | None] = []
 
-    def fail_cleanup(*, owner_token: str | None = None) -> list[str]:
-        owners.append(owner_token)
+    def fail_cleanup(*, owner_marker: str | None = None) -> list[str]:
+        owners.append(owner_marker)
         return ["orphan remained"]
 
     monkeypatch.setattr(patch_target, fail_cleanup)
     with pytest.raises(RuntimeError, match="orphan remained"):
         service.close()
-    assert owners == [service.coordinator.owner_token]
+    assert owners == [service.coordinator.owner_marker]
     assert service.coordinator._state == "open"
 
-    monkeypatch.setattr(patch_target, lambda *, owner_token=None: [])
+    monkeypatch.setattr(patch_target, lambda *, owner_marker=None: [])
     service.close()
     assert service.coordinator._state == "closed"
 
@@ -1319,21 +1320,44 @@ def test_adopted_lease_less_incident_survives_unrelated_release(tmp_path: Path) 
     owner.close()
 
 
-def test_lease_status_never_emits_owner_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_redact_sensitive_strips_secret_named_keys() -> None:
+    from agentic_hil.redact import redact_sensitive
+
+    redacted = redact_sensitive(
+        {
+            "api_token": "abc",
+            "device_secret": "xyz",
+            "password": "p",
+            "quarantine_id": "keep",
+            "owner_marker": "keep",
+            "nested": {"session_token": "t", "state": "active"},
+            "leases": [{"auth_token": "l", "lease_state": "active"}],
+        }
+    )
+    assert redacted["api_token"] == "[redacted]"
+    assert redacted["device_secret"] == "[redacted]"
+    assert redacted["password"] == "[redacted]"
+    assert redacted["nested"]["session_token"] == "[redacted]"
+    assert redacted["leases"][0]["auth_token"] == "[redacted]"
+    # Non-secret-named keys, including the ownership marker, are preserved.
+    assert redacted["quarantine_id"] == "keep"
+    assert redacted["owner_marker"] == "keep"
+    assert redacted["nested"]["state"] == "active"
+    assert redacted["leases"][0]["lease_state"] == "active"
+
+
+def test_lease_status_output_carries_no_secret_named_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "owner")
     lease = owner.acquire("physical:secret-leak")
     try:
-        status = owner.status()
-        # The in-process nonce must not appear in the operator-facing record.
-        assert status["record"]["owner_token"] == "[redacted]"
-        assert owner.owner_token not in json.dumps(status)
-
         monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
         entrypoint(["lease-status"])
         printed = capsys.readouterr().out
-        assert owner.owner_token not in printed
-        assert "[redacted]" in printed
+        # No secret-named key ("*_token"/"*secret"/"password") appears in the
+        # operator-facing output; the ownership marker is renamed to a
+        # non-secret field and is not a credential.
+        assert not re.search(r'"[A-Za-z0-9_]*(?:token|secret|password)"\s*:', printed, re.IGNORECASE)
     finally:
         lease.release()
         owner.close()

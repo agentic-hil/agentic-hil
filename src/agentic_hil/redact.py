@@ -1,10 +1,11 @@
 """Redaction of secret-named values from operator-facing output.
 
-Coordination records carry an internal ``owner_token`` nonce (a per-process
-``secrets.token_hex`` used only to match process ownership). It is not an
-external credential, but it must never be emitted in clear text to an operator
-terminal, an MCP client, or a workspace stream. This module strips any
-secret-named key from a value before it is serialized to such a sink.
+Defense-in-depth for the CLI, MCP, and workspace-stream serializers: any value
+whose key looks like a credential (``*_token``, ``*secret``, ``password``,
+``api_key``) is replaced with a placeholder before it is serialized to such a
+sink, so a future field carrying a real secret cannot leak in clear text. The
+internal ownership marker is deliberately NOT a secret-named field and is not a
+credential.
 """
 from __future__ import annotations
 

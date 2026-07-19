@@ -19,7 +19,7 @@ _PROCESS_OWNER: ContextVar[str | None] = ContextVar("agentic_hil_process_owner",
 @dataclass
 class ManagedProcessRecord:
     child: subprocess.Popen
-    owner_token: str | None = None
+    owner_marker: str | None = None
     state: str = "starting"
     cleanup_errors: list[str] = field(default_factory=list)
 
@@ -27,7 +27,7 @@ class ManagedProcessRecord:
 def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
     child = subprocess.Popen(args, **kwargs)
     with _PROCESS_RECORDS_LOCK:
-        _PROCESS_RECORDS[id(child)] = ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get())
+        _PROCESS_RECORDS[id(child)] = ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get())
     try:
         return register_process_group(child)
     except BaseException as primary_error:
@@ -45,8 +45,8 @@ def current_process_owner() -> str | None:
 
 
 @contextmanager
-def managed_process_owner(owner_token: str):
-    reset_token = _PROCESS_OWNER.set(owner_token)
+def managed_process_owner(owner_marker: str):
+    reset_token = _PROCESS_OWNER.set(owner_marker)
     try:
         yield
     finally:
@@ -61,7 +61,7 @@ def process_group_kwargs() -> dict[str, object]:
 
 def register_process_group(child: subprocess.Popen) -> subprocess.Popen:
     with _PROCESS_RECORDS_LOCK:
-        record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get()))
+        record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get()))
     if os.name == "nt":
         job_handle: int | None = None
         try:
@@ -94,7 +94,7 @@ def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
         _terminate_process_tree(child, timeout_s)
     except BaseException as error:
         with _PROCESS_RECORDS_LOCK:
-            record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get()))
+            record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get()))
             record.state = "cleanup_pending"
             record.cleanup_errors.append(f"{type(error).__name__}: {error}")
         raise
@@ -354,11 +354,11 @@ def managed_processes() -> list[ManagedProcessRecord]:
         return list(_PROCESS_RECORDS.values())
 
 
-def cleanup_registered_processes(timeout_s: float = CHILD_REAP_TIMEOUT_S, *, owner_token: str | None = None) -> list[str]:
+def cleanup_registered_processes(timeout_s: float = CHILD_REAP_TIMEOUT_S, *, owner_marker: str | None = None) -> list[str]:
     errors: list[str] = []
     interrupt: KeyboardInterrupt | SystemExit | None = None
     records = managed_processes()
-    candidates = [item for item in records if item.owner_token == owner_token] if owner_token is not None else [item for item in records if item.state == "cleanup_pending"]
+    candidates = [item for item in records if item.owner_marker == owner_marker] if owner_marker is not None else [item for item in records if item.state == "cleanup_pending"]
     for record in candidates:
         try:
             terminate_process_tree(record.child, timeout_s)

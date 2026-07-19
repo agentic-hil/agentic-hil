@@ -360,7 +360,7 @@ class AgenticHILToolService:
     def _invoke_dispatch(self, callback) -> JsonObject:
         self._dispatch_depth += 1
         try:
-            with managed_process_owner(self.coordinator.owner_token):
+            with managed_process_owner(self.coordinator.owner_marker):
                 return callback()
         finally:
             self._dispatch_depth -= 1
@@ -575,9 +575,9 @@ class AgenticHILToolService:
                             interrupt = error
                     else:
                         self._debug_lease = None
-        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_token):
+        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_marker):
             errors.append(("provisional_handle", RuntimeError(provisional_error)))
-        process_errors = cleanup_registered_processes(owner_token=self.coordinator.owner_token)
+        process_errors = cleanup_registered_processes(owner_marker=self.coordinator.owner_marker)
         errors.extend(("process_registry", RuntimeError(error)) for error in process_errors)
         if not errors:
             self.coordinator.close()

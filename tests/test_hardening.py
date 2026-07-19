@@ -498,10 +498,10 @@ def test_com_double_failure_keeps_raw_handle_reachable_for_retry(tmp_path: Path,
     result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace())
 
     assert result["ok"] is False
-    assert provisional_handle_count(service.coordinator.owner_token) == 1
+    assert provisional_handle_count(service.coordinator.owner_marker) == 1
     service.close()
     assert close_calls["count"] == 2
-    assert provisional_handle_count(service.coordinator.owner_token) == 0
+    assert provisional_handle_count(service.coordinator.owner_marker) == 0
 
 
 def test_can_inner_double_failure_keeps_raw_bus_reachable_for_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -546,7 +546,7 @@ def test_can_outer_session_constructor_failure_closes_adapter(tmp_path: Path, mo
         service.session_start("bench", clear_rx_queue=False)
 
     assert adapter.closed is True
-    assert provisional_handle_count(service.coordinator.owner_token) == 0
+    assert provisional_handle_count(service.coordinator.owner_marker) == 0
     assert service.coordinator.blocked is False
     service.close()
 

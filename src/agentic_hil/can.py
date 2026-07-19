@@ -139,7 +139,7 @@ class CanBusService:
         except CoordinationError as error:
             return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result})
         try:
-            with managed_process_owner(self.coordinator.owner_token):
+            with managed_process_owner(self.coordinator.owner_marker):
                 opened = open_adapter(self.config, bus_id, bus_config, False)
         except BaseException as error:
             lease.quarantine("can_open_interrupted", error)
@@ -158,7 +158,7 @@ class CanBusService:
                 lease.quarantine("can_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
         adapter_session = opened["session"]
-        adapter_provisional = register_provisional_handle(self.coordinator.owner_token, f"can-adapter:{bus_id}", adapter_session.close)
+        adapter_provisional = register_provisional_handle(self.coordinator.owner_marker, f"can-adapter:{bus_id}", adapter_session.close)
         try:
             session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease)
         except BaseException as error:
@@ -309,9 +309,9 @@ class CanBusService:
                 errors.append((bus_id, error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_token))
+        errors.extend(("provisional_handle", RuntimeError(error)) for error in cleanup_provisional_handles(self.coordinator.owner_marker))
         if self._owns_coordinator:
-            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_token=self.coordinator.owner_token))
+            errors.extend(("process_registry", RuntimeError(error)) for error in cleanup_registered_processes(owner_marker=self.coordinator.owner_marker))
             if not errors:
                 self.coordinator.close()
         if interrupt is not None:

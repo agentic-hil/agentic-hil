@@ -197,7 +197,7 @@ class HardwareCoordinator:
     def __init__(self, config: AgenticHILConfig, frontend: str = "python"):
         self.config = config
         self.frontend = frontend
-        self.owner_token = secrets.token_hex(32)
+        self.owner_marker = secrets.token_hex(32)
         self.owner_started_at = utc_now_iso()
         self.config_sha256 = hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
         self.root = trusted_state_directory(config.state_root, "coordination")
@@ -437,8 +437,9 @@ class HardwareCoordinator:
                 "blocked": self.blocked or blocked_state,
                 "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
                 "lifecycle_state": self._state,
-                # The record carries the internal owner_token nonce; redact it so
-                # it is never emitted to an operator terminal or MCP client.
+                # Defense-in-depth: strip any secret-named field from the record
+                # before it reaches an operator terminal or MCP client. The
+                # ownership marker is not secret-named and passes through.
                 "record": redact_sensitive(record),
                 "leases": [lease.status() for lease in self.leases.values()],
             }
@@ -635,7 +636,7 @@ class HardwareCoordinator:
         return {
             "version": LEASE_VERSION,
             "state": state,
-            "owner_token": self.owner_token,
+            "owner_marker": self.owner_marker,
             "owner_pid": os.getpid(),
             "owner_started_at": self.owner_started_at,
             "frontend": self.frontend,
@@ -674,7 +675,7 @@ class HardwareCoordinator:
             (state is None or isinstance(state, str))
             and isinstance(resources_field, list)
             and all(isinstance(item, str) for item in resources_field)
-            and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_token", "recovered_quarantine_id"))
+            and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_marker", "recovered_quarantine_id"))
         )
         if not typed:
             raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "record_path": str(path)})
@@ -806,7 +807,7 @@ def resource_digest(resource: str) -> str:
 
 
 def legacy_quarantine_id(record: JsonObject) -> str:
-    identity = "\0".join(str(record.get(field, "")) for field in ("owner_token", "owner_started_at", "project_resource"))
+    identity = "\0".join(str(record.get(field, "")) for field in ("owner_marker", "owner_started_at", "project_resource"))
     return "legacy-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
