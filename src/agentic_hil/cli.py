@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import tempfile
-from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from importlib import resources
@@ -32,8 +31,9 @@ from agentic_hil.config import (
     safe_read_text,
     validate_config_schema,
 )
+from agentic_hil.coordination import HardwareCoordinator
 from agentic_hil.debugger import create_debugger_backend
-from agentic_hil.report import write_report
+from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
@@ -151,7 +151,7 @@ def entrypoint(argv: list[str] | None = None) -> int:
 
 
 def result_succeeded(result: JsonObject) -> bool:
-    return result.get("ok") is True and result.get("audit_ok") is not False and result.get("target_ok") is not False
+    return overall_success(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +185,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     reactor_parser = subparsers.add_parser("test-reactor", help="run a validated hardware test sequence")
     reactor_parser.add_argument("--test-config", default=DEFAULT_TEST_CONFIG_PATH)
+
+    subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
+    recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
+    recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
@@ -220,6 +224,10 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
         return run_test_reactor(args.test_config)
+    if args.command in {"lease-status", "recover"}:
+        config = load_cli_authoritative_config(None)
+        coordinator = HardwareCoordinator(config, "operator-cli")
+        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "mcp-config":
@@ -314,8 +322,19 @@ def migrate_config(source: str) -> JsonObject:
     try:
         load_authoritative_config(workspace)
     except BaseException as error:
-        with suppress(FileNotFoundError):
+        try:
             target_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                error.args = (*error.args, f"Migration target cleanup failed: {cleanup_error}")
+                raise
+            raise ConfigError(
+                "config_write_failed",
+                "Migrated configuration validation failed and the incomplete target could not be removed.",
+                {"path": str(target_path), "cleanup_required": True},
+            ) from error
         if isinstance(error, OSError):
             raise ConfigError("config_write_failed", "Migrated Agentic HIL configuration failed post-write validation.", {"path": str(target_path)}) from error
         raise
@@ -354,7 +373,7 @@ def strip_empty_legacy_args(raw: JsonObject, source_path: str) -> None:
             if not isinstance(value, dict) or "args" not in value:
                 continue
             args = value.get("args")
-            if args:
+            if args != []:
                 raise ConfigError(
                     "config_migration_required",
                     "Process bridge args cannot be migrated safely. Pin an operator-controlled wrapper directly as executable.",
@@ -388,6 +407,7 @@ def require_migration_mapping(raw: JsonObject, field: str) -> JsonObject:
 
 def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> None:
     temporary_path: Path | None = None
+    primary_error: BaseException | None = None
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target_path.parent, delete=False) as handle:
             temporary_path = Path(handle.name)
@@ -395,10 +415,24 @@ def validate_migrated_text(text: str, target_path: Path, workspace: Path) -> Non
             handle.flush()
             os.fsync(handle.fileno())
         pin_configured_executables(pin_configured_paths(load_config(str(temporary_path), str(workspace))))
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         if temporary_path is not None:
-            with suppress(FileNotFoundError):
+            try:
                 temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_error:
+                if primary_error is not None and isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                    primary_error.args = (*primary_error.args, f"Migration validation cleanup failed: {cleanup_error}")
+                else:
+                    raise ConfigError(
+                        "config_write_failed",
+                        "Migrated configuration validation temporary file could not be removed.",
+                        {"path": str(temporary_path), "cleanup_required": True},
+                    ) from (primary_error or cleanup_error)
 
 
 def write_exclusive_text(path: Path, text: str) -> None:
@@ -406,6 +440,7 @@ def write_exclusive_text(path: Path, text: str) -> None:
     descriptor = -1
     created = False
     complete = False
+    primary_error: BaseException | None = None
     try:
         descriptor = os.open(path, flags, 0o600)
         created = True
@@ -415,14 +450,28 @@ def write_exclusive_text(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         complete = True
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         try:
             if descriptor >= 0:
                 os.close(descriptor)
         finally:
             if created and not complete:
-                with suppress(FileNotFoundError):
+                try:
                     path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as cleanup_error:
+                    if primary_error is not None and isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                        primary_error.args = (*primary_error.args, f"Incomplete migration target cleanup failed: {cleanup_error}")
+                    else:
+                        raise ConfigError(
+                            "config_write_failed",
+                            "Incomplete migrated configuration could not be removed.",
+                            {"path": str(path), "cleanup_required": True},
+                        ) from (primary_error or cleanup_error)
 
 
 def yaml_error_details(error: yaml.YAMLError, path: Path) -> JsonObject:
@@ -436,16 +485,27 @@ def yaml_error_details(error: yaml.YAMLError, path: Path) -> JsonObject:
 def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
-    service = AgenticHILToolService(config)
+    service = AgenticHILToolService(config, frontend="reactor")
+    primary_error: BaseException | None = None
     try:
         result = TestReactor(service.config, service).run(test_config)
-    except Exception:
-        with suppress(Exception):
-            service.close()
-        raise
+    except BaseException as error:
+        primary_error = error
+        result = {
+            "ok": False,
+            "tool": "test_reactor",
+            "name": test_config.name,
+            "test_config_path": test_config.path,
+            "error_type": "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "reactor_exception",
+            "exception_type": type(error).__name__,
+            "summary": "Test reactor was interrupted; all containment steps were attempted.",
+            "steps": [],
+            "cleanup": getattr(error, "agentic_hil_cleanup", []),
+            "cleanup_ok": False,
+        }
     try:
         service.close()
-    except Exception as error:
+    except BaseException as error:
         cleanup_error = {
             "device": "service",
             "action": "close",
@@ -465,7 +525,14 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
         result.setdefault("step_error_type", result.get("error_type"))
         result["error_type"] = "cleanup_failed"
         result["summary"] = "Test reactor sequence failed during cleanup."
-    return write_report(config, result)
+        if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+            primary_error = error
+    written = write_report(config, result)
+    if primary_error is not None:
+        if written.get("audit_ok") is False:
+            primary_error.args = (*primary_error.args, "Final reactor audit failed.")
+        raise primary_error
+    return written
 
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:

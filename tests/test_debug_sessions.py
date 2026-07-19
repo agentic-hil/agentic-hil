@@ -6,7 +6,8 @@ import pytest
 from conftest import FAKE_GDB, write_config
 
 from agentic_hil.config import load_config
-from agentic_hil.gdbmi import intel_hex_record, write_intel_hex_file
+from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
+from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
 CTC_ARRAY_ADDRESS = 0x200006F0
@@ -121,6 +122,27 @@ def test_debug_continue_reports_unexpected_breakpoint(tmp_path: Path) -> None:
         service.close()
 
 
+def test_unconfirmed_debug_halt_quarantines_lease(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="halt_timeout")
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+
+        halted = service.call("debug_halt", {"timeout_s": 0.1})
+
+        assert halted["ok"] is False
+        assert halted["target_state"] == "unknown"
+        assert halted["side_effect_status"] == "unknown"
+        assert halted["cleanup_required"] is True
+        assert service.coordinator.blocked is True
+        cleared = service.call("debug_clear_breakpoints")
+        assert cleared["cleanup_required"] is True
+        assert service.coordinator.blocked is True
+    finally:
+        with pytest.raises(RuntimeError, match="target state remains unconfirmed"):
+            service.close()
+        service.coordinator.close()
+
+
 def test_debug_continue_reports_target_exception_context(tmp_path: Path) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="hardfault")
     try:
@@ -200,8 +222,24 @@ def test_debug_symbol_info_reports_missing_symbol(tmp_path: Path) -> None:
         result = service.call("debug_symbol_info", {"symbol": "missing_symbol"})
         assert result["ok"] is False
         assert result["error_type"] == "symbol_not_found"
+        assert result["side_effect_committed"] is False
+        assert result.get("cleanup_required") is not True
+        assert service.coordinator.blocked is False
     finally:
         service.close()
+
+
+def test_service_close_persists_debug_shutdown_before_release(tmp_path: Path) -> None:
+    service = debug_service(tmp_path)
+    assert start_debug_session(service)["ok"] is True
+
+    service.close()
+
+    report = read_last_report(service.config)
+    assert report["tool"] == "debug_stop_session"
+    assert report["status"] == "stopped"
+    assert report["lease_state"] == "active"
+    assert service._debug_lease is None
 
 
 def test_debug_symbol_allowlist_blocks_unlisted_symbols(tmp_path: Path) -> None:
@@ -243,6 +281,7 @@ def test_debug_file_breakpoint_requires_allow_all_symbols(tmp_path: Path) -> Non
         rejected = restricted.call("debug_set_breakpoint", {"location": {"file": "main.c", "line": 12}})
         assert rejected["ok"] is False
         assert rejected["error_type"] == "permission_denied"
+        assert restricted.call("debug_stop_session")["ok"] is True
 
         assert start_debug_session(unrestricted)["ok"] is True
         allowed = unrestricted.call("debug_set_breakpoint", {"location": {"file": "main.c", "line": 12}})
@@ -403,7 +442,10 @@ def test_debug_stop_reports_cleanup_failure(tmp_path: Path, monkeypatch: pytest.
         assert result["ok"] is False
         assert result["error_type"] == "cleanup_failed"
         assert "close failed" in result["cleanup_error"]
-        assert result["active"] is False
+        assert result["active"] is True
+        assert result["status"] == "cleanup_required"
+        assert result["hardware_state"] == "unknown"
+        assert result["quarantined"] is True
         assert service._debug_artifact is not None
 
         monkeypatch.setattr(session.gdb, "close", original_close)
@@ -412,6 +454,39 @@ def test_debug_stop_reports_cleanup_failure(tmp_path: Path, monkeypatch: pytest.
         assert service._debug_artifact is None
     finally:
         monkeypatch.setattr(session.gdb, "close", original_close)
+        service.close()
+
+
+def test_breakpoint_cleanup_retry_only_deletes_remaining_breakpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        assert service.call("debug_set_breakpoint", {"location": "first"})["ok"] is True
+        assert service.call("debug_set_breakpoint", {"location": "second"})["ok"] is True
+        debug = service.backend._debug
+        original = debug._gdb_command
+        failed_once = False
+        deletes: list[str] = []
+
+        def command(session, command: str, timeout_s=None):
+            nonlocal failed_once
+            if command.startswith("-break-delete"):
+                deletes.append(command)
+                if command.endswith(" 2") and not failed_once:
+                    failed_once = True
+                    return GdbMiCommandResult(result_class="error", line="", error_message="delete failed")
+            return original(session, command, timeout_s)
+
+        monkeypatch.setattr(debug, "_gdb_command", command)
+        first = service.call("debug_clear_breakpoints")
+        assert first["ok"] is False
+        assert [item["backend_id"] for item in debug.session.breakpoints] == ["2"]
+
+        second = service.call("debug_clear_breakpoints")
+        assert second["ok"] is True
+        assert deletes == ["-break-delete 1", "-break-delete 2", "-break-delete 2"]
+        assert service.hardware_lease_status()["blocked"] is False
+    finally:
         service.close()
 
 

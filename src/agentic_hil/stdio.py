@@ -30,8 +30,9 @@ def run_stdio_server(
 ) -> int:
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
-    tools = AgenticHILToolService(config)
+    tools = AgenticHILToolService(config, frontend="mcp")
     limit = max_message_chars or message_size_limit(tools.config)
+    primary_error: BaseException | None = None
     try:
         while True:
             raw_line = input_stream.readline(limit)
@@ -45,15 +46,26 @@ def run_stdio_server(
             if not line:
                 continue
             try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
+                message = json.loads(line, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+            except (json.JSONDecodeError, ValueError):
                 write_message(output_stream, parse_error_response())
                 continue
             response = handle_mcp_message(message, tools)
             if response is not None:
                 write_message(output_stream, response)
-    finally:
+    except BaseException as error:
+        primary_error = error
+    cleanup_error: BaseException | None = None
+    try:
         tools.close()
+    except BaseException as error:
+        cleanup_error = error
+    if primary_error is not None:
+        if cleanup_error is not None:
+            primary_error.args = (*primary_error.args, f"Cleanup error: {type(cleanup_error).__name__}: {cleanup_error}")
+        raise primary_error
+    if cleanup_error is not None:
+        raise cleanup_error
     return 0
 
 

@@ -11,12 +11,14 @@ from contextlib import suppress
 from pathlib import Path
 
 from agentic_hil.config import (
+    ConfigError,
     atomic_write_bytes,
     configured_work_path,
     display_path,
     is_path_within_frozen,
     resolve_work_path,
     safe_configured_directory,
+    safe_open_binary,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -75,39 +77,50 @@ class ArtifactManager:
         return self._store_uploaded_data(decoded["data"], str(filename["filename"]))
 
     def validate_local_path(self, image_path: str) -> JsonObject:
-        resolved = Path(resolve_work_path(self.config, image_path))
+        resolved = configured_work_path(self.config, image_path)
         validation: JsonObject = {
             "path_traversal_safe": not has_traversal_segment(image_path),
-            "exists": resolved.exists(),
+            "exists": False,
             "allowed_root": self._is_under_allowed_roots(resolved),
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
             "sha256_computed": False,
         }
-        if validation["exists"]:
-            validation["regular_file"] = resolved.is_file()
-            validation["single_link"] = os.lstat(resolved).st_nlink == 1
         validation["require_allowed_root"] = self.config.validation.require_allowed_root
 
         if not validation["path_traversal_safe"]:
             return self._validation_error("Firmware artifact path contains traversal segments.", validation)
-        if self.config.validation.require_existing_file and not validation["exists"]:
-            return self._validation_error("Firmware artifact does not exist.", validation, "artifact_not_found")
         if self.config.validation.require_allowed_root and not validation["allowed_root"]:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
-        if validation.get("regular_file") is False or validation.get("single_link") is False:
-            return self._validation_error("Firmware artifact must be a regular file with exactly one filesystem link.", validation)
 
         sha256: str | None = None
         size_bytes: int | None = None
+        integrity_sha256: str | None = None
+        try:
+            with safe_open_binary(resolved, workspace=self.config.work_dir) as handle:
+                opened = os.fstat(handle.fileno())
+                validation.update({"exists": True, "regular_file": True, "single_link": True})
+                size_bytes = opened.st_size
+                if size_bytes > self._max_upload_bytes():
+                    return self._artifact_too_large(size_bytes, "flash_firmware")
+                data = handle.read(self._max_upload_bytes() + 1)
+        except FileNotFoundError:
+            if self.config.validation.require_existing_file:
+                return self._validation_error("Firmware artifact does not exist.", validation, "artifact_not_found")
+            data = b""
+        except (ConfigError, OSError) as error:
+            validation.update({"regular_file": False, "single_link": False})
+            return self._validation_error("Firmware artifact must be a single-link regular file that can be opened safely.", {**validation, "backend_error": str(error)})
         if validation["exists"]:
-            size_bytes = resolved.stat().st_size
+            if len(data) > self._max_upload_bytes():
+                return self._artifact_too_large(len(data), "flash_firmware")
+            integrity_sha256 = hashlib.sha256(data).hexdigest()
             if self.config.validation.compute_sha256:
-                sha256 = sha256_file(resolved)
+                sha256 = integrity_sha256
                 validation["sha256_computed"] = True
             if self.config.validation.inspect_known_formats:
-                validation.update(self._inspect_format(resolved))
+                validation.update(self._inspect_format_bytes(resolved.suffix.lower(), data))
 
         failed_plausibility = [
             key for key in ["elf_header", "hex_parseable", "bin_size_plausible"] if validation.get(key) is False
@@ -122,6 +135,7 @@ class ArtifactManager:
                 "path": display_path(self.config, image_path),
                 "resolved_path": str(resolved),
                 "sha256": sha256,
+                "integrity_sha256": integrity_sha256,
                 "size_bytes": size_bytes,
                 "validation": validation,
             },
@@ -130,10 +144,11 @@ class ArtifactManager:
 
     def stage_for_backend(self, artifact: JsonObject, tool: str) -> JsonObject:
         source = Path(str(artifact["resolved_path"]))
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(source, flags)
-        except OSError as error:
+            source_context = safe_open_binary(source, workspace=self.config.work_dir)
+            source_file = source_context.__enter__()
+            descriptor = source_file.fileno()
+        except (ConfigError, OSError) as error:
             return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error)}
 
         temporary_path: Path | None = None
@@ -144,38 +159,29 @@ class ArtifactManager:
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
             if source_stat.st_size > self._max_upload_bytes():
                 return self._artifact_too_large(source_stat.st_size, tool)
-            try:
-                current_path = source.resolve(strict=True)
-                current_stat = os.stat(source, follow_symlinks=False)
-            except OSError:
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after it was opened."}
-            if current_path != source or not os.path.samestat(source_stat, current_stat):
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact path changed after validation."}
             digest = hashlib.sha256()
             copied_bytes = 0
             suffix = source.suffix.lower()
             staging_directory = Path(tempfile.mkdtemp(dir=self._staging.name, prefix="stage-"))
-            with os.fdopen(descriptor, "rb") as source_file:
-                descriptor = -1
-                with tempfile.NamedTemporaryFile(dir=staging_directory, prefix=".tmp-", suffix=suffix, delete=False) as staged_file:
-                    temporary_path = Path(staged_file.name)
-                    for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
-                        copied_bytes += len(chunk)
-                        if copied_bytes > self._max_upload_bytes():
-                            return self._artifact_too_large(copied_bytes, tool)
-                        digest.update(chunk)
-                        staged_file.write(chunk)
-                    staged_file.flush()
-                    os.fsync(staged_file.fileno())
+            with tempfile.NamedTemporaryFile(dir=staging_directory, prefix=".tmp-", suffix=suffix, delete=False) as staged_file:
+                temporary_path = Path(staged_file.name)
+                for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
+                    copied_bytes += len(chunk)
+                    if copied_bytes > self._max_upload_bytes():
+                        return self._artifact_too_large(copied_bytes, tool)
+                    digest.update(chunk)
+                    staged_file.write(chunk)
+                staged_file.flush()
+                os.fsync(staged_file.fileno())
             actual_sha256 = digest.hexdigest()
-            expected_sha256 = artifact.get("sha256")
+            expected_sha256 = artifact.get("integrity_sha256") or artifact.get("sha256")
             if expected_sha256 is not None and actual_sha256 != expected_sha256:
                 return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation."}
             staged_path = staging_directory / source.name
             os.replace(temporary_path, staged_path)
             temporary_path = None
             staged_artifact = dict(artifact)
-            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "size_bytes": copied_bytes, "staged": True})
+            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "integrity_sha256": actual_sha256, "size_bytes": copied_bytes, "staged": True})
             return {"ok": True, "artifact": staged_artifact}
         except OSError as error:
             return {
@@ -186,8 +192,7 @@ class ArtifactManager:
                 "backend_error": str(error),
             }
         finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+            source_context.__exit__(None, None, None)
             if temporary_path is not None:
                 with suppress(OSError):
                     temporary_path.unlink()
@@ -337,6 +342,7 @@ class ArtifactManager:
             "summary": "Firmware artifact exceeds configured max_upload_size_mb.",
             "bytes": size_bytes,
             "max_bytes": self._max_upload_bytes(),
+            "side_effect_committed": False,
         }
 
     def _validation_error(self, summary: str, validation: JsonObject, error_type: str = "artifact_validation_failed") -> JsonObject:
@@ -351,21 +357,13 @@ class ArtifactManager:
             roots.append(configured_work_path(self.config, self.config.artifacts.upload_directory))
         return any(is_path_within_frozen(resolved_path, root) for root in roots)
 
-    def _inspect_format(self, file_path: Path) -> JsonObject:
-        suffix = file_path.suffix.lower()
+    def _inspect_format_bytes(self, suffix: str, data: bytes) -> JsonObject:
         if suffix == ".elf":
-            try:
-                with file_path.open("rb") as handle:
-                    return {"elf_header": handle.read(4) == b"\x7fELF"}
-            except OSError:
-                return {"elf_header": False}
+            return {"elf_header": data[:4] == b"\x7fELF"}
         if suffix == ".hex":
-            return {"hex_parseable": looks_like_intel_hex(file_path)}
+            return {"hex_parseable": looks_like_intel_hex_bytes(data)}
         if suffix == ".bin":
-            try:
-                return {"bin_size_plausible": file_path.stat().st_size > 0}
-            except OSError:
-                return {"bin_size_plausible": False}
+            return {"bin_size_plausible": bool(data)}
         return {}
 
 
@@ -435,6 +433,28 @@ def looks_like_intel_hex(file_path: Path) -> bool:
                 saw_record = True
     except (OSError, UnicodeDecodeError):
         return False
+    return saw_record
+
+
+def looks_like_intel_hex_bytes(data: bytes) -> bool:
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    saw_record = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith(":"):
+            return False
+        payload = line[1:]
+        if len(payload) < 10 or len(payload) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", payload) is None:
+            return False
+        record = bytes.fromhex(payload)
+        if len(record) != record[0] + 5 or sum(record) & 0xFF:
+            return False
+        saw_record = True
     return saw_record
 
 

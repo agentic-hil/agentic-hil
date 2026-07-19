@@ -11,7 +11,7 @@ from pathlib import Path
 from agentic_hil.process import (
     CHILD_REAP_TIMEOUT_S,
     process_group_kwargs,
-    register_process_group,
+    spawn_managed_process,
     terminate_process_tree,
 )
 
@@ -27,30 +27,39 @@ class CompletedCommand:
 
 def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
     try:
-        child = register_process_group(subprocess.Popen(
+        child = spawn_managed_process(
             command,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             **process_group_kwargs(),
-        ))
-        try:
-            stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
-            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
-            stdout, stderr = child.communicate(timeout=CHILD_REAP_TIMEOUT_S)
-            timed_out = True
-        return CompletedCommand(
-            stdout=decode_output(stdout),
-            stderr=decode_output(stderr),
-            returncode=child.returncode,
-            timed_out=timed_out,
-            not_found=False,
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)
+    try:
+        stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
+        terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        try:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+            stdout, stderr = child.communicate(timeout=CHILD_REAP_TIMEOUT_S)
+            timed_out = True
+        except BaseException as cleanup_error:
+            raise RuntimeError(f"Timed-out command cleanup remains unconfirmed: {cleanup_error}") from cleanup_error
+    except BaseException as primary_error:
+        try:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+        except BaseException as cleanup_error:
+            raise RuntimeError(f"Command failed and cleanup remains unconfirmed: {cleanup_error}") from primary_error
+        raise
+    return CompletedCommand(
+        stdout=decode_output(stdout),
+        stderr=decode_output(stderr),
+        returncode=child.returncode,
+        timed_out=timed_out,
+        not_found=False,
+    )
 
 
 def decode_output(value: str | bytes | None) -> str:

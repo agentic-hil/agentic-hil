@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from agentic_hil.report import overall_success
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -93,7 +95,7 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
 def _agentic_hil_service(agentic_hil_config: AgenticHILConfig) -> Iterator[AgenticHILToolService]:
     from agentic_hil.tools import AgenticHILToolService
 
-    service = AgenticHILToolService(agentic_hil_config)
+    service = AgenticHILToolService(agentic_hil_config, frontend="pytest")
     try:
         yield service
     finally:
@@ -112,14 +114,25 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
         yield _agentic_hil_service
     finally:
         errors: list[str] = []
+        interrupt: BaseException | None = None
         if _agentic_hil_service._debug_artifact is not None:
-            stopped = _agentic_hil_service.debug_stop_session()
-            if not stopped.get("ok"):
-                errors.append(f"debug: {stopped.get('summary', stopped.get('error_type'))}")
+            try:
+                stopped = _agentic_hil_service.call("debug_stop_session")
+                if not overall_success(stopped):
+                    errors.append(f"debug: {stopped.get('summary', stopped.get('error_type'))}")
+            except BaseException as error:
+                errors.append(f"debug: {type(error).__name__}: {error}")
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
         for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses), ("adapter", _agentic_hil_service.adapters)]:
             try:
                 resource.close()
-            except Exception as error:
+            except BaseException as error:
                 errors.append(f"{name}: {type(error).__name__}: {error}")
+                if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
+        if interrupt is not None:
+            interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(errors))
+            raise interrupt
         if errors:
             pytest.fail("Agentic HIL fixture cleanup failed: " + "; ".join(errors), pytrace=False)

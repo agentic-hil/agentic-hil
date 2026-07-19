@@ -8,6 +8,8 @@ import time
 from typing import BinaryIO, TextIO
 
 from agentic_hil.comports import ComPortService
+from agentic_hil.config import ConfigError
+from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STDIN_CHUNK_BYTES = 4096
@@ -30,43 +32,67 @@ def run_com_stdio(
     service = ComPortService(config)
     started_ok = False
     failed = False
+    primary_error: BaseException | None = None
     try:
-        started = service.session_start(port_id, True)
-        if not started.get("ok"):
+        try:
+            ensure_audit_ready(config)
+        except (ConfigError, OSError) as error:
+            started = audit_unavailable("com_session_start", error)
+        else:
+            started = service.session_start(port_id, True)
+        if not overall_success(started):
             write_error(error_stream, started)
-            return 1
-        started_ok = True
-        port = config.com_ports[port_id]
-        read_size = max_read_bytes or port.max_buffer_bytes
-        last_data_at = time.monotonic()
-        input_stream_closed = False
-        stdin_chunks = start_stdin_reader(input_stream)
-        while not failed:
-            chunk = next_stdin_chunk(stdin_chunks)
-            if chunk:
-                written = service.write_bytes(port_id, chunk, "com_stdio_write")
-                if not written.get("ok"):
+            failed = True
+        else:
+            started_ok = True
+            port = config.com_ports[port_id]
+            read_size = max_read_bytes or port.max_buffer_bytes
+            last_data_at = time.monotonic()
+            input_stream_closed = False
+            stdin_chunks = start_stdin_reader(input_stream)
+            while not failed:
+                chunk = next_stdin_chunk(stdin_chunks)
+                if chunk:
+                    written = service.write_bytes(port_id, chunk, "com_stdio_write")
+                    if not overall_success(written):
+                        failed = True
+                        write_error(error_stream, written)
+                elif chunk == b"":
+                    input_stream_closed = True
+                result = service.read_bytes(port_id, read_size, read_wait_timeout_s, "com_stdio_read")
+                if not overall_success(result):
                     failed = True
-                    write_error(error_stream, written)
-            elif chunk == b"":
-                input_stream_closed = True
-            result = service.read_bytes(port_id, read_size, read_wait_timeout_s, "com_stdio_read")
-            if not result.get("ok"):
+                    write_error(error_stream, result)
+                    break
+                if int(result.get("bytes_read", 0)) > 0:
+                    output_stream.write(str(result["data"].get("text", "")))
+                    output_stream.flush()
+                    last_data_at = time.monotonic()
+                    continue
+                if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
+                    break
+    except BaseException as error:
+        primary_error = error
+    cleanup_errors: list[BaseException] = []
+    if started_ok:
+        try:
+            stopped = service.session_stop(port_id)
+            if not overall_success(stopped):
                 failed = True
-                write_error(error_stream, result)
-                break
-            if int(result.get("bytes_read", 0)) > 0:
-                output_stream.write(str(result["data"].get("text", "")))
-                output_stream.flush()
-                last_data_at = time.monotonic()
-                continue
-            if input_stream_closed and time.monotonic() - last_data_at >= eof_idle_timeout_s:
-                break
-        return 1 if failed else 0
-    finally:
-        if started_ok:
-            service.session_stop(port_id)
+                write_error(error_stream, stopped)
+        except BaseException as error:
+            cleanup_errors.append(error)
+    try:
         service.close()
+    except BaseException as error:
+        cleanup_errors.append(error)
+    if primary_error is not None:
+        if cleanup_errors:
+            primary_error.args = (*primary_error.args, "Cleanup errors: " + "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors))
+        raise primary_error
+    if cleanup_errors:
+        raise RuntimeError("COM stdio cleanup failed: " + "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)) from cleanup_errors[0]
+    return 1 if failed else 0
 
 
 def start_stdin_reader(input_stream: BinaryIO) -> queue.Queue[bytes]:

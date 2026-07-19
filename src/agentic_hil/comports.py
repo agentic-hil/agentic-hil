@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import ConfigError, display_path
+from agentic_hil.config import ConfigError, display_path, safe_append_text
+from agentic_hil.coordination import (
+    CoordinationError,
+    DetachedHardwareLease,
+    HardwareCoordinator,
+    HardwareLease,
+    com_resource,
+)
 from agentic_hil.report import (
     append_jsonl,
     audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
+    overall_success,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -46,7 +56,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 
 
 class ComPortSession:
-    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, *, start_reader: bool = True):
+    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True):
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
@@ -58,21 +68,26 @@ class ComPortSession:
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
         self.reader: threading.Thread | None = None
+        self.audit_broken = False
+        self.lease = lease or DetachedHardwareLease()
         if start_reader:
             self.start_reader()
 
     def start_reader(self) -> None:
         if self.reader is not None:
             return
-        self.reader = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader.start()
+        reader = threading.Thread(target=self._reader_loop, daemon=True)
+        reader.start()
+        self.reader = reader
 
     def _reader_loop(self) -> None:
         while self.active:
             try:
                 waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
-                data = self.serial_handle.read(waiting or 1)
+                read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
+                data = self.serial_handle.read(read_size)
                 if not data:
+                    time.sleep(0.01)
                     continue
                 chunk = bytes(data)
                 with self.lock:
@@ -84,6 +99,8 @@ class ComPortSession:
                 audit_error = append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
                 if audit_error is not None:
                     self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
+                    self.audit_broken = True
+                    self.lease.quarantine("com_reader_audit_broken", audit_error, audit_broken=True)
                     self.active = False
                     break
             except Exception as error:  # serial backends raise implementation-specific exception classes
@@ -99,8 +116,10 @@ class ComPortSession:
 
 
 class ComPortService:
-    def __init__(self, config: AgenticHILConfig):
+    def __init__(self, config: AgenticHILConfig, coordinator: HardwareCoordinator | None = None):
         self.config = config
+        self.coordinator = coordinator or HardwareCoordinator(config, "com-service")
+        self._owns_coordinator = coordinator is None
         self.sessions: dict[str, ComPortSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
@@ -133,6 +152,8 @@ class ComPortService:
         }
 
     def session_start(self, port_id: str, clear_buffer: bool = True) -> JsonObject:
+        if not isinstance(port_id, str) or not isinstance(clear_buffer, bool):
+            return self._write_report({"ok": False, "tool": "com_session_start", "error_type": "invalid_argument", "summary": "port_id must be a string and clear_buffer must be a boolean.", "side_effect_committed": False})
         port = self._configured_port(port_id, "com_session_start")
         if not port["ok"]:
             return self._write_report(port)
@@ -152,21 +173,57 @@ class ComPortService:
                 return self._write_report(self._close_failure("com_session_start", port_id, error))
             self.sessions.pop(port_id, None)
 
-        opened = self._open_serial(port_id, port["port_config"])
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
+            safe_append_text(log_path, "")
+        except (ConfigError, OSError) as error:
+            return audit_unavailable("com_session_start", error)
+        try:
+            lease = self.coordinator.acquire(com_resource(self.config, port_id))
+        except CoordinationError as error:
+            return self._write_report({"tool": "com_session_start", "port_id": port_id, "side_effect_committed": False, **error.result})
+        try:
+            opened = self._open_serial(port_id, port["port_config"], log_path, lease)
+        except BaseException as error:
+            lease.quarantine("com_open_interrupted", error)
+            raise
         if not opened["ok"]:
-            return self._write_report(opened)
+            safe_to_release = opened.get("side_effect_committed") is False or opened.get("cleanup_confirmed") is True
+            if not safe_to_release:
+                lease.quarantine("com_open_cleanup_unconfirmed", opened.get("backend_error"))
+            return self._write_unattached_lease_report(opened, lease, release_if_safe=safe_to_release)
         session = opened["session"]
-        audit_error = append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
         self.sessions[port_id] = session
+        audit_error = append_jsonl(session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
+        if audit_error is not None:
+            session.audit_broken = True
+            with suppress(BaseException):
+                self._stop_session(session, "audit_failed")
+            result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "cleanup_required": True, "summary": "COM port opened, but audit initialization failed; resource is quarantined."}
+            return self._write_report(mark_audit_failure(result, audit_error))
         try:
             session.start_reader()
-        except Exception as error:
+        except BaseException as error:
             try:
-                self._stop_session(session, "start_failed")
-            except Exception as close_error:
-                return self._write_report(self._close_failure("com_session_start", port_id, close_error))
+                self._stop_session(session, "start_failed", defer_release=True)
+            except BaseException as close_error:
+                written = self._write_report(self._close_failure("com_session_start", port_id, close_error))
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    error.args = (*error.args, f"Cleanup error: {close_error}")
+                    raise error from close_error
+                if isinstance(close_error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                return written
+            failure = {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_reader_start_failed", "summary": "COM port reader could not be started; the port was closed.", "backend_error": str(error), "cleanup_confirmed": True, "side_effect_committed": False}
+            written = self._write_report(failure)
+            if written.get("audit_ok") is False:
+                return written
+            if not session.lease.release():
+                return self._write_report(self._close_failure("com_session_start", port_id, RuntimeError("Lease release remained unconfirmed.")))
             self.sessions.pop(port_id, None)
-            return self._write_report({"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_reader_start_failed", "summary": "COM port reader could not be started; the port was closed.", "backend_error": str(error)})
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise error
+            return {**written, **session.lease.status()}
         result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."}
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
@@ -178,12 +235,17 @@ class ComPortService:
         if session is None:
             return self._write_report({"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": False, "summary": "COM port session was not active."})
         try:
-            audit_error = self._stop_session(session, "requested")
+            audit_error = self._stop_session(session, "requested", defer_release=True)
         except Exception as error:
             return self._write_report(self._close_failure("com_session_stop", port_id, error))
-        self.sessions.pop(port_id, None)
         result = {"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."}
-        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+        written = self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+        if written.get("audit_ok") is False:
+            return {**written, "cleanup_required": True, "quarantined": True}
+        if not session.lease.release():
+            return self._write_report(self._close_failure("com_session_stop", port_id, RuntimeError("Lease release remained unconfirmed.")))
+        self.sessions.pop(port_id, None)
+        return {**written, **session.lease.status()}
 
     def write(self, port_id: str, payload: JsonObject) -> JsonObject:
         port = self._configured_port(port_id, "com_write")
@@ -211,11 +273,21 @@ class ComPortService:
                 flush()
         except Exception as error:
             result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
+            session.lease.quarantine("com_write_effect_unconfirmed", error)
+            result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
             audit_error = append_jsonl(session.log_path, {"event": "error", **result})
-            return mark_audit_failure(result, audit_error) if audit_error is not None else result
+            if audit_error is not None:
+                session.audit_broken = True
+                session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+                return mark_audit_failure(result, audit_error)
+            return result
         audit_error = append_jsonl(session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
         result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
-        return mark_audit_failure(result, audit_error) if audit_error is not None else result
+        if audit_error is not None:
+            session.audit_broken = True
+            session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+            return mark_audit_failure(result, audit_error)
+        return result
 
     def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
         return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
@@ -234,6 +306,8 @@ class ComPortService:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be an integer and wait_timeout_s must be a number."}
         if parsed_max_bytes < 1:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be at least 1."}
+        if not math.isfinite(parsed_wait_timeout_s):
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."}
         deadline = time.monotonic() + max(0.0, min(parsed_wait_timeout_s, 60.0))
         while self._session_is_active(session):
             with session.lock:
@@ -252,30 +326,34 @@ class ComPortService:
         return result
 
     def close(self) -> None:
-        errors: list[tuple[str, Exception]] = []
-        for port_id, session in list(self.sessions.items()):
+        errors: list[tuple[str, BaseException]] = []
+        interrupt: BaseException | None = None
+        for port_id in list(self.sessions):
             try:
-                self._stop_session(session, "shutdown")
-            except Exception as error:
+                result = self.session_stop(port_id)
+                if not overall_success(result):
+                    raise RuntimeError(str(result.get("summary", "COM port cleanup failed.")))
+            except BaseException as error:
                 errors.append((port_id, error))
-            else:
-                self.sessions.pop(port_id, None)
+                if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
+        if self._owns_coordinator and not errors:
+            self.coordinator.close()
+        if interrupt is not None:
+            interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(f"{port_id}: {type(error).__name__}: {error}" for port_id, error in errors))
+            raise interrupt
         if errors:
             details = "; ".join(f"{port_id}: {type(error).__name__}: {error}" for port_id, error in errors)
             raise RuntimeError(f"COM port cleanup failed: {details}") from errors[0][1]
 
-    def _open_serial(self, port_id: str, port_config: ComPortConfig) -> JsonObject:
+    def _open_serial(self, port_id: str, port_config: ComPortConfig, log_path: str, lease: HardwareLease) -> JsonObject:
         try:
             import serial
         except ImportError:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"]}
-        try:
-            log_path = str(Path(logs_directory(self.config)) / f"com-{timestamp_for_filename()}-{safe_filename(port_id, 'port')}.jsonl")
-        except (ConfigError, OSError) as error:
-            return audit_unavailable("com_session_start", error)
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
         try:
             serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
-            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path, start_reader=False)}
+            return {"ok": True, "session": ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)}
         except Exception as error:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
 
@@ -292,8 +370,10 @@ class ComPortService:
         if not port["ok"]:
             return port
         session = self.sessions.get(port_id)
-        if session is None or not self._session_is_active(session):
+        if session is None or self.coordinator.blocked or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
             result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
+            if session is not None and (self.coordinator.blocked or session.audit_broken or session.lease.state != "active"):
+                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
             if session is not None and session.reader_error:
                 result["reader_error"] = session.reader_error
                 result["summary"] = "COM port session failed and is no longer active. Start it again with com_session_start."
@@ -317,12 +397,48 @@ class ComPortService:
             return False
         return session.active and bool(getattr(session.serial_handle, "is_open", True))
 
-    def _stop_session(self, session: ComPortSession, reason: str) -> Exception | None:
+    def _stop_session(self, session: ComPortSession, reason: str, *, defer_release: bool = False) -> Exception | None:
         session.active = False
-        session.serial_handle.close()
+        errors: list[tuple[str, BaseException]] = []
+        interrupt: BaseException | None = None
+        cancel_read = getattr(session.serial_handle, "cancel_read", None)
+        if callable(cancel_read):
+            try:
+                cancel_read()
+            except BaseException as error:
+                errors.append(("cancel_read", error))
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
+        try:
+            session.serial_handle.close()
+        except BaseException as error:
+            errors.append(("close", error))
+            if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                interrupt = error
         if session.reader is not None and session.reader is not threading.current_thread():
-            session.reader.join(timeout=max(1.0, session.port_config.timeout_s + 0.5))
-        return append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+            try:
+                session.reader.join(timeout=max(1.0, session.port_config.timeout_s + 0.5))
+                if session.reader.is_alive():
+                    raise RuntimeError("COM port reader remained active after close.")
+            except BaseException as error:
+                errors.append(("reader", error))
+                if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
+        audit_error = append_jsonl(session.log_path, {"event": "stop", "reason": reason})
+        if audit_error is not None or session.audit_broken:
+            session.audit_broken = True
+            session.lease.quarantine("com_audit_broken", audit_error, audit_broken=True)
+            errors.append(("audit", audit_error or RuntimeError("COM audit state was already broken.")))
+        if errors:
+            session.lease.quarantine("com_cleanup_unconfirmed", errors[0][1], audit_broken=session.audit_broken)
+            details = "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
+            if interrupt is not None:
+                interrupt.args = (*interrupt.args, f"Cleanup errors: {details}")
+                raise interrupt
+            raise RuntimeError(details) from errors[0][1]
+        if not defer_release and not session.lease.release():
+            raise RuntimeError("COM resource release remains unconfirmed.")
+        return audit_error
 
     def _close_failure(self, tool: str, port_id: str, error: Exception) -> JsonObject:
         return {
@@ -335,7 +451,29 @@ class ComPortService:
         }
 
     def _write_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, mark_side_effect(result))
+        prepared = mark_side_effect(result)
+        port_id = prepared.get("port_id")
+        session = self.sessions.get(port_id) if isinstance(port_id, str) else None
+        unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
+        if session is not None and unsafe_effect:
+            session.lease.quarantine("com_effect_unconfirmed")
+        if session is not None:
+            prepared = {**prepared, **session.lease.status()}
+        written = write_report(self.config, prepared)
+        if session is not None and written.get("audit_ok") is False:
+            session.audit_broken = True
+            session.lease.quarantine("com_report_audit_broken", audit_broken=True)
+            written = write_report(self.config, {**written, **session.lease.status()})
+        return written
+
+    def _write_unattached_lease_report(self, result: JsonObject, lease: HardwareLease, *, release_if_safe: bool) -> JsonObject:
+        written = write_report(self.config, {**mark_side_effect(result), **lease.status()})
+        if written.get("audit_ok") is False:
+            lease.quarantine("com_report_audit_broken", audit_broken=True)
+            return write_report(self.config, {**written, **lease.status()})
+        if release_if_safe and not lease.release():
+            return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "COM lease release remained unconfirmed."})
+        return {**written, **lease.status()}
 
     def _permission_denied(self, tool: str, summary: str, port_id: str | None = None) -> JsonObject:
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
@@ -345,6 +483,8 @@ class ComPortService:
 
 
 def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject:
+    if set(payload) - {"text", "hex"}:
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "COM write payload contains unsupported fields."}
     has_text = payload.get("text") is not None
     has_hex = payload.get("hex") is not None
     if has_text == has_hex:

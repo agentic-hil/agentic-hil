@@ -7,6 +7,7 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a safe, bounded gate between AI ag
 - executing actions whose permission switch is disabled
 - command or path injection through MCP tool arguments or config values
 - writing files outside the project through report, log, or dump paths
+- bypassing resource leases, stale-owner quarantine, audit fail-closed behavior, or bridge safe-state confirmation
 
 ## Supported Versions
 
@@ -27,5 +28,7 @@ You can expect an acknowledgement within 7 days. Please allow time for a fix and
 ## Scope Notes
 
 Each project has exactly one automatically discovered authoritative config, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. `AGENTIC_HIL_CONFIG` may select another absolute path, but either file must remain outside the workspace and mandatory `workspace_root` must bind it to the exact project root. Keep that file and any override operator-controlled. Debugger/GDB/CAN process-bridge executables and OpenOCD scripts named by the config must also live outside the workspace. Repository `.agentic-hil/testconfig.yaml` files are test plans only and carry no hardware authority.
+
+Mutable canonical report and hardware-lease state is stored under `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX, never beside a read-only policy or inside the workspace. Do not delete or edit quarantine records to bypass recovery; confirm physical safe state first, then use `agentic-hil recover --confirm-safe-state`.
 
 This boundary assumes the agent cannot modify the authoritative config, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an external YAML config cannot sandbox an already equivalent host principal.

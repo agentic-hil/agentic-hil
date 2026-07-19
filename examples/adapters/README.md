@@ -34,20 +34,20 @@ The bridge is any executable (Python scripts run via the current interpreter) re
 
 ```text
 request:  {"id": <int>, "method": <str>, "params": <object>}
-response: {"id": <int>, "result": {"ok": true, ...}}
+response: {"id": <int>, "result": {"ok": true, "protocol_version": 2, ...}}
           {"id": <int>, "result": {"ok": false, "error_type": "...", "summary": "..."}}
 ```
 
 | Method | Params | Purpose |
 |--------|--------|---------|
-| `open` | `channels`, `faults` (configured allowlists) | initialize the adapter; return `backend` info |
+| `open` | `channels`, `faults` (configured allowlists) | initialize the adapter; return `protocol_version: 2` and `backend` info |
 | `set_value` | `channel`, `value`, optional `unit` | drive a simulated sensor/stimulus channel |
 | `inject_fault` | `fault`, optional `channel` | enter a fault state |
 | `clear_fault` | optional `fault`, optional `channel` | leave fault state(s) |
 | `measure` | `channel` | return `value` (+ optional `unit`) for a channel |
-| `close` | — | shut down; the process should exit afterwards |
+| `close` | — | enter device-specific safe state and return `ok: true`, `protocol_version: 2`, and `safe_state_confirmed: true` |
 
-Agentic HIL enforces permissions (`allow_adapter_read`, `allow_adapter_write`), validates channel/fault names against the config, logs every action to `.agentic-hil/logs/adapter-*.jsonl`, and kills the bridge process if it does not exit on close.
+Agentic HIL releases resource ownership only after both an explicit safe-state acknowledgement and verified process-tree reap. Missing/negative acknowledgements quarantine the resource for operator recovery. Agentic HIL enforces permissions (`allow_adapter_read`, `allow_adapter_write`), validates channel/fault names against the config, and logs every action to `.agentic-hil/logs/adapter-*.jsonl`.
 
 ## Included example
 

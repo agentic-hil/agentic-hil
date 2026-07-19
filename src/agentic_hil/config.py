@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -15,7 +16,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
@@ -96,6 +97,7 @@ def config_schema() -> JsonObject:
 
 
 def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> None:
+    reject_nonfinite_numbers(raw, "config_invalid", config_path)
     schema = config_schema()
     try:
         Draft202012Validator.check_schema(schema)
@@ -114,17 +116,29 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     """Parse one config file. Production entrypoints must use load_authoritative_config."""
     if config_path is None:
         return load_authoritative_config(work_dir or Path.cwd())
-    config_file = Path(config_path).expanduser().resolve()
+    config_file = absolute_without_symlinks(Path(config_path).expanduser())
     resolved_config_path = str(config_file)
-    if not config_file.exists():
+
+    try:
+        loaded = yaml.load(safe_read_text(config_file), Loader=UniqueKeyLoader)
+    except FileNotFoundError as error:
         raise ConfigError(
             "config_file_not_found",
             "Agentic HIL configuration file could not be found.",
             {"path": resolved_config_path},
-        )
-
-    try:
-        loaded = yaml.load(config_file.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+        ) from error
+    except ConfigError as error:
+        try:
+            is_directory = stat.S_ISDIR(os.lstat(config_file).st_mode)
+        except OSError:
+            is_directory = False
+        if is_directory:
+            raise ConfigError(
+                "config_unreadable",
+                "Agentic HIL configuration file could not be read.",
+                {"path": resolved_config_path},
+            ) from error
+        raise
     except OSError as error:
         raise ConfigError(
             "config_unreadable",
@@ -239,6 +253,7 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
             )
     else:
         requested = project_config_path(expected)
+    requested = absolute_without_symlinks(requested)
     resolved = requested.resolve()
     if not resolved.is_file():
         raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)})
@@ -248,7 +263,7 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
             "The authoritative config must be a single-link regular file.",
             {"path": str(resolved)},
         )
-    config = load_config(str(resolved))
+    config = load_config(str(requested))
     workspace = Path(config.work_dir)
     if is_path_within_frozen(requested, workspace) or is_path_within(resolved, workspace):
         raise ConfigError(
@@ -285,6 +300,25 @@ def project_config_path(workspace: str | Path) -> Path:
     identity = os.path.normcase(str(resolved))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
     return project_config_directory() / f"{safe_name}-{digest}" / "config.yaml"
+
+
+def user_state_root() -> Path:
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return safe_directory(root / "agentic-hil")
+
+
+def project_state_directory(config: AgenticHILConfig) -> Path:
+    identity = "\0".join(
+        [
+            os.path.normcase(str(Path(config.config_path).resolve())),
+            os.path.normcase(str(Path(config.work_dir).resolve())),
+        ]
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return safe_directory(user_state_root() / "projects" / digest)
 
 
 def pin_configured_paths(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -510,6 +544,17 @@ def safe_configured_directory(config: AgenticHILConfig, requested_path: str, fie
     return str(directory)
 
 
+def safe_directory(directory: str | Path) -> Path:
+    path = absolute_without_symlinks(Path(directory))
+    if os.name != "nt":
+        descriptor = _open_directory_fd(path, create=True)
+        os.close(descriptor)
+    else:
+        handles = _windows_hold_directory_chain(path, create=True)
+        _close_windows_handles(handles)
+    return path
+
+
 def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
     path = _validated_absolute_file_path(file_path, workspace)
     try:
@@ -600,7 +645,7 @@ def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None
             parent_descriptor = _open_directory_fd(path.parent)
             descriptor = -1
             try:
-                flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
                 _validate_open_file(descriptor, path)
                 import fcntl
@@ -620,7 +665,7 @@ def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None
         descriptor = -1
         try:
             path = safe_file_path(path, workspace)
-            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+            descriptor = _windows_open_regular_file(path, read=True, write=True, create=True)
             opened = _validate_open_file(descriptor, path)
             if not os.path.samestat(opened, os.stat(path, follow_symlinks=False)):
                 raise ConfigError("unsafe_configured_path", "Lock file changed while it was being opened.", {"path": str(path)})
@@ -738,6 +783,77 @@ def _close_windows_handles(handles: list[int]) -> None:
         close_handle(handle)
 
 
+def _windows_open_regular_file(
+    path: Path,
+    *,
+    read: bool = False,
+    write: bool = False,
+    create: bool = False,
+    append: bool = False,
+) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    get_file_type = kernel32.GetFileType
+    get_file_type.argtypes = [wintypes.HANDLE]
+    get_file_type.restype = wintypes.DWORD
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_info.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    access = (0x80000000 if read else 0) | (0x40000000 if write else 0)
+    handle = create_file(
+        str(path),
+        access,
+        0x1 | 0x2,
+        None,
+        4 if create else 3,
+        0x80 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        information = ByHandleFileInformation()
+        if get_file_type(handle) != 0x1 or not get_info(handle, ctypes.byref(information)):
+            raise ConfigError("unsafe_configured_path", "Configured file is not a disk file.", {"path": str(path)})
+        if information.dwFileAttributes & (0x10 | 0x400) or information.nNumberOfLinks != 1:
+            raise ConfigError("unsafe_configured_path", "Configured file must be a single-link regular file without reparse points.", {"path": str(path)})
+        descriptor_flags = getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        descriptor_flags |= os.O_RDWR if read and write else os.O_WRONLY if write else os.O_RDONLY
+        if append:
+            descriptor_flags |= os.O_APPEND
+        descriptor = msvcrt.open_osfhandle(int(handle), descriptor_flags)
+        handle = invalid_handle
+        return descriptor
+    finally:
+        if handle != invalid_handle:
+            close_handle(handle)
+
+
 def _validate_open_file(descriptor: int, path: Path) -> os.stat_result:
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
@@ -749,45 +865,53 @@ def _validate_open_file(descriptor: int, path: Path) -> os.stat_result:
     return opened
 
 
-def safe_read_bytes(file_path: str | Path, *, workspace: str | Path | None = None) -> bytes:
+@contextmanager
+def safe_open_binary(file_path: str | Path, *, workspace: str | Path | None = None) -> Iterator[BinaryIO]:
     path = _validated_absolute_file_path(file_path, workspace)
     if os.name != "nt":
         parent_descriptor = _open_directory_fd(path.parent)
+        descriptor = -1
         try:
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             try:
                 descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
             except OSError as error:
                 _raise_unsafe_path_error(error, path)
                 raise
-        finally:
-            os.close(parent_descriptor)
-        try:
-            _validate_open_file(descriptor, path)
+            opened = _validate_open_file(descriptor, path)
+            current = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            if not os.path.samestat(opened, current):
+                raise ConfigError("unsafe_configured_path", "Configured file changed while it was being opened.", {"path": str(path)})
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                return handle.read()
+                yield handle
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+            os.close(parent_descriptor)
+        return
 
     directory_handles = _windows_hold_directory_chain(path.parent)
+    descriptor = -1
     try:
         path = safe_file_path(path, workspace)
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0))
-    finally:
-        _close_windows_handles(directory_handles)
-    try:
+        descriptor = _windows_open_regular_file(path, read=True)
         opened = _validate_open_file(descriptor, path)
         current = os.stat(path, follow_symlinks=False)
         if not os.path.samestat(opened, current) or path.parent.resolve() != path.parent:
             raise ConfigError("unsafe_configured_path", "Configured file changed while it was being opened.", {"path": str(path)})
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            return handle.read()
+            yield handle
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        _close_windows_handles(directory_handles)
+
+
+def safe_read_bytes(file_path: str | Path, *, workspace: str | Path | None = None) -> bytes:
+    with safe_open_binary(file_path, workspace=workspace) as handle:
+        return handle.read()
 
 
 def safe_read_text(
@@ -870,7 +994,7 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
         if os.name != "nt":
             parent_descriptor = _open_directory_fd(path.parent)
             try:
-                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 try:
                     descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
                 except OSError as error:
@@ -894,7 +1018,7 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
             path = safe_file_path(path)
             lock_path = path.with_name(f".{path.name}.lock")
             safe_file_path(lock_path)
-            lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+            lock_descriptor = _windows_open_regular_file(lock_path, read=True, write=True, create=True)
             try:
                 lock_stat = _validate_open_file(lock_descriptor, lock_path)
                 if not os.path.samestat(lock_stat, os.stat(lock_path, follow_symlinks=False)):
@@ -905,7 +1029,7 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
                 import msvcrt
 
                 msvcrt.locking(lock_descriptor, msvcrt.LK_LOCK, 1)
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
+                descriptor = _windows_open_regular_file(path, write=True, create=True, append=True)
                 try:
                     opened = _validate_open_file(descriptor, path)
                     current = os.stat(path, follow_symlinks=False)
@@ -988,8 +1112,25 @@ def raise_config_validation_error(error: Any, config_path: str | None = None) ->
 def add_scalar_schema_value(details: JsonObject, value: object) -> None:
     if isinstance(value, str):
         details["value"] = value[:128]
+    elif isinstance(value, float) and not math.isfinite(value):
+        details["value"] = "non-finite"
     elif isinstance(value, (int, float, bool)) or value is None:
         details["value"] = value
+
+
+def reject_nonfinite_numbers(value: object, error_type: str, path: str | None = None, parts: list[str] | None = None) -> None:
+    field_parts = parts or []
+    if isinstance(value, float) and not math.isfinite(value):
+        details: JsonObject = {"field": format_field_path(field_parts), "value": "non-finite"}
+        if path is not None:
+            details["path"] = path
+        raise ConfigError(error_type, "Configuration values must be finite numbers.", details)
+    if isinstance(value, dict):
+        for key, child in value.items():
+            reject_nonfinite_numbers(child, error_type, path, [*field_parts, str(key)])
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            reject_nonfinite_numbers(child, error_type, path, [*field_parts, str(index)])
 
 
 def schema_error_field(error: Any) -> str:
@@ -1048,6 +1189,7 @@ def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),
         flash_address=optional_string(raw.get("flash_address")),
         timeout_s=float(raw.get("timeout_s", 60)),
+        resource_id=optional_string(raw.get("resource_id")),
     )
 
 
@@ -1080,6 +1222,7 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         encoding=str(raw.get("encoding", "utf-8")),
         max_buffer_bytes=int(raw.get("max_buffer_bytes", 65536)),
         max_write_bytes=int(raw.get("max_write_bytes", 4096)),
+        resource_id=optional_string(raw.get("resource_id")),
     )
 
 
@@ -1108,6 +1251,7 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
         listen_only=bool(raw.get("listen_only", False)),
         max_buffer_frames=int(raw.get("max_buffer_frames", 1024)),
         max_frame_data_bytes=int(raw.get("max_frame_data_bytes", 64 if fd else 8)),
+        resource_id=optional_string(raw.get("resource_id")),
     )
 
 
@@ -1119,6 +1263,7 @@ def adapter_config(name: str, value: Any) -> AdapterConfig:
         timeout_s=float(raw.get("timeout_s", 10.0)),
         channels=string_list(raw.get("channels"), []),
         faults=string_list(raw.get("faults"), []),
+        resource_id=optional_string(raw.get("resource_id")),
     )
 
 

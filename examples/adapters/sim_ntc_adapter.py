@@ -24,6 +24,7 @@ BETA_K = 3950.0
 T25_K = 298.15
 KELVIN_OFFSET = 273.15
 OPEN_RESISTANCE_OHM = 1e9
+PROTOCOL_VERSION = 2
 
 CHANNELS = ["temperature", "resistance"]
 FAULTS = ["open", "short_to_gnd", "short_to_vcc"]
@@ -54,7 +55,7 @@ def error(error_type: str, summary: str) -> dict:
 
 def handle(method: str, params: dict) -> dict:
     if method == "open":
-        return ok(backend="sim-ntc", channels=CHANNELS, faults=FAULTS)
+        return ok(protocol_version=PROTOCOL_VERSION, backend="sim-ntc", channels=CHANNELS, faults=FAULTS)
     if method == "set_value":
         if params.get("channel") != "temperature":
             return error("channel_not_supported", "sim-ntc can only set the temperature channel.")
@@ -80,7 +81,9 @@ def handle(method: str, params: dict) -> dict:
             return ok(channel=channel, value=measured_resistance_ohm(), unit="ohm", fault=state["fault"])
         return error("channel_not_supported", "sim-ntc can only measure temperature and resistance.")
     if method == "close":
-        return ok()
+        state["fault"] = None
+        state["temperature_c"] = 25.0
+        return ok(protocol_version=PROTOCOL_VERSION, safe_state_confirmed=True, safe_state={"faults_cleared": True, "outputs_disabled": True})
     return error("unknown_method", f"unknown method: {method}")
 
 

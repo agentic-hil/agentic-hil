@@ -16,9 +16,10 @@ from agentic_hil.config import (
     UniqueKeyLoader,
     absolute_without_symlinks,
     is_path_within_frozen,
+    reject_nonfinite_numbers,
     safe_read_text,
 )
-from agentic_hil.report import write_report
+from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
 
@@ -38,7 +39,7 @@ DEBUGGER_DEVICE_ACTIONS = {"flash", *DEBUG_ACTIONS}
 
 
 def result_failed(result: JsonObject) -> bool:
-    return result.get("ok") is not True or result.get("target_ok") is False or result.get("audit_ok") is False
+    return not overall_success(result)
 
 
 def result_error_type(result: JsonObject) -> str:
@@ -138,6 +139,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
         raise ConfigError("test_config_invalid", "Test reactor configuration root must be a mapping.", {"path": str(path)})
+    reject_nonfinite_numbers(raw, "test_config_invalid", str(path))
     validate_test_config_schema(raw, str(path))
     steps = [
         TestStep(
@@ -232,6 +234,7 @@ class Device:
         self.service = service
         self._owns_debug_session = False
         self._owns_uart_session = False
+        self.cleanup_interrupts: list[BaseException] = []
 
     def execute(self, action: str, arguments: JsonObject) -> JsonObject:
         if action in DEBUGGER_DEVICE_ACTIONS and not self.config.debugger:
@@ -364,7 +367,9 @@ class Device:
     def _cleanup_call(self, tool: str, arguments: JsonObject | None = None) -> JsonObject:
         try:
             return self.service.call(tool, arguments)
-        except Exception as error:
+        except BaseException as error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                self.cleanup_interrupts.append(error)
             return exception_result(tool, "cleanup_exception", "Cleanup action raised an exception.", error)
 
 
@@ -400,10 +405,11 @@ class TestReactor:
             }
             if "step" in validation_error:
                 result["failed_step"] = validation_error["step"]
-            return write_report(self.config, result)
+            return result
 
         completed: list[JsonObject] = []
         failed_step: int | None = None
+        primary_error: BaseException | None = None
         try:
             for index, step in enumerate(test_config.steps, start=1):
                 device = self.devices.get(step.device)
@@ -429,8 +435,21 @@ class TestReactor:
                 if result_failed(result):
                     failed_step = index
                     break
+        except BaseException as error:
+            primary_error = error
         finally:
             cleanup = [result for device in reversed(list(self.devices.values())) for result in device.cleanup()]
+
+        cleanup_interrupts = [error for device in self.devices.values() for error in device.cleanup_interrupts]
+        if primary_error is not None:
+            primary_error.agentic_hil_cleanup = cleanup
+            if cleanup_interrupts:
+                primary_error.args = (*primary_error.args, "Cleanup interrupts: " + "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_interrupts))
+            raise primary_error
+        if cleanup_interrupts:
+            interrupt = cleanup_interrupts[0]
+            interrupt.agentic_hil_cleanup = cleanup
+            raise interrupt
 
         cleanup_errors = [item for item in cleanup if result_failed(item["result"])]
         cleanup_ok = not cleanup_errors
@@ -454,7 +473,7 @@ class TestReactor:
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
         elif not cleanup_ok:
             result["error_type"] = "cleanup_failed"
-        return write_report(self.config, result)
+        return result
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
         debug_active = False
@@ -602,7 +621,7 @@ def preflight_error(index: int, step: TestStep, field: str, summary: str, detail
     }
 
 
-def exception_result(tool: str, error_type: str, summary: str, error: Exception) -> JsonObject:
+def exception_result(tool: str, error_type: str, summary: str, error: BaseException) -> JsonObject:
     return {
         "ok": False,
         "tool": tool,

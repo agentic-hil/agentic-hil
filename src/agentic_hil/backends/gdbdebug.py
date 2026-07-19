@@ -17,7 +17,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
     mark_audit_failure,
@@ -115,7 +115,7 @@ class GdbDebugSessions:
         server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
         log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
         try:
-            server = register_process_group(subprocess.Popen(
+            server = spawn_managed_process(
                 server_args,
                 cwd=str(Path(str(resolved_server["executable_path"])).parent),
                 text=True,
@@ -125,13 +125,30 @@ class GdbDebugSessions:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 **process_group_kwargs(),
-            ))
+            )
         except OSError as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
-        self._start_output_readers(session)
         self.session = session
+        try:
+            self._start_output_readers(session)
+        except BaseException as error:
+            cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if cleanup_error is not None:
+                session.status = "cleanup_required"
+            else:
+                self.session = None
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if cleanup_error is not None:
+                    error.args = (*error.args, f"Cleanup error: {cleanup_error}")
+                raise
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debug_session_setup_failed", "summary": "Debug server output readers could not be started.", "backend_error": str(error)}
+            if cleanup_error is not None:
+                result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
+            else:
+                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
+            return self._report(result)
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
             failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
@@ -139,12 +156,30 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
                 failure["cleanup_required"] = True
-                session.status = "error"
+                session.status = "cleanup_required"
             else:
+                failure.update({"cleanup_confirmed": True, "side_effect_committed": False})
                 self.session = None
             return self._report(failure)
 
-        session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
+        try:
+            session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
+        except BaseException as error:
+            cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
+            if cleanup_error is not None:
+                session.status = "cleanup_required"
+            else:
+                self.session = None
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if cleanup_error is not None:
+                    error.args = (*error.args, f"Cleanup error: {cleanup_error}")
+                raise
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_start_failed", "summary": "GDB/MI process could not be initialized.", "backend_error": str(error)}
+            if cleanup_error is not None:
+                result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
+            else:
+                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
+            return self._report(result)
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
@@ -152,8 +187,9 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 result["cleanup_error"] = cleanup_error
                 result["cleanup_required"] = True
-                session.status = "error"
+                session.status = "cleanup_required"
             else:
+                result.update({"cleanup_confirmed": True, "side_effect_committed": False})
                 self.session = None
             return self._report(result)
 
@@ -186,18 +222,20 @@ class GdbDebugSessions:
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
         cleanup_error = self._cleanup_session(session, timeout)
-        session.status = "error" if cleanup_error is not None else "stopped"
+        session.status = "cleanup_required" if cleanup_error is not None else "stopped"
         if cleanup_error is not None:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "error", "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed."})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
         self.session = None
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
-        if session is not None and session.status not in {"stopped", "error"} and session.gdb is not None:
+        if session is not None and session.status not in {"stopped", "error", "cleanup_required"} and session.gdb is not None:
             self._refresh_session_stop(session)
-        active = session is not None and session.status not in {"stopped", "error"}
+        active = session is not None and session.status != "stopped"
         result: JsonObject = {"ok": True, "tool": "debug_get_session_status", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "session": self._session_status(session) if session else None}
+        if session is not None and session.status == "cleanup_required":
+            result.update({"cleanup_required": True, "hardware_state": "unknown", "quarantined": True})
         result.update(target_stop_fields(session.stop_reason if session else None))
         return result
 
@@ -234,7 +272,7 @@ class GdbDebugSessions:
 
     def list_breakpoints(self) -> JsonObject:
         session = self.session
-        active = session is not None and session.status not in {"stopped", "error"}
+        active = session is not None and session.status != "stopped"
         return {"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []}
 
     def clear_breakpoints(self) -> JsonObject:
@@ -243,13 +281,14 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
-        for breakpoint in session.breakpoints:
+        cleared = 0
+        for breakpoint in list(session.breakpoints):
             if breakpoint.get("backend_id"):
                 response = self._gdb_command(session, f"-break-delete {breakpoint['backend_id']}")
                 if not response.ok:
                     return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out))
-        cleared = len(session.breakpoints)
-        session.breakpoints = []
+            session.breakpoints.remove(breakpoint)
+            cleared += 1
         self._write_session_log(session)
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared."})
 
@@ -282,7 +321,7 @@ class GdbDebugSessions:
                 session.status = "running"
                 session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
             self._write_session_log(session)
-            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": interrupt.ok, "halt_confirmed": halt_confirmed, "target_state": "halted" if halt_confirmed else "unknown"}
+            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": interrupt.ok, "halt_confirmed": halt_confirmed, "target_state": "halted" if halt_confirmed else "unknown", "side_effect_committed": halt_confirmed, "side_effect_status": "committed" if halt_confirmed else "unknown"}
             result.update(target_stop_fields(session.stop_reason))
             return self._report(result)
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
@@ -312,7 +351,7 @@ class GdbDebugSessions:
         if stop.timed_out or stop.reason == "debugger_error":
             session.status = "running" if stop.timed_out else "error"
             self._write_session_log(session)
-            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout" if stop.timed_out else "debugger_error", "summary": "Target halt was requested but not confirmed.", "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": True, "halt_confirmed": False, "target_state": "unknown"}
+            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout" if stop.timed_out else "debugger_error", "summary": "Target halt was requested but not confirmed.", "stop_reason": session.stop_reason.get("stop_reason"), "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": True, "halt_confirmed": False, "target_state": "unknown", "side_effect_status": "unknown"}
             result.update(target_stop_fields(session.stop_reason))
             return self._report(result)
         session.status = "halted"
@@ -371,7 +410,7 @@ class GdbDebugSessions:
         if session is not None and session.status != "stopped":
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
-                session.status = "error"
+                session.status = "cleanup_required"
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
             session.status = "stopped"
         self.session = None
@@ -437,7 +476,9 @@ class GdbDebugSessions:
 
     def _require_session(self, tool: str) -> JsonObject:
         session = self.session
-        if session is None or session.status in {"stopped", "error"} or session.gdb is None or not session.gdb.is_running():
+        if session is None or session.status in {"stopped", "error", "cleanup_required"} or session.gdb is None or not session.gdb.is_running():
+            if session is not None and session.status == "cleanup_required":
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "resource_quarantined", "summary": "Debug session requires cleanup before further effects.", "cleanup_required": True, "quarantined": True, "hardware_state": "unknown"}
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first."}
         return {"ok": True, "session": session}
 
@@ -474,6 +515,7 @@ class GdbDebugSessions:
         stop_reason = str(stop.get("stop_reason"))
         ok = stop_reason not in ABNORMAL_STOP_REASONS
         result: JsonObject = {"ok": ok, "tool": tool, "backend": self.backend_name, "stop_reason": stop_reason, "stop": stop, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": f"{summary_prefix}: {stop_reason}."}
+        result.update({"side_effect_committed": True, "side_effect_status": "committed", **target_stop_fields(stop)})
         if not ok:
             result["error_type"] = stop_error_type(stop_reason)
             result["suggested_actions"] = suggested_actions_for_stop(stop_reason)
@@ -558,7 +600,7 @@ class GdbDebugSessions:
             return self._symbol_failure(tool, symbol, size_response.error_message, size_response.timed_out)
         size_value = parse_gdb_integer(mi_field(size_response.line, "value"))
         if address_value is None or size_value is None:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_resolution_failed", "summary": "GDB returned an unparsable symbol address or size.", "symbol": symbol}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_resolution_failed", "summary": "GDB returned an unparsable symbol address or size.", "symbol": symbol, "side_effect_committed": False}
         return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value}
 
     def _validate_symbol(self, tool: str, symbol: str) -> JsonObject:
@@ -579,7 +621,7 @@ class GdbDebugSessions:
             error_type = "symbol_ambiguous"
         else:
             error_type = "symbol_resolution_failed"
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": message or "Symbol could not be resolved.", "symbol": symbol}
+        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": message or "Symbol could not be resolved.", "symbol": symbol, "side_effect_committed": False}
 
     def _read_memory_bytes(self, tool: str, session: GdbDebugSession, address: int, size_bytes: int) -> JsonObject:
         data = bytearray()
@@ -600,19 +642,33 @@ class GdbDebugSessions:
         return {"ok": True, "data": bytes(data)}
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
-        errors: list[tuple[str, Exception]] = []
+        errors: list[tuple[str, BaseException]] = []
+        interrupt: BaseException | None = None
         if session.gdb is not None:
             try:
                 session.gdb.close(timeout_s)
-            except Exception as error:
+            except BaseException as error:
                 errors.append(("gdb", error))
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupt = error
         try:
             terminate_process_tree(session.server, timeout_s)
             if session.server.poll() is None:
                 raise RuntimeError("Debug server remained active after kill.")
-        except Exception as error:
+        except BaseException as error:
             errors.append(("debug_server", error))
+            if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                interrupt = error
+        prior_audit_error = getattr(self, "_audit_error", None)
+        self._audit_error = None
         self._write_session_log(session)
+        cleanup_audit_error = self._audit_error or prior_audit_error
+        if cleanup_audit_error is not None:
+            self._audit_error = cleanup_audit_error
+            errors.append(("audit", cleanup_audit_error))
+        if interrupt is not None:
+            interrupt.args = (*interrupt.args, "Cleanup errors: " + "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors))
+            raise interrupt
         if errors:
             return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
         return None

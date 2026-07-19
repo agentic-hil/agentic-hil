@@ -20,6 +20,9 @@ def isolated_config_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     config_root = tmp_path / "user-config"
     monkeypatch.setenv("APPDATA", str(config_root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    state_root = tmp_path.parent / f"{tmp_path.name}-user-state"
+    monkeypatch.setenv("LOCALAPPDATA", str(state_root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
 

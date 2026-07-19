@@ -100,7 +100,8 @@ def main() -> int:
             threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
         elif command.startswith("-exec-interrupt"):
             emit(f"{token}^done")
-            emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
+            if behavior() != "halt_timeout":
+                emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
         elif command.startswith("-data-evaluate-expression"):
             expression = command[len("-data-evaluate-expression") :].strip().strip('"')
             evaluate_expression(token, expression)

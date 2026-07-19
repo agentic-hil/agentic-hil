@@ -50,6 +50,7 @@
         "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
         "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },
         "flash_address": { "type": ["string", "null"], "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$", "default": null },
+        "resource_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null },
         "timeout_s": { "type": "number", "minimum": 0, "default": 60.0 }
       }
     },
@@ -95,7 +96,8 @@
           "write_timeout_s": { "type": "number", "minimum": 0, "default": 1.0 },
           "encoding": { "type": "string", "default": "utf-8" },
           "max_buffer_bytes": { "type": "integer", "minimum": 1, "default": 65536 },
-          "max_write_bytes": { "type": "integer", "minimum": 1, "default": 4096 }
+          "max_write_bytes": { "type": "integer", "minimum": 1, "default": 4096 },
+          "resource_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null }
         }
       },
       "default": {}
@@ -121,7 +123,8 @@
           "receive_own_messages": { "type": "boolean", "default": false },
           "listen_only": { "type": "boolean", "default": false },
           "max_buffer_frames": { "type": "integer", "minimum": 1, "default": 1024 },
-          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 }
+          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 },
+          "resource_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null }
         }
       },
       "default": {}
@@ -138,7 +141,8 @@
           "executable": { "type": "string" },
           "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
           "channels": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] },
-          "faults": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] }
+          "faults": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] },
+          "resource_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null }
         }
       },
       "default": {}

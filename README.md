@@ -106,7 +106,7 @@ artifacts:
 
 com_ports:
   dut_uart:
-    device: "/dev/ttyACM0"
+    device: "/dev/ttyACM0"  # Windows example: "COM5"
     baudrate: 115200
 
 devices:
@@ -127,8 +127,10 @@ adapters:
     faults: ["open", "short_to_gnd", "short_to_vcc"]
 
 permissions:
+  allow_probe: true
   allow_flash: true
   allow_reset: true
+  allow_com_read: true
   allow_com_write: true
   allow_can_write: true
   allow_adapter_read: true
@@ -137,7 +139,7 @@ permissions:
   allow_mass_erase: false
 ```
 
-The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`.
+The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on debugger, COM, CAN, or adapter entries when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease.
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
@@ -203,6 +205,9 @@ See [`examples/testconfig.example.yaml`](examples/testconfig.example.yaml) for t
 - Deliberate interlock: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
 - Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
 - All actions log to `.agentic-hil/logs/` and write a structured report to `.agentic-hil/reports/`.
+- Every frontend acquires persistent owner-token leases under the user state directory before touching hardware. A second process receives `resource_busy`; owner crashes, unknown effects, audit failures, or unconfirmed cleanup quarantine resources instead of silently releasing them.
+- Process bridges implement protocol version 2. Resource release requires both `safe_state_confirmed: true` from device-specific cleanup and verified process-tree reap. Operators inspect `agentic-hil lease-status` and may run `agentic-hil recover --confirm-safe-state` only after physically confirming recovery.
+- Canonical report and lease state lives under `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX. Workspace report files are write-only compatibility snapshots and never bootstrap trusted state.
 
 ## pytest Plugin
 

@@ -3,10 +3,41 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any
 
 CHILD_REAP_TIMEOUT_S = 5.0
+_PROCESS_RECORDS: dict[int, ManagedProcessRecord] = {}
+_PROCESS_RECORDS_LOCK = threading.RLock()
+_PROCESS_OWNER: ContextVar[str | None] = ContextVar("agentic_hil_process_owner", default=None)
+
+
+@dataclass
+class ManagedProcessRecord:
+    child: subprocess.Popen
+    owner_token: str | None = None
+    state: str = "starting"
+    cleanup_errors: list[str] = field(default_factory=list)
+
+
+def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
+    child = subprocess.Popen(args, **kwargs)
+    with _PROCESS_RECORDS_LOCK:
+        _PROCESS_RECORDS[id(child)] = ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get())
+    return register_process_group(child)
+
+
+@contextmanager
+def managed_process_owner(owner_token: str):
+    reset_token = _PROCESS_OWNER.set(owner_token)
+    try:
+        yield
+    finally:
+        _PROCESS_OWNER.reset(reset_token)
 
 
 def process_group_kwargs() -> dict[str, object]:
@@ -16,6 +47,8 @@ def process_group_kwargs() -> dict[str, object]:
 
 
 def register_process_group(child: subprocess.Popen) -> subprocess.Popen:
+    with _PROCESS_RECORDS_LOCK:
+        record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get()))
     if os.name == "nt":
         job_handle: int | None = None
         try:
@@ -24,8 +57,14 @@ def register_process_group(child: subprocess.Popen) -> subprocess.Popen:
                 raise OSError("Windows Job Object setup returned no containment handle.")
             child._agentic_hil_job_handle = job_handle
             _resume_windows_process(child)
-        except BaseException:
-            _abort_windows_registration(child, job_handle)
+        except BaseException as primary_error:
+            cleanup_errors = _abort_windows_registration(child, job_handle)
+            if cleanup_errors:
+                record.state = "cleanup_pending"
+                record.cleanup_errors.extend(cleanup_errors)
+                details = "; ".join(cleanup_errors)
+                raise RuntimeError(f"Windows process registration failed and cleanup remains unconfirmed: {details}") from primary_error
+            _forget_process(child)
             raise
     else:
         try:
@@ -33,12 +72,25 @@ def register_process_group(child: subprocess.Popen) -> subprocess.Popen:
         except ProcessLookupError:
             child_pgid = child.pid
         child._agentic_hil_pgid = child_pgid
+    record.state = "running"
     return child
 
 
 def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
+    try:
+        _terminate_process_tree(child, timeout_s)
+    except BaseException as error:
+        with _PROCESS_RECORDS_LOCK:
+            record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_token=_PROCESS_OWNER.get()))
+            record.state = "cleanup_pending"
+            record.cleanup_errors.append(f"{type(error).__name__}: {error}")
+        raise
+
+
+def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
     if os.name == "nt":
         if getattr(child, "_agentic_hil_tree_reaped", False) is True:
+            _forget_process(child)
             return
         job_handle = getattr(child, "_agentic_hil_job_handle", None)
         if isinstance(job_handle, int):
@@ -49,6 +101,7 @@ def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
             child._agentic_hil_job_handle = None
             child.wait(timeout=max(0.1, timeout_s))
             child._agentic_hil_tree_reaped = True
+            _forget_process(child)
             return
         if child.poll() is not None:
             raise RuntimeError("Windows process tree was not registered before its leader exited.")
@@ -61,16 +114,19 @@ def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
         if child.poll() is None:
             raise RuntimeError("Windows process tree remained active after taskkill.")
         child._agentic_hil_tree_reaped = True
+        _forget_process(child)
         return
 
     child_pgid = _child_process_group(child)
     if child_pgid is None or child_pgid == os.getpgrp():
         _terminate_single_child(child, timeout_s)
+        _forget_process(child)
         return
 
     with suppress(ProcessLookupError):
         os.killpg(child_pgid, signal.SIGTERM)
     if _wait_for_process_group(child, child_pgid, timeout_s):
+        _forget_process(child)
         return
     with suppress(ProcessLookupError):
         os.killpg(child_pgid, signal.SIGKILL)
@@ -78,6 +134,7 @@ def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
         _terminate_single_child(child, timeout_s)
         if _process_group_exists(child_pgid):
             raise RuntimeError("Process group remained active after SIGKILL.")
+    _forget_process(child)
 
 
 def _child_process_group(child: subprocess.Popen) -> int | None:
@@ -247,18 +304,61 @@ def _resume_windows_process(child: subprocess.Popen) -> None:
         close_handle(snapshot)
 
 
-def _abort_windows_registration(child: subprocess.Popen, job_handle: int | None) -> None:
+def _abort_windows_registration(child: subprocess.Popen, job_handle: int | None) -> list[str]:
+    errors: list[str] = []
     if job_handle is not None:
-        with suppress(OSError):
+        child._agentic_hil_job_handle = job_handle
+        try:
             _terminate_windows_job(job_handle)
-        with suppress(OSError):
-            _close_windows_handle(job_handle)
-        child._agentic_hil_job_handle = None
+        except OSError as error:
+            errors.append(f"TerminateJobObject: {type(error).__name__}: {error}")
+        try:
+            if not _wait_for_windows_job(job_handle, CHILD_REAP_TIMEOUT_S):
+                errors.append("WaitForJob: active processes remained")
+        except OSError as error:
+            errors.append(f"QueryInformationJobObject: {type(error).__name__}: {error}")
     else:
-        with suppress(OSError):
+        try:
             child.kill()
-    with suppress(subprocess.TimeoutExpired):
+        except OSError as error:
+            errors.append(f"kill: {type(error).__name__}: {error}")
+    try:
         child.wait(timeout=CHILD_REAP_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        errors.append(f"wait: {type(error).__name__}: {error}")
+    if job_handle is not None and not errors:
+        try:
+            _close_windows_handle(job_handle)
+        except OSError as error:
+            errors.append(f"CloseHandle: {type(error).__name__}: {error}")
+        else:
+            child._agentic_hil_job_handle = None
+    return errors
+
+
+def managed_processes() -> list[ManagedProcessRecord]:
+    with _PROCESS_RECORDS_LOCK:
+        return list(_PROCESS_RECORDS.values())
+
+
+def cleanup_registered_processes(timeout_s: float = CHILD_REAP_TIMEOUT_S, *, owner_token: str | None = None) -> list[str]:
+    errors: list[str] = []
+    records = managed_processes()
+    candidates = [item for item in records if item.owner_token == owner_token] if owner_token is not None else [item for item in records if item.state == "cleanup_pending"]
+    for record in candidates:
+        try:
+            terminate_process_tree(record.child, timeout_s)
+        except BaseException as error:
+            record.state = "cleanup_pending"
+            detail = f"pid {record.child.pid}: {type(error).__name__}: {error}"
+            record.cleanup_errors.append(detail)
+            errors.append(detail)
+    return errors
+
+
+def _forget_process(child: subprocess.Popen) -> None:
+    with _PROCESS_RECORDS_LOCK:
+        _PROCESS_RECORDS.pop(id(child), None)
 
 
 def _terminate_windows_job(handle: int) -> None:

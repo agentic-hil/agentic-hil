@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -14,9 +12,10 @@ from agentic_hil.config import (
     ConfigError,
     atomic_write_text,
     display_path,
-    is_path_within_frozen,
+    project_state_directory,
     safe_append_text,
     safe_configured_directory,
+    safe_directory,
     safe_file_lock,
     safe_file_path,
     safe_read_text,
@@ -72,16 +71,7 @@ def report_state_path(config: AgenticHILConfig) -> str:
 
 
 def report_state_directory(config: AgenticHILConfig) -> Path:
-    workspace = Path(config.work_dir)
-    config_directory = Path(config.config_path).resolve().parent
-    if not is_path_within_frozen(config_directory, workspace):
-        directory = config_directory
-    else:
-        identity = os.path.normcase(str(workspace.resolve()))
-        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-        directory = Path(tempfile.gettempdir()).resolve() / "agentic-hil" / "report-state" / digest
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return directory
+    return safe_directory(project_state_directory(config) / "reports")
 
 
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
@@ -89,15 +79,24 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched.setdefault("audit_ok", True)
     try:
         report_path = last_report_path(config)
-        enriched.setdefault("report_path", display_path(config, report_path))
         with safe_file_lock(report_lock_path(config)):
             state = load_or_initialize_report_state(config)
-            try:
-                if is_failure_report(enriched):
+            snapshot_allowed = True
+            if is_failure_report(enriched):
+                try:
                     safe_write_text(config, last_failure_path(config), json.dumps(enriched, indent=2) + "\n")
-                safe_write_text(config, report_path, json.dumps(enriched, indent=2) + "\n")
-            except (ConfigError, OSError, ValueError) as error:
-                enriched = mark_audit_failure(enriched, error)
+                except (ConfigError, OSError, ValueError) as error:
+                    enriched = mark_audit_failure(enriched, error)
+                    snapshot_allowed = False
+            if snapshot_allowed:
+                snapshot = {**enriched, "report_path": display_path(config, report_path)}
+                try:
+                    safe_write_text(config, report_path, json.dumps(snapshot, indent=2) + "\n")
+                except (ConfigError, OSError, ValueError) as error:
+                    enriched = mark_audit_failure(enriched, error)
+                else:
+                    enriched = snapshot
+            enriched["state_path"] = report_state_path(config)
             state["last_report"] = enriched
             if is_failure_report(enriched):
                 state["last_failure"] = enriched
@@ -127,7 +126,7 @@ def read_report_state_entry(
         with safe_file_lock(report_lock_path(config)):
             state = read_report_state(config)
             if state is None:
-                return read_report_file(config, legacy_path_factory, tool, missing_summary)
+                return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary}
             report = state.get(key)
             if isinstance(report, dict):
                 return report
@@ -169,8 +168,8 @@ def load_or_initialize_report_state(config: AgenticHILConfig) -> JsonObject:
         return state
     state = {
         "version": 1,
-        "last_report": read_legacy_report(config, last_report_path(config)),
-        "last_failure": read_legacy_report(config, last_failure_path(config)),
+        "last_report": None,
+        "last_failure": None,
     }
     write_report_state(config, state)
     return state
@@ -236,11 +235,17 @@ def read_report_file(config: AgenticHILConfig, path_factory: Callable[[AgenticHI
 
 
 def is_failure_report(report: JsonObject) -> bool:
-    return report.get("ok") is not True or report.get("target_ok") is False or report.get("audit_ok") is False
+    return not overall_success(report)
+
+
+def overall_success(result: JsonObject) -> bool:
+    return result.get("ok") is True and result.get("target_ok") is not False and result.get("audit_ok") is not False
 
 
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:
     report = read_last_failure(config)
+    if report.get("ok") is not True and report.get("tool") == "classify_last_error" and report.get("error_type") not in {None, "report_not_found"}:
+        return report
     if not report.get("ok") and report.get("error_type") == "report_not_found":
         return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL failure has been recorded yet."}
     if report.get("ok") is True and report.get("target_ok") is not False and report.get("audit_ok") is not False:
@@ -303,8 +308,26 @@ def mark_side_effect(result: JsonObject) -> JsonObject:
     }:
         return result
     enriched = dict(result)
-    if result.get("ok") is True:
+    if result.get("side_effect_status") in {"not_started", "committed", "partial", "unknown"}:
+        return enriched
+    if result.get("ok") is True or result.get("target_ok") is False:
         enriched.update({"side_effect_committed": True, "side_effect_status": "committed", "retry_safe": False})
+    elif result.get("error_type") in {
+        "permission_denied",
+        "invalid_argument",
+        "session_already_active",
+        "session_not_active",
+        "not_supported",
+        "artifact_not_found",
+        "artifact_validation_failed",
+        "output_validation_failed",
+        "resource_busy",
+    }:
+        enriched.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+    elif result.get("error_type") == "resource_quarantined":
+        enriched.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": False})
+    elif result.get("side_effect_committed") is False:
+        enriched.update({"side_effect_status": "not_started", "retry_safe": True})
     elif result.get("side_effect_committed") is True:
         enriched.update({"side_effect_status": "partial", "retry_safe": False})
     else:
@@ -313,22 +336,42 @@ def mark_side_effect(result: JsonObject) -> JsonObject:
 
 
 def merge_audit_status(result: JsonObject, *sources: JsonObject) -> JsonObject:
-    errors = [source["audit_error"] for source in sources if source.get("audit_ok") is False and "audit_error" in source]
-    if not errors:
+    failed = [source for source in sources if source.get("audit_ok") is False]
+    if not failed:
         return result
+    errors: list[JsonObject] = []
+    for source in failed:
+        for error in audit_errors(source):
+            if error not in errors:
+                errors.append(error)
     enriched = dict(result)
-    enriched.update({"audit_ok": False, "audit_error": errors[0], "audit_errors": errors, "retry_safe": False})
+    enriched.update({"audit_ok": False, "retry_safe": False})
+    if errors:
+        enriched.update({"audit_error": errors[0], "audit_errors": errors})
     return enriched
 
 
 def mark_audit_failure(result: JsonObject, error: Exception) -> JsonObject:
     enriched = dict(result)
-    enriched["audit_ok"] = False
-    enriched["audit_error"] = {
+    new_error = {
         "error_type": getattr(error, "error_type", type(error).__name__),
         "summary": getattr(error, "summary", "Audit output could not be written."),
         "backend_error": str(error),
     }
+    errors = audit_errors(result)
+    if new_error not in errors:
+        errors.append(new_error)
+    enriched["audit_ok"] = False
+    enriched["audit_error"] = errors[0]
+    enriched["audit_errors"] = errors
     if enriched.get("side_effect_committed") is True:
         enriched["retry_safe"] = False
     return enriched
+
+
+def audit_errors(result: JsonObject) -> list[JsonObject]:
+    nested = result.get("audit_errors")
+    if isinstance(nested, list):
+        return [item for item in nested if isinstance(item, dict)]
+    single = result.get("audit_error")
+    return [single] if isinstance(single, dict) else []

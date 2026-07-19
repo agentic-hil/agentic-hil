@@ -19,6 +19,7 @@ from agentic_hil.report import (
     mark_audit_failure,
     mark_side_effect,
     merge_audit_status,
+    overall_success,
     timestamp_for_filename,
     utc_now_iso,
     write_report,
@@ -125,8 +126,10 @@ class PyOCDBackend:
         result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
         result["verify"] = True
-        if not result.get("ok"):
+        if not overall_success(result):
             result["reset_after_flash"] = False
+            if result.get("ok") is True:
+                result["reset_skipped_reason"] = "audit_failed" if result.get("audit_ok") is False else "target_failed"
             return self._write_action_report(result)
         if not reset_after_flash:
             result["reset_after_flash"] = False

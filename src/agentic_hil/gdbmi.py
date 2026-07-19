@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentic_hil.config import atomic_write_text
-from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
 from agentic_hil.types import JsonObject
 
 GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2", "--init-eval-command=set auto-load off"]
@@ -47,7 +47,7 @@ class GdbMiClient:
     def __init__(self, executable: str, work_dir: str):
         from agentic_hil.backends.common import invocation
 
-        self.child = register_process_group(subprocess.Popen(
+        self.child = spawn_managed_process(
             [*invocation(executable), *GDB_MI_ARGS],
             cwd=work_dir,
             text=True,
@@ -57,7 +57,7 @@ class GdbMiClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             **process_group_kwargs(),
-        ))
+        )
         self.lock = threading.Lock()
         self.next_token = 0
         self.pending: JsonObject | None = None
@@ -65,8 +65,15 @@ class GdbMiClient:
         self.last_stop_line: str | None = None
         self.command_history: list[JsonObject] = []
         self.exited = threading.Event()
-        threading.Thread(target=self._stdout_reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        try:
+            threading.Thread(target=self._stdout_reader, daemon=True).start()
+            threading.Thread(target=self._stderr_reader, daemon=True).start()
+        except BaseException as primary_error:
+            try:
+                terminate_process_tree(self.child, 5.0)
+            except BaseException as cleanup_error:
+                raise RuntimeError(f"GDB reader setup failed and process cleanup remains unconfirmed: {cleanup_error}") from primary_error
+            raise
 
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
         if "\n" in mi_command or "\r" in mi_command:

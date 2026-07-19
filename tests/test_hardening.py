@@ -17,7 +17,7 @@ from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, 
 from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
-from agentic_hil.bridge import ProcessBridgeSession
+from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
@@ -124,6 +124,24 @@ class RetryCloseSerialHandle:
         self.is_open = False
 
 
+class FailingCancelSerialHandle:
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.close_attempts = 0
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def cancel_read(self) -> None:
+        raise OSError("cancel failed")
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        self.is_open = False
+
+
 def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
@@ -158,6 +176,67 @@ def test_com_session_stop_retains_session_when_close_fails_for_retry(tmp_path: P
     assert second["ok"] is True
     assert handle.close_attempts == 2
     assert "dut" not in service.sessions
+
+
+def test_com_session_stop_attempts_close_after_cancel_failure(tmp_path: Path) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-cancel.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = FailingCancelSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.session_stop("dut")
+
+    assert result["error_type"] == "com_port_close_failed"
+    assert result["cleanup_required"] is True
+    assert handle.close_attempts == 1
+
+
+def test_com_open_failure_without_cleanup_confirmation_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    monkeypatch.setattr(service, "_open_serial", lambda *args: {"ok": False, "tool": "com_session_start", "port_id": "dut", "error_type": "com_port_open_failed", "summary": "partial open unknown"})
+    try:
+        result = service.session_start("dut")
+
+        assert result["cleanup_required"] is True
+        assert result["lease_state"] == "cleanup_required"
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_com_open_failure_with_confirmed_cleanup_releases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    monkeypatch.setattr(service, "_open_serial", lambda *args: {"ok": False, "tool": "com_session_start", "port_id": "dut", "error_type": "com_port_open_failed", "summary": "open rolled back", "cleanup_confirmed": True})
+
+    result = service.session_start("dut")
+
+    assert result["cleanup_confirmed"] is True
+    assert result["lease_state"] == "released"
+    assert result.get("cleanup_required") is not True
+
+
+def test_com_reader_start_failure_reports_before_lease_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    handle = SimpleNamespace(is_open=True, in_waiting=0, close=lambda: setattr(handle, "is_open", False))
+
+    def opened(port_id, port_config, log_path, lease):
+        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False)
+        session.start_reader = lambda: (_ for _ in ()).throw(RuntimeError("thread failed"))
+        return {"ok": True, "session": session}
+
+    monkeypatch.setattr(service, "_open_serial", opened)
+    result = service.session_start("dut")
+
+    assert result["error_type"] == "com_reader_start_failed"
+    assert result["lease_state"] == "released"
+    assert read_last_report(config)["lease_state"] == "active"
+    assert service.sessions == {}
 
 
 class BlockingStdin:
@@ -228,6 +307,7 @@ def test_artifact_upload_rejects_oversized_local_file(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert result["error_type"] == "artifact_too_large"
+    assert result["side_effect_committed"] is False
 
 
 def test_com_ports_list_hides_host_ports_without_read_permission(tmp_path: Path) -> None:
@@ -287,10 +367,11 @@ def test_bridge_close_propagates_reap_failure(monkeypatch: pytest.MonkeyPatch) -
         lambda process, timeout: (_ for _ in ()).throw(subprocess.TimeoutExpired("bridge", timeout)),
     )
 
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(BridgeCleanupError) as excinfo:
         session.close()
 
     assert session.closed is False
+    assert excinfo.value.result["process_reaped"] is False
 
 
 def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Path) -> None:
@@ -302,6 +383,13 @@ def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Pat
         raise subprocess.TimeoutExpired("bridge", 1)
 
     bridge = SimpleNamespace(close=fail_close, status=lambda: {"active": True})
+    lease = SimpleNamespace(state="active", audit_ok=True)
+
+    def quarantine(*_args, **_kwargs) -> None:
+        lease.state = "cleanup_required"
+
+    lease.quarantine = quarantine
+    lease.status = lambda: {"lease_status": lease.state, "cleanup_required": lease.state != "active"}
     session = SimpleNamespace(
         adapter_id="ntc",
         adapter_config=config.adapters["ntc"],
@@ -309,6 +397,10 @@ def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Pat
         log_path=str(tmp_path / ".agentic-hil" / "logs" / "adapter.jsonl"),
         started_at="now",
         active=True,
+        audit_broken=False,
+        lease=lease,
+        safe_state_confirmed=False,
+        process_reaped=False,
     )
     service.sessions["ntc"] = session
 
@@ -317,7 +409,8 @@ def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Pat
     assert result["ok"] is False
     assert result["error_type"] == "adapter_bridge_close_failed"
     assert service.sessions["ntc"] is session
-    assert session.active is True
+    assert session.active is False
+    assert result["cleanup_required"] is True
     service.sessions.clear()
 
 
@@ -1167,13 +1260,12 @@ def test_backend_staging_rejects_artifact_above_limit(tmp_path: Path) -> None:
     manager = ArtifactManager(config)
     try:
         validation = manager.validate_local_path("build/firmware.bin")
-        result = manager.stage_for_backend(validation["artifact"], "flash_firmware")
     finally:
         manager.close()
 
-    assert result["ok"] is False
-    assert result["tool"] == "flash_firmware"
-    assert result["error_type"] == "artifact_too_large"
+    assert validation["ok"] is False
+    assert validation["tool"] == "flash_firmware"
+    assert validation["error_type"] == "artifact_too_large"
 
 
 def test_backend_staging_io_error_is_structured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

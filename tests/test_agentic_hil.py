@@ -924,14 +924,21 @@ def test_windows_job_cleanup_reports_remaining_processes(monkeypatch: pytest.Mon
 def test_process_can_adapter_close_reaps_child() -> None:
     child = spawn_ignoring_bridge_child()
     session = ProcessCanAdapterSession(child)
-    session.close()
+    from agentic_hil.bridge import BridgeCleanupError
+
+    with pytest.raises(BridgeCleanupError) as excinfo:
+        session.close()
+    assert excinfo.value.result["safe_state_confirmed"] is False
     assert child.poll() is not None
 
 
 def test_process_can_adapter_request_after_exit_returns_error() -> None:
     child = spawn_ignoring_bridge_child()
     session = ProcessCanAdapterSession(child)
-    session.close()
+    from agentic_hil.bridge import BridgeCleanupError
+
+    with pytest.raises(BridgeCleanupError):
+        session.close()
     result = session.send(CanFrame(id=1, extended=False, rtr=False, data=b""))
     assert result["ok"] is False
 

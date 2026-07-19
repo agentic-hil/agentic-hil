@@ -13,6 +13,7 @@ The primary risks are:
 - Flashing unintended firmware artifacts or files outside approved project roots.
 - Performing destructive hardware actions such as mass erase without explicit authorization.
 - Confusing MCP JSON-RPC control output with plain serial text output.
+- Concurrent or crashed frontends leaving physical hardware ownership or safe state ambiguous.
 - Leaking host paths, serial logs, hardware identifiers, or local configuration details in reports.
 
 ## Mitigations
@@ -35,6 +36,11 @@ The primary risks are:
 - `mcp-stdio` is reserved for JSON-RPC. Plain serial text uses the separate `com-stdio` path only when explicitly requested.
 - `.agentic-hil/testconfig.yaml` and `--test-config` select test steps only. A test plan cannot select hardware, grant permissions, or replace the discovered config or its override.
 - Reports and structured errors include `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path` so failures can be audited without bypassing configured controls.
+- Every frontend acquires service-owned, cross-process leases for the project and each physical resource before backend effects. Lease records contain random owner tokens, PID/start metadata, config identity, and resource keys. Live leases cannot be stolen; stale or uncertain leases become quarantined.
+- Process-bridge protocol v2 requires `ok: true` and `safe_state_confirmed: true`; bridge process reap is verified separately. Both conditions plus intact audit state are required before ownership is released.
+- Canonical reports and lease records live under the user state root, namespaced by config and workspace identity. Workspace report files are untrusted write-only views.
+- Tool input schemas are enforced before dispatch, non-finite numbers are rejected, and composite success requires `ok: true`, `target_ok` not false, and `audit_ok` not false.
+- Config, report/log, and artifact paths use nonblocking special-file-resistant opens. Artifact size, digest, and format checks use one verified descriptor before private staging.
 
 ## Cryptography Scope
 

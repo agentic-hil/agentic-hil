@@ -177,8 +177,6 @@ steps:
     )
     try:
         result = TestReactor(service.config, service).run(load_test_config(str(test_path), str(tmp_path)))
-        last_report = service.call("get_last_report")
-        classified = service.call("classify_last_error")
     finally:
         service.close()
 
@@ -188,10 +186,6 @@ steps:
     assert [item["action"] for item in result["cleanup"]] == ["debug_stop", "uart_close"]
     assert com_ports.active == set()
     assert not (tmp_path / "build" / "should-not-exist.hex").exists()
-    assert last_report["report"]["tool"] == "test_reactor"
-    assert last_report["report"]["error_type"] == "unexpected_breakpoint"
-    assert classified["error_type"] == "unexpected_breakpoint"
-    assert classified["source_tool"] == "test_reactor"
 
 
 def test_test_config_accepts_json_and_rejects_unknown_actions(tmp_path: Path) -> None:

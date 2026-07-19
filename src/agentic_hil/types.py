@@ -29,6 +29,7 @@ class DebuggerConfig:
     target_cfg: str
     flash_address: str | None
     timeout_s: float
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class ComPortConfig:
     encoding: str
     max_buffer_bytes: int
     max_write_bytes: int
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,7 @@ class CanBusConfig:
     listen_only: bool
     max_buffer_frames: int
     max_frame_data_bytes: int
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,7 @@ class AdapterConfig:
     timeout_s: float
     channels: list[str]
     faults: list[str]
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)

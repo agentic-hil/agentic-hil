@@ -8,18 +8,24 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- Added cross-process hardware leases, persistent crash quarantine, `lease-status`, and explicit operator-confirmed `recover --confirm-safe-state` handling.
+- Versioned process bridges at protocol v2 with mandatory physical safe-state acknowledgement before resource release.
 - Added `agentic-hil migrate-config --from <path>` to move 0.2.3 workspace-local configs into the external authoritative policy location with all hardware permissions forced back to deny-by-default for operator review.
 - Added a permission-gated test reactor with configured `Device` bindings, semantic preflight, duplicate-key rejection, and YAML/JSON sequences for flashing, UART lifecycle, run-to-breakpoint, and Intel HEX symbol dumps with exception-safe cleanup.
 - Added `debugger_probes_list` and `agentic-hil debugger-probes` for permission-gated enumeration of connected probe IDs through STM32CubeProgrammer or pyOCD.
 
 ### Fixed
 
+- Made audit/target status part of overall tool success, validated MCP and direct tool arguments against one strict contract, and blocked later effects after unknown or unaudited outcomes.
+- Moved canonical report state into config-and-workspace-namespaced user state, stopped importing workspace snapshots, and made process/session cleanup retryable across partial failures and interrupts.
+- Reworked artifact/config/log I/O around bounded, nonblocking, single-descriptor checks and rejected non-finite configuration timeouts.
 - Preserved final test-reactor failure reports after successful cleanup and kept `classify_last_error` anchored to the latest failure instead of later read-only status calls.
 - Created nested debug-dump output directories only during real dump execution, while keeping test-reactor preflight read-only.
 - Prevented COM, CAN, and adapter sessions from leaking when audit log paths become unavailable during session start.
 
 ### Security
 
+- Enforced one live owner for each project and physical probe/COM/CAN/adapter resource across MCP, CLI, pytest, reactor, and direct Python service entry points; stale owners now require explicit safe-state recovery.
 - Normalized symlink/reparse secure-I/O failures to structured `unsafe_configured_path` errors and avoided wrapping failed report reads as successful `get_last_report` calls.
 - Rejected legacy bridge `args` with explicit migration guidance and kept process bridges pinned to operator-controlled executables.
 - Bounded in-memory path locks to active operations and hardened child-process cleanup/decoding for debugger and bridge subprocesses.

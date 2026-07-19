@@ -4,6 +4,9 @@ import json
 from typing import Any
 
 from agentic_hil import __version__
+from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
+from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
+from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
 
@@ -16,86 +19,6 @@ JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_INTERNAL_ERROR = -32603
 
-EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "additionalProperties": False}
-
-MCP_TOOL_NAMES = [
-    "debugger_info",
-    "debugger_probes_list",
-    "probe_target",
-    "artifact_upload",
-    "flash_firmware",
-    "reset_target",
-    "debug_start_session",
-    "debug_stop_session",
-    "debug_get_session_status",
-    "debug_set_breakpoint",
-    "debug_list_breakpoints",
-    "debug_clear_breakpoints",
-    "debug_continue",
-    "debug_halt",
-    "debug_get_stop_reason",
-    "debug_symbol_info",
-    "debug_dump_symbol_ihex",
-    "get_last_report",
-    "classify_last_error",
-    "com_ports_list",
-    "com_session_start",
-    "com_session_stop",
-    "com_write",
-    "com_read",
-    "can_buses_list",
-    "can_session_start",
-    "can_session_stop",
-    "can_send",
-    "can_read",
-    "adapters_list",
-    "adapter_session_start",
-    "adapter_session_stop",
-    "adapter_set_value",
-    "adapter_inject_fault",
-    "adapter_clear_fault",
-    "adapter_measure",
-]
-
-MCP_TOOLS: list[JsonObject] = [
-    {"name": "debugger_info", "description": "Check whether the configured debugger backend is available.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debugger_probes_list", "description": "List every connected probe ID visible to the configured debugger backend.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "probe_target", "description": "Probe the configured embedded target through the configured debugger.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "artifact_upload", "description": "Upload a local or base64-encoded firmware artifact into the configured Agentic HIL artifact store.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "filename": {"type": "string"}, "data_base64": {"type": "string"}}, "oneOf": [{"required": ["image_path"]}, {"required": ["filename", "data_base64"]}], "additionalProperties": False}},
-    {"name": "flash_firmware", "description": "Flash a validated firmware artifact. Provide exactly one of image_path or artifact_id. The target is not reset unless reset_after_flash is true.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "artifact_id": {"type": "string"}, "reset_after_flash": {"type": "boolean", "default": False}}, "oneOf": [{"required": ["image_path"]}, {"required": ["artifact_id"]}], "additionalProperties": False}},
-    {"name": "reset_target", "description": "Reset the configured target through the configured debugger.", "inputSchema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["run", "halt", "init"], "default": "run"}}, "additionalProperties": False}},
-    {"name": "debug_start_session", "description": "Start a typed debug session for a validated ELF artifact.", "inputSchema": {"type": "object", "properties": {"image_path": {"type": "string"}, "artifact_id": {"type": "string"}, "mode": {"type": "string", "enum": ["attach", "reset_halt", "load"], "default": "attach"}, "timeout_s": {"type": "number", "minimum": 0}}, "oneOf": [{"required": ["image_path"]}, {"required": ["artifact_id"]}], "additionalProperties": False}},
-    {"name": "debug_stop_session", "description": "Stop the active typed debug session.", "inputSchema": {"type": "object", "properties": {"timeout_s": {"type": "number", "minimum": 0}}, "additionalProperties": False}},
-    {"name": "debug_get_session_status", "description": "Return active debug-session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debug_set_breakpoint", "description": "Set a typed breakpoint by symbol/function name or file and line.", "inputSchema": {"type": "object", "properties": {"location": {"oneOf": [{"type": "string"}, {"type": "object"}]}}, "required": ["location"], "additionalProperties": False}},
-    {"name": "debug_list_breakpoints", "description": "List breakpoints in the active debug session.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debug_clear_breakpoints", "description": "Clear all breakpoints from the active debug session.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debug_continue", "description": "Continue target execution until stop or timeout.", "inputSchema": {"type": "object", "properties": {"timeout_s": {"type": "number", "minimum": 0}}, "additionalProperties": False}},
-    {"name": "debug_halt", "description": "Halt the target in the active debug session.", "inputSchema": {"type": "object", "properties": {"timeout_s": {"type": "number", "minimum": 0}}, "additionalProperties": False}},
-    {"name": "debug_get_stop_reason", "description": "Return the last structured stop reason.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"], "additionalProperties": False}},
-    {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}, "output_path": {"type": "string"}}, "required": ["symbol", "output_path"], "additionalProperties": False}},
-    {"name": "get_last_report", "description": "Return the most recent structured Agentic HIL report.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "classify_last_error", "description": "Classify the most recent Agentic HIL/debugger failure.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "com_ports_list", "description": "List configured named COM ports and detected host serial ports.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "com_session_start", "description": "Open a configured COM port and start a background feedback session.", "inputSchema": {"type": "object", "properties": {"port_id": {"type": "string"}, "clear_buffer": {"type": "boolean", "default": True}}, "required": ["port_id"], "additionalProperties": False}},
-    {"name": "com_session_stop", "description": "Stop a configured COM port session.", "inputSchema": {"type": "object", "properties": {"port_id": {"type": "string"}}, "required": ["port_id"], "additionalProperties": False}},
-    {"name": "com_write", "description": "Write text or hex stimulus to an active COM port session.", "inputSchema": {"type": "object", "properties": {"port_id": {"type": "string"}, "text": {"type": "string"}, "hex": {"type": "string"}}, "required": ["port_id"], "oneOf": [{"required": ["text"]}, {"required": ["hex"]}], "additionalProperties": False}},
-    {"name": "com_read", "description": "Read buffered feedback from an active COM port session.", "inputSchema": {"type": "object", "properties": {"port_id": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1}, "wait_timeout_s": {"type": "number", "minimum": 0, "default": 0}}, "required": ["port_id"], "additionalProperties": False}},
-    {"name": "can_buses_list", "description": "List configured named CAN buses and active session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "can_session_start", "description": "Open a configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "clear_rx_queue": {"type": "boolean", "default": True}}, "required": ["bus_id"], "additionalProperties": False}},
-    {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}}, "required": ["bus_id"], "additionalProperties": False}},
-    {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, "required": ["bus_id", "frame_id"], "additionalProperties": False}},
-    {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session.", "inputSchema": {"type": "object", "properties": {"bus_id": {"type": "string"}, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": {"type": "number", "minimum": 0, "default": 0}}, "required": ["bus_id"], "additionalProperties": False}},
-    {"name": "adapters_list", "description": "List configured test adapters and session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "adapter_session_start", "description": "Start a configured test-adapter bridge session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_session_stop", "description": "Stop a configured test-adapter session.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_set_value", "description": "Set an allowed test-adapter channel value.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}}, "required": ["adapter_id", "channel", "value"], "additionalProperties": False}},
-    {"name": "adapter_inject_fault", "description": "Inject an allowed test-adapter fault.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "fault"], "additionalProperties": False}},
-    {"name": "adapter_clear_fault", "description": "Clear one or all injected test-adapter faults.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "fault": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id"], "additionalProperties": False}},
-    {"name": "adapter_measure", "description": "Measure an allowed test-adapter channel.", "inputSchema": {"type": "object", "properties": {"adapter_id": {"type": "string"}, "channel": {"type": "string"}}, "required": ["adapter_id", "channel"], "additionalProperties": False}},
-]
-
 AGENTIC_HIL_WORKFLOW_PROMPT = """Use Agentic Hardware-in-the-Loop (Agentic HIL) as the safe gate to the configured embedded hardware.
 
 Workflow:
@@ -106,7 +29,8 @@ Workflow:
 5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
 6. Read structured results after every hardware action.
 7. Use configured COM port, CAN bus, and test-adapter ids only.
-8. If ok is false, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
+8. Continue only when ok is true, target_ok is not false, and audit_ok is not false.
+9. On any composite failure, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
@@ -184,7 +108,7 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     if not isinstance(arguments, dict):
         return mcp_tool_error(name, "invalid_argument", "tools/call arguments must be an object.")
     result = tools.call(name, arguments)
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "structuredContent": result, "isError": result.get("ok") is False}
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "structuredContent": result, "isError": not overall_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:
