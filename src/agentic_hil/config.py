@@ -325,7 +325,7 @@ def project_state_directory(config: AgenticHILConfig) -> Path:
         ]
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-    return safe_directory(Path(config.state_root) / "projects" / digest)
+    return trusted_state_directory(config.state_root, "projects", digest)
 
 
 def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
@@ -342,10 +342,54 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
         for index, candidate in enumerate((root, *root.parents)):
             opened = os.stat(candidate, follow_symlinks=False)
             mode = stat.S_IMODE(opened.st_mode)
-            unsafe_write = bool(mode & 0o022) and not bool(mode & stat.S_ISVTX)
+            # The final state_root must never be group/world writable. The sticky
+            # bit only excuses ANCESTORS (e.g. /tmp 01777), where the sticky bit
+            # still stops other users from replacing existing entries; it does
+            # not stop them from pre-creating our derived subdirectories inside a
+            # world-writable final root.
+            unsafe_write = bool(mode & 0o022) and (index == 0 or not bool(mode & stat.S_ISVTX))
             if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
-                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user and have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
+                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
     return root
+
+
+def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
+    """Create/reopen a directory derived from the already-validated state_root,
+    verifying every derived component is owned by the current user, is a real
+    directory, and is not writable by other users. This closes the gap where a
+    foreign local user pre-creates coordination/locks/records/projects before
+    the first trusted start."""
+    base = absolute_without_symlinks(Path(state_root))
+    target = base.joinpath(*parts)
+    if not parts:
+        return safe_directory(target)
+    if os.name == "nt":
+        handles = _windows_hold_directory_chain(target, create=True)
+        _close_windows_handles(handles)
+        validate_windows_state_root(target)
+        return target
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = _open_directory_fd(base, create=True)
+    try:
+        euid = os.geteuid()
+        for part in parts:
+            with suppress(FileExistsError):
+                os.mkdir(part, mode=0o700, dir_fd=descriptor)
+            try:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            except OSError as error:
+                _raise_unsafe_path_error(error, target)
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode):
+                raise ConfigError("unsafe_configured_path", "Derived state directory component is not a directory.", {"field": "state_root", "path": str(target)})
+            if opened.st_uid != euid or bool(stat.S_IMODE(opened.st_mode) & 0o022):
+                raise ConfigError("unsafe_configured_path", "Derived state directory must be owned by the current user and not writable by other users.", {"field": "state_root", "path": str(target)})
+        return target
+    finally:
+        os.close(descriptor)
 
 
 def validate_windows_state_root(root: Path) -> None:

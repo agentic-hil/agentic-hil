@@ -193,6 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
     recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
     recover_parser.add_argument("--quarantine-id", required=True)
+    recover_parser.add_argument("--accept-config-change", action="store_true", help="explicit operator override: accept that the authoritative config changed since the incident was recorded")
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
@@ -231,7 +232,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
-        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id)
+        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id, accept_config_change=args.accept_config_change)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "mcp-config":

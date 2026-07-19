@@ -924,3 +924,415 @@ def test_hardware_exception_with_busy_project_lock_stays_fail_closed(tmp_path: P
     finally:
         service.close()
         other.close()
+
+
+def failing_write_record(coordinator: HardwareCoordinator, should_fail):
+    original = coordinator._write_record
+
+    def wrapper(resource: str, record: dict) -> None:
+        if should_fail(resource, record):
+            raise OSError("injected write fault")
+        original(resource, record)
+
+    return wrapper
+
+
+def restore_write_record(coordinator: HardwareCoordinator, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(coordinator, "_write_record", type(coordinator)._write_record.__get__(coordinator))
+
+
+def test_release_resource_write_fault_blocks_and_stays_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:release-fault")
+    monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: record.get("state") == "released"))
+
+    assert lease.release() is False
+    assert lease.state == "cleanup_required"
+    assert lease.valid is True
+    assert lease.lease_id in coordinator.leases
+    assert coordinator.blocked is True
+    assert all(lock.locked for lock in lease.locks)
+
+    with pytest.raises(CoordinationError) as own_acquire:
+        coordinator.acquire("physical:second-resource")
+    assert own_acquire.value.result["error_type"] == "resource_quarantined"
+
+    second_owner = HardwareCoordinator(coordinator.config, "second")
+    with pytest.raises(CoordinationError) as foreign_acquire:
+        second_owner.acquire("physical:release-fault")
+    assert foreign_acquire.value.result["error_type"] == "resource_busy"
+
+    restore_write_record(coordinator, monkeypatch)
+    assert lease.release() is True
+    assert lease.state == "released"
+    assert coordinator.blocked is False
+    assert coordinator._read_record("physical:release-fault")["state"] == "released"
+    assert coordinator._read_record(coordinator.project_key)["state"] == "released"
+    coordinator.close()
+    second_owner.close()
+
+
+def test_release_fault_with_total_write_failure_still_blocks_in_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:total-io-loss")
+    monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: True))
+
+    assert lease.release() is False
+    assert lease.state == "cleanup_required"
+    assert coordinator.blocked is True
+    assert lease.errors and all(error.get("reason") == "lease_release_unconfirmed" for error in lease.errors)
+
+    with pytest.raises(CoordinationError):
+        coordinator.acquire("physical:other")
+
+    restore_write_record(coordinator, monkeypatch)
+    assert lease.release() is True
+    assert coordinator.blocked is False
+    coordinator.close()
+
+
+def test_release_project_write_fault_blocks_and_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:project-fault")
+    monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: resource == coordinator.project_key and record.get("state") == "released"))
+
+    assert lease.release() is False
+    assert lease.state == "cleanup_required"
+    assert coordinator.blocked is True
+    assert coordinator._read_record("physical:project-fault")["state"] == "cleanup_required"
+
+    restore_write_record(coordinator, monkeypatch)
+    assert lease.release() is True
+    assert coordinator._read_record(coordinator.project_key)["state"] == "released"
+    coordinator.close()
+
+
+def test_release_lock_fault_blocks_and_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:lock-fault")
+    lock = lease.locks[0]
+    original_release = lock.release
+    monkeypatch.setattr(lock, "release", lambda: (_ for _ in ()).throw(OSError("unlock failed")))
+
+    assert lease.release() is False
+    assert lease.state == "cleanup_required"
+    assert coordinator.blocked is True
+    assert lease.lease_id in coordinator.leases
+    assert coordinator._read_record("physical:lock-fault")["state"] == "cleanup_required"
+
+    monkeypatch.setattr(lock, "release", original_release)
+    assert lease.release() is True
+    assert lease.state == "released"
+    assert coordinator._read_record("physical:lock-fault")["state"] == "released"
+    coordinator.close()
+
+
+def test_poison_quarantines_leases_in_provisional_release_states(tmp_path: Path) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    releasing = coordinator.acquire("physical:releasing-state")
+    released_in_memory = coordinator.acquire("physical:released-state")
+    releasing.state = "releasing"
+    released_in_memory.state = "released"
+
+    coordinator.poison("unknown_hardware_exception")
+
+    assert releasing.state == "cleanup_required"
+    assert released_in_memory.state == "cleanup_required"
+    assert coordinator.blocked is True
+    for resource in ("physical:releasing-state", "physical:released-state"):
+        assert coordinator._read_record(resource)["state"] == "cleanup_required"
+    coordinator.close()
+
+
+def test_recovery_converges_for_multi_lease_incident(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease_a = owner.acquire("physical:incident-a")
+    lease_b = owner.acquire("physical:incident-b")
+    lease_a.quarantine("first_failure")
+    lease_b.quarantine("second_failure")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    union = ["physical:incident-a", "physical:incident-b"]
+    for resource in union:
+        assert sorted(owner._read_record(resource)["resources"]) == union
+    owner.close()
+
+    recovery = HardwareCoordinator(config, "recovery")
+    result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+
+    assert result["ok"] is True
+    assert sorted(result["resources"]) == union
+    for resource in union:
+        assert recovery._read_record(resource)["state"] == "released"
+    assert recovery._read_record(recovery.project_key)["state"] == "released"
+
+
+def test_recovery_resumes_idempotently_after_each_partial_persist_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:part-a", "physical:part-b")
+    lease.quarantine("incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    owner.close()
+
+    recovery = HardwareCoordinator(config, "recovery")
+    resources = sorted(["physical:part-a", "physical:part-b"])
+    for fail_index in range(len(resources)):
+        calls = {"count": -1}
+
+        def fail_nth(resource: str, record: dict, fail_index: int = fail_index, calls: dict = calls) -> bool:
+            if record.get("state") != "released":
+                return False
+            calls["count"] += 1
+            return calls["count"] == fail_index
+
+        monkeypatch.setattr(recovery, "_write_record", failing_write_record(recovery, fail_nth))
+        result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+        assert result["error_type"] == "recovery_persist_failed"
+        assert result["retry_safe"] is True
+        assert recovery._read_record(recovery.project_key)["state"] == "recovery_pending"
+        restore_write_record(recovery, monkeypatch)
+
+        blocked_probe = HardwareCoordinator(config, "probe")
+        with pytest.raises(CoordinationError):
+            blocked_probe.acquire("physical:part-a")
+        blocked_probe.close()
+
+    final = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert final["ok"] is True
+    for resource in resources:
+        marker = recovery._read_record(resource)
+        assert marker["state"] == "released"
+        assert marker["recovered_quarantine_id"] == quarantine_id
+    assert recovery._read_record(recovery.project_key)["state"] == "released"
+
+
+def test_recovery_resume_flag_after_uninterrupted_partial_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:resume-a", "physical:resume-b")
+    lease.quarantine("incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    owner.close()
+
+    recovery = HardwareCoordinator(config, "recovery")
+    calls = {"count": -1}
+
+    def fail_second(resource: str, record: dict) -> bool:
+        if record.get("state") != "released":
+            return False
+        calls["count"] += 1
+        return calls["count"] == 1
+
+    monkeypatch.setattr(recovery, "_write_record", failing_write_record(recovery, fail_second))
+    partial = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert partial["error_type"] == "recovery_persist_failed"
+    restore_write_record(recovery, monkeypatch)
+
+    final = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert final["ok"] is True
+    assert final["resumed"] is True
+    assert recovery._read_record(recovery.project_key)["state"] == "released"
+
+
+def test_recovery_config_change_requires_explicit_audited_override(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:config-change")
+    lease.quarantine("incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    recorded_sha = owner.config_sha256
+    owner.close()
+
+    config_file = Path(config.config_path)
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "\n# operator comment\n", encoding="utf-8")
+    changed_config = load_config(str(config_file))
+    recovery = HardwareCoordinator(changed_config, "recovery")
+
+    refused = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert refused["error_type"] == "config_changed"
+    assert refused["recorded_config_sha256"] == recorded_sha
+    assert refused["current_config_sha256"] == recovery.config_sha256
+    assert recovery.status()["blocked"] is True
+
+    accepted = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id, accept_config_change=True)
+    assert accepted["ok"] is True
+    assert accepted["config_change_accepted"] is True
+    audit_lines = [json.loads(line) for line in (recovery.root / "recovery.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert audit_lines[-1]["config_change_accepted"] is True
+    assert audit_lines[-1]["recorded_config_sha256"] == recorded_sha
+    assert audit_lines[-1]["current_config_sha256"] == recovery.config_sha256
+
+
+def test_arbitrary_quarantine_reason_cannot_be_caller_resolved(tmp_path: Path) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = coordinator.acquire("physical:arbitrary")
+    lease.quarantine("arbitrary_unknown_effect")
+
+    assert lease.resolve_retryable_cleanup("arbitrary_unknown_effect") is False
+    assert lease.state == "cleanup_required"
+    assert lease.release() is False
+    assert coordinator.blocked is True
+    assert coordinator.status()["blocked"] is True
+    coordinator.close()
+
+
+def test_status_race_does_not_quarantine_cleanly_released_owner(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:status-race")
+    observer = HardwareCoordinator(config, "observer")
+    original_probe = observer._project_probe_lock
+
+    class ReleaseBeforeAcquireLock:
+        def __init__(self) -> None:
+            self.inner = original_probe()
+
+        def acquire(self) -> None:
+            assert lease.release() is True
+            owner.close()
+            self.inner.acquire()
+
+        def release(self) -> None:
+            self.inner.release()
+
+    observer._project_probe_lock = lambda: ReleaseBeforeAcquireLock()
+    status = observer.status()
+
+    assert status["blocked"] is False
+    assert status["snapshot_atomic"] is True
+    assert status["record"]["state"] == "released"
+    assert observer._read_record(observer.project_key)["state"] == "released"
+    observer.close()
+
+
+def test_status_flags_non_atomic_snapshot_while_foreign_owner_holds_lock(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:snapshot")
+    observer = HardwareCoordinator(config, "observer")
+    try:
+        status = observer.status()
+        assert status["owner_active"] is True
+        assert status["snapshot_atomic"] is False
+        assert status["blocked"] is False
+    finally:
+        lease.release()
+        owner.close()
+        observer.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"{bad json", b"\xff\xfe\x00corrupt", b'{"version": 2, "state": 5}\n', b'{"version": 2, "state": "quarantined", "resources": 5}\n'],
+)
+def test_corrupt_coordination_records_are_structured_at_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: bytes,
+) -> None:
+    config = config_for(tmp_path)
+    coordinator = HardwareCoordinator(config, "setup")
+    coordinator._record_path(coordinator.project_key).write_bytes(payload)
+    monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
+
+    for arguments in (["lease-status"], ["recover", "--confirm-safe-state", "--quarantine-id", "incident"]):
+        exit_code = entrypoint(arguments)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert exit_code == 1
+        assert result["error_type"] == "coordination_state_invalid"
+        assert "Traceback" not in captured.err
+
+
+def test_recovery_releases_orphaned_active_resource_in_incident(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    setup = HardwareCoordinator(config, "setup")
+    quarantine_id = "incident-with-orphan-active"
+    setup._write_record("physical:active-c", setup._base_record("active", ["physical:active-c"]))
+    setup._write_record("physical:incident-a", {**setup._base_record("quarantined", ["physical:incident-a"]), "quarantine_id": quarantine_id, "reason": "boom"})
+    setup._write_record(setup.project_key, {**setup._base_record("cleanup_required", ["physical:active-c", "physical:incident-a"]), "quarantine_id": quarantine_id})
+
+    result = setup.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+
+    assert result["ok"] is True, result
+    assert setup._read_record("physical:active-c")["state"] == "released"
+    assert setup._read_record("physical:incident-a")["state"] == "released"
+    assert setup._read_record(setup.project_key)["state"] == "released"
+
+
+def test_retryable_release_success_does_not_poison_other_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease_a = owner.acquire("physical:a")
+    lease_b = owner.acquire("physical:b")
+    lease_b.quarantine("b_failure")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    faults = {"remaining": 1}
+
+    def one_shot(resource: str, record: dict) -> bool:
+        if record.get("state") == "released" and resource == "physical:a" and faults["remaining"] > 0:
+            faults["remaining"] -= 1
+            return True
+        return False
+
+    monkeypatch.setattr(owner, "_write_record", failing_write_record(owner, one_shot))
+    assert lease_a.release() is False
+    assert lease_a.state == "cleanup_required"
+    assert lease_a.release() is True
+
+    assert "physical:a" not in owner.incident_resources
+    assert owner._read_record("physical:a")["state"] == "released"
+    project = owner._read_record(owner.project_key)
+    assert project["state"] == "cleanup_required"
+    assert "physical:a" not in project["resources"]
+    assert "physical:b" in project["resources"]
+    assert owner.blocked is True
+    owner.close()
+
+    recovery = HardwareCoordinator(config, "recovery")
+    result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert result["ok"] is True, result
+    assert sorted(result["resources"]) == ["physical:b"]
+
+
+def test_adopted_lease_less_incident_survives_unrelated_release(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    lease_b = owner.acquire("physical:healthy-b")
+    owner._write_record("physical:orphan-x", {**owner._base_record("quarantined", ["physical:orphan-x"]), "quarantine_id": "prior-incident", "reason": "prior_dead_owner"})
+
+    with pytest.raises(CoordinationError):
+        owner.acquire("physical:orphan-x")
+    assert owner.blocked is True
+    assert owner.status()["blocked"] is True
+
+    # Releasing the unrelated healthy lease must not erase the adopted incident.
+    assert lease_b.release() is True
+    assert owner.blocked is True
+    status = owner.status()
+    assert status["blocked"] is True
+    assert status["quarantine_id"] is not None
+    assert owner._read_record(owner.project_key)["state"] == "cleanup_required"
+    assert "physical:orphan-x" in owner._read_record(owner.project_key)["resources"]
+    owner.close()
+
+
+def test_release_fault_reraises_keyboard_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    owner = HardwareCoordinator(config_for(tmp_path), "owner")
+    lease = owner.acquire("physical:interrupt")
+
+    def interrupting_write(resource: str, record: dict) -> None:
+        if record.get("state") == "released":
+            raise KeyboardInterrupt("operator interrupt during release persist")
+
+    monkeypatch.setattr(owner, "_write_record", interrupting_write)
+    with pytest.raises(KeyboardInterrupt):
+        lease.release()
+
+    # Fail-closed despite the interrupt: lease quarantined and still blocking.
+    assert owner.blocked is True
+    assert lease.state == "cleanup_required"
+    monkeypatch.setattr(owner, "_write_record", type(owner)._write_record.__get__(owner))
+    owner.close()
