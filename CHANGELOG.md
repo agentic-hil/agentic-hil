@@ -24,6 +24,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Created nested debug-dump output directories only during real dump execution, while keeping test-reactor preflight read-only.
 - Prevented COM, CAN, and adapter sessions from leaking when audit log paths become unavailable during session start.
 - Made Windows directory-chain pinning sharing-compatible so concurrent Agentic HIL operations keep their rename/delete protection, made the Windows report-state lock block like the POSIX branch, kept coordination-poisoning failures from masking primary hardware errors, expanded `~` in state-root environment overrides before use, and released private staging directories after local artifact uploads.
+- Made lease release a durable, retryable transition and hardware recovery convergent: partial persistence resumes idempotently, incident markers agree on their resource set, and a config-hash change now refuses recovery with `config_changed` until the operator reruns with the explicit `--accept-config-change` override instead of dead-ending. Wrote detailed hardware-effect logs canonically under `state_root` with a monotonic sequence and tamper-evident hash chain, exposing `canonical_audit` verification on reports; latched GDB audit-write failures permanently and reconciled breakpoint cleanup against the backend; and retained provisional raw handles for retryable close after constructor and interrupt faults.
 
 ### Security
 
@@ -34,6 +35,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Replaced the project-local/two-file configuration model with one deny-by-default authoritative config outside the repository, discovered from the project root with an optional absolute-path `AGENTIC_HIL_CONFIG` override and bound to the project by mandatory `workspace_root`.
 - Added explicit gates for debugger execution and target reset (`allow_reset`), deny-by-default config generation, startup pinning for debugger/GDB/bridge executables and OpenOCD scripts, deny-all empty symbol allowlists, and symlink-safe artifact/output paths.
 - Revalidated firmware artifacts into private process staging before backend use, rejected multiply-linked inputs/outputs, switched structured writes to atomic replacement, disabled GDB auto-loading, and moved trusted subprocess working directories outside the workspace.
+- Revalidated the trusted `state_root` and every derived coordination/audit/report directory for owner, type, and write mode on each open (rejecting sticky world-writable roots and foreign-owned subdirectories), and stopped emitting environment-derived absolute state-root/config paths and any secret-named field to operator/CLI/MCP output sinks.
 
 ## [0.2.3] - 2026-07-14
 
