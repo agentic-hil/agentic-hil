@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Versioned process bridges at protocol v2 with mandatory physical safe-state acknowledgement before resource release.
 - Added `agentic-hil migrate-config --from <path>` to move 0.2.3 workspace-local configs into the external authoritative policy location with all hardware permissions forced back to deny-by-default for operator review.
 - Added a permission-gated test reactor with configured `Device` bindings, semantic preflight, duplicate-key rejection, and YAML/JSON sequences for flashing, UART lifecycle, run-to-breakpoint, and Intel HEX symbol dumps with exception-safe cleanup.
+- Added multi-board support to the test reactor: a named `debuggers` map lets each device drive an independent debug probe (`devices.<id>.debugger` selects `true` for the top-level debugger or a named entry, with an optional per-device `target`), enforcing one device per probe and running each named debugger on its own service under one shared project lease. Added `agentic-hil test-schema` to emit the bundled test-plan schema.
 - Added `debugger_probes_list` and `agentic-hil debugger-probes` for permission-gated enumeration of connected probe IDs through STM32CubeProgrammer or pyOCD.
 
 ### Fixed

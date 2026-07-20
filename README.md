@@ -171,7 +171,7 @@ A typical loop: build firmware → `flash_firmware` with `reset_after_flash: tru
 
 ## Test Reactor
 
-The test reactor executes a strict, sequential YAML or JSON test plan against logical `devices` from the authoritative config. A Device is a small binding to the one global debugger and optionally one named UART; it is not a general multi-DUT SDK. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
+The test reactor executes a strict, sequential YAML or JSON test plan against logical `devices` from the authoritative config. A Device binds to a debugger — the top-level `debugger` (`devices.<id>.debugger: true`) or a named entry in the `debuggers` map for an independently controlled board (`devices.<id>.debugger: <name>`, with an optional per-device `target`) — and optionally one named UART. Each physical probe drives exactly one device; named-debugger devices run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
 
 Before the first hardware action, the reactor validates every device, capability, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
