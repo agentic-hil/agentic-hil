@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from importlib import resources
@@ -452,8 +453,19 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
+def mcp_server_command() -> str:
+    """Command an MCP client should spawn for this install. Prefer the bare name
+    when it resolves on PATH (portable); otherwise the absolute console-script
+    path next to this interpreter (e.g. a project venv) so the entry still works
+    when the install is not on PATH -- no manual .mcp.json editing needed."""
+    if shutil.which("agentic-hil"):
+        return "agentic-hil"
+    script = Path(sys.executable).parent / ("agentic-hil.exe" if os.name == "nt" else "agentic-hil")
+    return str(script) if script.exists() else "agentic-hil"
+
+
 def mcp_config_text() -> str:
-    return resources.files("agentic_hil").joinpath("templates", "mcp.json").read_text(encoding="utf-8")
+    return json.dumps({"mcpServers": {"agentic-hil": {"command": mcp_server_command(), "args": ["mcp-stdio"]}}}, indent=2) + "\n"
 
 
 def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
