@@ -9,6 +9,14 @@ def main() -> int:
     if "--version" in args:
         print("STM32CubeProgrammer version: 2.18.0")
         return 0
+    if "-l" in args:
+        if "st-link-only" not in args:
+            print("intrusive probe listing is not allowed", file=sys.stderr)
+            return 2
+        print("===== STLink Interface =====")
+        print("ST-LINK SN  : STLINK123")
+        print("ST-LINK SN  : STLINK456")
+        return 0
     text = " ".join(args)
     print(text)
     if "-w" in args:

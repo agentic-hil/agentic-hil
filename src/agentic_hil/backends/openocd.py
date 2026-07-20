@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -14,7 +13,16 @@ from agentic_hil.backends.common import (
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.config import display_path, resolve_work_path
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.report import (
+    AuditWriteError,
+    annotate_audit_error,
+    logs_directory,
+    read_last_report,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_audit_json,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 OPENOCD_NOT_FOUND: JsonObject = {
@@ -102,6 +110,17 @@ class OpenOCDBackend:
             "summary": "OpenOCD is available.",
         }
 
+    def list_probes(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by .agentic-hil/config.yaml.")
+        return {
+            "ok": False,
+            "tool": "debugger_probes_list",
+            "backend": self.backend_name,
+            "error_type": "not_supported",
+            "summary": "OpenOCD cannot enumerate all connected probe IDs through a backend-independent command.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
@@ -120,10 +139,14 @@ class OpenOCDBackend:
         if self.config.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
-        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
+        artifact_path = str(artifact["resolved_path"])
+        if Path(artifact_path).suffix.lower() == ".bin" and self.config.debugger.flash_address is None:
+            return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with OpenOCD requires debugger.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(artifact_path))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
-        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        address = f" {self.config.debugger.flash_address}" if Path(artifact_path).suffix.lower() == ".bin" else ""
+        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}{address}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -132,6 +155,8 @@ class OpenOCDBackend:
         return self._write_action_report(result)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("reset_target", "Target reset is disabled because permissions.allow_probe is false.")
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
@@ -198,6 +223,12 @@ class OpenOCDBackend:
     def close(self) -> None:
         self._debug.close()
 
+    def has_active_session(self) -> bool:
+        return self._debug.has_active_session()
+
+    def active_session_ids(self) -> list[str]:
+        return ["default"] if self.has_active_session() else []
+
     def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
         startup = "init; reset halt" if reset else "init; halt"
         return [
@@ -262,22 +293,26 @@ class OpenOCDBackend:
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **OPENOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
 
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
-        if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
-
         output = f"{completed.stdout}{completed.stderr}"
-        if completed.returncode == 0:
+        if completed.timed_out:
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+        elif completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
-            if success_marker is not None and success_marker not in output:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path)
-            result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
-            if success_marker is not None:
-                result["success_confirmed"] = True
-            return result
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                result = self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+            elif success_marker is not None and success_marker not in output:
+                result = self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path)
+            else:
+                result = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
+                if success_marker is not None:
+                    result["success_confirmed"] = True
+        else:
+            result = self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+        try:
+            self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        except AuditWriteError as error:
+            raise annotate_audit_error(error, result) from error
+        return result
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
         error_type = self._public_error_type(backend_error_type)
@@ -298,7 +333,7 @@ class OpenOCDBackend:
         return write_report(self.config, result)
 
     def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+        write_audit_json(log_path, {"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr})
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}

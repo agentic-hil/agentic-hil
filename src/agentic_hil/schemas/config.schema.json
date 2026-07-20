@@ -29,6 +29,55 @@
         "timeout_s": { "type": "number", "default": 60.0 }
       }
     },
+    "debuggers": {
+      "type": "object",
+      "description": "Named debugger configurations for independently controlled test-reactor devices.",
+      "propertyNames": {
+        "allOf": [
+          { "pattern": "^[A-Za-z0-9_.-]+$" },
+          { "not": { "const": "default" } }
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "default": "openocd", "enum": ["openocd", "stlink", "pyocd"] },
+          "executable": { "type": ["string", "null"], "default": null },
+          "probe_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null },
+          "target_type": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+$", "default": null },
+          "interface": { "type": "string", "default": "SWD", "enum": ["SWD", "JTAG"] },
+          "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
+          "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },
+          "flash_address": { "type": ["string", "null"], "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$", "default": null },
+          "timeout_s": { "type": "number", "default": 60.0 }
+        }
+      },
+      "default": {}
+    },
+    "devices": {
+      "type": "object",
+      "description": "Logical test devices bound to a debugger and optionally a configured UART.",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["debugger"],
+        "properties": {
+          "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+          "uart": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+$", "default": null },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "controller": { "type": "string" }
+            }
+          }
+        }
+      },
+      "default": {}
+    },
     "debug": {
       "type": "object",
       "description": "Typed debug-session settings for safe GDB/OpenOCD operations.",
@@ -52,7 +101,8 @@
         "upload_directory": { "type": "string", "default": ".agentic-hil/artifacts" },
         "allowed_extensions": { "type": "array", "items": { "type": "string" }, "default": [".elf", ".hex", ".bin"] },
         "max_upload_size_mb": { "type": "integer", "default": 64 },
-        "allow_upload": { "type": "boolean", "default": true }
+        "allow_upload": { "type": "boolean", "default": true },
+        "max_local_artifact_size_mb": { "type": "integer", "minimum": 1, "default": 256 }
       }
     },
     "com_ports": {
@@ -83,6 +133,17 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["channel"],
+        "allOf": [
+          {
+            "if": { "properties": { "fd": { "const": false } } },
+            "then": {
+              "properties": {
+                "data_bitrate": { "type": "null" },
+                "max_frame_data_bytes": { "maximum": 8 }
+              }
+            }
+          }
+        ],
         "properties": {
           "adapter": { "type": "string", "default": "peak", "enum": ["peak", "socketcan", "process"] },
           "channel": { "type": "string" },

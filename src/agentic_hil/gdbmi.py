@@ -45,25 +45,46 @@ class GdbMiClient:
     def __init__(self, executable: str, work_dir: str):
         from agentic_hil.backends.common import invocation
 
-        self.child = subprocess.Popen(
-            [*invocation(executable), *GDB_MI_ARGS],
-            cwd=work_dir,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.lock = threading.Lock()
-        self.next_token = 0
-        self.pending: JsonObject | None = None
-        self.pending_stop: JsonObject | None = None
-        self.last_stop_line: str | None = None
-        self.command_history: list[JsonObject] = []
-        self.exited = threading.Event()
-        threading.Thread(target=self._stdout_reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        try:
+            self.child = subprocess.Popen(
+                [*invocation(executable), *GDB_MI_ARGS],
+                cwd=work_dir,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except BaseException as error:
+            error._agentic_hil_completion_confirmed = True
+            raise
+        try:
+            self.lock = threading.Lock()
+            self.next_token = 0
+            self.pending: JsonObject | None = None
+            self.pending_stop: JsonObject | None = None
+            self.last_stop_line: str | None = None
+            self.command_history: list[JsonObject] = []
+            self.exited = threading.Event()
+            threading.Thread(target=self._stdout_reader, daemon=True).start()
+            threading.Thread(target=self._stderr_reader, daemon=True).start()
+        except BaseException as error:
+            if self.child.poll() is None:
+                with suppress(BaseException):
+                    self.child.terminate()
+                    self.child.wait(timeout=GDB_EXIT_COMMAND_TIMEOUT_S)
+            if self.child.poll() is None:
+                with suppress(BaseException):
+                    self.child.kill()
+                    self.child.wait(timeout=GDB_EXIT_COMMAND_TIMEOUT_S)
+            if self.child.poll() is not None:
+                error._agentic_hil_completion_confirmed = True
+            else:
+                # The spawned GDB process could not be reaped and no client object
+                # exists to track it: expose it so the caller can ledger it.
+                error._agentic_hil_orphan_child = self.child
+            raise
 
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
         if "\n" in mi_command or "\r" in mi_command:
@@ -140,8 +161,7 @@ class GdbMiClient:
             self.child.wait(timeout=max(0.1, timeout_s))
         if self.child.poll() is None:
             self.child.kill()
-            with suppress(subprocess.TimeoutExpired):
-                self.child.wait(timeout=max(0.1, timeout_s))
+            self.child.wait(timeout=max(0.1, timeout_s))
 
     def history(self) -> list[JsonObject]:
         with self.lock:
@@ -246,6 +266,8 @@ def parse_gdb_integer(value: str | None) -> int | None:
 
 
 def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> None:
+    from agentic_hil.report import atomic_write_text
+
     lines: list[str] = []
     upper_address: int | None = None
     for offset in range(0, len(data), INTEL_HEX_BYTES_PER_RECORD):
@@ -256,7 +278,7 @@ def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> No
             upper_address = chunk_upper
         lines.append(intel_hex_record(absolute & 0xFFFF, 0x00, data[offset : offset + INTEL_HEX_BYTES_PER_RECORD]))
     lines.append(INTEL_HEX_EOF_RECORD)
-    file_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii")
 
 
 def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:

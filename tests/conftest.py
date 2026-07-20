@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 pytest_plugins = ["pytester"]
 
@@ -11,6 +14,12 @@ FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
+
+
+@pytest.fixture(autouse=True)
+def isolate_hardware_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"
+    monkeypatch.setenv(variable, str(tmp_path / "state-home"))
 
 
 def write_config(
@@ -24,6 +33,9 @@ def write_config(
     gdb_executable: Path | None = None,
     allowed_symbols: list[str] | None = None,
     max_dump_size_bytes: int = 1048576,
+    debugger_timeout_s: float = 5,
+    debuggers_yaml: str = "debuggers: {}\n",
+    devices_yaml: str = "devices: {}\n",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
     adapters_yaml: str = "adapters: {}\n",
@@ -47,8 +59,8 @@ debugger:
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   flash_address: {('null' if flash_address is None else repr(flash_address))}
-  timeout_s: 5
-debug:
+  timeout_s: {debugger_timeout_s}
+{debuggers_yaml}{devices_yaml}debug:
   gdb_executable: {('null' if gdb_executable is None else repr(gdb_executable.as_posix()))}
   allowed_symbols: {(allowed_symbols if allowed_symbols is not None else [])}
   max_dump_size_bytes: {max_dump_size_bytes}

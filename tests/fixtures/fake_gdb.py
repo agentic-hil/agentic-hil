@@ -80,6 +80,9 @@ def main() -> int:
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
+        elif command == "-thread-info":
+            state = "running" if behavior() == "initial_running" else "stopped"
+            emit(f'{token}^done,threads=[{{id="1",state="{state}"}}],current-thread-id="1"')
         elif command.startswith(("-gdb-set", "-file-exec-and-symbols", "-interpreter-exec", "-target-download", "-break-delete")):
             emit(f"{token}^done")
         elif command.startswith("-break-insert"):
@@ -88,10 +91,17 @@ def main() -> int:
         elif command.startswith("-exec-continue"):
             emit(f"{token}^running")
             emit("*running,thread-id=\"all\"")
-            threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
+            if behavior() == "continue_gdb_exit":
+                return 0
+            if behavior() not in {"continue_interrupt_failed", "continue_no_followup_stop", "continue_confirmed_fallback"}:
+                threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
         elif command.startswith("-exec-interrupt"):
-            emit(f"{token}^done")
-            emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
+            if behavior() in {"continue_interrupt_failed", "halt_interrupt_failed"}:
+                emit(f'{token}^error,msg="Interrupt failed."')
+            else:
+                emit(f"{token}^done")
+                if behavior() not in {"continue_no_followup_stop", "halt_no_stop"}:
+                    emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
         elif command.startswith("-data-evaluate-expression"):
             expression = command[len("-data-evaluate-expression") :].strip().strip('"')
             evaluate_expression(token, expression)

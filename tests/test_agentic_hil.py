@@ -12,10 +12,24 @@ from conftest import FAKE_STLINK_UNCONFIRMED, SIM_NTC_ADAPTER, write_config
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.pyocd import parse_pyocd_probes
+from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
-from agentic_hil.cli import init_config, install_skill, mcp_config, schema
+from agentic_hil.cli import (
+    entrypoint,
+    hardware_recover,
+    hardware_status,
+    init_config,
+    install_skill,
+    mcp_config,
+    schema,
+)
+from agentic_hil.cli import (
+    test_schema as export_test_schema,
+)
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.hardware_lock import ProjectHardwareLock
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
@@ -74,6 +88,24 @@ def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     assert "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration" in schema_path.read_text(encoding="utf-8")
 
 
+def test_schema_exports_bundled_test_config_schema(tmp_path: Path) -> None:
+    schema_path = tmp_path / "testconfig.schema.json"
+
+    result = export_test_schema(str(schema_path))
+
+    assert result["ok"] is True
+    document = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert document["$id"] == "https://agentic-hil.local/schemas/testconfig.schema.json"
+
+
+def test_test_schema_cli_stdout_is_one_json_document(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = entrypoint(["test-schema"])
+
+    document = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert document["$id"] == "https://agentic-hil.local/schemas/testconfig.schema.json"
+
+
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
     output_path = tmp_path / ".mcp.json"
     result = mcp_config(str(output_path))
@@ -91,6 +123,47 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert result["error_type"] == "mcp_config_exists"
     result_forced = mcp_config(str(output_path), force=True)
     assert result_forced["ok"] is True
+
+
+def test_hardware_status_and_recover_clear_quarantine(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    quarantine = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[{"type": "debugger", "id": "default"}], inspection_errors=[])
+
+    status = hardware_status(config.config_path)
+    denied = hardware_recover(config.config_path, acknowledge_hardware_checked=False)
+    missing_id = hardware_recover(config.config_path, acknowledge_hardware_checked=True)
+    stale = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id="stale")
+    live_owner = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]))
+    recovered = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]), force_live_owner=True)
+    clear_status = hardware_status(config.config_path)
+
+    assert status["quarantined"] is True
+    assert status["quarantine_id"] == quarantine["quarantine_id"]
+    assert status["quarantine"]["updated_at"] == quarantine["updated_at"]
+    assert denied["error_type"] == "acknowledgement_required"
+    assert missing_id["error_type"] == "quarantine_id_required"
+    assert stale["error_type"] == "quarantine_changed"
+    assert live_owner["error_type"] == "owner_process_still_running"
+    assert recovered["ok"] is True
+    assert recovered["recovered"] is True
+    assert recovered["restart_required"] is True
+    assert clear_status["quarantined"] is False
+
+
+def test_hardware_recover_surfaces_report_failure_after_safe_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config(str(write_config(tmp_path)), str(tmp_path))
+    lock = ProjectHardwareLock(config.config_path)
+    assert lock.acquire(source="test") is True
+    quarantine = lock.quarantine_and_release(reason="hardware_cleanup_failed", source="test", active_resources=[], inspection_errors=[])
+    monkeypatch.setattr("agentic_hil.cli.write_report", lambda *_: (_ for _ in ()).throw(OSError("report full")))
+
+    result = hardware_recover(config.config_path, acknowledge_hardware_checked=True, quarantine_id=str(quarantine["quarantine_id"]), force_live_owner=True)
+
+    assert result["error_type"] == "audit_write_failed"
+    assert result["operation_result"]["ok"] is True
+    assert hardware_status(config.config_path)["hardware_state_unconfirmed"] is False
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
@@ -148,9 +221,145 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
         probe = mcp_tool_call(service, "probe_target")
     finally:
         service.close()
-    assert probe["ok"] is True
+    assert probe["ok"] is True, probe
     log_text = (tmp_path / probe["log_path"]).read_text(encoding="utf-8")
     assert "adapter serial STLINK123" in log_text
+
+
+def test_openocd_probe_listing_reports_not_supported(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path)), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+
+
+def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, debugger_type="stlink")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
+def test_pyocd_lists_all_connected_probe_ids(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, debugger_type="pyocd")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": "PYOCD123"}, {"probe_id": "PYOCD456"}]
+
+
+def test_probe_listing_can_select_named_debugger(tmp_path: Path) -> None:
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml=f'''debuggers:
+  discovery:
+    type: "stlink"
+    executable: "{(Path(__file__).parent / "fixtures" / "fake_stlink.py").as_posix()}"
+''',
+            )
+        ),
+        str(tmp_path),
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list", {"debugger": "discovery"})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["debugger"] == "discovery"
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+
+
+def test_named_debugger_cannot_use_reserved_default_name(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        debuggers_yaml='''debuggers:
+  default:
+    type: "stlink"
+''',
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+
+    assert excinfo.value.error_type == "config_invalid"
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "duplicate_key"),
+    [
+        ("debuggers:\n  probe: {}\n  probe: {}\n", "probe"),
+        ("devices:\n  dut: {}\n  dut: {}\n", "dut"),
+        ("com_ports:\n  uart: {}\n  uart: {}\n", "uart"),
+        ("can_buses:\n  bus: {}\n  bus: {}\n", "bus"),
+        ("adapters:\n  rig: {}\n  rig: {}\n", "rig"),
+        ("permissions:\n  allow_flash: true\n  allow_flash: false\n", "allow_flash"),
+    ],
+)
+def test_project_config_rejects_duplicate_mapping_keys(tmp_path: Path, yaml_text: str, duplicate_key: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml_text, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path), str(tmp_path))
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert f"duplicate key '{duplicate_key}'" in excinfo.value.details["backend_error"]
+    assert excinfo.value.details["line"] > 0
+
+
+def test_config_path_defines_project_root_across_working_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = write_config(tmp_path)
+    subdirectory = tmp_path / "firmware" / "src"
+    subdirectory.mkdir(parents=True)
+    monkeypatch.chdir(subdirectory)
+
+    config = load_config(str(config_path))
+
+    assert config.config_path == str(config_path.resolve())
+    assert config.work_dir == str(tmp_path.resolve())
+
+
+def test_probe_listing_requires_probe_permission(tmp_path: Path) -> None:
+    service = AgenticHILToolService(
+        load_config(
+            str(write_config(tmp_path, debugger_type="stlink", permissions_yaml="permissions:\n  allow_probe: false\n")),
+            str(tmp_path),
+        )
+    )
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+
+
+def test_probe_listing_parsers_fail_closed() -> None:
+    assert stlink_probe_ids("ST-LINK SN  : 001\nSTLink SN: 002\n") == ["001", "002"]
+    assert stlink_empty_result("No ST-LINK detected") is True
+    assert parse_pyocd_probes("not-json")["error_type"] == "probe_discovery_failed"
+    assert parse_pyocd_probes('{"status": 1, "boards": []}')["error_type"] == "probe_discovery_failed"
+
+
+def test_debugger_probes_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config_path = write_config(tmp_path, debugger_type="stlink")
+
+    exit_code = entrypoint(["debugger-probes", "--config", str(config_path)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
 
 
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
@@ -173,6 +382,34 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert with_reset["reset_after_flash"] is True
     reset_log = (tmp_path / with_reset["log_path"]).read_text(encoding="utf-8")
     assert "verify reset" in reset_log
+
+
+def test_openocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path)), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert "debugger.flash_address" in result["summary"]
+
+
+def test_openocd_passes_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, flash_address="0x08000000")), str(tmp_path)))
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    log_text = (tmp_path / result["log_path"]).read_text(encoding="utf-8")
+    assert "verify 0x08000000" in log_text
 
 
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:
@@ -326,8 +563,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 35
-    assert len(set(MCP_TOOL_NAMES)) == 35
+    assert len(MCP_TOOL_NAMES) == 36
+    assert len(set(MCP_TOOL_NAMES)) == 36
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     config = load_config(str(write_config(tmp_path)), str(tmp_path))
     service = AgenticHILToolService(config)
@@ -389,8 +626,10 @@ def spawn_ignoring_bridge_child() -> subprocess.Popen[str]:
 def test_process_can_adapter_close_reaps_child() -> None:
     child = spawn_ignoring_bridge_child()
     session = ProcessCanAdapterSession(child)
-    session.close()
+    result = session.close()
     assert child.poll() is not None
+    assert result.process_reaped is True
+    assert result.safe_state_confirmed is False
 
 
 def test_process_can_adapter_request_after_exit_returns_error() -> None:
@@ -399,6 +638,49 @@ def test_process_can_adapter_request_after_exit_returns_error() -> None:
     session.close()
     result = session.send(CanFrame(id=1, extended=False, rtr=False, data=b""))
     assert result["ok"] is False
+
+
+def test_process_bridge_close_reaps_child_when_close_request_is_interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = spawn_ignoring_bridge_child()
+    session = ProcessCanAdapterSession(child)
+    monkeypatch.setattr(session, "request", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+
+    assert child.poll() is not None
+    assert session.last_close_result is not None
+    assert session.last_close_result.process_reaped is True
+    assert session.last_close_result.safe_state_confirmed is False
+
+
+def test_process_bridge_records_kill_interrupt_before_reraising(monkeypatch: pytest.MonkeyPatch) -> None:
+    class KillInterruptedChild:
+        stdin = None
+        stdout: list[str] = []
+        stderr: list[str] = []
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> None:
+            raise subprocess.TimeoutExpired("bridge", timeout)
+
+        def kill(self) -> None:
+            raise KeyboardInterrupt
+
+    session = ProcessCanAdapterSession(KillInterruptedChild())
+    monkeypatch.setattr(session, "request", lambda *_: {"ok": True, "safe_state_confirmed": True})
+
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+
+    assert session.last_close_result is not None
+    assert session.last_close_result.process_reaped is False
+    assert session.last_close_result.cleanup_confirmed is False
 
 
 NTC_ADAPTER_YAML = f'''adapters:

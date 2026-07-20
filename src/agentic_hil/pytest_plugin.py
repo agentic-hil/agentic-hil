@@ -98,6 +98,4 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
     try:
         yield _agentic_hil_service
     finally:
-        _agentic_hil_service.adapters.close()
-        _agentic_hil_service.com_ports.close()
-        _agentic_hil_service.can_buses.close()
+        _agentic_hil_service.cleanup_test_sessions()

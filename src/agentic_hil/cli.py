@@ -13,8 +13,12 @@ from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import DEFAULT_CONFIG_PATH, ConfigError, config_schema_text, display_path, load_config
 from agentic_hil.debugger import create_debugger_backend
+from agentic_hil.hardware_lock import HardwareLockError, ProjectHardwareLock, marker_owner_is_alive
+from agentic_hil.report import write_report
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.types import JsonObject
+from agentic_hil.test_reactor import TestReactor, load_test_config, test_config_schema_text
+from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
@@ -28,6 +32,13 @@ debugger:
   interface_cfg: "interface/stlink.cfg"
   target_cfg: "target/stm32f4x.cfg"
   timeout_s: 60
+
+debuggers: {}
+
+devices:
+  dut:
+    debugger: "default"
+    uart: null
 
 debug:
   gdb_executable: null
@@ -112,6 +123,11 @@ def entrypoint(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         print_json(error.to_dict())
         return 1
+    except HardwareLockError as error:
+        print_json({"ok": False, "error_type": "hardware_lock_failed", "backend_error": str(error), "summary": "Project hardware state storage is unavailable."})
+        return 1
+    except KeyboardInterrupt:
+        return 130
     if isinstance(result, int):
         return result
     if result is not None:
@@ -132,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
     doctor_parser.add_argument("--config", default=None)
 
+    debugger_probes_parser = subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
+    debugger_probes_parser.add_argument("--config", default=None)
+    debugger_probes_parser.add_argument("--debugger", default="default", help="named debugger from config, or default")
+
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
     mcp_parser = subparsers.add_parser("mcp-stdio", help="run MCP over stdio")
@@ -144,9 +164,26 @@ def build_parser() -> argparse.ArgumentParser:
     com_stdio_parser.add_argument("--read-wait-timeout-s", type=float, default=0.05)
     com_stdio_parser.add_argument("--eof-idle-timeout-s", type=float, default=0.5)
 
+    reactor_parser = subparsers.add_parser("test-reactor", help="run validated hardware tests across configured devices")
+    reactor_parser.add_argument("--config", default=None)
+    reactor_parser.add_argument("--test-config", required=True, help="explicit test configuration path; ~ expands to the user home directory")
+
+    hardware_status_parser = subparsers.add_parser("hardware-status", help="show project hardware lock and quarantine status")
+    hardware_status_parser.add_argument("--config", default=None)
+
+    hardware_recover_parser = subparsers.add_parser("hardware-recover", help="clear project hardware quarantine after operator inspection")
+    hardware_recover_parser.add_argument("--config", default=None)
+    hardware_recover_parser.add_argument("--quarantine-id", default=None)
+    hardware_recover_parser.add_argument("--acknowledge-hardware-checked", action="store_true")
+    hardware_recover_parser.add_argument("--force-live-owner", action="store_true", help="emergency override after independently stopping or isolating the source process")
+
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
     schema_parser.add_argument("--output", default=None)
     schema_parser.add_argument("--force", action="store_true")
+
+    test_schema_parser = subparsers.add_parser("test-schema", help="print or write bundled test configuration schema")
+    test_schema_parser.add_argument("--output", default=None)
+    test_schema_parser.add_argument("--force", action="store_true")
 
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
@@ -165,6 +202,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return init_config(args.config, args.force)
     if args.command == "doctor":
         return doctor(args.config)
+    if args.command == "debugger-probes":
+        return debugger_probes(args.config, args.debugger)
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
@@ -173,8 +212,16 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "com-stdio":
         config = load_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
+    if args.command == "test-reactor":
+        return run_test_reactor(args.config, args.test_config)
+    if args.command == "hardware-status":
+        return hardware_status(args.config)
+    if args.command == "hardware-recover":
+        return hardware_recover(args.config, args.acknowledge_hardware_checked, args.quarantine_id, args.force_live_owner)
     if args.command == "schema":
         return schema(args.output, args.force)
+    if args.command == "test-schema":
+        return test_schema(args.output, args.force)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -227,11 +274,111 @@ def init_next_steps(available_com_ports: JsonObject) -> list[str]:
     return next_steps
 
 
-def schema(output: str | None = None, force: bool = False) -> JsonObject:
+def debugger_probes(config_path: str | None = None, debugger_name: str = "default") -> JsonObject:
+    service = AgenticHILToolService(load_config(config_path))
+    try:
+        return service.call("debugger_probes_list", {"debugger": debugger_name})
+    finally:
+        service.close()
+
+
+def run_test_reactor(config_path: str | None, test_config_path: str) -> JsonObject:
+    config = load_config(config_path)
+    plan = load_test_config(test_config_path, config.work_dir)
+    return TestReactor(config).run(plan)
+
+
+def resolve_hardware_config_path(config_path: str | None) -> str:
+    """Resolve the lock/marker identity exactly like load_config, but without parsing the policy file.
+
+    Incident inspection and recovery must keep working when the project config is
+    invalid, unreadable, or deleted.
+    """
+    from agentic_hil.config import resolve_config_path
+
+    requested = Path(resolve_config_path(config_path)).expanduser()
+    resolved = requested if requested.is_absolute() else Path.cwd().resolve() / requested
+    return str(resolved.resolve())
+
+
+def hardware_status(config_path: str | None = None) -> JsonObject:
+    try:
+        hardware_lock = ProjectHardwareLock(resolve_hardware_config_path(config_path))
+        status = hardware_lock.status()
+    except HardwareLockError as error:
+        return {"ok": False, "tool": "hardware_status", "error_type": "hardware_status_failed", "backend_error": str(error), "summary": "Project hardware lock state could not be inspected."}
+    state = status.get("state")
+    quarantine_id = state.get("quarantine_id") if isinstance(state, dict) else None
+    return {"tool": "hardware_status", **status, "quarantine_id": quarantine_id, "quarantine": state if status.get("quarantined") else None}
+
+
+def hardware_recover(config_path: str | None = None, acknowledge_hardware_checked: bool = False, quarantine_id: str | None = None, force_live_owner: bool = False) -> JsonObject:
+    try:
+        config = load_config(config_path)
+    except ConfigError:
+        config = None
+    if not acknowledge_hardware_checked:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "acknowledgement_required", "summary": "Use --acknowledge-hardware-checked after confirming hardware is safe."}
+    if not quarantine_id:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Use --quarantine-id from hardware-status after confirming the exact hardware state is safe."}
+    try:
+        hardware_lock = ProjectHardwareLock(resolve_hardware_config_path(config_path))
+        acquired = hardware_lock.acquire(recovery=True, source="hardware_recover")
+    except HardwareLockError as error:
+        result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_lock_failed", "summary": "Project hardware lease could not be acquired for recovery.", "backend_error": str(error)}
+        return write_hardware_recovery_report(config, result)
+    if not acquired:
+        result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_busy", "summary": "Project hardware is in use by another Agentic HIL process."}
+        return write_hardware_recovery_report(config, result)
+    try:
+        previous = hardware_lock.quarantine_info()
+        if previous is not None and previous.get("recovery_blocked") is True:
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_state_unreadable", "summary": "Hardware state marker is unreadable; repair state-file access before recovery.", "state": previous}
+            return write_hardware_recovery_report(config, result)
+        if previous is None or previous.get("quarantine_id", previous.get("lease_id")) != quarantine_id:
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Hardware state marker changed after operator inspection.", "state": previous}
+            return write_hardware_recovery_report(config, result)
+        if not force_live_owner and marker_owner_is_alive(previous):
+            result = {"ok": False, "tool": "hardware_recover", "error_type": "owner_process_still_running", "summary": "Stop the original Agentic HIL process before recovery.", "state": previous}
+            return write_hardware_recovery_report(config, result)
+        hardware_lock.clear_quarantine(quarantine_id)
+        result = {"ok": True, "tool": "hardware_recover", "recovered": True, "restart_required": True, "state": previous, "summary": "Project hardware state marker cleared after operator acknowledgement. Restart any existing Agentic HIL service process before further hardware access."}
+        return write_hardware_recovery_report(config, result)
+    except HardwareLockError as error:
+        result = {"ok": False, "tool": "hardware_recover", "error_type": "hardware_recovery_failed", "summary": "Project hardware state marker could not be cleared.", "backend_error": str(error)}
+        return write_hardware_recovery_report(config, result)
+    finally:
+        hardware_lock.release_os_lock()
+
+
+def write_hardware_recovery_report(config: AgenticHILConfig | None, result: JsonObject) -> JsonObject:
+    if config is None:
+        return write_hardware_recovery_state_audit(result)
+    try:
+        return write_report(config, result)
+    except Exception as error:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "audit_write_failed", "operation_result": result, "backend_error": str(error), "summary": "Hardware recovery result could not be written."}
+
+
+def write_hardware_recovery_state_audit(result: JsonObject) -> JsonObject:
+    """Project config is unusable: audit the recovery into the user state directory instead."""
+    from agentic_hil.hardware_lock import hardware_state_directory
+    from agentic_hil.report import atomic_write_text, timestamp_for_filename
+
+    try:
+        audit_path = hardware_state_directory() / f"recovery-{timestamp_for_filename()}.json"
+        enriched = {**result, "report_path": str(audit_path), "report_note": "Project config was not loadable; recovery was audited into the user state directory."}
+        atomic_write_text(audit_path, json.dumps(enriched, indent=2) + "\n")
+        return enriched
+    except Exception as error:
+        return {"ok": False, "tool": "hardware_recover", "error_type": "audit_write_failed", "operation_result": result, "backend_error": str(error), "summary": "Hardware recovery result could not be written."}
+
+
+def schema(output: str | None = None, force: bool = False) -> JsonObject | None:
     text = config_schema_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return None
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -240,15 +387,28 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
 
 
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject | None:
+    text = test_config_schema_text()
+    if output is None:
+        sys.stdout.write(text)
+        return None
+    output_path = Path(output).expanduser()
+    if output_path.exists() and not force:
+        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    return {"ok": True, "summary": "Agentic HIL test configuration schema written.", "path": str(output_path)}
+
+
 def mcp_config_text() -> str:
     return resources.files("agentic_hil").joinpath("templates", "mcp.json").read_text(encoding="utf-8")
 
 
-def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
+def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | None:
     text = mcp_config_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return None
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "mcp_config_exists", "summary": "MCP configuration already exists. Use --force to overwrite it.", "path": output}

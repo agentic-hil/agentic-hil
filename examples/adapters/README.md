@@ -45,9 +45,9 @@ response: {"id": <int>, "result": {"ok": true, ...}}
 | `inject_fault` | `fault`, optional `channel` | enter a fault state |
 | `clear_fault` | optional `fault`, optional `channel` | leave fault state(s) |
 | `measure` | `channel` | return `value` (+ optional `unit`) for a channel |
-| `close` | — | shut down; the process should exit afterwards |
+| `close` | — | reset hardware to a safe state, return `safe_state_confirmed: true`, then exit |
 
-Agentic HIL enforces permissions (`allow_adapter_read`, `allow_adapter_write`), validates channel/fault names against the config, logs every action to `.agentic-hil/logs/adapter-*.jsonl`, and kills the bridge process if it does not exit on close.
+Agentic HIL enforces permissions (`allow_adapter_read`, `allow_adapter_write`), validates channel/fault names against the config, logs every action to `.agentic-hil/logs/adapter-*.jsonl`, and kills the bridge process if it does not exit on close. Bridge process exit alone is not considered safe; `close` must return `{"ok": true, "safe_state_confirmed": true}` after relays, loads, and injected faults are reset.
 
 ## Included example
 

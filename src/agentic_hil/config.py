@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
+from yaml.constructor import ConstructorError
+from yaml.resolver import BaseResolver
 
 from agentic_hil.types import (
     AdapterConfig,
@@ -17,6 +19,7 @@ from agentic_hil.types import (
     ComPortConfig,
     DebuggerConfig,
     DebugInterfaceConfig,
+    DeviceConfig,
     JsonObject,
     LogsConfig,
     PermissionsConfig,
@@ -28,6 +31,28 @@ from agentic_hil.types import (
 DEFAULT_CONFIG_PATH = ".agentic-hil/config.yaml"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> JsonObject:
+    loader.flatten_mapping(node)
+    mapping_value: JsonObject = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping_value
+        except TypeError as error:
+            raise ConstructorError("while constructing a mapping", node.start_mark, "found an unhashable key", key_node.start_mark) from error
+        if duplicate:
+            raise ConstructorError("while constructing a mapping", node.start_mark, f"found duplicate key {key!r}", key_node.start_mark)
+        mapping_value[key] = loader.construct_object(value_node, deep=deep)
+    return mapping_value
+
+
+UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping)
 
 
 class ConfigError(Exception):
@@ -71,42 +96,51 @@ def resolve_config_path(config_path: str | None = None) -> str:
 def load_config(config_path: str | None = None, work_dir: str | None = None) -> AgenticHILConfig:
     resolved_config_path = resolve_config_path(config_path)
     base = Path(work_dir or Path.cwd()).resolve()
-    config_file = Path(resolved_config_path)
+    requested_config_file = Path(resolved_config_path).expanduser()
+    config_file = (requested_config_file if requested_config_file.is_absolute() else base / requested_config_file).resolve()
+    if work_dir is None and config_file.parent.name == ".agentic-hil":
+        base = config_file.parent.parent
     if not config_file.exists():
         raise ConfigError(
             "config_file_not_found",
             "Agentic HIL configuration file could not be found.",
-            {"path": resolved_config_path},
+            {"path": str(config_file)},
         )
 
     try:
-        loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        loaded = yaml.load(config_file.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
     except OSError as error:
         raise ConfigError(
             "config_unreadable",
             "Agentic HIL configuration file could not be read.",
-            {"path": resolved_config_path, "backend_error": str(error)},
+            {"path": str(config_file), "backend_error": str(error)},
         ) from error
     except UnicodeDecodeError as error:
         raise ConfigError(
             "config_invalid",
             "Agentic HIL configuration file is not valid UTF-8 text.",
-            {"path": resolved_config_path},
+            {"path": str(config_file)},
         ) from error
     except yaml.YAMLError as error:
+        details: JsonObject = {"path": str(config_file), "backend_error": str(error)}
+        mark = getattr(error, "problem_mark", None)
+        if mark is not None:
+            details.update({"line": mark.line + 1, "column": mark.column + 1})
         raise ConfigError(
             "config_invalid",
             "Agentic HIL configuration file is not valid YAML.",
-            {"path": resolved_config_path},
+            details,
         ) from error
 
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
-        raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
-    validate_config_schema(raw, resolved_config_path)
+        raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": str(config_file)})
+    validate_config_schema(raw, str(config_file))
 
     target_raw = mapping(raw.get("target"), "target")
     debugger_raw = mapping(raw.get("debugger"), "debugger")
+    debuggers_raw = mapping(raw.get("debuggers"), "debuggers")
+    devices_raw = mapping(raw.get("devices"), "devices")
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
     com_ports_raw = mapping(raw.get("com_ports"), "com_ports")
@@ -125,14 +159,29 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
 
+    target = target_config(target_raw)
+    debugger = debugger_config(debugger_raw, debugger_type)
+    debuggers = {name: debugger_config(mapping(value, f"debuggers.{name}")) for name, value in debuggers_raw.items()}
+    if "default" in debuggers:
+        raise ConfigError(
+            "config_invalid",
+            "The debugger name 'default' is reserved for the top-level debugger configuration.",
+            {"field": "debuggers.default"},
+        )
+    com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
+    devices = {name: device_config(name, value, target) for name, value in devices_raw.items()}
+    validate_devices(devices, debuggers, com_ports)
+
     return AgenticHILConfig(
-        config_path=resolved_config_path,
+        config_path=str(config_file),
         work_dir=str(base),
-        target=target_config(target_raw),
-        debugger=debugger_config(debugger_raw, debugger_type),
+        target=target,
+        debugger=debugger,
+        debuggers=debuggers,
+        devices=devices,
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
-        com_ports={name: com_port_config(name, value) for name, value in com_ports_raw.items()},
+        com_ports=com_ports,
         can_buses={name: can_bus_config(name, value) for name, value in can_buses_raw.items()},
         adapters={name: adapter_config(name, value) for name, value in adapters_raw.items()},
         validation=validation_config(validation_raw),
@@ -207,9 +256,16 @@ def target_config(raw: JsonObject) -> TargetConfig:
     return TargetConfig(name=str(raw.get("name", "unknown-target")), controller=str(raw.get("controller", "unknown-controller")))
 
 
-def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
+def debugger_config(raw: JsonObject, debugger_type: str | None = None) -> DebuggerConfig:
+    resolved_type = debugger_type or str(raw.get("type", "openocd"))
+    if resolved_type not in {"openocd", "stlink", "pyocd"}:
+        raise ConfigError(
+            "config_invalid",
+            "Unsupported debugger type.",
+            {"value": resolved_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+        )
     return DebuggerConfig(
-        type=debugger_type,  # type: ignore[arg-type]
+        type=resolved_type,  # type: ignore[arg-type]
         executable=optional_string(raw.get("executable")),
         probe_id=optional_string(raw.get("probe_id")),
         target_type=optional_string(raw.get("target_type")),
@@ -219,6 +275,40 @@ def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
         flash_address=optional_string(raw.get("flash_address")),
         timeout_s=float(raw.get("timeout_s", 60)),
     )
+
+
+def device_config(name: str, value: Any, default_target: TargetConfig) -> DeviceConfig:
+    raw = mapping(value, f"devices.{name}")
+    target_raw = mapping(raw.get("target"), f"devices.{name}.target")
+    target = TargetConfig(
+        name=str(target_raw.get("name", default_target.name)),
+        controller=str(target_raw.get("controller", default_target.controller)),
+    )
+    return DeviceConfig(
+        debugger=str(raw["debugger"]),
+        uart=optional_string(raw.get("uart")),
+        target=target,
+    )
+
+
+def validate_devices(
+    devices: dict[str, DeviceConfig],
+    debuggers: dict[str, DebuggerConfig],
+    com_ports: dict[str, ComPortConfig],
+) -> None:
+    for name, device in devices.items():
+        if device.debugger != "default" and device.debugger not in debuggers:
+            raise ConfigError(
+                "config_invalid",
+                "Device references an unknown debugger.",
+                {"field": f"devices.{name}.debugger", "value": device.debugger},
+            )
+        if device.uart is not None and device.uart not in com_ports:
+            raise ConfigError(
+                "config_invalid",
+                "Device references an unknown UART from com_ports.",
+                {"field": f"devices.{name}.uart", "value": device.uart},
+            )
 
 
 def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
@@ -236,6 +326,7 @@ def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
         allowed_extensions=[item.lower() for item in string_list(raw.get("allowed_extensions"), [".elf", ".hex", ".bin"])],
         max_upload_size_mb=int(raw.get("max_upload_size_mb", 64)),
         allow_upload=bool(raw.get("allow_upload", True)),
+        max_local_artifact_size_mb=int(raw.get("max_local_artifact_size_mb", 256)),
     )
 
 

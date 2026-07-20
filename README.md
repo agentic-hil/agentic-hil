@@ -142,13 +142,32 @@ permissions:
 
 The MCP server reloads and validates this policy before every tool call, so configuration changes take effect without restarting the client. Invalid edits fail closed instead of continuing with the previously loaded policy.
 
+For a project with more than one DUT or probe, keep the single project policy and add named debuggers and logical devices. The existing `debugger:` remains the default debugger used by MCP tools and can be selected with `debugger: "default"`:
+
+```yaml
+debuggers:
+  controller_probe:
+    type: "openocd"
+    probe_id: "066DFF575051717867013749"
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
+
+devices:
+  controller:
+    debugger: "controller_probe"
+    uart: "dut_uart"
+    target:
+      name: "controller-board"
+      controller: "stm32f4"
+```
+
 Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
 ## MCP Tools
 
 | Group | Tools | Notes |
 |-------|-------|-------|
-| Debugger | `debugger_info`, `probe_target`, `reset_target` | OpenOCD, pyOCD, or STM32CubeProgrammer CLI |
+| Debugger | `debugger_info`, `debugger_probes_list`, `probe_target`, `reset_target` | Probe discovery with pyOCD or STM32CubeProgrammer; target access with OpenOCD, pyOCD, or STM32CubeProgrammer CLI |
 | Firmware | `flash_firmware`, `artifact_upload` | artifacts are validated (path, extension, format, SHA-256) before flashing; post-flash reset requires `reset_after_flash: true` |
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
@@ -164,6 +183,39 @@ Real-world firmware bugs show up under electrical conditions that standard lab t
 
 Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_ntc_adapter.py`): flash the firmware, set the simulated sensor to 25 °C and assert nominal behavior, inject an `open` fault and assert the firmware reports the sensor failure, clear the fault and assert recovery — every step automated, reproducible, and policy-gated.
 
+## Test Reactor
+
+The test reactor executes validated hardware workflows against the logical `devices:` in the one project-local `.agentic-hil/config.yaml`. A project can have any number of separate test configuration files. Pass the selected file explicitly; it may be inside the project, elsewhere on the machine, or below the user home directory via `~`:
+
+```bash
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/hardware/boot.yaml
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config ~/agentic-hil-tests/controller/diagnostics.yaml
+```
+
+Relative test-configuration paths are resolved from the project working directory. No directory is searched automatically and no project/user precedence rule applies. Tests in the selected file run strictly one at a time. A project-wide hardware lease blocks concurrent reactor, MCP, CLI, and pytest hardware access; policy changes during a run abort remaining hardware actions.
+
+```yaml
+version: 1
+tests:
+  - name: capture-diagnostic-buffer
+    device: controller
+    steps:
+      - action: debug_start
+        image_path: build/firmware.elf
+        mode: attach
+      - action: run_until_breakpoint
+        location: test_done
+        timeout_s: 10
+      - action: dump_memory
+        symbol: diagnostic_buffer
+        output_path: build/diagnostic-buffer.hex
+      - action: debug_stop
+```
+
+Supported steps are `flash`, `uart_open`, `uart_close`, `debug_start`, `run_until_breakpoint`, `dump_memory`, and `debug_stop`. The complete file is schema-validated and preflighted against device capabilities, artifacts, permissions, symbol allowlists, and step ordering before the first hardware action. Sessions opened by a failed test are cleaned up automatically.
+
+Export the editor/validation schema with `agentic-hil test-schema --output agentic-hil-test.schema.json`. A complete starting point is available at [`examples/test-reactor/diagnostic.yaml`](examples/test-reactor/diagnostic.yaml).
+
 ## Safety Model
 
 - The agent never gets a shell, a raw debugger, or a device path — only the named, configured resources.
@@ -172,7 +224,20 @@ Example diagnosis loop with the bundled NTC simulator (`examples/adapters/sim_nt
 - Deliberate interlock: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
 - Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
 - Test adapter channels and fault names are explicit allowlists — Agentic HIL rejects anything not named in the config before it reaches the adapter bridge.
+- Hardware access is protected by a project-scoped lease plus a persistent state marker. Agentic HIL writes `active` before the first hardware action, clears it only after confirmed cleanup, and leaves or upgrades it to `quarantined` when cleanup is unsafe or unconfirmed.
+- `hardware_state_unconfirmed` is authoritative: do not run more hardware actions until an operator has inspected the rig and used `hardware-status` / `hardware-recover`.
+- Process bridges must confirm physical safe state on close with `safe_state_confirmed: true`; a dead bridge process alone is not proof that relays, loads, or injected faults were reset.
 - All actions log to `.agentic-hil/logs/` and write a structured report to `.agentic-hil/reports/`.
+
+### Hardware quarantine
+
+Quarantine is created when cleanup cannot prove that debugger, COM, CAN, or adapter resources are inactive and physically safe. While an `active` or `quarantined` marker exists, new hardware actions fail closed with `hardware_state_unconfirmed`. Markers live under `${XDG_STATE_HOME:-~/.local/state}/agentic-hil/hardware/` on Linux/macOS and `%LOCALAPPDATA%\agentic-hil\hardware\` on Windows, not the project tree.
+
+Before recovery, inspect the rig: debugger and bridge processes stopped, COM/CAN resources free, adapter faults and relays reset, and DUT outputs in a safe state. Then use the exact `quarantine_id` reported by status so a stale acknowledgement cannot clear a newer unsafe state. Recovery refuses with `owner_process_still_running` while the Agentic HIL process that wrote the marker is still alive on this machine; stop that process first, or pass `--force-live-owner` only after independently stopping or isolating it. Recovery clears persistent state only; restart any existing MCP, pytest, or CLI service process before further hardware access because locally poisoned instances remain blocked.
+
+The lease is project-scoped by configuration path. Two projects that name the same physical probe, COM port, CAN channel, or adapter do not share a global resource lock; operators must avoid concurrent access across projects. Two further known limits: JSONL event logs are flushed but not fsynced per event, so a host crash can lose the final buffered log lines (the state marker and reports are written atomically and fsynced), and bridge cleanup terminates the direct child process only — bridge executables must not detach their own worker processes.
+
+`hardware-status` and `hardware-recover` intentionally do not parse the project policy file: they resolve the marker from the configuration path alone, so an operator can always inspect and recover an incident even when the config that caused it is invalid or deleted. Session-stop tools likewise skip the policy reload, so an active session can always be shut down safely under the last validated policy.
 
 ## pytest Plugin
 
@@ -194,11 +259,16 @@ The `agentic_hil` fixture loads `.agentic-hil/config.yaml` relative to the pytes
 ```text
 agentic-hil init
 agentic-hil doctor
+agentic-hil debugger-probes --config .agentic-hil/config.yaml --debugger controller_probe
 agentic-hil com-ports
+agentic-hil test-reactor --config .agentic-hil/config.yaml --test-config tests/hardware/boot.yaml
+agentic-hil hardware-status --config .agentic-hil/config.yaml
+agentic-hil hardware-recover --config .agentic-hil/config.yaml --quarantine-id <id> --acknowledge-hardware-checked
 agentic-hil mcp-config --output .mcp.json
 agentic-hil mcp-stdio --config .agentic-hil/config.yaml
 agentic-hil com-stdio --config .agentic-hil/config.yaml --port dut_uart
 agentic-hil schema --output agentic-hil-config.schema.json
+agentic-hil test-schema --output agentic-hil-test.schema.json
 agentic-hil skill-install --agent opencode
 ```
 

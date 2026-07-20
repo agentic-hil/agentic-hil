@@ -6,7 +6,7 @@ from typing import TextIO
 
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, cleanup_error_is_audit_only
 from agentic_hil.types import AgenticHILConfig
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
@@ -25,12 +25,16 @@ def run_stdio_server(
     config: AgenticHILConfig,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
+    error_stream: TextIO | None = None,
     max_message_chars: int | None = None,
 ) -> int:
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
+    error_stream = error_stream or sys.stderr
     limit = max_message_chars or message_size_limit(config)
     tools = AgenticHILToolService(config)
+    pending_base_exception: BaseException | None = None
+    cleanup_error: BaseException | None = None
     try:
         while True:
             raw_line = input_stream.readline(limit)
@@ -51,8 +55,44 @@ def run_stdio_server(
             response = handle_mcp_message(message, tools)
             if response is not None:
                 write_message(output_stream, response)
+    except BaseException as error:
+        pending_base_exception = error
     finally:
-        tools.close()
+        try:
+            tools.close()
+        except BaseException as error:
+            cleanup_error = error
+    if cleanup_error is not None:
+        try:
+            state = tools.hardware_state()
+            hardware_unconfirmed = bool(state["active"])
+        except Exception as state_error:
+            state = {"active_resources": [], "inspection_errors": [{"type": "hardware_state", "error": str(state_error)}]}
+            hardware_unconfirmed = True
+        audit_only = cleanup_error_is_audit_only(cleanup_error)
+        error_stream.write(
+            json.dumps(
+                {
+                    "ok": False,
+                    "tool": "mcp_stdio",
+                    "error_type": "audit_write_failed" if audit_only and not hardware_unconfirmed else "hardware_cleanup_failed",
+                    "hardware_state_unconfirmed": hardware_unconfirmed,
+                    "active_resources": state["active_resources"],
+                    "inspection_errors": state["inspection_errors"],
+                    "exception_type": type(cleanup_error).__name__,
+                    "backend_error": str(cleanup_error),
+                    "summary": "MCP server shutdown could not confirm a safe hardware state." if hardware_unconfirmed else "MCP server hardware cleanup completed, but shutdown reporting failed.",
+                }
+            )
+            + "\n"
+        )
+        error_stream.flush()
+    if pending_base_exception is not None:
+        raise pending_base_exception
+    if cleanup_error is not None:
+        if not isinstance(cleanup_error, Exception):
+            raise cleanup_error
+        return 1
     return 0
 
 
