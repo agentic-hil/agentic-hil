@@ -51,10 +51,10 @@ uvx --from agentic-hil agentic-hil --version
 4. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
 
 ```bash
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil@install-loop agentic-hil --version
 ```
 
-5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic-hil agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil agentic-hil --version`.
+5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic-hil agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil@install-loop agentic-hil --version`.
 6. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
@@ -66,7 +66,7 @@ then rerun step 3. A missing runner is a remediable setup prerequisite, not a re
 If the `pip --user` command is not reliably on `PATH`, use an isolated persistent install for the MCP server entry (still user-local, still no admin rights):
 
 ```bash
-uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil
+uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil@install-loop
 ```
 
 `pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.

@@ -39,7 +39,7 @@ Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.s
 
 ```bash
 uvx --from agentic-hil agentic-hil --version
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil@install-loop agentic-hil --version
 ```
 
 Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):
