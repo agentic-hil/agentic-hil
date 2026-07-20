@@ -16,6 +16,7 @@ from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
     config_schema_text,
+    ensure_safe_state_root,
     load_authoritative_config,
     project_config_path,
     user_state_root,
@@ -198,6 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
+    setup_parser = subparsers.add_parser("setup", help="one-shot project setup: config + agent skill + .mcp.json + doctor")
+    setup_parser.add_argument("--agent", default="claude-code")
+    setup_parser.add_argument("--force", action="store_true")
+
     return parser
 
 
@@ -229,7 +234,43 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
         return install_skill(args.agent, args.target, args.force)
+    if args.command == "setup":
+        return setup_project(args.agent, args.force)
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
+
+
+def setup_project(agent: str, force: bool = False) -> JsonObject:
+    """One-shot, RTK-style project setup. Prepares a safe state_root, writes the
+    authoritative config, installs the agent skill, writes .mcp.json, and runs
+    doctor -- so an agent needs a single command instead of orchestrating four
+    and hand-fixing the state_root permission snag."""
+    workspace = Path.cwd().resolve()
+    state_actions = ensure_safe_state_root()
+
+    config_path = project_config_path(workspace)
+    if config_path.exists() and not force:
+        config_result: JsonObject = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept (use --force to overwrite).", "path": str(config_path)}
+    else:
+        config_result = init_config(None, force=True)
+
+    skill_result = install_skill(agent, None, force)
+    mcp_result = mcp_config(".mcp.json", force=True)
+    doctor_result = doctor(None) if overall_success(config_result) else {"ok": False, "skipped": True, "summary": "Doctor skipped because configuration was not written."}
+
+    ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result))
+    return {
+        "ok": ok,
+        "tool": "agentic_hil_setup",
+        "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup finished with errors; inspect steps.",
+        "agent": agent,
+        "state_root_changes": state_actions,
+        "steps": {
+            "config": config_result,
+            "skill_install": skill_result,
+            "mcp_config": mcp_result,
+            "doctor": doctor_result,
+        },
+    }
 
 
 def init_config(config_path: str | None = None, force: bool = False) -> JsonObject:

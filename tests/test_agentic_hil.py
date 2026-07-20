@@ -30,10 +30,11 @@ from agentic_hil.cli import (
     install_skill,
     mcp_config,
     schema,
+    setup_project,
     test_schema,
 )
 from agentic_hil.comports import ComPortService
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import ConfigError, load_config, project_config_path
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService
@@ -66,6 +67,27 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
     assert "allow_reset: false" in config_text
     assert "allow_upload: false" in config_text
     assert initialized_config_path(workspace) == config_path
+
+
+def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["ok"] is True
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["steps"]["doctor"]["ok"] is True
+    assert (workspace / ".mcp.json").is_file()
+    assert (home / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md").is_file()
+    assert project_config_path(workspace).is_file()
 
 
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:

@@ -67,21 +67,23 @@ agentic-hil skill-install --agent <agent>          # or: uvx --from git+https://
 
 Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The installed `agentic-hil` distribution is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
 
+`agentic-hil setup --agent <agent>` (see below) already installs this skill as part of one-shot project setup; run `skill-install` on its own only for a skill-only reinstall or version bump.
+
 ## Configure Each Project
 
 In every firmware project that should use Agentic HIL:
 
 ```bash
-agentic-hil init
-# Review the deny-by-default external config path printed by init, then:
-agentic-hil doctor
+agentic-hil setup --agent <agent>
 ```
 
-`init` creates exactly one automatically discovered authoritative configuration outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. Ask the human operator to review resource and permission changes. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
+`setup` is the one-shot path: it prepares a safe external `state_root`, writes the deny-by-default authoritative config, installs the agent skill, writes `.mcp.json`, and runs `doctor` — one command instead of running `init`, `skill-install`, `mcp-config`, and `doctor` yourself, and it fixes the common group-writable `state_root` ancestor snag automatically. It returns one JSON result with a per-step breakdown.
 
-`agentic-hil doctor` validates that same file and checks the debugger only when `allow_probe` permits execution.
+The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. Ask the human operator to review resource and permission changes. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
 
-Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "Agentic HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
+Run the granular steps yourself only if you need to (`agentic-hil init`, then `agentic-hil doctor`). `doctor` validates the authoritative file and checks the debugger only when `allow_probe` permits execution.
+
+Expected healthy result: `ok: true` overall with each step ok, and — once `allow_probe` is enabled — a nested debugger result with `ok: true`.
 
 ## Configure MCP
 

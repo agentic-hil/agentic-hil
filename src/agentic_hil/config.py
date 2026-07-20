@@ -342,6 +342,39 @@ def user_state_root() -> Path:
     return safe_directory(root / "agentic-hil")
 
 
+def ensure_safe_state_root() -> list[str]:
+    """Create the user state directory and tighten any user-owned, group/other-
+    writable ancestors so validated_state_root() accepts it (the common
+    ``unsafe_configured_path`` snag on default Linux homes). Returns the list of
+    changes made. Posix only; on Windows the directory is created and ACL
+    checking is left to validate_windows_state_root()."""
+    target = user_state_root()
+    actions: list[str] = []
+    if os.name == "nt":
+        return actions
+    with suppress(OSError):
+        os.chmod(target, 0o700)
+    home = Path.home().resolve()
+    uid = os.geteuid()
+    for candidate in (target, *target.parents):
+        try:
+            info = os.stat(candidate, follow_symlinks=False)
+        except OSError:
+            continue
+        if info.st_uid != uid:
+            break  # never touch directories we do not own (e.g. /home, /)
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022 and not bool(mode & stat.S_ISVTX):
+            try:
+                os.chmod(candidate, mode & ~0o022)
+                actions.append(f"removed group/other write on {candidate}")
+            except OSError:
+                pass
+        if candidate == home:
+            break
+    return actions
+
+
 def project_state_directory(config: AgenticHILConfig) -> Path:
     identity = "\0".join(
         [
