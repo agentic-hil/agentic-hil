@@ -6,6 +6,7 @@ from typing import Any
 from agentic_hil import __version__
 from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
 from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
+from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
@@ -31,7 +32,7 @@ Workflow:
 7. Use configured COM port, CAN bus, and test-adapter ids only.
 8. Continue only when ok is true; target_ok, audit_ok, and cleanup_ok are not false; cleanup_required and quarantined are not true; lease_state is one of null, active, or released (any other value, including stale, blocks success); side_effect_status is neither unknown nor partial; and hardware_state is not unknown.
 9. On any composite failure, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
-10. For quarantined hardware, stop effects and ask the operator to inspect lease-status, physically confirm the current quarantine_id, and run recover --confirm-safe-state --quarantine-id <id>.
+10. For quarantined hardware, stop effects and ask the operator to inspect lease-status, physically confirm the current quarantine_id, and run recover --confirm-safe-state --quarantine-id <id>. If recovery returns config_changed, the operator verifies the config delta and reruns with --accept-config-change.
 
 Safety rules:
 - Do not request raw OpenOCD or debugger commands.
@@ -110,7 +111,11 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     if not isinstance(arguments, dict):
         return mcp_tool_error(name, "invalid_argument", "tools/call arguments must be an object.")
     result = tools.call(name, arguments)
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "structuredContent": result, "isError": not overall_success(result)}
+    # Defense-in-depth: strip any secret-named field before the result is
+    # serialized into the MCP content text and structuredContent. isError is
+    # computed from the raw result (redaction touches no success field).
+    safe_result = redact_sensitive(result)
+    return {"content": [{"type": "text", "text": json.dumps(safe_result, indent=2)}], "structuredContent": safe_result, "isError": not overall_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:

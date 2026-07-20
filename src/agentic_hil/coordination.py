@@ -20,11 +20,15 @@ from agentic_hil.config import (
     safe_read_text,
     trusted_state_directory,
 )
-from agentic_hil.redact import redact_sensitive
+from agentic_hil.redact import filesystem_error_detail, redact_sensitive
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 LEASE_VERSION = 2
 DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
+# Absolute paths under the environment-derived state_root / config location are
+# kept in the on-disk record for incident matching, but never emitted to an
+# operator or MCP sink.
+_RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace")
 LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
 RETRYABLE_CLEANUP_REASONS = frozenset(
     {
@@ -39,6 +43,14 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
 )
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
+
+
+def _public_record(record: JsonObject | None) -> JsonObject | None:
+    if not isinstance(record, dict):
+        return record
+    redacted = redact_sensitive(record)
+    assert isinstance(redacted, dict)
+    return {key: value for key, value in redacted.items() if key not in _RECORD_OUTPUT_HIDDEN_KEYS}
 
 
 class CoordinationError(RuntimeError):
@@ -113,7 +125,11 @@ class _LifetimeLock:
             except BaseException as error:
                 errors.append(error)
             else:
+                # Closing the fd also drops the OS lock, so if the explicit unlock
+                # above raised but the close succeeds, the lock is still gone;
+                # never leave `locked` True on a freed descriptor.
                 self.descriptor = -1
+                self.locked = False
         try:
             _close_windows_handles(self.directory_handles)
         except BaseException as error:
@@ -310,6 +326,13 @@ class HardwareCoordinator:
                 if blocked_after:
                     incident_after = sorted(residual_incident | {resource for item in remaining.values() for resource in item.resources})
                     self._persist_project("cleanup_required", incident_after, leases=remaining)
+                    # Re-normalize sibling quarantined markers down to the shrunken
+                    # incident set; otherwise a marker still listing the released
+                    # resource fails recover()'s marker ⊆ incident check forever
+                    # after an unclean owner death.
+                    for item in remaining.values():
+                        if item.state in {"cleanup_required", "quarantined"}:
+                            self._persist_lease(item, incident_override=incident_after)
                 elif remaining:
                     self._persist_project("active", leases=remaining)
                 else:
@@ -437,10 +460,10 @@ class HardwareCoordinator:
                 "blocked": self.blocked or blocked_state,
                 "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
                 "lifecycle_state": self._state,
-                # Defense-in-depth: strip any secret-named field from the record
-                # before it reaches an operator terminal or MCP client. The
-                # ownership marker is not secret-named and passes through.
-                "record": redact_sensitive(record),
+                # Strip secret-named fields AND the absolute env-derived paths
+                # (config_path, workspace) before the record reaches an operator
+                # terminal or MCP client.
+                "record": _public_record(record),
                 "leases": [lease.status() for lease in self.leases.values()],
             }
 
@@ -601,13 +624,14 @@ class HardwareCoordinator:
             ) from error
         return lock
 
-    def _persist_lease(self, lease: HardwareLease, state: str | None = None) -> None:
+    def _persist_lease(self, lease: HardwareLease, state: str | None = None, incident_override: list[str] | None = None) -> None:
         record_state = state or lease.state
         resources = list(lease.resources)
-        if record_state in {"cleanup_required", "quarantined"} and self.incident_resources:
+        incident = set(incident_override) if incident_override is not None else self.incident_resources
+        if record_state in {"cleanup_required", "quarantined"} and incident:
             # Every incident marker carries the full incident resource union so
             # project record and resource markers stay recovery-consistent.
-            resources = sorted(set(resources) | self.incident_resources)
+            resources = sorted(set(resources) | incident)
         record = self._base_record(record_state, resources)
         record.update(
             {
@@ -652,19 +676,22 @@ class HardwareCoordinator:
         return self.record_directory / f"{resource_digest(resource)}.json"
 
     def _read_record(self, resource: str) -> JsonObject | None:
+        # The record's absolute path lives under the environment-derived state_root
+        # and must never appear in a result destined for an operator/MCP sink; the
+        # resource name identifies the record safely for diagnostics.
         path = self._record_path(resource)
         try:
             text = safe_read_text(path)
         except FileNotFoundError:
             return None
         except (OSError, UnicodeDecodeError, ConfigError) as error:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "record_path": str(path), "backend_error": str(error)}) from error
+            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "resource": resource, **filesystem_error_detail(error)}) from error
         try:
             value = json.loads(text)
         except ValueError as error:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "record_path": str(path), "backend_error": str(error)}) from error
+            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "resource": resource, "backend_error": str(error)}) from error
         if not isinstance(value, dict) or value.get("version") not in {1, LEASE_VERSION}:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "record_path": str(path)})
+            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "resource": resource})
         if value.get("version") == 1:
             value = {**value, "version": LEASE_VERSION}
             if value.get("state") in {"cleanup_required", "quarantined"}:
@@ -678,7 +705,7 @@ class HardwareCoordinator:
             and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_marker", "recovered_quarantine_id"))
         )
         if not typed:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "record_path": str(path)})
+            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "resource": resource})
         return value
 
     def _write_record(self, resource: str, record: JsonObject) -> None:

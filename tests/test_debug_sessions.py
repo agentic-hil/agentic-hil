@@ -902,3 +902,69 @@ def test_audit_fault_between_breakpoint_deletes_stops_remaining_deletes(tmp_path
         with pytest.raises(RuntimeError):
             service.close()
         service.coordinator.close()
+
+
+def test_debug_stop_release_persist_fault_converges_on_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A transient persist fault during a debug lease release must leave the lease
+    # retryable, and a second debug_stop_session must converge (not stick until
+    # process restart).
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        coordinator = service.coordinator
+        original_write = coordinator._write_record
+        faults = {"remaining": 1}
+
+        def flaky_write(resource: str, record: dict) -> None:
+            if record.get("state") == "released" and faults["remaining"] > 0:
+                faults["remaining"] -= 1
+                raise OSError("injected release persist fault")
+            original_write(resource, record)
+
+        monkeypatch.setattr(coordinator, "_write_record", flaky_write)
+        first = service.call("debug_stop_session")
+        assert first["ok"] is False
+        assert coordinator.blocked is True
+
+        second = service.call("debug_stop_session")
+        assert second["ok"] is True, second
+        assert coordinator.blocked is False
+    finally:
+        service.close()
+
+
+def test_clear_breakpoints_missing_delete_does_not_poison_next_continue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tolerated "No breakpoint number N" delete must not clobber the target's
+    # stop reason to debugger_error, which would spuriously fail the next continue.
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        continued = service.call("debug_continue", {"timeout_s": 5})
+        assert continued["ok"] is True
+        assert continued["stop_reason"] == "breakpoint_hit"
+
+        debug = service.backend._debug
+        original = debug._gdb_command
+        listed_once = {"done": False}
+
+        def real_gdb_semantics(session, command: str, timeout_s=None, **kwargs):
+            if command.startswith("-break-list"):
+                if not listed_once["done"]:
+                    listed_once["done"] = True
+                    return original(session, command, timeout_s, **kwargs)
+                return GdbMiCommandResult(result_class="done", line='^done,BreakpointTable={nr_rows="0",body=[]}')
+            if command.startswith("-break-delete"):
+                return GdbMiCommandResult(result_class="error", line="", error_message="No breakpoint number 1.")
+            return original(session, command, timeout_s, **kwargs)
+
+        monkeypatch.setattr(debug, "_gdb_command", real_gdb_semantics)
+        cleared = service.call("debug_clear_breakpoints")
+        assert cleared["ok"] is True, cleared
+        monkeypatch.setattr(debug, "_gdb_command", original)
+
+        # The stop reason must be preserved, not poisoned to debugger_error.
+        assert str(debug.session.stop_reason.get("stop_reason")) != "debugger_error"
+        assert service.call("debug_stop_session")["ok"] is True
+    finally:
+        service.close()

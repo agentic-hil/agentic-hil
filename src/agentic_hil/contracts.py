@@ -11,6 +11,7 @@ from agentic_hil.types import JsonObject
 
 EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "additionalProperties": False}
 NONEMPTY_STRING: JsonObject = {"type": "string", "minLength": 1}
+SYMBOL_NAME: JsonObject = {"type": "string", "pattern": r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$"}
 TIMEOUT: JsonObject = {"type": "number", "minimum": 0}
 BREAKPOINT_LOCATION: JsonObject = {
     "oneOf": [
@@ -70,8 +71,8 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "debug_continue", "description": "Continue target execution until stop or timeout.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_halt", "description": "Halt the target in the active debug session.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_get_stop_reason", "description": "Return the last structured stop reason.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": object_schema({"symbol": NONEMPTY_STRING}, required=["symbol"])},
-    {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": object_schema({"symbol": NONEMPTY_STRING, "output_path": NONEMPTY_STRING}, required=["symbol", "output_path"])},
+    {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
+    {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": object_schema({"symbol": SYMBOL_NAME, "output_path": NONEMPTY_STRING}, required=["symbol", "output_path"])},
     {"name": "get_last_report", "description": "Return the most recent structured Agentic HIL report.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "classify_last_error", "description": "Classify the most recent Agentic HIL/debugger failure.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "com_ports_list", "description": "List configured named COM ports and detected host serial ports.", "inputSchema": EMPTY_OBJECT_SCHEMA},

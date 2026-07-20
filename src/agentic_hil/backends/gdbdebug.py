@@ -336,6 +336,11 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
+        # Preserve the target's stop reason: a tolerated "No breakpoint number N"
+        # delete makes _gdb_command clobber stop_reason to debugger_error, which
+        # would spuriously short-circuit the next debug_continue. Clearing
+        # breakpoints does not change target execution state.
+        prior_stop_reason = session.stop_reason
         # Reconcile from the backend's authoritative list FIRST and delete only
         # numbers GDB actually reports. Driving deletes from the local list would
         # re-issue `-break-delete N` for an id GDB already removed after a lost
@@ -355,6 +360,10 @@ class GdbDebugSessions:
         # The backend is authoritatively empty; only now is the local list safe
         # to drop, including provisional entries whose ACK was lost.
         session.breakpoints.clear()
+        # Restore the pre-clear stop reason if a tolerated missing-breakpoint
+        # delete poisoned it to a spurious debugger_error.
+        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
+            session.stop_reason = prior_stop_reason
         self._write_session_log(session)
         result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "cleared": cleared, "backend_reconciled": True, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "All breakpoints cleared and reconciled with the backend."}
         if self._audit_broken is not None:

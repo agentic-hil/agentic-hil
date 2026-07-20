@@ -24,6 +24,7 @@ from agentic_hil.config import (
     safe_read_text,
     safe_write_text,
 )
+from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 _GENESIS_DIGEST = "0" * 64
@@ -95,7 +96,7 @@ def _read_canonical_sidecar(canonical_path: Path) -> JsonObject:
         data = json.loads(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ConfigError("coordination_state_invalid", "Canonical audit ledger is corrupted.", {"path": str(_canonical_sidecar_path(canonical_path))}) from error
-    if not isinstance(data, dict) or not isinstance(data.get("sequence"), int) or not isinstance(data.get("chain_sha256"), str):
+    if not isinstance(data, dict) or not isinstance(data.get("sequence"), int) or not isinstance(data.get("chain_sha256"), str) or not isinstance(data.get("bytes"), int):
         raise ConfigError("coordination_state_invalid", "Canonical audit ledger has an invalid format.", {"path": str(_canonical_sidecar_path(canonical_path))})
     return data
 
@@ -279,7 +280,15 @@ def recommit_report_with_status(config: AgenticHILConfig, written: JsonObject, s
     if written.get("lease_state") == status.get("lease_state"):
         return {**written, **status}
     final = write_report(config, {**written, **status})
-    return {**final, **status}
+    merged = {**final, **status}
+    if final.get("audit_ok") is False:
+        # The re-commit write failed its audit; the lease.status() overlay
+        # (audit_ok=True on a cleanly-released lease) must not mask that. Surface
+        # the audit failure fail-closed instead of returning apparent success.
+        merged.update({"audit_ok": False, "ok": False, "cleanup_required": True})
+        merged["audit_error"] = final.get("audit_error")
+        merged["audit_errors"] = final.get("audit_errors")
+    return merged
 
 
 def read_last_report(config: AgenticHILConfig) -> JsonObject:
@@ -307,16 +316,18 @@ def read_report_state_entry(
                 return report
             return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary}
     except ConfigError as error:
-        return {"tool": tool, **error.to_dict()}
+        # error.to_dict() carries details["path"] = the absolute state-root path;
+        # drop it so no environment-derived path reaches the sink.
+        return {"tool": tool, **{key: value for key, value in error.to_dict().items() if key != "path"}}
     except (OSError, ValueError) as error:
-        # The absolute state-root path is internal; report the failure without
-        # emitting it to an operator/MCP sink.
+        # str(OSError) embeds the absolute state-root filename; emit only the
+        # error class/errno so no environment-derived path reaches the sink.
         return {
             "ok": False,
             "tool": tool,
             "error_type": "report_unreadable",
             "summary": "Agentic HIL report state could not be read.",
-            "backend_error": str(error),
+            **filesystem_error_detail(error),
         }
 
 

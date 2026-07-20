@@ -20,7 +20,7 @@ from agentic_hil.provisional import (
     discharge_provisional_handle,
     register_provisional_handle,
 )
-from agentic_hil.report import (  # noqa: F401 - append_jsonl kept for the passive rx reader path
+from agentic_hil.report import (
     append_jsonl,
     append_jsonl_audited,
     audit_unavailable,

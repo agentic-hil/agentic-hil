@@ -345,6 +345,35 @@ def test_tool_validation_blocks_backend_before_audit(tmp_path: Path, monkeypatch
     assert called is False
 
 
+def test_mcp_and_cli_redact_secret_named_fields_at_the_sink() -> None:
+    import json as _json
+
+    from agentic_hil.cli import print_json
+
+    class Tools:
+        def call(self, name: str, arguments: dict) -> dict:
+            return {"ok": True, "tool": name, "device_secret": "s3cr3t", "session_token": "t0ken", "quarantine_id": "keep"}
+
+    response = call_tool({"name": "probe_target", "arguments": {}}, Tools())  # type: ignore[arg-type]
+    # Redacted in BOTH the structuredContent and the serialized content text.
+    assert response["structuredContent"]["device_secret"] == "[redacted]"
+    assert response["structuredContent"]["session_token"] == "[redacted]"
+    assert response["structuredContent"]["quarantine_id"] == "keep"
+    assert "s3cr3t" not in response["content"][0]["text"]
+    assert "t0ken" not in response["content"][0]["text"]
+
+    printed: list[str] = []
+    original = sys.stdout.write
+    sys.stdout.write = printed.append  # type: ignore[assignment]
+    try:
+        print_json({"ok": True, "api_token": "leak-me", "state": "active"})
+    finally:
+        sys.stdout.write = original  # type: ignore[assignment]
+    rendered = "".join(printed)
+    assert "leak-me" not in rendered
+    assert _json.loads(rendered)["api_token"] == "[redacted]"
+
+
 def test_mcp_marks_unsafe_results_as_errors() -> None:
     class Tools:
         def __init__(self, result: dict):
@@ -1296,6 +1325,38 @@ def test_retryable_release_success_does_not_poison_other_incident(tmp_path: Path
     result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
     assert result["ok"] is True, result
     assert sorted(result["resources"]) == ["physical:b"]
+
+
+def test_multi_lease_incident_shrinks_sibling_markers_on_release(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "owner")
+    l1 = owner.acquire("physical:incident-a")
+    l2 = owner.acquire("physical:incident-b")
+    l1.quarantine("debug_target_state_unconfirmed")
+    l2.quarantine("second_failure")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    union = ["physical:incident-a", "physical:incident-b"]
+    # Incident grew to {a,b}; the sibling marker b over-claims the full union.
+    assert sorted(owner._read_record("physical:incident-b")["resources"]) == union
+
+    assert l1.resolve_retryable_cleanup("debug_target_state_unconfirmed") is True
+    assert l1.release() is True
+
+    # Sibling marker b must be re-normalized down to {b}; otherwise recover()'s
+    # marker-subset check would reject the incident forever after an unclean crash.
+    assert owner._read_record("physical:incident-b")["resources"] == ["physical:incident-b"]
+    assert owner._read_record(owner.project_key)["resources"] == ["physical:incident-b"]
+
+    # Simulate an unclean owner death (drop OS locks WITHOUT close()'s re-persist).
+    for lock in list(l2.locks):
+        lock.release()
+    if owner.project_lock is not None:
+        owner.project_lock.release()
+
+    recovery = HardwareCoordinator(config, "recovery")
+    result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert result["ok"] is True, result
+    assert sorted(result["resources"]) == ["physical:incident-b"]
 
 
 def test_adopted_lease_less_incident_survives_unrelated_release(tmp_path: Path) -> None:

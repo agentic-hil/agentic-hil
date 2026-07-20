@@ -803,10 +803,13 @@ def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
                 with suppress(FileExistsError):
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
             next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            opened = os.fstat(next_descriptor)
-            if not stat.S_ISDIR(opened.st_mode):
+            try:
+                opened = os.fstat(next_descriptor)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise ConfigError("unsafe_configured_path", "Configured path component is not a directory.", {"path": str(path)})
+            except BaseException:
                 os.close(next_descriptor)
-                raise ConfigError("unsafe_configured_path", "Configured path component is not a directory.", {"path": str(path)})
+                raise
             os.close(descriptor)
             descriptor = next_descriptor
         return descriptor

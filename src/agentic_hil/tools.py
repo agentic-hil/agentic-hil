@@ -446,11 +446,16 @@ class AgenticHILToolService:
         if name == "debug_stop_session":
             if overall_success(result):
                 lease.resolve_retryable_cleanup("debug_session_cleanup_unconfirmed")
-                if lease.state != "active":
-                    result = {**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed."}
                 written = self._lease_result(result, lease)
-                if lease.state == "active" and written.get("audit_ok") is not False and lease.release():
+                # lease.release() handles both an active lease and a lease left in
+                # the retryable "lease_release_unconfirmed" state by a prior
+                # transient persist fault, so a debug release can converge instead
+                # of sticking until process restart.
+                if written.get("audit_ok") is not False and lease.release():
                     self._debug_lease = None
+                    return self._recommit_lease_report(written, lease)
+                if lease.state != "active":
+                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed."}, lease)
                 return self._recommit_lease_report(written, lease)
             else:
                 lease.quarantine("debug_session_cleanup_unconfirmed", audit_broken=result.get("audit_ok") is False)
@@ -561,10 +566,11 @@ class AgenticHILToolService:
                         if shutdown_result.get("audit_ok") is False:
                             raise RuntimeError("Debug shutdown report could not be persisted.")
                         lease.resolve_retryable_cleanup("debug_backend_cleanup_exception")
-                        if lease.state != "active":
-                            raise RuntimeError("Debug shutdown completed, but prior target state remains unconfirmed.")
+                        # release() converges an active lease or one left retryable
+                        # by a prior release-persist fault; a genuine quarantine
+                        # returns False and stays unconfirmed for operator recovery.
                         if not lease.release():
-                            raise RuntimeError("Debug shutdown lease release remained unconfirmed.")
+                            raise RuntimeError("Debug shutdown completed, but prior target state remains unconfirmed.")
                     except BaseException as error:
                         try:
                             lease.quarantine("debug_shutdown_reporting_failed", error, audit_broken=bool(shutdown_result and shutdown_result.get("audit_ok") is False))

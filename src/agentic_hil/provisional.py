@@ -47,6 +47,7 @@ def cleanup_provisional_handles(owner_marker: str) -> list[str]:
     whose close succeeds are removed; entries that still fail stay registered so
     a later call retries them. Returns one error string per failed handle."""
     errors: list[str] = []
+    interrupt: KeyboardInterrupt | SystemExit | None = None
     with _GUARD:
         targets = [(token, entry) for token, entry in _HANDLES.items() if entry.owner_marker == owner_marker]
     for token, entry in targets:
@@ -54,9 +55,15 @@ def cleanup_provisional_handles(owner_marker: str) -> list[str]:
             entry.close()
         except BaseException as error:  # noqa: BLE001 - best-effort cleanup, aggregated
             errors.append(f"{entry.label}: {type(error).__name__}: {error}")
+            if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
+                interrupt = error
             continue
         with _GUARD:
             _HANDLES.pop(token, None)
+    if interrupt is not None:
+        # Every handle was still attempted; only now, after the best-effort
+        # sweep, is the interrupt propagated instead of masked as an error string.
+        raise interrupt
     return errors
 
 

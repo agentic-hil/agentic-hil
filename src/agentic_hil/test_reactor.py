@@ -589,10 +589,13 @@ class TestReactor:
         return None
 
     def _preflight_tool_contract(self, index: int, step: TestStep) -> JsonObject | None:
-        # Validate every later step's derived tool arguments against the exact
-        # MCP contract validators, so a step the reactor schema accepted but the
-        # tool contract rejects (e.g. a traversal path) fails before any backend
-        # call builds hardware or process state.
+        # Validate each step's plan-supplied tool arguments against the exact MCP
+        # contract validators, so a step the reactor schema accepted but the tool
+        # contract rejects (e.g. a traversal path) fails before any backend call
+        # builds hardware or process state. (uart_open/uart_close carry no
+        # plan-supplied arguments — their port_id is device-config-derived and
+        # already validated at config load — so they have nothing to pre-check
+        # here beyond the semantic device checks above.)
         for tool, arguments in step_tool_arguments(step):
             error = validate_tool_arguments(tool, arguments)
             if error is not None:
@@ -618,8 +621,10 @@ class TestReactor:
 
 
 def step_tool_arguments(step: TestStep) -> list[tuple[str, JsonObject]]:
-    """Every MCP tool call a step will make, as (tool, arguments), so preflight
-    can validate them against the same contracts the dispatcher enforces."""
+    """The plan-supplied tool calls a step will make, as (tool, arguments), so
+    preflight can validate them against the same contracts the dispatcher
+    enforces. uart_open/uart_close are omitted: their only argument (port_id) is
+    device-config-derived, not plan-supplied, and validated at config load."""
     action = step.action
     arguments = step.arguments
     if action == "flash":
