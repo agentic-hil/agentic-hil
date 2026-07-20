@@ -29,9 +29,8 @@ from agentic_hil.cli import (
     initialized_config_path,
     install_skill,
     mcp_config,
-    migrate_config,
     schema,
-    write_exclusive_text,
+    test_schema,
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
@@ -69,269 +68,42 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
     assert initialized_config_path(workspace) == config_path
 
 
-def test_migrate_config_writes_external_deny_by_default_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text(
-        "target:\n  name: old-target\nartifacts:\n  allow_upload: true\npermissions:\n  allow_probe: true\n",
-        encoding="utf-8",
-    )
-    target = initialized_config_path(workspace)
-    if target.exists():
-        target.unlink()
-
-    result = migrate_config(str(legacy))
-
-    assert result["ok"] is True
-    assert result["path"] == str(target)
-    migrated = target.read_text(encoding="utf-8")
-    assert f"workspace_root: {str(workspace.resolve())}" in migrated
-    assert "allow_probe: false" in migrated
-    assert "allow_upload: false" in migrated
-    assert load_config(str(target), str(workspace)).target.name == "old-target"
-
-
-def test_migrate_config_accepts_explicit_external_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = tmp_path / "external-config.yaml"
-    legacy.write_text("target:\n  name: external-target\n", encoding="utf-8")
-
-    result = migrate_config(str(legacy.resolve()))
-
-    assert result["ok"] is True
-    assert load_config(result["path"], str(workspace)).target.name == "external-target"
-
-
-def test_migrate_config_rejects_non_empty_bridge_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text(
-        "can_buses:\n  injected:\n    adapter: process\n    executable: /bin/python\n    args: [workspace-script.py]\n",
-        encoding="utf-8",
-    )
-    target = initialized_config_path(workspace)
-    if target.exists():
-        target.unlink()
-
-    with pytest.raises(ConfigError) as rejected:
-        migrate_config(str(legacy))
-
-    assert rejected.value.error_type == "config_migration_required"
-    assert rejected.value.details["field"] == "can_buses.injected.args"
-    assert not target.exists()
-
-
-def test_migrate_config_yaml_error_does_not_echo_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    secret = "legacy-secret-must-not-leak"
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text(f"bridge_password: [{secret}\n", encoding="utf-8")
-
-    with pytest.raises(ConfigError) as rejected:
-        migrate_config(str(legacy))
-
-    details = json.dumps(rejected.value.to_dict())
-    assert rejected.value.error_type == "config_invalid"
-    assert secret not in details
-    assert "line" in rejected.value.details
-
-
-def test_migrate_config_rejects_non_string_mapping_key(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("can_buses:\n  1: {}\n", encoding="utf-8")
-
-    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_invalid"
-    assert result["line"] == 2
-    assert result["column"] == 3
-    assert "backend_error" not in result
-
-
-def test_write_exclusive_text_removes_incomplete_target_on_fsync_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "config.yaml"
-
-    def fail_fsync(_descriptor: int) -> None:
-        raise OSError("fsync failed")
-
-    monkeypatch.setattr(os, "fsync", fail_fsync)
-
-    with pytest.raises(OSError):
-        write_exclusive_text(target, "workspace_root: /tmp\n")
-
-    assert not target.exists()
-
-
-def test_write_exclusive_text_removes_incomplete_target_on_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "config.yaml"
-    monkeypatch.setattr(os, "fsync", lambda _descriptor: (_ for _ in ()).throw(KeyboardInterrupt()))
-
-    with pytest.raises(KeyboardInterrupt):
-        write_exclusive_text(target, "workspace_root: /tmp\n")
-
-    assert not target.exists()
-
-
-@pytest.mark.parametrize("section_value", ["null", "[]"])
-@pytest.mark.parametrize("section", ["debug", "artifacts"])
-def test_migrate_config_rejects_wrong_shaped_sections(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    section: str,
-    section_value: str,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text(f"{section}: {section_value}\n", encoding="utf-8")
-
-    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_invalid"
-    assert result["field"] == section
-
-
-def test_migrate_config_reports_source_io_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.setattr("agentic_hil.cli.safe_read_text", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret path detail")))
-
-    exit_code = entrypoint(["migrate-config", "--from", str((tmp_path / "legacy.yaml").resolve())])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_unreadable"
-    assert "secret path detail" not in json.dumps(result)
-
-
-def test_migrate_config_reports_destination_io_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
-    monkeypatch.setattr("agentic_hil.cli.write_exclusive_text", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret path detail")))
-
-    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_write_failed"
-    assert "secret path detail" not in json.dumps(result)
-
-
-def test_migrate_config_cleans_target_after_post_write_io_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
-    target = initialized_config_path(workspace)
-    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("secret detail")))
-
-    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_write_failed"
-    assert "secret detail" not in json.dumps(result)
-    assert not target.exists()
-
-
-def test_migrate_config_cleans_target_after_post_write_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
-    target = initialized_config_path(workspace)
-    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
-
-    with pytest.raises(KeyboardInterrupt):
-        migrate_config(str(legacy))
-
-    assert not target.exists()
-
-
-def test_migrate_config_cleans_validation_temp_after_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
-    target = initialized_config_path(workspace)
-    monkeypatch.setattr("agentic_hil.cli.os.fsync", lambda _descriptor: (_ for _ in ()).throw(KeyboardInterrupt()))
-
-    with pytest.raises(KeyboardInterrupt):
-        migrate_config(str(legacy))
-
-    assert not target.exists()
-    assert target.parent.exists()
-    assert list(target.parent.iterdir()) == []
-
-
-def test_migrate_config_parent_collision_is_write_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    legacy = workspace / ".agentic-hil" / "config.yaml"
-    legacy.parent.mkdir()
-    legacy.write_text("target:\n  name: legacy\n", encoding="utf-8")
-    target = initialized_config_path(workspace)
-    target.parent.parent.mkdir(parents=True, exist_ok=True)
-    target.parent.write_text("not a directory", encoding="utf-8")
-
-    exit_code = entrypoint(["migrate-config", "--from", str(legacy)])
-
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_write_failed"
-
-
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "config.schema.json"
     result = schema(str(schema_path))
     assert result["ok"] is True
     assert "Agentic HIL configuration" in schema_path.read_text(encoding="utf-8")
+
+
+def test_test_schema_exports_bundled_testconfig_schema(tmp_path: Path) -> None:
+    schema_path = tmp_path / "testconfig.schema.json"
+    result = test_schema(str(schema_path))
+    assert result["ok"] is True
+    assert "test reactor configuration" in schema_path.read_text(encoding="utf-8")
+
+    denied = test_schema(str(schema_path))
+    assert denied["ok"] is False
+    assert denied["error_type"] == "schema_exists"
+
+    assert test_schema(str(schema_path), force=True)["ok"] is True
+
+
+def test_doctor_reports_named_debugger_selectors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n",
+        devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: probe_b\n",
+        permissions_yaml="permissions: {}\n",
+    )
+    monkeypatch.chdir(workspace)
+
+    result = doctor()
+
+    assert result["ok"] is True
+    assert result["devices"]["dut_a"]["debugger"] == "default"
+    assert result["devices"]["dut_b"]["debugger"] == "probe_b"
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:

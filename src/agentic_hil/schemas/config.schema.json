@@ -36,7 +36,7 @@
     },
     "devices": {
       "type": "object",
-      "description": "Logical DUTs available to the test reactor. Each device may use the global debugger and one configured UART.",
+      "description": "Logical DUTs available to the test reactor. Each device may bind the top-level debugger (true), a named entry from `debuggers`, or no debugger, plus one configured UART.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -63,7 +63,7 @@
           "target": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Optional per-device target override (defaults to the top-level target).",
+            "description": "Per-device target override for a device on a named debugger; unspecified fields default to the top-level target.",
             "properties": {
               "name": {
                 "type": "string"

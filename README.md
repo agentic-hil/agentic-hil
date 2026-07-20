@@ -112,8 +112,17 @@ com_ports:
 
 devices:
   dut:
-    debugger: true            # at most one Device may use the global debugger
+    debugger: true            # at most one Device may use the top-level debugger
     uart: "dut_uart"          # reference a named com_ports entry
+  dut_b:
+    debugger: "probe_b"       # named entry in `debuggers` for an independent board
+    target:                   # optional override; requires a named debugger
+      name: "sensor-node"
+
+debuggers:                    # additional probes for multi-board test-reactor plans
+  probe_b:
+    type: "openocd"
+    probe_id: "0669FF505153"  # pin the physical probe so boards cannot swap silently
 
 can_buses:
   dut_can:
@@ -145,14 +154,6 @@ The operator reviews this file and explicitly enables only the required resource
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
-Existing 0.2.3 projects with `.agentic-hil/config.yaml` must migrate explicitly:
-
-```bash
-agentic-hil migrate-config --from .agentic-hil/config.yaml
-```
-
-Migration writes the canonical external config, sets `workspace_root`, removes only empty legacy bridge `args`, and forces hardware permissions, uploads, and unrestricted symbol access back to `false`. Non-empty bridge `args` require manual migration: pin an operator-controlled wrapper directly as `executable` instead.
-
 Export the full JSON schema with `agentic-hil schema --output agentic-hil-config.schema.json`.
 
 ## MCP Tools
@@ -171,9 +172,22 @@ A typical loop: build firmware → `flash_firmware` with `reset_after_flash: tru
 
 ## Test Reactor
 
-The test reactor executes a strict, sequential YAML or JSON test plan against logical `devices` from the authoritative config. A Device binds to a debugger — the top-level `debugger` (`devices.<id>.debugger: true`) or a named entry in the `debuggers` map for an independently controlled board (`devices.<id>.debugger: <name>`, with an optional per-device `target`) — and optionally one named UART. Each physical probe drives exactly one device; named-debugger devices run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
+Write a hardware test as a plan, not a script: one reviewable YAML file describes flash → stimulate → break → dump, and the reactor guarantees it is either executed exactly as written or rejected before the first hardware action. No half-run plans, no leftover breakpoints, no orphaned debug or UART sessions — the same file behaves identically on your bench and in CI, and it diffs like code in a pull request.
+
+The test reactor executes a strict, sequential YAML or JSON test plan against logical `devices` from the authoritative config. A Device binds to a debugger, to one named UART, or to both — nothing more is required, and a UART-only device runs UART-only plans without any debugger configured. The debugger is either the top-level `debugger` (`devices.<id>.debugger: true`) or a named entry in the `debuggers` map for an independently controlled board (`devices.<id>.debugger: <name>`, with an optional per-device `target`). Each physical probe drives exactly one device; named-debugger devices run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
 
 Before the first hardware action, the reactor validates every device, capability, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
+
+The run pipeline is deliberately simple — validate everything, then execute, then always clean up:
+
+```mermaid
+flowchart LR
+    plan["test plan<br/>(YAML / JSON)"] --> pre["preflight:<br/>every step validated,<br/>no hardware touched"]
+    pre -->|any finding| rej["rejected —<br/>zero steps executed"]
+    pre -->|all steps valid| run["sequential execution,<br/>fail-fast"]
+    run --> clean["guaranteed cleanup:<br/>breakpoints removed,<br/>sessions closed"]
+    clean --> rep["structured report<br/>+ canonical audit"]
+```
 
 ```yaml
 # .agentic-hil/testconfig.yaml
@@ -199,18 +213,43 @@ See [`examples/testconfig.example.yaml`](examples/testconfig.example.yaml) for t
 
 ## Safety Model
 
-- The agent never gets a shell or raw debugger; MCP exposes only resources named in the authoritative configuration.
-- By default, the config is discovered in the current user's Agentic HIL projects directory. `AGENTIC_HIL_CONFIG` may select another absolute path. Either file must remain outside the repository and bind `workspace_root` to the exact project workspace. Configured debugger and process-bridge executables are pinned at startup and rejected if they resolve inside the workspace.
-- Firmware artifacts must live under `artifacts.allowed_roots`, match an allowed extension, pass format plausibility checks, and are hashed before flashing. Path traversal is rejected.
-- Validated artifacts are reopened without following links, checked for replacement/hard links, and staged in a private process directory before any debugger backend can consume them.
-- Permission switches gate high-risk action classes, including debugger execution, flashing, and reset. A post-flash reset requires both `allow_flash` and `allow_reset`; flashing without reset requires only `allow_flash`. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
-- Deliberate interlock: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
-- Serial/CAN writes are size-capped (`max_write_bytes`, `max_frame_data_bytes`); reads are buffer-capped. Debugger calls run with timeouts and TCP servers disabled (OpenOCD `gdb_port`/`tcl_port`/`telnet_port disabled`); only a typed debug session opens a `gdb_port`, bound to `localhost` on an ephemeral port for exactly that session, and it is torn down with the session.
-- All actions log to `.agentic-hil/logs/` and write a structured report to `.agentic-hil/reports/`.
-- Every frontend acquires persistent owner-token leases under the user state directory before touching hardware. A second process receives `resource_busy`; owner crashes, unknown effects, audit failures, or unconfirmed cleanup quarantine resources instead of silently releasing them.
-- Process bridges implement protocol version 2. Resource release requires both `safe_state_confirmed: true` from device-specific cleanup and verified process-tree reap. Operators inspect `agentic-hil lease-status`, physically confirm recovery for its current `quarantine_id`, then run `agentic-hil recover --confirm-safe-state --quarantine-id <id>`. An old incident ID cannot release a newer quarantine. If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` (showing the recorded and current hashes); after verifying the config delta, rerun with the explicit `--accept-config-change` override.
-- Detailed hardware-effect logs are written canonically under the trusted `state_root` with a monotonic sequence and a tamper-evident SHA-256 hash chain; the workspace log is an untrusted mirror. `get_last_report`/`classify_last_error` expose `canonical_audit` (`log_sequence`, `log_chain_sha256`, `workspace_log_verified`), where verification confirms every canonical effect record is still present, in order, in the workspace log.
-- Canonical report and lease state lives under the absolute `state_root` pinned in the authoritative config. `agentic-hil init` chooses `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX and persists that path. Workspace report files are write-only compatibility snapshots and never bootstrap trusted state.
+Leave an agent alone with real bench hardware and still trust the board, the host, and the logs afterwards. The agent can edit every file inside the workspace, so nothing there is trusted — all authority sits outside, beyond its reach:
+
+```mermaid
+flowchart LR
+    subgraph ws["project workspace — agent-writable"]
+        agent["AI agent / CI"]
+    end
+    subgraph host["operator-controlled host — outside the workspace"]
+        cfg["authoritative config<br/>deny-by-default permissions,<br/>pinned executables,<br/>bound to workspace_root"]
+        state["state_root<br/>owner leases · quarantine ·<br/>SHA-256 audit chain"]
+    end
+    agent -- "MCP (stdio)" --> hil["Agentic HIL"]
+    hil -- "policy lookup" --> cfg
+    hil -- "leases + canonical audit" --> state
+    hil -- "validated, time-boxed actions" --> hw["debug probe · serial · CAN"]
+```
+
+Every hardware action, from every entry point, walks the same gate:
+
+```mermaid
+flowchart LR
+    call["tool call"] --> gate["permission gate<br/>deny-by-default"]
+    gate --> val["validate<br/>paths · artifacts · sizes"]
+    val --> lease["acquire owner lease<br/>cross-process"]
+    lease --> exec["execute<br/>pinned executable, timeout"]
+    exec --> audit["append to<br/>SHA-256 audit chain"]
+    audit --> result["structured JSON result"]
+    exec -.->|crash / unknown effect| quarantine["quarantine —<br/>operator recovery required"]
+```
+
+- Deny-by-default permission switches per action class, with deliberate interlocks — flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
+- Configured executables and OpenOCD scripts are pinned at startup and must resolve outside the workspace; firmware artifacts are validated, hashed, and staged in a private process directory before any backend consumes them.
+- Serial/CAN writes and reads are size- and buffer-capped; debugger calls run with timeouts and OpenOCD's TCP servers disabled.
+- One live owner per project and physical probe/port/bus across all entry points; a second process gets `resource_busy`, and crashes or unknown effects quarantine the resource until explicit operator recovery ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#13-resource_busy-or-quarantined-hardware)).
+- Canonical reports and the tamper-evident audit chain live under the operator-pinned `state_root`; workspace logs and reports are untrusted mirrors, verified against the chain on read.
+
+The complete threat model and design rationale: [docs/security-design.md](docs/security-design.md).
 
 ## pytest Plugin
 
@@ -230,6 +269,7 @@ agentic-hil mcp-stdio
 agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 agentic-hil com-stdio --port dut_uart
 agentic-hil schema --output agentic-hil-config.schema.json
+agentic-hil test-schema --output testconfig.schema.json
 agentic-hil skill-install --agent opencode
 ```
 

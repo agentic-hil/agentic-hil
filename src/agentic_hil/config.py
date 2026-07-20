@@ -165,13 +165,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
-    if "workspace_root" not in raw:
-        raise ConfigError(
-            "config_migration_required",
-            "Agentic HIL 0.2.3-style configurations must be migrated to the external authoritative policy format.",
-            {"path": resolved_config_path, "next_step": f"agentic-hil migrate-config --from {resolved_config_path}"},
-        )
-    reject_legacy_bridge_args(raw, resolved_config_path)
+    reject_bridge_args(raw, resolved_config_path)
     validate_config_schema(raw, resolved_config_path)
 
     workspace_value = str(raw["workspace_root"])
@@ -295,7 +289,28 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
             "The automatically discovered config is not canonical for this workspace.",
             {"path": str(resolved), "expected_path": str(project_config_path(workspace)), "workspace_root": config.workspace_root},
         )
-    return pin_configured_paths(pin_configured_executables(config))
+    return validate_pinned_probe_ownership(pin_configured_paths(pin_configured_executables(config)))
+
+
+def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfig:
+    # validate_devices() rejects probe collisions on the *configured* values, but
+    # pinning can collapse two lexically distinct executables (or a null one
+    # resolved from PATH) onto the same binary. Re-check on the pinned config so
+    # two devices can never silently drive one physical probe.
+    resource_owner: dict[str, str] = {}
+    for name, device in config.devices.items():
+        if device.debugger is None:
+            continue
+        resolved = config.debugger if device.debugger == "default" else config.debuggers[device.debugger]
+        identity = debugger_resource_identity(resolved)
+        if identity in resource_owner:
+            raise ConfigError(
+                "config_invalid",
+                "Two devices resolve to the same physical debug probe after executable pinning; give each debugger a distinct probe_id or resource_id so boards cannot silently share a probe.",
+                {"field": f"devices.{name}.debugger", "resource": identity, "other_device": resource_owner[identity]},
+            )
+        resource_owner[identity] = name
+    return config
 
 
 def project_config_directory() -> Path:
@@ -1437,6 +1452,12 @@ def validate_devices(devices: dict[str, DeviceConfig], debugger: DebuggerConfig,
     debugger_owner: dict[str, str] = {}
     resource_owner: dict[str, str] = {}
     for name, device in devices.items():
+        if device.target is not None and device.debugger in (None, "default"):
+            raise ConfigError(
+                "config_invalid",
+                "A per-device target override requires a named debugger; devices on the top-level debugger use the top-level target.",
+                {"field": f"devices.{name}.target", "debugger": device.debugger},
+            )
         if device.debugger is not None:
             if device.debugger != "default" and device.debugger not in debuggers:
                 raise ConfigError(
@@ -1604,7 +1625,7 @@ def logs_config(raw: JsonObject) -> LogsConfig:
     return LogsConfig(directory=str(raw.get("directory", ".agentic-hil/logs")))
 
 
-def reject_legacy_bridge_args(raw: JsonObject, config_path: str) -> None:
+def reject_bridge_args(raw: JsonObject, config_path: str) -> None:
     for section in ("can_buses", "adapters"):
         entries = raw.get(section)
         if not isinstance(entries, dict):
@@ -1612,8 +1633,8 @@ def reject_legacy_bridge_args(raw: JsonObject, config_path: str) -> None:
         for name, value in entries.items():
             if isinstance(value, dict) and "args" in value:
                 raise ConfigError(
-                    "config_migration_required",
-                    "Process bridge args are no longer accepted across the trusted policy boundary. Pin an operator-controlled wrapper directly as executable.",
+                    "config_invalid",
+                    "Process bridge args are not accepted across the trusted policy boundary. Pin an operator-controlled wrapper directly as executable.",
                     {"path": config_path, "field": f"{section}.{name}.args"},
                 )
 

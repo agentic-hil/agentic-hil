@@ -41,13 +41,13 @@ In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
-## 2. `config_file_not_found` / `config_invalid` / `config_unreadable` / `config_migration_required`
+## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
 Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
-Likely cause: the automatically discovered config is missing, a legacy `.agentic-hil/config.yaml` still needs migration, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
+Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
-Fix: run `agentic-hil init` for new projects, or `agentic-hil migrate-config --from .agentic-hil/config.yaml` for 0.2.3 projects. Review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init`, review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
 ## 3. `config_invalid` / Workspace Binding Failure
 
@@ -130,3 +130,11 @@ Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can
 Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
+
+## 13. `resource_busy` Or Quarantined Hardware
+
+Symptom: tools return `resource_busy`, `cleanup_required`, or `quarantined`, and results carry a `quarantine_id`.
+
+Likely cause: another live process owns the project or resource lease, or a previous owner crashed / left an unknown hardware effect, which quarantines the resource instead of silently releasing it.
+
+Fix: inspect ownership with `agentic-hil lease-status`. If a live owner exists, wait or stop it. For a quarantine, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.

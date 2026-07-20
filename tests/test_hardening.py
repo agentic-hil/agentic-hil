@@ -1093,8 +1093,8 @@ def test_raw_config_requires_workspace_root(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as rejected:
         load_config(str(config_path))
 
-    assert rejected.value.error_type == "config_migration_required"
-    assert "migrate-config" in rejected.value.details["next_step"]
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["validator"] == "required"
 
 
 def test_raw_config_rejects_duplicate_keys(tmp_path: Path) -> None:
@@ -1182,7 +1182,7 @@ def test_authoritative_config_rejects_process_bridge_arguments(tmp_path: Path, m
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "config_migration_required"
+    assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "can_buses.injected.args"
 
 
@@ -1237,7 +1237,7 @@ def test_authoritative_config_rejects_adapter_bridge_arguments(tmp_path: Path, m
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(workspace)
 
-    assert rejected.value.error_type == "config_migration_required"
+    assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "adapters.injected.args"
 
 
@@ -1268,6 +1268,37 @@ def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, 
     assert config.debugger.executable == str(FAKE_OPENOCD.resolve())
     assert config.debugger.interface_cfg == str(interface_cfg.resolve())
     assert config.debugger.target_cfg == str(target_cfg.resolve())
+
+
+def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Configured values differ (absolute path vs. bare PATH name), so the
+    # pre-pin collision check passes — but both pin onto the same binary with no
+    # probe_id, i.e. the same physical probe. Pinned validation must reject it.
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    shim = toolchain / "pyocd-shim.bat"
+    shim.write_text("@echo off\n", encoding="utf-8")
+    os.chmod(shim, 0o755)
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_type="pyocd",
+        debugger_executable=shim,
+        debuggers_yaml='debuggers:\n  probe_b:\n    type: pyocd\n    executable: "pyocd-shim.bat"\n',
+        devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: probe_b\n",
+        permissions_yaml="permissions:\n  allow_probe: true\n",
+    )
+    monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert "after executable pinning" in rejected.value.summary
+    assert rejected.value.details["other_device"] == "dut_a"
 
 
 def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(

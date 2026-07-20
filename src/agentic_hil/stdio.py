@@ -85,7 +85,7 @@ def mcp_stdio(config_path: str | None = None) -> int:
             requested = (requested if requested.is_absolute() else workspace / requested).resolve()
             if requested != Path(config.config_path):
                 raise ConfigError(
-                    "config_migration_required",
+                    "config_invalid",
                     "Explicit config paths cannot override the authoritative Agentic HIL policy. Use AGENTIC_HIL_CONFIG with an absolute external path.",
                     {"selected_path": str(requested), "authoritative_path": config.config_path},
                 )

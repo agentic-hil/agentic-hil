@@ -247,7 +247,7 @@ class Device:
         self.cleanup_interrupts: list[BaseException] = []
 
     def execute(self, action: str, arguments: JsonObject) -> JsonObject:
-        if action in DEBUGGER_DEVICE_ACTIONS and not self.config.debugger:
+        if action in DEBUGGER_DEVICE_ACTIONS and not self.config.has_debugger:
             return self._capability_error(action, "debugger")
         if action in {"uart_open", "uart_close"} and self.config.uart is None:
             return self._capability_error(action, "uart")
@@ -399,9 +399,15 @@ class TestReactor:
         # by close(); the shared base service is owned by the caller.
         self._owned_services: list[AgenticHILToolService] = []
         self.devices = {}
-        for device_id, device in config.devices.items():
-            debugger = self._resolve_device_debugger(device)
-            self.devices[device_id] = Device(device_id, device, self._device_service(device, debugger), debugger)
+        try:
+            for device_id, device in config.devices.items():
+                debugger = self._resolve_device_debugger(device)
+                self.devices[device_id] = Device(device_id, device, self._device_service(device, debugger), debugger)
+        except BaseException:
+            # A later device's service failed to build; the caller never gets a
+            # reactor to close, so already-built services must be closed here.
+            self._close_owned_services()
+            raise
 
     def _resolve_device_debugger(self, device: DeviceConfig) -> DebuggerConfig | None:
         if device.debugger is None:
@@ -422,15 +428,25 @@ class TestReactor:
         self._owned_services.append(built)
         return built
 
-    def close(self) -> None:
+    def _close_owned_services(self) -> list[BaseException]:
         errors: list[BaseException] = []
         for built in self._owned_services:
             try:
                 built.close()
             except BaseException as error:  # noqa: BLE001 - aggregate per-device close errors
                 errors.append(error)
-        if errors:
-            raise errors[0]
+        self._owned_services = []
+        return errors
+
+    def close(self) -> None:
+        errors = self._close_owned_services()
+        if not errors:
+            return
+        interrupts = [error for error in errors if isinstance(error, (KeyboardInterrupt, SystemExit))]
+        if interrupts:
+            raise interrupts[0]
+        detail = "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+        raise RuntimeError(f"Per-device service cleanup failed: {detail}") from errors[0]
 
     def run(self, test_config: TestConfig) -> JsonObject:
         try:
@@ -538,7 +554,7 @@ class TestReactor:
             contract_error = self._preflight_tool_contract(index, step)
             if contract_error is not None:
                 return contract_error
-            if step.action in DEBUGGER_DEVICE_ACTIONS and not device.config.debugger:
+            if step.action in DEBUGGER_DEVICE_ACTIONS and not device.config.has_debugger:
                 return preflight_error(index, step, "device", "Device does not configure the debugger capability.")
             if step.action in {"uart_open", "uart_close"}:
                 uart = device.config.uart

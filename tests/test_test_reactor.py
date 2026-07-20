@@ -546,7 +546,8 @@ def test_device_target_override_inherits_unspecified_project_fields(tmp_path: Pa
         str(
             write_config(
                 tmp_path,
-                devices_yaml='devices:\n  controller:\n    debugger: "default"\n    target:\n      name: "renamed-controller"\n',
+                debuggers_yaml="debuggers:\n  probe_t:\n    type: openocd\n    resource_id: rt\n",
+                devices_yaml='devices:\n  controller:\n    debugger: probe_t\n    target:\n      name: "renamed-controller"\n',
             )
         )
     )
@@ -554,6 +555,28 @@ def test_device_target_override_inherits_unspecified_project_fields(tmp_path: Pa
     assert config.devices["controller"].target is not None
     assert config.devices["controller"].target.name == "renamed-controller"
     assert config.devices["controller"].target.controller == config.target.controller
+
+
+def test_device_target_override_requires_named_debugger(tmp_path: Path) -> None:
+    # Only named-debugger devices run on their own service; a target override on
+    # the top-level debugger (or a UART-only device) would be silently ignored,
+    # so it is rejected instead.
+    for devices_yaml in (
+        'devices:\n  dut:\n    debugger: true\n    target:\n      name: "other"\n',
+        'devices:\n  dut:\n    uart: dut_uart\n    target:\n      name: "other"\n',
+    ):
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(
+                str(
+                    write_config(
+                        tmp_path,
+                        devices_yaml=devices_yaml,
+                        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n',
+                    )
+                )
+            )
+        assert excinfo.value.error_type == "config_invalid"
+        assert excinfo.value.details["field"] == "devices.dut.target"
 
 
 def test_cli_parses_test_reactor_command() -> None:
@@ -675,3 +698,213 @@ def test_reactor_requires_factory_for_named_debugger_devices(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="service_factory"):
         TestReactor(config, RecordingService())  # type: ignore[arg-type]
+
+
+def test_preflight_gates_debug_actions_on_the_devices_own_debugger(tmp_path: Path) -> None:
+    # dut_b runs on a named pyocd debugger while the top-level debugger is
+    # openocd: typed debug steps must be judged by the DEVICE's debugger type.
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: pyocd\n    resource_id: rb\n",
+                devices_yaml="devices:\n  dut_b:\n    debugger: probe_b\n",
+            )
+        )
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 1
+steps:
+  - {device: dut_b, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {device: dut_b, action: debug_stop}
+""",
+    )
+
+    class ClosableService(RecordingService):
+        def close(self) -> None:
+            pass
+
+    reactor = TestReactor(config, RecordingService(), service_factory=lambda device_config: ClosableService())  # type: ignore[arg-type]
+    try:
+        result = reactor.run(load_test_config(str(plan_path), str(tmp_path)))
+    finally:
+        reactor.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    assert result["validation_error"]["debugger_type"] == "pyocd"
+
+
+def test_debug_steps_execute_on_the_named_debugger_service(tmp_path: Path) -> None:
+    # Inverse direction: the top-level debugger is pyocd (no typed debug), but
+    # dut_b's NAMED debugger is openocd — preflight must pass and the steps must
+    # run on the per-device service, not the base service.
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debugger_type="pyocd",
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n",
+                devices_yaml="devices:\n  dut_b:\n    debugger: probe_b\n",
+            )
+        )
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 1
+steps:
+  - {device: dut_b, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {device: dut_b, action: debug_stop}
+""",
+    )
+
+    class ClosableService(RecordingService):
+        def close(self) -> None:
+            pass
+
+    base = RecordingService()
+    built: list[ClosableService] = []
+
+    def factory(device_config) -> ClosableService:
+        svc = ClosableService()
+        built.append(svc)
+        return svc
+
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(load_test_config(str(plan_path), str(tmp_path)))
+    finally:
+        reactor.close()
+
+    assert result["ok"] is True, result
+    assert base.calls == []
+    assert [name for name, _ in built[0].calls] == ["debug_start_session", "debug_stop_session"]
+
+
+def test_cli_reports_reactor_construction_failure_and_closes_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If building the per-device services fails inside TestReactor.__init__, the
+    # CLI must still write a structured report, close the base service, and only
+    # then re-raise the constructor error.
+    from types import SimpleNamespace
+
+    from agentic_hil.cli import run_test_reactor
+
+    class FakeService:
+        def __init__(self, config, frontend: str) -> None:
+            assert frontend == "reactor"
+            self.config = config
+            self.coordinator = object()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    services: list[FakeService] = []
+
+    def make_service(config, frontend: str = "", **kwargs) -> FakeService:
+        svc = FakeService(config, frontend=frontend or kwargs.get("frontend", ""))
+        services.append(svc)
+        return svc
+
+    written: list[dict] = []
+
+    def fake_reactor(config, service, service_factory=None):
+        raise RuntimeError("device service failed to build")
+
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda workspace: SimpleNamespace(work_dir="."))
+    monkeypatch.setattr(
+        "agentic_hil.cli.load_test_config", lambda path, work_dir: SimpleNamespace(name="plan", path="plan.yaml", steps=[])
+    )
+    monkeypatch.setattr("agentic_hil.cli.AgenticHILToolService", lambda config, frontend: make_service(config, frontend=frontend))
+    monkeypatch.setattr("agentic_hil.cli.TestReactor", fake_reactor)
+    monkeypatch.setattr("agentic_hil.cli.write_report", lambda config, result: written.append(result) or result)
+
+    with pytest.raises(RuntimeError, match="device service failed to build"):
+        run_test_reactor("plan.yaml")
+
+    assert len(services) == 1
+    assert services[0].closed is True
+    assert written and written[0]["error_type"] == "reactor_exception"
+    assert written[0]["ok"] is False
+
+
+def test_reactor_init_failure_closes_already_built_services(tmp_path: Path) -> None:
+    # If a later device's service fails to build, the constructor never returns,
+    # so the reactor itself must close the services it already built.
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+                devices_yaml="devices:\n  dut_b:\n    debugger: probe_b\n  dut_c:\n    debugger: probe_c\n",
+            )
+        )
+    )
+
+    class ClosableService(RecordingService):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    built: list[ClosableService] = []
+
+    def factory(device_config) -> ClosableService:
+        if built:
+            raise RuntimeError("second device service failed to build")
+        svc = ClosableService()
+        built.append(svc)
+        return svc
+
+    with pytest.raises(RuntimeError, match="second device service failed to build"):
+        TestReactor(config, RecordingService(), service_factory=factory)  # type: ignore[arg-type]
+    assert len(built) == 1
+    assert built[0].closed is True
+
+
+def test_reactor_close_aggregates_all_per_device_errors(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+                devices_yaml="devices:\n  dut_b:\n    debugger: probe_b\n  dut_c:\n    debugger: probe_c\n",
+            )
+        )
+    )
+
+    class FailingCloseService(RecordingService):
+        def __init__(self, message: str) -> None:
+            super().__init__()
+            self.message = message
+
+        def close(self) -> None:
+            raise OSError(self.message)
+
+    names = iter(["close-b failed", "close-c failed"])
+
+    def factory(device_config) -> FailingCloseService:
+        return FailingCloseService(next(names))
+
+    reactor = TestReactor(config, RecordingService(), service_factory=factory)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError) as excinfo:
+        reactor.close()
+    assert "close-b failed" in str(excinfo.value)
+    assert "close-c failed" in str(excinfo.value)
+    # close() drained the owned services; a second close must not re-raise.
+    reactor.close()

@@ -10,9 +10,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Added cross-process hardware leases, persistent crash quarantine, `lease-status`, and incident-bound operator recovery through `recover --confirm-safe-state --quarantine-id <id>`.
 - Versioned process bridges at protocol v2 with mandatory physical safe-state acknowledgement before resource release.
-- Added `agentic-hil migrate-config --from <path>` to move 0.2.3 workspace-local configs into the external authoritative policy location with all hardware permissions forced back to deny-by-default for operator review.
 - Added a permission-gated test reactor with configured `Device` bindings, semantic preflight, duplicate-key rejection, and YAML/JSON sequences for flashing, UART lifecycle, run-to-breakpoint, and Intel HEX symbol dumps with exception-safe cleanup.
-- Added multi-board support to the test reactor: a named `debuggers` map lets each device drive an independent debug probe (`devices.<id>.debugger` selects `true` for the top-level debugger or a named entry, with an optional per-device `target`), enforcing one device per probe and running each named debugger on its own service under one shared project lease. Added `agentic-hil test-schema` to emit the bundled test-plan schema.
+- Added multi-board support to the test reactor: a named `debuggers` map lets each device drive an independent debug probe (`devices.<id>.debugger` selects `true` for the top-level debugger or a named entry, with an optional per-device `target` that requires a named debugger), enforcing one device per probe — validated again after executable pinning so lexically distinct executables cannot silently share one physical probe — and running each named debugger on its own service under one shared project lease. `agentic-hil doctor` now reports each device's debugger selector as `"default"`, a named-debugger name, or `null` instead of a boolean. Added `agentic-hil test-schema` to emit the bundled test-plan schema.
 - Added `debugger_probes_list` and `agentic-hil debugger-probes` for permission-gated enumeration of connected probe IDs through STM32CubeProgrammer or pyOCD.
 
 ### Fixed
@@ -31,7 +30,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Enforced one live owner for each project and physical probe/COM/CAN/adapter resource across MCP, CLI, pytest, reactor, and direct Python service entry points; stale owners now require explicit safe-state recovery.
 - Normalized symlink/reparse secure-I/O failures to structured `unsafe_configured_path` errors and avoided wrapping failed report reads as successful `get_last_report` calls.
-- Rejected legacy bridge `args` with explicit migration guidance and kept process bridges pinned to operator-controlled executables.
+- Rejected process bridge `args` entirely and kept process bridges pinned to operator-controlled executables.
 - Bounded in-memory path locks to active operations and hardened child-process cleanup/decoding for debugger and bridge subprocesses.
 - Replaced the project-local/two-file configuration model with one deny-by-default authoritative config outside the repository, discovered from the project root with an optional absolute-path `AGENTIC_HIL_CONFIG` override and bound to the project by mandatory `workspace_root`.
 - Added explicit gates for debugger execution and target reset (`allow_reset`), deny-by-default config generation, startup pinning for debugger/GDB/bridge executables and OpenOCD scripts, deny-all empty symbol allowlists, and symlink-safe artifact/output paths.
