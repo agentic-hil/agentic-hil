@@ -180,14 +180,10 @@ Before the first hardware action, the reactor validates every device, capability
 
 The run pipeline is deliberately simple — validate everything, then execute, then always clean up:
 
-```mermaid
-flowchart LR
-    plan["test plan<br/>(YAML / JSON)"] --> pre["preflight:<br/>every step validated,<br/>no hardware touched"]
-    pre -->|any finding| rej["rejected —<br/>zero steps executed"]
-    pre -->|all steps valid| run["sequential execution,<br/>fail-fast"]
-    run --> clean["guaranteed cleanup:<br/>breakpoints removed,<br/>sessions closed"]
-    clean --> rep["structured report<br/>+ canonical audit"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/reactor-pipeline-dark.svg">
+  <img alt="Test reactor pipeline: plan → preflight (no hardware touched; any finding rejects the whole plan) → sequential fail-fast execution → guaranteed cleanup → structured report" src="docs/diagrams/reactor-pipeline.svg">
+</picture>
 
 ```yaml
 # .agentic-hil/testconfig.yaml
@@ -215,33 +211,17 @@ See [`examples/testconfig.example.yaml`](examples/testconfig.example.yaml) for t
 
 Leave an agent alone with real bench hardware and still trust the board, the host, and the logs afterwards. The agent can edit every file inside the workspace, so nothing there is trusted — all authority sits outside, beyond its reach:
 
-```mermaid
-flowchart LR
-    subgraph ws["project workspace — agent-writable"]
-        agent["AI agent / CI"]
-    end
-    subgraph host["operator-controlled host — outside the workspace"]
-        cfg["authoritative config<br/>deny-by-default permissions,<br/>pinned executables,<br/>bound to workspace_root"]
-        state["state_root<br/>owner leases · quarantine ·<br/>SHA-256 audit chain"]
-    end
-    agent -- "MCP (stdio)" --> hil["Agentic HIL"]
-    hil -- "policy lookup" --> cfg
-    hil -- "leases + canonical audit" --> state
-    hil -- "validated, time-boxed actions" --> hw["debug probe · serial · CAN"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/trusted-boundary-dark.svg">
+  <img alt="Trusted policy boundary: the agent-writable workspace talks to Agentic HIL over MCP stdio only; the authoritative config and state_root (leases, quarantine, audit chain) live on the operator-controlled host outside the workspace" src="docs/diagrams/trusted-boundary.svg">
+</picture>
 
 Every hardware action, from every entry point, walks the same gate:
 
-```mermaid
-flowchart LR
-    call["tool call"] --> gate["permission gate<br/>deny-by-default"]
-    gate --> val["validate<br/>paths · artifacts · sizes"]
-    val --> lease["acquire owner lease<br/>cross-process"]
-    lease --> exec["execute<br/>pinned executable, timeout"]
-    exec --> audit["append to<br/>SHA-256 audit chain"]
-    audit --> result["structured JSON result"]
-    exec -.->|crash / unknown effect| quarantine["quarantine —<br/>operator recovery required"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/action-gate-dark.svg">
+  <img alt="Action gate: tool call → deny-by-default permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery" src="docs/diagrams/action-gate.svg">
+</picture>
 
 - Deny-by-default permission switches per action class, with deliberate interlocks — flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
 - Configured executables and OpenOCD scripts are pinned at startup and must resolve outside the workspace; firmware artifacts are validated, hashed, and staged in a private process directory before any backend consumes them.
