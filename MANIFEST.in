@@ -5,10 +5,11 @@ include TROUBLESHOOTING.md
 include SECURITY.md
 include llms.txt
 include LICENSE
+include docs/mcp-hosts.md
 recursive-include src/agentic_hil/schemas *.json
 recursive-include src/agentic_hil/templates *.json
 recursive-include src/agentic_hil/skills *.md
 recursive-include tests *.py
-recursive-include examples *.py *.md
+recursive-include examples *.py *.md *.yaml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

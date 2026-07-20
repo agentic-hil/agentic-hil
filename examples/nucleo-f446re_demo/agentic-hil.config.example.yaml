@@ -1,14 +1,18 @@
-# Copy to .agentic-hil/config.yaml inside this demo directory and adjust the
-# serial device for your host. The config is the policy: Agentic HIL only allows
-# what is named here.
+# Template only: copy these contents to the external config created by
+# `agentic-hil init`, never to the repository. Replace workspace_root with this
+# demo's absolute path, set state_root to an operator-controlled absolute path
+# outside the workspace, and adjust host-specific debugger and serial paths.
+workspace_root: "/absolute/path/to/agentic-hil/examples/nucleo-f446re_demo"
+state_root: "/absolute/operator-controlled/user-state/agentic-hil"
+
 target:
   name: "nucleo-f446re-demo"
   controller: "stm32f446ret6"
 
 debugger:
   type: "openocd"            # or "stlink" for STM32CubeProgrammer CLI
-  interface_cfg: "interface/stlink.cfg"
-  target_cfg: "target/stm32f4x.cfg"
+  interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
+  target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
   timeout_s: 60
 
 artifacts:
@@ -19,3 +23,19 @@ com_ports:
   dut_uart:
     device: "/dev/ttyACM0"   # Nucleo ST-LINK virtual COM port; e.g. COM5 on Windows
     baudrate: 115200
+
+devices:
+  dut:
+    debugger: true
+    uart: "dut_uart"
+
+permissions:
+  allow_probe: true
+  allow_flash: true
+  allow_reset: true
+  allow_com_read: true
+  allow_com_write: false
+  allow_can_read: false
+  allow_can_write: false
+  allow_raw_debugger_commands: false
+  allow_mass_erase: false

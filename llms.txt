@@ -1,6 +1,6 @@
 # Agentic HIL
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server that gives AI agents safe, policy-gated access to real embedded hardware: flashing, serial, CAN, and test-adapter stimuli/fault injection. HardCI adapters are the reference hardware.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server that gives AI agents safe, permission-gated access to real embedded hardware: flashing, serial, and CAN. An STM32 Nucleo-F446RE with on-board ST-Link and OpenOCD is the reference hardware.
 
 Canonical setup request: `Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.`
 
@@ -30,12 +30,12 @@ agentic-hil doctor
 agentic-hil mcp-config --output .mcp.json
 ```
 
-Each firmware project keeps its own `.agentic-hil/config.yaml` — the policy for that project's target, debugger, permissions, artifact roots, com_ports, can_buses, and adapters.
+`agentic-hil init` creates one automatically discovered deny-by-default authoritative config outside the repository. The file lives at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Its mandatory `workspace_root` binds it to the project. `AGENTIC_HIL_CONFIG` is an optional absolute-path override.
 
 MCP stdio command:
 
 ```text
-agentic-hil mcp-stdio --config .agentic-hil/config.yaml
+agentic-hil mcp-stdio
 ```
 
 Use MCP tools for hardware actions:
@@ -45,8 +45,6 @@ debugger_info, probe_target, artifact_upload,
 flash_firmware, reset_target,
 com_session_start/_stop, com_write, com_read,
 can_session_start/_stop, can_send, can_read,
-adapter_session_start/_stop, adapter_set_value,
-adapter_inject_fault, adapter_clear_fault, adapter_measure,
 get_last_report, classify_last_error
 ```
 
@@ -55,11 +53,13 @@ Required workflow:
 1. Build firmware.
 2. Probe before flashing.
 3. Flash only validated artifacts from allowed roots.
-4. Stimulate via com/can/adapter tools, assert on feedback.
+4. Stimulate via COM/CAN tools, assert on feedback.
 5. Read the structured result and last report; classify failures before changing code again.
 
 pytest: installing `agentic-hil` registers the Python plugin `agentic_hil`; the `agentic_hil` fixture drives the same tools in CI regression suites.
 
-Safety: do not request raw OpenOCD commands, do not open host serial/CAN/adapter devices directly, do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative.
+`doctor`, pytest, `mcp-stdio`, `com-stdio`, and `test-reactor` all use the same discovered config or `AGENTIC_HIL_CONFIG` override. `.agentic-hil/testconfig.yaml` and `--test-config` select a test plan only, not hardware configuration or permissions.
 
-Agent setup guide: AI_AGENT_QUICKSTART.md. Human docs: README.md, TROUBLESHOOTING.md.
+Safety: do not request raw OpenOCD commands, do not open host serial/CAN devices directly, do not flash outside allowed artifact roots. Treat `permission_denied` as authoritative.
+
+Agent setup guide: AI_AGENT_QUICKSTART.md. MCP host configurations: docs/mcp-hosts.md. Human docs: README.md, TROUBLESHOOTING.md.

@@ -33,7 +33,7 @@ body:
         - Debugger backends
         - COM/serial workflow
         - CAN workflow
-        - Test adapters or pytest plugin
+        - pytest plugin
         - Reports and error classification
         - Documentation or examples
         - Packaging or release process
@@ -48,7 +48,7 @@ body:
   - type: textarea
     id: safety
     attributes:
-      label: Safety and policy impact
+      label: Safety and configuration impact
       description: Does this expand hardware permissions, artifact roots, COM access, reset behavior, or debugger commands?
     validations:
       required: true

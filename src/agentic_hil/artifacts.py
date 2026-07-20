@@ -3,20 +3,48 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import os
 import re
+import stat
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-from agentic_hil.config import display_path, resolve_work_path
+from agentic_hil.config import (
+    ConfigError,
+    atomic_write_bytes,
+    configured_work_path,
+    display_path,
+    is_path_within_frozen,
+    resolve_work_path,
+    safe_configured_directory,
+    safe_open_binary,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
 class ArtifactManager:
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        self._staging = tempfile.TemporaryDirectory(prefix="agentic-hil-artifacts-")
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         self.config = config
+
+    def close(self) -> None:
+        self._staging.cleanup()
+
+    def release_stage(self, artifact: JsonObject) -> None:
+        if artifact.get("staged") is not True:
+            return
+        path = Path(str(artifact.get("resolved_path", "")))
+        staging_root = Path(self._staging.name)
+        if not is_path_within_frozen(path, staging_root):
+            return
+        with suppress(OSError):
+            path.unlink()
+        with suppress(OSError):
+            path.parent.rmdir()
 
     def upload(self, payload: JsonObject | None = None) -> JsonObject:
         payload = payload or {}
@@ -25,7 +53,7 @@ class ArtifactManager:
                 "ok": False,
                 "tool": "artifact_upload",
                 "error_type": "permission_denied",
-                "summary": "Artifact upload is disabled by .agentic-hil/config.yaml.",
+                "summary": "Artifact upload is disabled by the authoritative config.",
             }
 
         has_image_path = payload.get("image_path") is not None
@@ -49,10 +77,10 @@ class ArtifactManager:
         return self._store_uploaded_data(decoded["data"], str(filename["filename"]))
 
     def validate_local_path(self, image_path: str) -> JsonObject:
-        resolved = Path(resolve_work_path(self.config, image_path))
+        resolved = configured_work_path(self.config, image_path)
         validation: JsonObject = {
             "path_traversal_safe": not has_traversal_segment(image_path),
-            "exists": resolved.exists(),
+            "exists": False,
             "allowed_root": self._is_under_allowed_roots(resolved),
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
             "sha256_computed": False,
@@ -61,8 +89,6 @@ class ArtifactManager:
 
         if not validation["path_traversal_safe"]:
             return self._validation_error("Firmware artifact path contains traversal segments.", validation)
-        if self.config.validation.require_existing_file and not validation["exists"]:
-            return self._validation_error("Firmware artifact does not exist.", validation, "artifact_not_found")
         if self.config.validation.require_allowed_root and not validation["allowed_root"]:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
@@ -70,13 +96,31 @@ class ArtifactManager:
 
         sha256: str | None = None
         size_bytes: int | None = None
+        integrity_sha256: str | None = None
+        try:
+            with safe_open_binary(resolved, workspace=self.config.work_dir) as handle:
+                opened = os.fstat(handle.fileno())
+                validation.update({"exists": True, "regular_file": True, "single_link": True})
+                size_bytes = opened.st_size
+                if size_bytes > self._max_upload_bytes():
+                    return self._artifact_too_large(size_bytes, "flash_firmware")
+                data = handle.read(self._max_upload_bytes() + 1)
+        except FileNotFoundError:
+            if self.config.validation.require_existing_file:
+                return self._validation_error("Firmware artifact does not exist.", validation, "artifact_not_found")
+            data = b""
+        except (ConfigError, OSError) as error:
+            validation.update({"regular_file": False, "single_link": False})
+            return self._validation_error("Firmware artifact must be a single-link regular file that can be opened safely.", {**validation, "backend_error": str(error)})
         if validation["exists"]:
-            size_bytes = resolved.stat().st_size
+            if len(data) > self._max_upload_bytes():
+                return self._artifact_too_large(len(data), "flash_firmware")
+            integrity_sha256 = hashlib.sha256(data).hexdigest()
             if self.config.validation.compute_sha256:
-                sha256 = sha256_file(resolved)
+                sha256 = integrity_sha256
                 validation["sha256_computed"] = True
             if self.config.validation.inspect_known_formats:
-                validation.update(self._inspect_format(resolved))
+                validation.update(self._inspect_format_bytes(resolved.suffix.lower(), data))
 
         failed_plausibility = [
             key for key in ["elf_header", "hex_parseable", "bin_size_plausible"] if validation.get(key) is False
@@ -91,11 +135,70 @@ class ArtifactManager:
                 "path": display_path(self.config, image_path),
                 "resolved_path": str(resolved),
                 "sha256": sha256,
+                "integrity_sha256": integrity_sha256,
                 "size_bytes": size_bytes,
                 "validation": validation,
             },
             "validation": validation,
         }
+
+    def stage_for_backend(self, artifact: JsonObject, tool: str) -> JsonObject:
+        source = Path(str(artifact["resolved_path"]))
+        try:
+            source_context = safe_open_binary(source, workspace=self.config.work_dir)
+            source_file = source_context.__enter__()
+            descriptor = source_file.fileno()
+        except (ConfigError, OSError) as error:
+            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error)}
+
+        temporary_path: Path | None = None
+        staging_directory: Path | None = None
+        try:
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
+            if source_stat.st_size > self._max_upload_bytes():
+                return self._artifact_too_large(source_stat.st_size, tool)
+            digest = hashlib.sha256()
+            copied_bytes = 0
+            suffix = source.suffix.lower()
+            staging_directory = Path(tempfile.mkdtemp(dir=self._staging.name, prefix="stage-"))
+            with tempfile.NamedTemporaryFile(dir=staging_directory, prefix=".tmp-", suffix=suffix, delete=False) as staged_file:
+                temporary_path = Path(staged_file.name)
+                for chunk in iter(lambda: source_file.read(SHA256_CHUNK_BYTES), b""):
+                    copied_bytes += len(chunk)
+                    if copied_bytes > self._max_upload_bytes():
+                        return self._artifact_too_large(copied_bytes, tool)
+                    digest.update(chunk)
+                    staged_file.write(chunk)
+                staged_file.flush()
+                os.fsync(staged_file.fileno())
+            actual_sha256 = digest.hexdigest()
+            expected_sha256 = artifact.get("integrity_sha256") or artifact.get("sha256")
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation."}
+            staged_path = staging_directory / source.name
+            os.replace(temporary_path, staged_path)
+            temporary_path = None
+            staged_artifact = dict(artifact)
+            staged_artifact.update({"resolved_path": str(staged_path), "sha256": actual_sha256, "integrity_sha256": actual_sha256, "size_bytes": copied_bytes, "staged": True})
+            return {"ok": True, "artifact": staged_artifact}
+        except OSError as error:
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "artifact_staging_failed",
+                "summary": "Firmware artifact could not be copied into private backend staging.",
+                "backend_error": str(error),
+            }
+        finally:
+            source_context.__exit__(None, None, None)
+            if temporary_path is not None:
+                with suppress(OSError):
+                    temporary_path.unlink()
+            if staging_directory is not None:
+                with suppress(OSError):
+                    staging_directory.rmdir()
 
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
@@ -103,7 +206,7 @@ class ArtifactManager:
                 "ok": False,
                 "tool": tool,
                 "error_type": "permission_denied",
-                "summary": "Using uploaded artifacts is disabled by .agentic-hil/config.yaml.",
+                "summary": "Using uploaded artifacts is disabled by the authoritative config.",
                 "artifact_id": artifact_id,
             }
         if not is_safe_artifact_id(artifact_id):
@@ -114,7 +217,7 @@ class ArtifactManager:
                 "summary": "artifact_id must be a safe uploaded artifact id.",
                 "artifact_id": artifact_id,
             }
-        resolved = Path(resolve_work_path(self.config, self.config.artifacts.upload_directory)) / artifact_id
+        resolved = Path(safe_configured_directory(self.config, self.config.artifacts.upload_directory, "artifacts.upload_directory")) / artifact_id
         if not resolved.exists():
             return {
                 "ok": False,
@@ -134,7 +237,14 @@ class ArtifactManager:
         artifact["artifact_id"] = artifact_id
         return {"ok": True, "artifact": artifact, "validation": validation["validation"]}
 
-    def validate_output_path(self, output_path: str, tool: str, allowed_extensions: list[str] | None = None) -> JsonObject:
+    def validate_output_path(
+        self,
+        output_path: str,
+        tool: str,
+        allowed_extensions: list[str] | None = None,
+        *,
+        create_parent: bool = False,
+    ) -> JsonObject:
         allowed_extensions = allowed_extensions or [".hex", ".ihex"]
         resolved = Path(resolve_work_path(self.config, output_path))
         validation: JsonObject = {
@@ -148,7 +258,8 @@ class ArtifactManager:
             return self._output_validation_error(tool, "Output path is outside allowed artifact roots.", validation)
         if not validation["allowed_extension"]:
             return self._output_validation_error(tool, "Output path extension is not allowed for this debug dump.", validation)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            safe_configured_directory(self.config, str(resolved.parent), f"{tool}.output_path")
         return {
             "ok": True,
             "output": {"path": display_path(self.config, output_path), "resolved_path": str(resolved)},
@@ -163,8 +274,12 @@ class ArtifactManager:
         size_bytes = int(source["artifact"].get("size_bytes") or 0)
         if size_bytes > self._max_upload_bytes():
             return self._artifact_too_large(size_bytes)
+        staged = self.stage_for_backend(source["artifact"], "artifact_upload")
+        if not staged["ok"]:
+            return staged
+        staged_path = Path(staged["artifact"]["resolved_path"])
         try:
-            data = Path(source["artifact"]["resolved_path"]).read_bytes()
+            data = staged_path.read_bytes()
         except OSError as error:
             return {
                 "ok": False,
@@ -173,6 +288,8 @@ class ArtifactManager:
                 "summary": "Firmware artifact could not be read.",
                 "backend_error": str(error),
             }
+        finally:
+            self.release_stage(staged["artifact"])
         return self._store_uploaded_data(data, Path(image_path).name, display_path(self.config, image_path))
 
     def _store_uploaded_data(self, data: bytes, filename: str, source_path: str | None = None) -> JsonObject:
@@ -181,10 +298,16 @@ class ArtifactManager:
 
         digest = hashlib.sha256(data).hexdigest()
         artifact_id = f"{digest}{Path(filename).suffix.lower()}"
-        upload_directory = Path(resolve_work_path(self.config, self.config.artifacts.upload_directory))
-        upload_directory.mkdir(parents=True, exist_ok=True)
+        upload_directory = Path(safe_configured_directory(self.config, self.config.artifacts.upload_directory, "artifacts.upload_directory"))
         stored_path = upload_directory / artifact_id
-        stored_path.write_bytes(data)
+        if stored_path.is_symlink():
+            return {
+                "ok": False,
+                "tool": "artifact_upload",
+                "error_type": "unsafe_configured_path",
+                "summary": "Uploaded artifact destination must not be a symlink.",
+            }
+        atomic_write_bytes(stored_path, data, workspace=self.config.work_dir)
 
         validation = self.validate_local_path(str(stored_path))
         if not validation["ok"]:
@@ -210,14 +333,15 @@ class ArtifactManager:
     def _max_upload_bytes(self) -> int:
         return max(0, self.config.artifacts.max_upload_size_mb) * 1024 * 1024
 
-    def _artifact_too_large(self, size_bytes: int) -> JsonObject:
+    def _artifact_too_large(self, size_bytes: int, tool: str = "artifact_upload") -> JsonObject:
         return {
             "ok": False,
-            "tool": "artifact_upload",
+            "tool": tool,
             "error_type": "artifact_too_large",
-            "summary": "Uploaded artifact exceeds configured max_upload_size_mb.",
+            "summary": "Firmware artifact exceeds configured max_upload_size_mb.",
             "bytes": size_bytes,
             "max_bytes": self._max_upload_bytes(),
+            "side_effect_committed": False,
         }
 
     def _validation_error(self, summary: str, validation: JsonObject, error_type: str = "artifact_validation_failed") -> JsonObject:
@@ -227,26 +351,18 @@ class ArtifactManager:
         return {"ok": False, "tool": tool, "error_type": "output_validation_failed", "summary": summary, "validation": validation}
 
     def _is_under_allowed_roots(self, resolved_path: Path) -> bool:
-        roots = [Path(resolve_work_path(self.config, root)) for root in self.config.artifacts.allowed_roots]
+        roots = [configured_work_path(self.config, root) for root in self.config.artifacts.allowed_roots]
         if self.config.artifacts.allow_upload:
-            roots.append(Path(resolve_work_path(self.config, self.config.artifacts.upload_directory)))
-        return any(is_relative_to(resolved_path, root) for root in roots)
+            roots.append(configured_work_path(self.config, self.config.artifacts.upload_directory))
+        return any(is_path_within_frozen(resolved_path, root) for root in roots)
 
-    def _inspect_format(self, file_path: Path) -> JsonObject:
-        suffix = file_path.suffix.lower()
+    def _inspect_format_bytes(self, suffix: str, data: bytes) -> JsonObject:
         if suffix == ".elf":
-            try:
-                with file_path.open("rb") as handle:
-                    return {"elf_header": handle.read(4) == b"\x7fELF"}
-            except OSError:
-                return {"elf_header": False}
+            return {"elf_header": data[:4] == b"\x7fELF"}
         if suffix == ".hex":
-            return {"hex_parseable": looks_like_intel_hex(file_path)}
+            return {"hex_parseable": looks_like_intel_hex_bytes(data)}
         if suffix == ".bin":
-            try:
-                return {"bin_size_plausible": file_path.stat().st_size > 0}
-            except OSError:
-                return {"bin_size_plausible": False}
+            return {"bin_size_plausible": bool(data)}
         return {}
 
 
@@ -319,12 +435,26 @@ def looks_like_intel_hex(file_path: Path) -> bool:
     return saw_record
 
 
-def is_relative_to(candidate: Path, root: Path) -> bool:
+def looks_like_intel_hex_bytes(data: bytes) -> bool:
     try:
-        candidate.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
         return False
+    saw_record = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith(":"):
+            return False
+        payload = line[1:]
+        if len(payload) < 10 or len(payload) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", payload) is None:
+            return False
+        record = bytes.fromhex(payload)
+        if len(record) != record[0] + 5 or sum(record) & 0xFF:
+            return False
+        saw_record = True
+    return saw_record
 
 
 def has_traversal_segment(value: str) -> bool:

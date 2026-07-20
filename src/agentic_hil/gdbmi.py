@@ -7,9 +7,11 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agentic_hil.config import atomic_write_text
+from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
 from agentic_hil.types import JsonObject
 
-GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2"]
+GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2", "--init-eval-command=set auto-load off"]
 RESULT_RECORD_PATTERN = re.compile(r"^(\d+)\^(done|running|connected|error|exit)(?:,.*)?$")
 MI_FIELD_ESCAPE_PATTERN = re.compile(r"\\(.)")
 STOP_RECORD_PREFIX = "*stopped,"
@@ -45,7 +47,7 @@ class GdbMiClient:
     def __init__(self, executable: str, work_dir: str):
         from agentic_hil.backends.common import invocation
 
-        self.child = subprocess.Popen(
+        self.child = spawn_managed_process(
             [*invocation(executable), *GDB_MI_ARGS],
             cwd=work_dir,
             text=True,
@@ -54,6 +56,7 @@ class GdbMiClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **process_group_kwargs(),
         )
         self.lock = threading.Lock()
         self.next_token = 0
@@ -62,8 +65,24 @@ class GdbMiClient:
         self.last_stop_line: str | None = None
         self.command_history: list[JsonObject] = []
         self.exited = threading.Event()
-        threading.Thread(target=self._stdout_reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        self.reader_threads = [
+            threading.Thread(target=self._stdout_reader, daemon=True),
+            threading.Thread(target=self._stderr_reader, daemon=True),
+        ]
+        try:
+            for reader in self.reader_threads:
+                reader.start()
+        except BaseException as primary_error:
+            try:
+                terminate_process_tree(self.child, 5.0)
+                for reader in self.reader_threads:
+                    if reader.ident is not None:
+                        reader.join(timeout=5.0)
+                if any(reader.is_alive() for reader in self.reader_threads):
+                    raise RuntimeError("GDB reader threads remained active after process cleanup.")
+            except BaseException as cleanup_error:
+                raise RuntimeError(f"GDB reader setup failed and process cleanup remains unconfirmed: {cleanup_error}") from primary_error
+            raise
 
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
         if "\n" in mi_command or "\r" in mi_command:
@@ -138,10 +157,15 @@ class GdbMiClient:
             self.command("-gdb-exit", min(GDB_EXIT_COMMAND_TIMEOUT_S, max(0.1, timeout_s)))
         with suppress(subprocess.TimeoutExpired):
             self.child.wait(timeout=max(0.1, timeout_s))
+        terminate_process_tree(self.child, timeout_s)
         if self.child.poll() is None:
-            self.child.kill()
-            with suppress(subprocess.TimeoutExpired):
-                self.child.wait(timeout=max(0.1, timeout_s))
+            raise RuntimeError("GDB process remained active after kill.")
+        readers = getattr(self, "reader_threads", [])
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(timeout=timeout_s)
+        if any(reader.is_alive() for reader in readers):
+            raise RuntimeError("GDB reader threads remained active after process cleanup.")
 
     def history(self) -> list[JsonObject]:
         with self.lock:
@@ -256,7 +280,7 @@ def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> No
             upper_address = chunk_upper
         lines.append(intel_hex_record(absolute & 0xFFFF, 0x00, data[offset : offset + INTEL_HEX_BYTES_PER_RECORD]))
     lines.append(INTEL_HEX_EOF_RECORD)
-    file_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii")
 
 
 def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:

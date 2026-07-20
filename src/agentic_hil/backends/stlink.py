@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
+from typing import Literal
 
 from agentic_hil.backends.common import (
     command_for_log,
@@ -13,8 +15,16 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import display_path, resolve_work_path
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.report import (
+    classify_failure_report,
+    logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 STLINK_NOT_FOUND: JsonObject = {
@@ -39,6 +49,8 @@ STLINK_SUCCESS_CONFIRMATION = {
     "flash_firmware": ["Download verified successfully"],
     "reset_target": ["MCU Reset", "reset is performed"],
 }
+STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link detected", "0 stlink detected"]
 
 
 class STLinkBackend:
@@ -55,7 +67,7 @@ class STLinkBackend:
         if not resolved["ok"]:
             return {"tool": "debugger_info", **resolved}
         command = [*invocation(str(resolved["executable_path"])), "--version"]
-        completed = spawn_command(command, self.config.work_dir, min(self.config.debugger.timeout_s, 10))
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **STLINK_NOT_FOUND}
         if completed.timed_out:
@@ -67,10 +79,42 @@ class STLinkBackend:
             return {"ok": False, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type)}
         return {"ok": True, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "probe_id": self.config.debugger.probe_id, "interface": self.config.debugger.interface, "version": version_line(output), "summary": "STM32CubeProgrammer CLI is available."}
 
+    def list_probes(self) -> JsonObject:
+        tool = "debugger_probes_list"
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return {"tool": tool, **resolved}
+        command = [*invocation(str(resolved["executable_path"])), "-q", "-l", "st-link-only"]
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
+        if completed.not_found:
+            return {"tool": tool, **STLINK_NOT_FOUND}
+        if completed.timed_out:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+        output = f"{completed.stdout}{completed.stderr}"
+        probe_ids = stlink_probe_ids(output)
+        if completed.returncode == 0 and (probe_ids or stlink_empty_result(output)):
+            probes = [{"probe_id": probe_id} for probe_id in probe_ids]
+            return {
+                "ok": True,
+                "tool": tool,
+                "backend": self.backend_name,
+                "probes": probes,
+                "summary": f"{len(probes)} connected debugger probe(s) detected.",
+            }
+        return {
+            "ok": False,
+            "tool": tool,
+            "backend": self.backend_name,
+            "error_type": "probe_discovery_failed",
+            "summary": "STM32CubeProgrammer did not return a recognized non-intrusive probe listing.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
-        result = self._run_stlink("probe_target", self._connection_args())
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
+        result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through ST-Link."
@@ -78,7 +122,7 @@ class STLinkBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
         if self.config.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:
@@ -91,7 +135,7 @@ class STLinkBackend:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with ST-Link requires debugger.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
             write_args.append(self.config.debugger.flash_address)
         reset_args = ["-rst"] if reset_after_flash else []
-        result = self._run_stlink("flash_firmware", [*self._connection_args(), *write_args, "-v", *reset_args])
+        result = self._run_stlink("flash_firmware", [*self._connection_args("HOTPLUG"), *write_args, "-v", *reset_args])
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -104,7 +148,7 @@ class STLinkBackend:
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         mode_args = {"run": ["-rst"], "halt": ["-halt"], "init": ["-halt"]}
-        result = self._run_stlink("reset_target", [*self._connection_args(), *mode_args[mode]])
+        result = self._run_stlink("reset_target", [*self._connection_args("NORMAL"), *mode_args[mode]])
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = f"Target reset with mode '{mode}'."
@@ -147,16 +191,7 @@ class STLinkBackend:
         return None
 
     def classify_last_error(self) -> JsonObject:
-        report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") == "report_not_found":
-            return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL report has been written yet."}
-        if report.get("ok"):
-            return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL report did not contain an error."}
-        error_type = str(report.get("error_type", "unknown_debugger_error"))
-        result = {"ok": True, "tool": "classify_last_error", "error_type": error_type, "summary": report.get("summary", "Last Agentic HIL report contained an error."), "likely_causes": report.get("likely_causes", self._likely_causes(error_type)), "report_path": report.get("report_path"), "log_path": report.get("log_path")}
-        if "backend_error_type" in report:
-            result["backend_error_type"] = report["backend_error_type"]
-        return result
+        return classify_failure_report(self.config, self._likely_causes)
 
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
@@ -184,27 +219,27 @@ class STLinkBackend:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **resolved, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
         args = [*invocation(str(resolved["executable_path"])), "-q", *action_args]
         log_path = str(Path(logs_directory(self.config)) / f"stlink-{timestamp_for_filename()}-{tool}.log")
-        completed = spawn_command(args, self.config.work_dir, self.config.debugger.timeout_s)
+        completed = spawn_command(args, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         finished_at = utc_now_iso()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **STLINK_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+            return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
             confirmation = self._confirm_operation_success(output, tool)
             if not confirmation["confirmed"]:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]})
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]}), audit_error)
+            return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
-    def _connection_args(self) -> list[str]:
-        args = ["-c", f"port={self.config.debugger.interface}"]
+    def _connection_args(self, mode: Literal["HOTPLUG", "NORMAL"]) -> list[str]:
+        args = ["-c", f"port={self.config.debugger.interface}", f"mode={mode}"]
         if self.config.debugger.probe_id is not None:
             args.append(f"sn={self.config.debugger.probe_id}")
         return args
@@ -236,10 +271,17 @@ class STLinkBackend:
         return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
-    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> Exception | None:
+        try:
+            safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
+        except (ConfigError, OSError) as error:
+            return error
+        return None
+
+    def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
+        return mark_audit_failure(result, error) if error is not None else result
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
@@ -282,3 +324,12 @@ def version_line(output: str) -> str:
         if "STM32CubeProgrammer version:" in line:
             return f"STM32CubeProgrammer {line.split(':', 1)[1].strip()}"
     return next((line.strip() for line in output.splitlines() if line.strip()), "STM32CubeProgrammer version output was empty.")
+
+
+def stlink_probe_ids(output: str) -> list[str]:
+    return list(dict.fromkeys(STLINK_SERIAL_PATTERN.findall(output)))
+
+
+def stlink_empty_result(output: str) -> bool:
+    lower = output.lower()
+    return any(marker in lower for marker in STLINK_EMPTY_MARKERS)

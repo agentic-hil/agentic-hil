@@ -14,7 +14,8 @@ ASYNC_STOP_DELAY_S = 0.02
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
-BEHAVIOR_FILE = "fake_gdb_behavior.txt"
+BEHAVIOR_MARKER = b"FAKE_GDB_BEHAVIOR="
+behavior_override = ""
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
 HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
@@ -26,10 +27,7 @@ def emit(line: str) -> None:
 
 
 def behavior() -> str:
-    try:
-        return Path(BEHAVIOR_FILE).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    return behavior_override
 
 
 def emit_delayed_stop(stop_line: str) -> None:
@@ -65,9 +63,13 @@ def read_memory(token: str, address_text: str, length_text: str) -> None:
 
 
 def main() -> int:
+    global behavior_override
+
     emit('=thread-group-added,id="i1"')
     emit("(gdb)")
     next_breakpoint = 1
+    live_breakpoints: set[int] = set()
+    reset_count = 0
     for raw_line in sys.stdin:
         match = COMMAND_PATTERN.match(raw_line.strip())
         if match is None:
@@ -77,12 +79,47 @@ def main() -> int:
             emit(f"{token}^exit")
             return 0
         if command.startswith("-target-select"):
+            if behavior() == "target_select_timeout":
+                continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
-        elif command.startswith(("-gdb-set", "-file-exec-and-symbols", "-interpreter-exec", "-target-download", "-break-delete")):
+        elif command.startswith("-file-exec-and-symbols"):
+            artifact_path = command[len("-file-exec-and-symbols") :].strip().strip('"').replace("\\\\", "\\")
+            try:
+                artifact_data = Path(artifact_path).read_bytes()
+                if BEHAVIOR_MARKER in artifact_data:
+                    behavior_override = artifact_data.split(BEHAVIOR_MARKER, 1)[1].splitlines()[0].decode()
+            except OSError:
+                pass
             emit(f"{token}^done")
+        elif command.startswith("-target-download"):
+            if behavior() == "download_timeout":
+                continue
+            if behavior() == "download_error":
+                emit(f'{token}^error,msg="Download failed"')
+                continue
+            emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec"):
+            reset_count += 1
+            if reset_count == 2 and behavior() == "post_load_reset_timeout":
+                continue
+            if reset_count == 2 and behavior() == "post_load_reset_error":
+                emit(f'{token}^error,msg="Reset failed"')
+                continue
+            emit(f"{token}^done")
+        elif command.startswith("-gdb-set"):
+            emit(f"{token}^done")
+        elif command.startswith("-break-delete"):
+            for number_text in command[len("-break-delete") :].split():
+                if number_text.isdigit():
+                    live_breakpoints.discard(int(number_text))
+            emit(f"{token}^done")
+        elif command.startswith("-break-list"):
+            body = ",".join(f'bkpt={{number="{number}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}' for number in sorted(live_breakpoints))
+            emit(f'{token}^done,BreakpointTable={{nr_rows="{len(live_breakpoints)}",nr_cols="6",body=[{body}]}}')
         elif command.startswith("-break-insert"):
+            live_breakpoints.add(next_breakpoint)
             emit(f'{token}^done,bkpt={{number="{next_breakpoint}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}')
             next_breakpoint += 1
         elif command.startswith("-exec-continue"):
@@ -91,7 +128,8 @@ def main() -> int:
             threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
         elif command.startswith("-exec-interrupt"):
             emit(f"{token}^done")
-            emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
+            if behavior() != "halt_timeout":
+                emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
         elif command.startswith("-data-evaluate-expression"):
             expression = command[len("-data-evaluate-expression") :].strip().strip('"')
             evaluate_expression(token, expression)

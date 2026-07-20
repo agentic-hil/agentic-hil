@@ -8,6 +8,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil.process import (
+    CHILD_REAP_TIMEOUT_S,
+    process_group_kwargs,
+    spawn_managed_process,
+    terminate_process_tree,
+)
+
 
 @dataclass(frozen=True)
 class CompletedCommand:
@@ -20,31 +27,46 @@ class CompletedCommand:
 
 def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
     try:
-        completed = subprocess.run(
+        child = spawn_managed_process(
             command,
             cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=max(0.0, timeout_seconds),
-            check=False,
-        )
-        return CompletedCommand(
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-            returncode=completed.returncode,
-            timed_out=False,
-            not_found=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **process_group_kwargs(),
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)
-    except subprocess.TimeoutExpired as error:
-        return CompletedCommand(
-            stdout=decode_output(error.stdout),
-            stderr=decode_output(error.stderr),
-            returncode=None,
-            timed_out=True,
-            not_found=False,
-        )
+    try:
+        stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
+        terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        try:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+            stdout, stderr = child.communicate(timeout=CHILD_REAP_TIMEOUT_S)
+            timed_out = True
+        except (KeyboardInterrupt, SystemExit):
+            # Preserve the interrupt after the best-effort reap above ran, rather
+            # than masking it as a generic cleanup RuntimeError.
+            raise
+        except BaseException as cleanup_error:
+            raise RuntimeError(f"Timed-out command cleanup remains unconfirmed: {cleanup_error}") from cleanup_error
+    except BaseException as primary_error:
+        try:
+            terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
+        except BaseException as cleanup_error:
+            if isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+                raise primary_error from cleanup_error
+            raise RuntimeError(f"Command failed and cleanup remains unconfirmed: {cleanup_error}") from primary_error
+        raise
+    return CompletedCommand(
+        stdout=decode_output(stdout),
+        stderr=decode_output(stderr),
+        returncode=child.returncode,
+        timed_out=timed_out,
+        not_found=False,
+    )
 
 
 def decode_output(value: str | bytes | None) -> str:

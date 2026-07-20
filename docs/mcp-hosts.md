@@ -1,0 +1,210 @@
+# Configure Agentic HIL in MCP Hosts
+
+Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
+
+This guide was verified against the linked host documentation on 2026-07-14.
+
+## Common Setup
+
+Install the server once and initialize the firmware project from its repository root:
+
+```bash
+uv tool install agentic-hil
+agentic-hil init
+```
+
+Every host configuration below represents this launch contract:
+
+```text
+Server name:       agentic-hil
+Transport:         stdio
+Command:           agentic-hil
+Arguments:         mcp-stdio
+Working directory: firmware project root
+Environment:       optional AGENTIC_HIL_CONFIG absolute-path override
+```
+
+The official MCP Registry identity is `io.github.agentic-hil/agentic-hil`. That registry identity, the local server key `agentic-hil`, and the executable `agentic-hil` refer to the same server, but they are not interchangeable fields.
+
+If `agentic-hil` is not on the MCP host's `PATH`, use `uvx` instead. In hosts with separate command and argument fields, replace the command with `uvx` and prepend `--from`, `agentic-hil`, `agentic-hil` to the arguments. For OpenCode, make the same replacement in its command array.
+
+## Authoritative Project Config
+
+Run `agentic-hil init` from the firmware project root. It creates one deny-by-default authoritative config outside the repository and binds its mandatory `workspace_root` to that absolute project path. The generated path is under `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX or `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows.
+
+The operator reviews that file and enables only required resources and permissions. The MCP server discovers it from the configured firmware-project working directory. If a different external location is needed, set its absolute path as `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment; do not add a machine-specific value to `.vscode/mcp.json`, `.codex/config.toml`, `.mcp.json`, `opencode.json`, or another repository-controlled file. For unattended hardware benches, use a host/user-level registration that the agent cannot edit.
+
+Optional POSIX override:
+
+```bash
+export AGENTIC_HIL_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/agentic-hil/projects/<project-id>/config.yaml"
+```
+
+Optional Windows PowerShell override:
+
+```powershell
+$env:AGENTIC_HIL_CONFIG = "$env:APPDATA\agentic-hil\projects\<project-id>\config.yaml"
+```
+
+## Canonical Tool Names
+
+Agentic HIL returns one canonical name for each tool in MCP `tools/list`, such as `probe_target`, `flash_firmware`, and `com_read`. Hosts may display a qualified form such as `agentic-hil_probe_target` or `mcp__agentic-hil__probe_target`. That prefix is a host-side namespace, not a second Agentic HIL API.
+
+Documentation, prompts, tests, and cross-host workflows should use the canonical wire name `probe_target`. Do not add aliases or change behavior by host. Use a qualified rendering only where a host's own permission or tool-selection syntax requires it.
+
+## VS Code and GitHub Copilot
+
+Use this server shape in the operator-controlled VS Code user-profile MCP configuration:
+
+```json
+{
+  "servers": {
+    "agentic-hil": {
+      "type": "stdio",
+      "command": "agentic-hil",
+      "args": [
+        "mcp-stdio"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+Run **MCP: List Servers**, start `agentic-hil`, and approve the workspace server after reviewing it. VS Code uses `servers`, not `mcpServers`. Prefer its user-profile MCP configuration for the operator-controlled registration; the configured `cwd` enables automatic config discovery.
+
+Sources: [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) and [GitHub Copilot MCP setup](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp/extend-copilot-chat-with-mcp).
+
+## JetBrains AI Assistant in CLion
+
+Open **Settings | Tools | AI Assistant | Model Context Protocol (MCP)**, add a stdio server, and paste:
+
+```json
+{
+  "mcpServers": {
+    "agentic-hil": {
+      "command": "agentic-hil",
+      "args": [
+        "mcp-stdio"
+      ]
+    }
+  }
+}
+```
+
+Set **Working directory** to the firmware repository root and then enable the server. JetBrains documents this as an IDE configuration flow, not as a portable repository file. An operator-set `AGENTIC_HIL_CONFIG` remains available as an optional override.
+
+If CLion uses the GitHub Copilot plugin instead of JetBrains AI Assistant, open Copilot Chat, select **Configure your MCP server**, and use the plugin's `mcp.json` shape:
+
+```json
+{
+  "servers": {
+    "agentic-hil": {
+      "command": "agentic-hil",
+      "args": [
+        "mcp-stdio"
+      ]
+    }
+  }
+}
+```
+
+The AI Assistant and Copilot plugin use different JSON containers. Their server and tool semantics remain identical.
+
+Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp/extend-copilot-chat-with-mcp#configuring-mcp-servers-in-jetbrains-ides).
+
+## OpenAI Codex
+
+Put this table in the operator-controlled `~/.codex/config.toml` and replace `cwd` with the absolute firmware repository root:
+
+```toml
+[mcp_servers.agentic-hil]
+command = "agentic-hil"
+args = ["mcp-stdio"]
+cwd = "/absolute/path/to/firmware-project"
+enabled = true
+```
+
+The configured `cwd` enables automatic config discovery. Start Codex with `AGENTIC_HIL_CONFIG` inherited only when an absolute-path override is required. Project-scoped configuration is unnecessary for this registration.
+
+Sources: [Codex MCP setup](https://developers.openai.com/codex/extend/mcp) and [Codex configuration reference](https://developers.openai.com/codex/config-file/config-reference).
+
+## Claude Code
+
+Use this server shape in an operator-controlled Claude Code user registration:
+
+```json
+{
+  "mcpServers": {
+    "agentic-hil": {
+      "type": "stdio",
+      "command": "agentic-hil",
+      "args": [
+        "mcp-stdio"
+      ]
+    }
+  }
+}
+```
+
+The equivalent CLI command, run from the firmware repository root, is:
+
+```bash
+claude mcp add --transport stdio --scope user agentic-hil -- agentic-hil mcp-stdio
+```
+
+`agentic-hil mcp-config --output .mcp.json` writes this host family's `mcpServers` discovery format. It does not include `AGENTIC_HIL_CONFIG` and does not generate VS Code, Codex, or OpenCode configuration. Launch the user-scoped registration from the intended project root; add an operator-set override only when needed.
+
+Source: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+## OpenCode
+
+Add this server to the operator-controlled `~/.config/opencode/opencode.json` and replace `cwd` with the absolute firmware repository root:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "agentic-hil": {
+      "type": "local",
+      "command": [
+        "agentic-hil",
+        "mcp-stdio"
+      ],
+      "cwd": "/absolute/path/to/firmware-project",
+      "enabled": true
+    }
+  }
+}
+```
+
+OpenCode uses `mcp`, `type: "local"`, and one command array. For an operator-controlled registration, use `~/.config/opencode/opencode.json`; its `cwd` enables automatic config discovery. If an override is needed, inherit `AGENTIC_HIL_CONFIG` from the parent environment rather than placing its machine-specific value in project configuration. Managed configuration is preferable on unattended benches because project configuration has higher precedence than normal global configuration.
+
+Sources: [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/) and [OpenCode configuration locations](https://opencode.ai/docs/config/).
+
+## Generic MCP Host
+
+MCP standardizes the stdio transport, not a universal host configuration file. In the host's MCP settings, map the common launch contract to its local fields:
+
+```text
+Name:              agentic-hil
+Transport:         stdio
+Executable:        agentic-hil
+Arguments:         mcp-stdio
+Working directory: <absolute firmware repository root>
+Environment:       optional AGENTIC_HIL_CONFIG=<absolute external config path>
+```
+
+Do not assume that `mcpServers`, `servers`, `mcp`, `env`, `cwd`, or `enabled` are portable keys. A Claude-compatible `.mcp.json` is a host convention, not part of the MCP specification.
+
+Source: [MCP stdio transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio).
+
+## Verify the Connection
+
+1. Confirm the host reports `agentic-hil` as connected.
+2. Inspect the host's tool list or MCP `tools/list` result.
+3. Confirm canonical tools such as `debugger_info`, `probe_target`, and `flash_firmware` are present.
+4. Run `debugger_info` before a hardware action when setup is unclear.
+5. Treat `permission_denied` as authoritative. Ask the operator to review the authoritative config; do not bypass it.
+
+See [Troubleshooting](../TROUBLESHOOTING.md) for startup, configuration, `PATH`, and debugger errors.

@@ -12,8 +12,18 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import display_path, resolve_work_path
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.report import (
+    classify_failure_report,
+    logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
+    merge_audit_status,
+    overall_success,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 PYOCD_NOT_FOUND: JsonObject = {
@@ -49,7 +59,7 @@ class PyOCDBackend:
         if not resolved["ok"]:
             return {"tool": "debugger_info", **resolved}
         command = [*invocation(str(resolved["executable_path"])), "--version"]
-        completed = spawn_command(command, self.config.work_dir, min(self.config.debugger.timeout_s, 10))
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **PYOCD_NOT_FOUND}
         if completed.timed_out:
@@ -62,9 +72,36 @@ class PyOCDBackend:
         version = output.splitlines()[0] if output else "pyOCD version output was empty."
         return {"ok": True, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "probe_id": self.config.debugger.probe_id, "target_type": self.config.debugger.target_type, "version": version, "summary": "pyOCD is available."}
 
+    def list_probes(self) -> JsonObject:
+        tool = "debugger_probes_list"
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return {"tool": tool, **resolved}
+        command = [*invocation(str(resolved["executable_path"])), "json", "--probes", "--no-config"]
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
+        if completed.not_found:
+            return {"tool": tool, **PYOCD_NOT_FOUND}
+        if completed.timed_out:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+        if completed.returncode != 0:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "pyOCD probe discovery command failed."}
+        parsed = parse_pyocd_probes(completed.stdout)
+        if not parsed["ok"]:
+            return {"tool": tool, "backend": self.backend_name, **parsed}
+        probes = parsed["probes"]
+        return {
+            "ok": True,
+            "tool": tool,
+            "backend": self.backend_name,
+            "probes": probes,
+            "summary": f"{len(probes)} connected debugger probe(s) detected.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         result = self._run_pyocd("probe_target", ["commander", "--command", "status", *self._connection_args()])
         if result.get("ok"):
             result["target_detected"] = True
@@ -73,7 +110,7 @@ class PyOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
         if self.config.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:
@@ -86,11 +123,13 @@ class PyOCDBackend:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debugger.flash_address.", "artifact": self._artifact_summary(artifact)}
             address_args = ["--base-address", self.config.debugger.flash_address]
 
-        result = self._run_pyocd("flash_firmware", ["flash", *self._connection_args(), *address_args, artifact_path])
+        result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
         result["verify"] = True
-        if not result.get("ok"):
+        if not overall_success(result):
             result["reset_after_flash"] = False
+            if result.get("ok") is True:
+                result["reset_skipped_reason"] = "audit_failed" if result.get("audit_ok") is False else "target_failed"
             return self._write_action_report(result)
         if not reset_after_flash:
             result["reset_after_flash"] = False
@@ -102,12 +141,15 @@ class PyOCDBackend:
             reset["artifact"] = self._artifact_summary(artifact)
             reset["verify"] = True
             reset["reset_after_flash"] = False
+            reset["side_effect_committed"] = True
+            reset["side_effect_status"] = "partial"
+            reset["retry_safe"] = False
             reset["error_type"] = "reset_failed"
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
-            return self._write_action_report(reset)
+            return self._write_action_report(merge_audit_status(reset, result, reset))
         result["reset_after_flash"] = reset_after_flash
         result["summary"] = "Firmware flashed, verified, and target reset."
-        return self._write_action_report(result)
+        return self._write_action_report(merge_audit_status(result, result, reset))
 
     def reset_target(self, mode: str = "run") -> JsonObject:
         allowed_modes = ["run", "halt", "init"]
@@ -154,16 +196,7 @@ class PyOCDBackend:
         return self._unsupported_debug_tool("debug_dump_symbol_ihex")
 
     def classify_last_error(self) -> JsonObject:
-        report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") == "report_not_found":
-            return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL report has been written yet."}
-        if report.get("ok"):
-            return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL report did not contain an error."}
-        error_type = str(report.get("error_type", "unknown_debugger_error"))
-        result = {"ok": True, "tool": "classify_last_error", "error_type": error_type, "summary": report.get("summary", "Last Agentic HIL report contained an error."), "likely_causes": report.get("likely_causes", self._likely_causes(error_type)), "report_path": report.get("report_path"), "log_path": report.get("log_path")}
-        if "backend_error_type" in report:
-            result["backend_error_type"] = report["backend_error_type"]
-        return result
+        return classify_failure_report(self.config, self._likely_causes)
 
     def close(self) -> None:
         return None
@@ -194,21 +227,21 @@ class PyOCDBackend:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **resolved, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
         args = [*invocation(str(resolved["executable_path"])), *action_args]
         log_path = str(Path(logs_directory(self.config)) / f"pyocd-{timestamp_for_filename()}-{tool}.log")
-        completed = spawn_command(args, self.config.work_dir, self.config.debugger.timeout_s)
+        completed = spawn_command(args, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         finished_at = utc_now_iso()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **PYOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+            return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+            return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
@@ -234,10 +267,17 @@ class PyOCDBackend:
         return None
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
-    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> Exception | None:
+        try:
+            safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
+        except (ConfigError, OSError) as error:
+            return error
+        return None
+
+    def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
+        return mark_audit_failure(result, error) if error is not None else result
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
@@ -288,3 +328,19 @@ class PyOCDBackend:
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debugger.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])
+
+
+def parse_pyocd_probes(output: str) -> JsonObject:
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD returned invalid probe-discovery JSON."}
+    if not isinstance(payload, dict) or payload.get("status") != 0 or not isinstance(payload.get("boards"), list):
+        return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD reported a probe-discovery failure."}
+    probe_ids: list[str] = []
+    for board in payload["boards"]:
+        if not isinstance(board, dict) or not isinstance(board.get("unique_id"), str) or not board["unique_id"]:
+            return {"ok": False, "error_type": "probe_discovery_failed", "summary": "pyOCD returned an invalid probe record."}
+        if board["unique_id"] not in probe_ids:
+            probe_ids.append(board["unique_id"])
+    return {"ok": True, "probes": [{"probe_id": probe_id} for probe_id in probe_ids]}

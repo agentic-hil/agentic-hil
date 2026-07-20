@@ -1,32 +1,185 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
-  "title": "Agentic Hardware-in-the-Loop (Agentic HIL) project configuration",
-  "description": "Schema for project-local .agentic-hil/config.yaml files.",
+  "title": "Agentic HIL configuration",
+  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits.",
   "type": "object",
   "additionalProperties": false,
+  "required": [
+    "workspace_root",
+    "state_root"
+  ],
   "properties": {
+    "workspace_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path of the workspace this configuration authorizes. It is the runtime working directory."
+    },
+    "state_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "default": "unknown-target" },
-        "controller": { "type": "string", "default": "unknown-controller" }
+        "name": {
+          "type": "string",
+          "default": "unknown-target"
+        },
+        "controller": {
+          "type": "string",
+          "default": "unknown-controller"
+        }
       }
+    },
+    "devices": {
+      "type": "object",
+      "description": "Logical DUTs available to the test reactor. Each device may bind the top-level debugger (true), a named entry from `debuggers`, or no debugger, plus one configured UART.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "debugger": {
+            "type": [
+              "boolean",
+              "string"
+            ],
+            "description": "false = no debugger; true = the top-level debugger; a name = an entry in `debuggers`.",
+            "default": false
+          },
+          "uart": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "default": null
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Per-device target override for a device on a named debugger; unspecified fields default to the top-level target.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "controller": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "debugger": {
+                "anyOf": [
+                  {
+                    "const": true
+                  },
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                ]
+              }
+            },
+            "required": [
+              "debugger"
+            ]
+          },
+          {
+            "properties": {
+              "uart": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "uart"
+            ]
+          }
+        ]
+      },
+      "default": {}
     },
     "debugger": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "type": { "type": "string", "default": "openocd", "enum": ["openocd", "stlink", "pyocd"] },
-        "executable": { "type": ["string", "null"], "default": null },
-        "probe_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]+$", "default": null },
-        "target_type": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+$", "default": null },
-        "interface": { "type": "string", "default": "SWD", "enum": ["SWD", "JTAG"] },
-        "interface_cfg": { "type": "string", "default": "interface/stlink.cfg" },
-        "target_cfg": { "type": "string", "default": "target/stm32f4x.cfg" },
-        "flash_address": { "type": ["string", "null"], "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$", "default": null },
-        "timeout_s": { "type": "number", "default": 60.0 }
+        "type": {
+          "type": "string",
+          "default": "openocd",
+          "enum": [
+            "openocd",
+            "stlink",
+            "pyocd"
+          ]
+        },
+        "executable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "probe_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "default": null
+        },
+        "target_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "default": null
+        },
+        "interface": {
+          "type": "string",
+          "default": "SWD",
+          "enum": [
+            "SWD",
+            "JTAG"
+          ]
+        },
+        "interface_cfg": {
+          "type": "string",
+          "default": "interface/stlink.cfg"
+        },
+        "target_cfg": {
+          "type": "string",
+          "default": "target/stm32f4x.cfg"
+        },
+        "flash_address": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$",
+          "default": null
+        },
+        "resource_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "default": null
+        },
+        "timeout_s": {
+          "type": "number",
+          "minimum": 0,
+          "default": 60.0
+        }
       }
     },
     "debug": {
@@ -34,13 +187,30 @@
       "description": "Typed debug-session settings for safe GDB/OpenOCD operations.",
       "additionalProperties": false,
       "properties": {
-        "gdb_executable": { "type": ["string", "null"], "default": null },
+        "gdb_executable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "allowed_symbols": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$"
+          },
           "default": []
         },
-        "max_dump_size_bytes": { "type": "integer", "minimum": 1, "default": 1048576 }
+        "allow_all_symbols": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_dump_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1048576
+        }
       },
       "default": {}
     },
@@ -48,29 +218,94 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "allowed_roots": { "type": "array", "items": { "type": "string" }, "default": ["build"] },
-        "upload_directory": { "type": "string", "default": ".agentic-hil/artifacts" },
-        "allowed_extensions": { "type": "array", "items": { "type": "string" }, "default": [".elf", ".hex", ".bin"] },
-        "max_upload_size_mb": { "type": "integer", "default": 64 },
-        "allow_upload": { "type": "boolean", "default": true }
+        "allowed_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "build"
+          ]
+        },
+        "upload_directory": {
+          "type": "string",
+          "default": ".agentic-hil/artifacts"
+        },
+        "allowed_extensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".elf",
+            ".hex",
+            ".bin"
+          ]
+        },
+        "max_upload_size_mb": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 64
+        },
+        "allow_upload": {
+          "type": "boolean",
+          "default": false
+        }
       }
     },
     "com_ports": {
       "type": "object",
       "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback.",
-      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["device"],
+        "required": [
+          "device"
+        ],
         "properties": {
-          "device": { "type": "string" },
-          "baudrate": { "type": "integer", "minimum": 1, "default": 115200 },
-          "timeout_s": { "type": "number", "minimum": 0, "default": 0.1 },
-          "write_timeout_s": { "type": "number", "minimum": 0, "default": 1.0 },
-          "encoding": { "type": "string", "default": "utf-8" },
-          "max_buffer_bytes": { "type": "integer", "minimum": 1, "default": 65536 },
-          "max_write_bytes": { "type": "integer", "minimum": 1, "default": 4096 }
+          "device": {
+            "type": "string"
+          },
+          "baudrate": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 115200
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.1
+          },
+          "write_timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0
+          },
+          "encoding": {
+            "type": "string",
+            "default": "utf-8"
+          },
+          "max_buffer_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 65536
+          },
+          "max_write_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 4096
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          }
         }
       },
       "default": {}
@@ -78,44 +313,145 @@
     "can_buses": {
       "type": "object",
       "description": "Named CAN buses that Agentic HIL may open for stimuli and feedback.",
-      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["channel"],
+        "required": [
+          "channel"
+        ],
         "properties": {
-          "adapter": { "type": "string", "default": "peak", "enum": ["peak", "socketcan", "process"] },
-          "channel": { "type": "string" },
-          "bitrate": { "type": "integer", "minimum": 1, "default": 500000 },
-          "fd": { "type": "boolean", "default": false },
-          "data_bitrate": { "type": ["integer", "null"], "minimum": 1, "default": null },
-          "pcanbasic_dll": { "type": ["string", "null"], "default": null },
-          "executable": { "type": ["string", "null"], "default": null },
-          "args": { "type": "array", "items": { "type": "string" }, "default": [] },
-          "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
-          "poll_interval_ms": { "type": "integer", "minimum": 1, "default": 10 },
-          "receive_own_messages": { "type": "boolean", "default": false },
-          "listen_only": { "type": "boolean", "default": false },
-          "max_buffer_frames": { "type": "integer", "minimum": 1, "default": 1024 },
-          "max_frame_data_bytes": { "type": "integer", "minimum": 0, "maximum": 64, "default": 8 }
+          "adapter": {
+            "type": "string",
+            "default": "peak",
+            "enum": [
+              "peak",
+              "socketcan",
+              "process"
+            ]
+          },
+          "channel": {
+            "type": "string"
+          },
+          "bitrate": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 500000
+          },
+          "fd": {
+            "type": "boolean",
+            "default": false
+          },
+          "data_bitrate": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "default": null
+          },
+          "pcanbasic_dll": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 10.0
+          },
+          "poll_interval_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10
+          },
+          "receive_own_messages": {
+            "type": "boolean",
+            "default": false
+          },
+          "listen_only": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_buffer_frames": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1024
+          },
+          "max_frame_data_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64,
+            "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true."
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          }
         }
       },
       "default": {}
     },
     "adapters": {
       "type": "object",
-      "description": "Named test adapters (sensor, actuator, load, and fault-simulation bridges) that Agentic HIL may control.",
-      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+$" },
+      "description": "Named test adapters controlled through externally pinned bridge entry points.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["executable"],
+        "required": [
+          "executable"
+        ],
         "properties": {
-          "executable": { "type": "string" },
-          "args": { "type": "array", "items": { "type": "string" }, "default": [] },
-          "timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
-          "channels": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] },
-          "faults": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }, "default": [] }
+          "executable": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 10.0
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "default": []
+          },
+          "faults": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "default": []
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          }
         }
       },
       "default": {}
@@ -124,38 +460,189 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "require_existing_file": { "type": "boolean", "default": true },
-        "require_allowed_root": { "type": "boolean", "default": true },
-        "require_allowed_extension": { "type": "boolean", "default": true },
-        "compute_sha256": { "type": "boolean", "default": true },
-        "inspect_known_formats": { "type": "boolean", "default": true }
+        "require_existing_file": {
+          "type": "boolean",
+          "default": true
+        },
+        "require_allowed_root": {
+          "type": "boolean",
+          "default": true
+        },
+        "require_allowed_extension": {
+          "type": "boolean",
+          "default": true
+        },
+        "compute_sha256": {
+          "type": "boolean",
+          "default": true
+        },
+        "inspect_known_formats": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "permissions": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "allow_probe": { "type": "boolean", "default": true },
-        "allow_flash": { "type": "boolean", "default": true },
-        "allow_com_read": { "type": "boolean", "default": true },
-        "allow_com_write": { "type": "boolean", "default": true },
-        "allow_can_read": { "type": "boolean", "default": true },
-        "allow_can_write": { "type": "boolean", "default": true },
-        "allow_adapter_read": { "type": "boolean", "default": true },
-        "allow_adapter_write": { "type": "boolean", "default": true },
-        "allow_raw_debugger_commands": { "type": "boolean", "default": false },
-        "allow_mass_erase": { "type": "boolean", "default": false }
+        "allow_probe": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_flash": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_reset": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_com_read": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_com_write": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_can_read": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_can_write": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_adapter_read": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_adapter_write": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_raw_debugger_commands": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_mass_erase": {
+          "type": "boolean",
+          "default": false
+        }
       }
     },
     "reports": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "directory": { "type": "string", "default": ".agentic-hil/reports" } }
+      "properties": {
+        "directory": {
+          "type": "string",
+          "default": ".agentic-hil/reports"
+        }
+      }
     },
     "logs": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "directory": { "type": "string", "default": ".agentic-hil/logs" } }
+      "properties": {
+        "directory": {
+          "type": "string",
+          "default": ".agentic-hil/logs"
+        }
+      }
+    },
+    "debuggers": {
+      "type": "object",
+      "description": "Named debugger configurations for independently controlled multi-board test-reactor devices. The name 'default' is reserved for the top-level debugger.",
+      "propertyNames": {
+        "allOf": [
+          {
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          {
+            "not": {
+              "const": "default"
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "default": "openocd",
+            "enum": [
+              "openocd",
+              "stlink",
+              "pyocd"
+            ]
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "probe_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          },
+          "target_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "default": null
+          },
+          "interface": {
+            "type": "string",
+            "default": "SWD",
+            "enum": [
+              "SWD",
+              "JTAG"
+            ]
+          },
+          "interface_cfg": {
+            "type": "string",
+            "default": "interface/stlink.cfg"
+          },
+          "target_cfg": {
+            "type": "string",
+            "default": "target/stm32f4x.cfg"
+          },
+          "flash_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$",
+            "default": null
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 60.0
+          }
+        }
+      },
+      "default": {}
     }
   }
 }

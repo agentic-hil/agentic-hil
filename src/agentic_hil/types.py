@@ -13,6 +13,19 @@ class TargetConfig:
 
 
 @dataclass(frozen=True)
+class DeviceConfig:
+    # None = no debugger; "default" = the top-level debugger; any other value =
+    # a named entry in AgenticHILConfig.debuggers (multi-board test reactor).
+    debugger: str | None
+    uart: str | None
+    target: TargetConfig | None = None
+
+    @property
+    def has_debugger(self) -> bool:
+        return self.debugger is not None
+
+
+@dataclass(frozen=True)
 class DebuggerConfig:
     type: Literal["openocd", "stlink", "pyocd"]
     executable: str | None
@@ -23,12 +36,14 @@ class DebuggerConfig:
     target_cfg: str
     flash_address: str | None
     timeout_s: float
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
 class DebugInterfaceConfig:
     gdb_executable: str | None
     allowed_symbols: list[str]
+    allow_all_symbols: bool
     max_dump_size_bytes: int
 
 
@@ -50,6 +65,7 @@ class ComPortConfig:
     encoding: str
     max_buffer_bytes: int
     max_write_bytes: int
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +84,7 @@ class CanBusConfig:
     listen_only: bool
     max_buffer_frames: int
     max_frame_data_bytes: int
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +94,7 @@ class AdapterConfig:
     timeout_s: float
     channels: list[str]
     faults: list[str]
+    resource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +110,7 @@ class ValidationConfig:
 class PermissionsConfig:
     allow_probe: bool
     allow_flash: bool
+    allow_reset: bool
     allow_com_read: bool
     allow_com_write: bool
     allow_can_read: bool
@@ -116,8 +135,12 @@ class LogsConfig:
 class AgenticHILConfig:
     config_path: str
     work_dir: str
+    workspace_root: str
+    state_root: str
     target: TargetConfig
+    devices: dict[str, DeviceConfig]
     debugger: DebuggerConfig
+    debuggers: dict[str, DebuggerConfig]
     debug: DebugInterfaceConfig
     artifacts: ArtifactsConfig
     com_ports: dict[str, ComPortConfig]

@@ -20,7 +20,7 @@ Names: the Python distribution/install target, CLI command, repository URL, and 
 - Run `ruff check src tests examples` and `pytest` before opening a pull request.
 - Run `python -m build` and inspect the sdist/wheel when package contents, bundled data files (schemas, templates, skills), or release files change.
 - Add or update tests when changing behavior.
-- Do not bypass Agentic HIL safety boundaries with raw debugger, flashing, reset, COM-port, CAN, or test-adapter access.
+- Do not bypass Agentic HIL safety boundaries with raw debugger, flashing, reset, COM-port, or CAN access.
 - Keep generated artifacts (`build/`, `dist/`, lockfiles) out of commits unless they are intentionally published source artifacts.
 - If README onboarding or demo behavior changes, update the affected examples and docs in the same pull request.
 - If a change affects Windows setup, confirm the docs still work for explicit OpenOCD paths and COM ports.
@@ -36,21 +36,20 @@ Use the bug report issue template when possible. Include enough information for 
 
 - Agentic HIL version (`agentic-hil --version`) and installation method (uv, pipx, pip, source).
 - Host OS, Python version, and OpenOCD or STM32CubeProgrammer version.
-- Board, debug probe, debugger backend, and serial/CAN/adapter hardware if relevant.
+- Board, debug probe, debugger backend, and serial/CAN hardware if relevant.
 - Minimal command sequence that triggered the failure.
 - Expected behavior and actual behavior.
-- Sanitized `.agentic-hil/config.yaml` with local paths, usernames, and secrets removed.
+- Sanitized discovered authoritative config or `AGENTIC_HIL_CONFIG` override, with local paths, usernames, and secrets removed.
 - Relevant `.agentic-hil/reports/last-report.json` content.
-- Relevant debugger, COM, CAN, or adapter `log_path` output, sanitized if needed.
+- Relevant debugger, COM, or CAN `log_path` output, sanitized if needed.
 - Whether the failure is reproducible after reconnecting the board and rerunning `agentic-hil doctor`.
 
 ## Hardware Safety
 
 Agentic HIL is designed to let agents perform hardware actions through configured, narrow tools. Contributions should preserve these principles:
 
-- Project-local `.agentic-hil/config.yaml` is the authority for permissions, artifact roots, and named devices.
-- Raw debugger commands and mass erase behavior must remain disabled unless a future design explicitly documents a safe policy.
-- Test-adapter channels and faults stay explicit allowlists; never widen them implicitly.
+- Agentic HIL discovers one operator-controlled config outside the repository; `AGENTIC_HIL_CONFIG` may provide an absolute-path override, and mandatory `workspace_root` binds either file to the exact project.
+- Raw debugger commands and mass erase behavior must remain disabled unless explicitly authorized by a reviewed design.
 - Hardware reports and structured errors should stay machine-readable so agents can reason about failures safely.
 
 ## Releases

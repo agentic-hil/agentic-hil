@@ -13,8 +13,16 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
-from agentic_hil.config import display_path, resolve_work_path
-from agentic_hil.report import logs_directory, read_last_report, timestamp_for_filename, utc_now_iso, write_report
+from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.report import (
+    classify_failure_report,
+    logs_directory,
+    mark_audit_failure,
+    mark_side_effect,
+    timestamp_for_filename,
+    utc_now_iso,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 OPENOCD_NOT_FOUND: JsonObject = {
@@ -67,7 +75,7 @@ class OpenOCDBackend:
         if not resolved["ok"]:
             return {"tool": "debugger_info", **resolved}
         command = [*invocation(str(resolved["executable_path"])), "--version"]
-        completed = spawn_command(command, self.config.work_dir, min(self.config.debugger.timeout_s, 10))
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **OPENOCD_NOT_FOUND}
         if completed.timed_out:
@@ -102,9 +110,20 @@ class OpenOCDBackend:
             "summary": "OpenOCD is available.",
         }
 
+    def list_probes(self) -> JsonObject:
+        if not self.config.permissions.allow_probe:
+            return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
+        return {
+            "ok": False,
+            "tool": "debugger_probes_list",
+            "backend": self.backend_name,
+            "error_type": "not_supported",
+            "summary": "OpenOCD cannot enumerate all connected probe IDs through a backend-independent command.",
+        }
+
     def probe_target(self) -> JsonObject:
         if not self.config.permissions.allow_probe:
-            return self._permission_denied("probe_target", "Probing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
@@ -114,7 +133,7 @@ class OpenOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by .agentic-hil/config.yaml.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
         if self.config.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
         if self.config.permissions.allow_mass_erase:
@@ -176,24 +195,7 @@ class OpenOCDBackend:
         return self._debug.dump_symbol_ihex(symbol, output)
 
     def classify_last_error(self) -> JsonObject:
-        report = read_last_report(self.config)
-        if not report.get("ok") and report.get("error_type") == "report_not_found":
-            return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL report has been written yet."}
-        if report.get("ok"):
-            return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL report did not contain an error."}
-        error_type = str(report.get("error_type", "unknown_debugger_error"))
-        result = {
-            "ok": True,
-            "tool": "classify_last_error",
-            "error_type": error_type,
-            "summary": report.get("summary", "Last Agentic HIL report contained an error."),
-            "likely_causes": report.get("likely_causes", self._likely_causes(error_type)),
-            "report_path": report.get("report_path"),
-            "log_path": report.get("log_path"),
-        }
-        if "backend_error_type" in report:
-            result["backend_error_type"] = report["backend_error_type"]
-        return result
+        return classify_failure_report(self.config, self._likely_causes)
 
     def close(self) -> None:
         self._debug.close()
@@ -256,28 +258,28 @@ class OpenOCDBackend:
             openocd_command,
         ]
         log_path = str(Path(logs_directory(self.config)) / f"openocd-{timestamp_for_filename()}-{tool}.log")
-        completed = spawn_command(args, self.config.work_dir, self.config.debugger.timeout_s)
+        completed = spawn_command(args, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         finished_at = utc_now_iso()
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **OPENOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
 
-        self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}
+            return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
 
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
             if success_marker is not None and success_marker not in output:
-                return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path), audit_error)
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
-            return result
-        return self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path)
+            return self._finish_log_audit(result, audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
         error_type = self._public_error_type(backend_error_type)
@@ -295,10 +297,17 @@ class OpenOCDBackend:
         return {"probe_target": "target_not_detected", "flash_firmware": "flash_failed", "reset_target": "reset_failed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
-        return write_report(self.config, result)
+        return write_report(self.config, mark_side_effect(result))
 
-    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> None:
-        Path(log_path).write_text(json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n", encoding="utf-8")
+    def _write_log(self, log_path: str, args: list[str], stdout: str, stderr: str, returncode: int | None, timed_out: bool) -> Exception | None:
+        try:
+            safe_write_text(self.config, log_path, json.dumps({"command": command_for_log(args), "returncode": returncode, "timed_out": timed_out, "stdout": stdout, "stderr": stderr}, indent=2) + "\n")
+        except (ConfigError, OSError) as error:
+            return error
+        return None
+
+    def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
+        return mark_audit_failure(result, error) if error is not None else result
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
