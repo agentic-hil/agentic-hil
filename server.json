@@ -3,7 +3,7 @@
   "name": "io.github.agentic-hil/agentic-hil",
   "title": "Agentic HIL",
   "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
-  "version": "0.2.4.dev0",
+  "version": "0.3.0",
   "repository": {
     "url": "https://github.com/agentic-hil/agentic-hil",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "agentic-hil",
-      "version": "0.2.4.dev0",
+      "version": "0.3.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

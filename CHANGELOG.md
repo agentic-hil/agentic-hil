@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-20
+
 ### Added
 
 - Added cross-process hardware leases, persistent crash quarantine, `lease-status`, and incident-bound operator recovery through `recover --confirm-safe-state --quarantine-id <id>`.
