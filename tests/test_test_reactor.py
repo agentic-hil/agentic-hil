@@ -539,6 +539,23 @@ def test_single_config_retains_device_uart_mapping(tmp_path: Path) -> None:
     assert config.devices["dut"].uart == "dut_uart"
 
 
+def test_device_target_override_inherits_unspecified_project_fields(tmp_path: Path) -> None:
+    # A per-device `target` overrides only the fields it names; the rest fall back
+    # to the project target so a device cannot silently lose the project controller.
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                devices_yaml='devices:\n  controller:\n    debugger: "default"\n    target:\n      name: "renamed-controller"\n',
+            )
+        )
+    )
+
+    assert config.devices["controller"].target is not None
+    assert config.devices["controller"].target.name == "renamed-controller"
+    assert config.devices["controller"].target.controller == config.target.controller
+
+
 def test_cli_parses_test_reactor_command() -> None:
     args = build_parser().parse_args(["test-reactor", "--test-config", "test.json"])
     assert args.command == "test-reactor"
