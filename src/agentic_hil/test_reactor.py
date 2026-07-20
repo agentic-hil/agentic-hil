@@ -390,6 +390,11 @@ class TestReactor:
         self.config = config
         self.service = service
         self._service_factory = service_factory
+        # A named debugger can only run on its own service; without a factory it
+        # would silently execute on the base service's top-level debugger (wrong
+        # board). Refuse that mismatch up front.
+        if service_factory is None and any(device.debugger not in (None, "default") for device in config.devices.values()):
+            raise ValueError("Multi-board devices use named debuggers and require a service_factory to build per-device services.")
         # Per-device services built for named debuggers are owned here and closed
         # by close(); the shared base service is owned by the caller.
         self._owned_services: list[AgenticHILToolService] = []

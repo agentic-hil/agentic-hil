@@ -229,7 +229,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         )
     com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
     devices = {name: device_config(name, value, target) for name, value in devices_raw.items()}
-    validate_devices(devices, debuggers, com_ports)
+    validate_devices(devices, debugger_config(debugger_raw, debugger_type), debuggers, com_ports)
 
     return AgenticHILConfig(
         config_path=resolved_config_path,
@@ -569,6 +569,30 @@ def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) 
     return str(lexical)
 
 
+def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, required: bool) -> DebuggerConfig:
+    candidates = {
+        "openocd": ["openocd"],
+        "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
+        "pyocd": ["pyocd"],
+    }[debugger.type]
+    configured = debugger.executable
+    if configured is None and debugger.type == "stlink":
+        from agentic_hil.backends.common import find_stm32_programmer_cli
+
+        configured = find_stm32_programmer_cli()
+    pinned = replace(
+        debugger,
+        executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates, required=required),
+    )
+    if required and pinned.type == "openocd":
+        pinned = replace(
+            pinned,
+            interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg"),
+            target_cfg=configured_external_file(config, pinned.target_cfg, f"{field_prefix}.target_cfg"),
+        )
+    return pinned
+
+
 def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     debugger_enabled = any(
         [
@@ -576,23 +600,6 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
             config.permissions.allow_flash,
             config.permissions.allow_reset,
         ]
-    )
-    debugger_candidates = {
-        "openocd": ["openocd"],
-        "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
-        "pyocd": ["pyocd"],
-    }[config.debugger.type]
-    configured_debugger = config.debugger.executable
-    if configured_debugger is None and config.debugger.type == "stlink":
-        from agentic_hil.backends.common import find_stm32_programmer_cli
-
-        configured_debugger = find_stm32_programmer_cli()
-    debugger_executable = configured_executable(
-        config,
-        configured_debugger,
-        "debugger.executable",
-        candidates=debugger_candidates,
-        required=debugger_enabled,
     )
     gdb_executable = configured_executable(
         config,
@@ -627,16 +634,15 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         )
         for name, adapter in config.adapters.items()
     }
-    debugger = replace(config.debugger, executable=debugger_executable)
-    if debugger_enabled and debugger.type == "openocd":
-        debugger = replace(
-            debugger,
-            interface_cfg=configured_external_file(config, debugger.interface_cfg, "debugger.interface_cfg"),
-            target_cfg=configured_external_file(config, debugger.target_cfg, "debugger.target_cfg"),
-        )
+    debugger = pin_one_debugger(config, config.debugger, "debugger", debugger_enabled)
+    # Named debuggers drive independent multi-board probes and MUST be pinned and
+    # validated exactly like the top-level one — otherwise a named entry could
+    # point a per-device backend at an unvalidated executable.
+    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_enabled) for name, named in config.debuggers.items()}
     return replace(
         config,
         debugger=debugger,
+        debuggers=debuggers,
         debug=replace(config.debug, gdb_executable=gdb_executable),
         can_buses=can_buses,
         adapters=adapters,
@@ -1419,8 +1425,17 @@ def device_debugger_selector(name: str, value: Any) -> str | None:
     )
 
 
-def validate_devices(devices: dict[str, DeviceConfig], debuggers: dict[str, DebuggerConfig], com_ports: dict[str, ComPortConfig]) -> None:
+def debugger_resource_identity(debugger: DebuggerConfig) -> str:
+    # Mirror coordination.debugger_resource() so config validation rejects exactly
+    # the collisions the coordinator would (and OpenOCD would silently share).
+    if debugger.resource_id:
+        return f"physical:{os.path.normcase(debugger.resource_id)}"
+    return f"probe:{os.path.normcase(str(debugger.probe_id or debugger.executable or debugger.type))}"
+
+
+def validate_devices(devices: dict[str, DeviceConfig], debugger: DebuggerConfig, debuggers: dict[str, DebuggerConfig], com_ports: dict[str, ComPortConfig]) -> None:
     debugger_owner: dict[str, str] = {}
+    resource_owner: dict[str, str] = {}
     for name, device in devices.items():
         if device.debugger is not None:
             if device.debugger != "default" and device.debugger not in debuggers:
@@ -1436,6 +1451,15 @@ def validate_devices(devices: dict[str, DeviceConfig], debuggers: dict[str, Debu
                     {"field": f"devices.{name}.debugger", "value": device.debugger, "other_device": debugger_owner[device.debugger]},
                 )
             debugger_owner[device.debugger] = name
+            resolved = debugger if device.debugger == "default" else debuggers[device.debugger]
+            identity = debugger_resource_identity(resolved)
+            if identity in resource_owner:
+                raise ConfigError(
+                    "config_invalid",
+                    "Two devices resolve to the same physical debug probe; give each debugger a distinct probe_id or resource_id so boards cannot silently share a probe.",
+                    {"field": f"devices.{name}.debugger", "resource": identity, "other_device": resource_owner[identity]},
+                )
+            resource_owner[identity] = name
         if device.uart is not None and device.uart not in com_ports:
             raise ConfigError(
                 "config_invalid",

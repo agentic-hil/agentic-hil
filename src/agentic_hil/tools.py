@@ -45,6 +45,10 @@ class AgenticHILToolService:
     ):
         self.config = config
         self.coordinator = coordinator or HardwareCoordinator(config, frontend)
+        # An injected coordinator (e.g. a per-device multi-board service sharing
+        # the base coordinator) is NOT owned here: this service must not close it
+        # or run its owner-scoped process/handle cleanup on teardown.
+        self._owns_coordinator = coordinator is None
         self.backend = backend or create_debugger_backend(self.config)
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
@@ -581,12 +585,13 @@ class AgenticHILToolService:
                             interrupt = error
                     else:
                         self._debug_lease = None
-        for provisional_error in cleanup_provisional_handles(self.coordinator.owner_marker):
-            errors.append(("provisional_handle", RuntimeError(provisional_error)))
-        process_errors = cleanup_registered_processes(owner_marker=self.coordinator.owner_marker)
-        errors.extend(("process_registry", RuntimeError(error)) for error in process_errors)
-        if not errors:
-            self.coordinator.close()
+        if self._owns_coordinator:
+            for provisional_error in cleanup_provisional_handles(self.coordinator.owner_marker):
+                errors.append(("provisional_handle", RuntimeError(provisional_error)))
+            process_errors = cleanup_registered_processes(owner_marker=self.coordinator.owner_marker)
+            errors.extend(("process_registry", RuntimeError(error)) for error in process_errors)
+            if not errors:
+                self.coordinator.close()
         if interrupt is not None:
             if errors:
                 cleanup_details = "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)

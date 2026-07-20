@@ -625,3 +625,36 @@ def test_reactor_two_devices_cannot_share_one_debugger(tmp_path: Path) -> None:
         )
     assert excinfo.value.error_type == "config_invalid"
     assert "same debugger" in excinfo.value.summary
+
+
+def test_reactor_rejects_named_debuggers_that_share_a_physical_probe(tmp_path: Path) -> None:
+    # Distinct debugger names, but neither carries a probe_id/resource_id, so both
+    # derive the same `probe:openocd` resource and would silently drive one probe.
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            str(
+                write_config(
+                    tmp_path,
+                    debuggers_yaml="debuggers:\n  probe_x:\n    type: openocd\n  probe_y:\n    type: openocd\n",
+                    devices_yaml="devices:\n  dut_a:\n    debugger: probe_x\n  dut_b:\n    debugger: probe_y\n",
+                )
+            )
+        )
+    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.details["other_device"] == "dut_a"
+
+
+def test_reactor_requires_factory_for_named_debugger_devices(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n",
+                devices_yaml="devices:\n  dut_b:\n    debugger: probe_b\n",
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="service_factory"):
+        TestReactor(config, RecordingService())  # type: ignore[arg-type]
