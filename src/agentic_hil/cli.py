@@ -200,6 +200,10 @@ def build_parser() -> argparse.ArgumentParser:
     schema_parser.add_argument("--output", default=None)
     schema_parser.add_argument("--force", action="store_true")
 
+    test_schema_parser = subparsers.add_parser("test-schema", help="print or write bundled test configuration schema")
+    test_schema_parser.add_argument("--output", default=None)
+    test_schema_parser.add_argument("--force", action="store_true")
+
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
     mcp_config_parser.add_argument("--force", action="store_true")
@@ -236,6 +240,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id, accept_config_change=args.accept_config_change)
     if args.command == "schema":
         return schema(args.output, args.force)
+    if args.command == "test-schema":
+        return test_schema(args.output, args.force)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -493,9 +499,15 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
     service = AgenticHILToolService(config, frontend="reactor")
+    # Devices on named debuggers (multi-board) get their own service driving their
+    # debugger, sharing the base coordinator so the whole project is one owner.
+    def device_service_factory(device_config: AgenticHILConfig) -> AgenticHILToolService:
+        return AgenticHILToolService(device_config, coordinator=service.coordinator, frontend="reactor")
+
+    reactor = TestReactor(service.config, service, service_factory=device_service_factory)
     primary_error: BaseException | None = None
     try:
-        result = TestReactor(service.config, service).run(test_config)
+        result = reactor.run(test_config)
     except BaseException as error:
         primary_error = error
         result = {
@@ -510,6 +522,12 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
             "cleanup": getattr(error, "agentic_hil_cleanup", []),
             "cleanup_ok": False,
         }
+    try:
+        reactor.close()
+    except BaseException as error:
+        result["ok"] = False
+        result["cleanup_ok"] = False
+        result.setdefault("cleanup_errors", []).append({"device": "reactor", "action": "close", "backend_error": str(error)})
     try:
         service.close()
     except BaseException as error:
@@ -581,6 +599,19 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
+
+
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+    text = resources.files("agentic_hil").joinpath("schemas", "testconfig.schema.json").read_text(encoding="utf-8")
+    if output is None:
+        sys.stdout.write(text)
+        return {"ok": True}
+    output_path = Path(output)
+    if output_path.exists() and not force:
+        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    return {"ok": True, "summary": "Agentic HIL test configuration schema written.", "path": output}
 
 
 def mcp_config_text() -> str:

@@ -14,8 +14,15 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class DeviceConfig:
-    debugger: bool
+    # None = no debugger; "default" = the top-level debugger; any other value =
+    # a named entry in AgenticHILConfig.debuggers (multi-board test reactor).
+    debugger: str | None
     uart: str | None
+    target: TargetConfig | None = None
+
+    @property
+    def has_debugger(self) -> bool:
+        return self.debugger is not None
 
 
 @dataclass(frozen=True)
@@ -133,6 +140,7 @@ class AgenticHILConfig:
     target: TargetConfig
     devices: dict[str, DeviceConfig]
     debugger: DebuggerConfig
+    debuggers: dict[str, DebuggerConfig]
     debug: DebugInterfaceConfig
     artifacts: ArtifactsConfig
     com_ports: dict[str, ComPortConfig]

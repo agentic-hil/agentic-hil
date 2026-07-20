@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from agentic_hil.config import (
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import AgenticHILConfig, DeviceConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, DeviceConfig, JsonObject
 
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
@@ -234,10 +235,13 @@ def format_test_config_field(parts: list[str]) -> str:
 
 
 class Device:
-    def __init__(self, device_id: str, config: DeviceConfig, service: AgenticHILToolService):
+    def __init__(self, device_id: str, config: DeviceConfig, service: AgenticHILToolService, debugger: DebuggerConfig | None = None):
         self.id = device_id
         self.config = config
         self.service = service
+        # The debugger this device drives (the top-level one, a named one for a
+        # multi-board setup, or None). Used for per-device preflight checks.
+        self.debugger = debugger
         self._owns_debug_session = False
         self._owns_uart_session = False
         self.cleanup_interrupts: list[BaseException] = []
@@ -382,10 +386,46 @@ class Device:
 class TestReactor:
     __test__ = False
 
-    def __init__(self, config: AgenticHILConfig, service: AgenticHILToolService):
+    def __init__(self, config: AgenticHILConfig, service: AgenticHILToolService, service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None):
         self.config = config
         self.service = service
-        self.devices = {device_id: Device(device_id, device, service) for device_id, device in config.devices.items()}
+        self._service_factory = service_factory
+        # Per-device services built for named debuggers are owned here and closed
+        # by close(); the shared base service is owned by the caller.
+        self._owned_services: list[AgenticHILToolService] = []
+        self.devices = {}
+        for device_id, device in config.devices.items():
+            debugger = self._resolve_device_debugger(device)
+            self.devices[device_id] = Device(device_id, device, self._device_service(device, debugger), debugger)
+
+    def _resolve_device_debugger(self, device: DeviceConfig) -> DebuggerConfig | None:
+        if device.debugger is None:
+            return None
+        if device.debugger == "default":
+            return self.config.debugger
+        return self.config.debuggers[device.debugger]
+
+    def _device_service(self, device: DeviceConfig, debugger: DebuggerConfig | None) -> AgenticHILToolService:
+        # A device on the top-level debugger (or when no factory is supplied)
+        # shares the base service; a named debugger drives an independent board,
+        # so it gets its own service built for that debugger + target, sharing the
+        # base coordinator for project-level exclusivity.
+        if self._service_factory is None or device.debugger in (None, "default"):
+            return self.service
+        per_device_config = replace(self.config, debugger=debugger, target=device.target or self.config.target)
+        built = self._service_factory(per_device_config)
+        self._owned_services.append(built)
+        return built
+
+    def close(self) -> None:
+        errors: list[BaseException] = []
+        for built in self._owned_services:
+            try:
+                built.close()
+            except BaseException as error:  # noqa: BLE001 - aggregate per-device close errors
+                errors.append(error)
+        if errors:
+            raise errors[0]
 
     def run(self, test_config: TestConfig) -> JsonObject:
         try:
@@ -541,13 +581,14 @@ class TestReactor:
                     return artifact_error
                 continue
 
-            if step.action in DEBUG_ACTIONS and self.config.debugger.type != "openocd":
+            device_debugger = device.debugger or self.config.debugger
+            if step.action in DEBUG_ACTIONS and device_debugger.type != "openocd":
                 return preflight_error(
                     index,
                     step,
                     "action",
                     "Typed debug actions currently require debugger.type 'openocd'.",
-                    {"debugger_type": self.config.debugger.type},
+                    {"debugger_type": device_debugger.type},
                 )
             if step.action == "debug_start":
                 if debug_active:

@@ -43,6 +43,7 @@ def write_config(
     state_root: Path | None = None,
     max_dump_size_bytes: int = 1048576,
     devices_yaml: str = "devices: {}\n",
+    debuggers_yaml: str = "",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
     adapters_yaml: str = "adapters: {}\n",
@@ -100,7 +101,7 @@ artifacts:
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{com_ports_yaml}{can_buses_yaml}{adapters_yaml}{permissions_yaml}reports:
+{debuggers_yaml}{com_ports_yaml}{can_buses_yaml}{adapters_yaml}{permissions_yaml}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"

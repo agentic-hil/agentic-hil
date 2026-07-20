@@ -218,18 +218,28 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
 
+    target = target_config(target_raw)
+    debuggers_raw = mapping(raw.get("debuggers"), "debuggers")
+    debuggers = {name: named_debugger_config(name, value) for name, value in debuggers_raw.items()}
+    if "default" in debuggers:
+        raise ConfigError(
+            "config_invalid",
+            "The debugger name 'default' is reserved for the top-level debugger configuration.",
+            {"field": "debuggers.default"},
+        )
     com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
-    devices = {name: device_config(name, value) for name, value in devices_raw.items()}
-    validate_devices(devices, com_ports)
+    devices = {name: device_config(name, value, target) for name, value in devices_raw.items()}
+    validate_devices(devices, debuggers, com_ports)
 
     return AgenticHILConfig(
         config_path=resolved_config_path,
         work_dir=str(workspace),
         workspace_root=str(workspace),
         state_root=str(state_root),
-        target=target_config(target_raw),
+        target=target,
         devices=devices,
         debugger=debugger_config(debugger_raw, debugger_type),
+        debuggers=debuggers,
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
         com_ports=com_ports,
@@ -1381,26 +1391,69 @@ def target_config(raw: JsonObject) -> TargetConfig:
     return TargetConfig(name=str(raw.get("name", "unknown-target")), controller=str(raw.get("controller", "unknown-controller")))
 
 
-def device_config(name: str, value: Any) -> DeviceConfig:
+def device_config(name: str, value: Any, default_target: TargetConfig) -> DeviceConfig:
     raw = mapping(value, f"devices.{name}")
-    return DeviceConfig(debugger=bool(raw.get("debugger", False)), uart=optional_string(raw.get("uart")))
-
-
-def validate_devices(devices: dict[str, DeviceConfig], com_ports: dict[str, ComPortConfig]) -> None:
-    debugger_devices = [name for name, device in devices.items() if device.debugger]
-    if len(debugger_devices) > 1:
-        raise ConfigError(
-            "config_invalid",
-            "Only one device may use the globally configured debugger.",
-            {"field": "devices", "debugger_devices": debugger_devices},
+    target: TargetConfig | None = None
+    if raw.get("target") is not None:
+        target_raw = mapping(raw.get("target"), f"devices.{name}.target")
+        target = TargetConfig(
+            name=str(target_raw.get("name", default_target.name)),
+            controller=str(target_raw.get("controller", default_target.controller)),
         )
+    return DeviceConfig(debugger=device_debugger_selector(name, raw.get("debugger", False)), uart=optional_string(raw.get("uart")), target=target)
+
+
+def device_debugger_selector(name: str, value: Any) -> str | None:
+    # false/absent -> no debugger; true -> the top-level debugger ("default");
+    # a non-empty string -> a named debugger for an independently controlled board.
+    if value is False or value is None:
+        return None
+    if value is True:
+        return "default"
+    if isinstance(value, str) and value:
+        return value
+    raise ConfigError(
+        "config_invalid",
+        "Device debugger must be false, true, or the name of a configured debugger.",
+        {"field": f"devices.{name}.debugger", "value": value},
+    )
+
+
+def validate_devices(devices: dict[str, DeviceConfig], debuggers: dict[str, DebuggerConfig], com_ports: dict[str, ComPortConfig]) -> None:
+    debugger_owner: dict[str, str] = {}
     for name, device in devices.items():
+        if device.debugger is not None:
+            if device.debugger != "default" and device.debugger not in debuggers:
+                raise ConfigError(
+                    "config_invalid",
+                    "Device references an unknown debugger.",
+                    {"field": f"devices.{name}.debugger", "value": device.debugger},
+                )
+            if device.debugger in debugger_owner:
+                raise ConfigError(
+                    "config_invalid",
+                    "Two devices may not use the same debugger; each physical probe drives one device.",
+                    {"field": f"devices.{name}.debugger", "value": device.debugger, "other_device": debugger_owner[device.debugger]},
+                )
+            debugger_owner[device.debugger] = name
         if device.uart is not None and device.uart not in com_ports:
             raise ConfigError(
                 "config_invalid",
                 "Device references an unknown UART from com_ports.",
                 {"field": f"devices.{name}.uart", "value": device.uart},
             )
+
+
+def named_debugger_config(name: str, value: Any) -> DebuggerConfig:
+    raw = mapping(value, f"debuggers.{name}")
+    debugger_type = str(raw.get("type", "openocd"))
+    if debugger_type not in {"openocd", "stlink", "pyocd"}:
+        raise ConfigError(
+            "config_invalid",
+            "Unsupported debugger.type.",
+            {"field": f"debuggers.{name}.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+        )
+    return debugger_config(raw, debugger_type)
 
 
 def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:

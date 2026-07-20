@@ -533,7 +533,9 @@ def test_single_config_retains_device_uart_mapping(tmp_path: Path) -> None:
         )
     )
 
-    assert config.devices["dut"].debugger is True
+    # `debugger: true` normalizes to the reserved "default" debugger selector.
+    assert config.devices["dut"].debugger == "default"
+    assert config.devices["dut"].has_debugger is True
     assert config.devices["dut"].uart == "dut_uart"
 
 
@@ -566,3 +568,60 @@ def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyP
 
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out)["audit_ok"] is False
+
+
+def test_reactor_routes_devices_to_independent_debuggers(tmp_path: Path) -> None:
+    # Multi-board: a device on the top-level debugger shares the base service; a
+    # device on a named debugger drives its own service built for that debugger,
+    # sharing the base coordinator for project-level exclusivity.
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n",
+                devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: probe_b\n",
+            )
+        )
+    )
+
+    class ClosableRecordingService(RecordingService):
+        def close(self) -> None:
+            self.closed = True
+
+    base = ClosableRecordingService()
+    built: list[ClosableRecordingService] = []
+
+    def factory(device_config) -> ClosableRecordingService:
+        svc = ClosableRecordingService()
+        svc.built_for = device_config.debugger
+        built.append(svc)
+        return svc
+
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        assert reactor.devices["dut_a"].service is base
+        assert reactor.devices["dut_a"].debugger is config.debugger
+        assert reactor.devices["dut_b"].service is not base
+        assert reactor.devices["dut_b"].debugger.resource_id == "rb"
+        assert len(built) == 1
+        assert built[0].built_for.resource_id == "rb"
+        assert built[0].built_for.type == "openocd"
+    finally:
+        reactor.close()
+    assert built[0].closed is True
+
+
+def test_reactor_two_devices_cannot_share_one_debugger(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            str(
+                write_config(
+                    tmp_path,
+                    devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: true\n",
+                )
+            )
+        )
+    assert excinfo.value.error_type == "config_invalid"
+    assert "same debugger" in excinfo.value.summary
