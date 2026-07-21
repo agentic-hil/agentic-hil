@@ -30,41 +30,55 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 ## Start Agentic HIL
 
-<!-- TEMP feature/smooth-installation: PyPI install paths removed so agents install from the branch. REVERT before merge. -->
 Fast path, in order — stop at the first step that works:
 
-Agentic HIL is a Python package, so a plain `pip install` is fine where `pip` works. Just don't fight a missing one: on current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip` — use `uv` as below (bootstrap it in step 4 if missing), or a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`).
+Agentic HIL is a Python package, so a plain `pip install` is fine where `pip` works. Just don't fight a missing one: on current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip` — use `uv` as below (bootstrap it in step 6 if missing), or a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`).
 
 1. If `agentic-hil --version` works, do not reinstall.
-2. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+2. Try the normal user-local pip install first:
 
 ```bash
-uvx --from git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation agentic-hil --version
+python -m pip install --user agentic-hil
+agentic-hil --version
 ```
 
-3. If `uv` is missing but `pipx` is available, the equivalent is `pipx run --spec git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation agentic-hil --version`.
-4. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
+If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, continue with the runner paths below.
+
+3. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+
+```bash
+uvx --from agentic-hil agentic-hil --version
+```
+
+4. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
+
+```bash
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+```
+
+5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic-hil agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil agentic-hil --version`.
+6. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-then rerun step 2. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+then rerun step 3. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
 
-For a stable command on `PATH` (the MCP server entry), use an isolated persistent install (still user-local, still no admin rights):
+If the `pip --user` command is not reliably on `PATH`, use an isolated persistent install for the MCP server entry (still user-local, still no admin rights):
 
 ```bash
-uv tool install git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation
+uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil
 ```
 
-`pipx install "git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation"` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
+`pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
 
 ## Install Agent Skill
 
 Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
-agentic-hil skill-install --agent <agent>          # or: uvx --from git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation agentic-hil skill-install --agent <agent>
+agentic-hil skill-install --agent <agent>          # or: uvx --from agentic-hil agentic-hil skill-install --agent <agent>
 ```
 
 Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The installed `agentic-hil` distribution is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.

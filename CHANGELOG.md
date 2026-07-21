@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
+### Added
+
+- `agentic-hil setup --agent <agent>`: one-shot project setup (authoritative config + skill install + MCP registration + doctor) in a single command. It prepares a safe external `state_root`, auto-tightening group/other-writable user-owned ancestors to resolve the common `unsafe_configured_path` snag on default Linux homes.
+- Per-agent USER-level MCP registration by `setup`: Codex `~/.codex/config.toml`, opencode `~/.config/opencode/opencode.json`, Claude Code `~/.claude.json` (via `claude mcp add --scope user`, with a direct-write fallback). Kept outside the repository to preserve the policy trust boundary; merges into existing config instead of overwriting; idempotent.
+- Claude Code plugin (`plugins/agentic-hil/` plus `.claude-plugin/marketplace.json`): bundles the `agentic-hil-config-setup` skill and the MCP server (lazy `uvx`), installable with `claude plugin install`. The repo is also discoverable by the Vercel `skills` CLI (`npx skills add`) for cross-agent skill distribution.
+
+### Changed
+
+- MCP registration emits a resolvable server command: the bare name when it is on `PATH`, otherwise the absolute console-script path next to the interpreter — so a project-venv install needs no manual `.mcp.json` editing.
+- `AI_AGENT_QUICKSTART.md` leads with `agentic-hil setup`, documents the MCP registration as user-level per agent, and adds guidance for pip-less environments (Ubuntu 24.04+/PEP-668).
+
 ## [0.3.0] - 2026-07-20
 
 ### Added

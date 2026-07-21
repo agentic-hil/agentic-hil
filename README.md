@@ -29,7 +29,7 @@ Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything in
 If you want to install it yourself anyway, install the Python package with pip and then use the `agentic-hil` command:
 
 ```bash
-pip install "git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation"
+pip install agentic-hil
 agentic-hil --version
 ```
 
@@ -38,13 +38,14 @@ If that fails because Python is externally managed, `agentic-hil` is not on `PAT
 Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
 
 ```bash
-uvx --from git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation agentic-hil --version
+uvx --from agentic-hil agentic-hil --version
+uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
 Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):
 
 ```bash
-uv tool install git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation
+uv tool install agentic-hil      # or: pipx install agentic-hil
 agentic-hil init
 agentic-hil mcp-config --output .mcp.json
 agentic-hil doctor

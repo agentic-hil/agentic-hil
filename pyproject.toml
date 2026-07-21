@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-hil"
-version = "0.3.0"
+version = "0.4.0"
 description = "Agentic Hardware-in-the-Loop (Agentic HIL) tools for AI-assisted embedded firmware loops"
 readme = "README.md"
 requires-python = ">=3.10"
