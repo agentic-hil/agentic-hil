@@ -99,6 +99,8 @@ No `cwd` or absolute path is baked in: every host starts the same command (`agen
 
 If you deliberately want a **project-scoped, team-shared** entry checked into the repo instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
 
+**Claude Code, optional:** a native plugin under `plugins/agentic-hil/` bundles this skill and the MCP server. Install it with `/plugin marketplace add https://github.com/agentic-hil/agentic-hil` then `/plugin install agentic-hil@agentic-hil` (or `claude --plugin-dir ./plugins/agentic-hil` to test). It is an alternative to the skill+MCP part of `agentic-hil setup --agent claude` — use one or the other for the MCP registration, not both. Either way, still run `agentic-hil setup --agent claude` (or at least `agentic-hil init`) once per firmware project for the deny-by-default authoritative config.
+
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, and CAN tool calls pass `bus_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --port <port_id>` process from the same project root; never mix plain text into `mcp-stdio`.
 
 ## Use The Tools
