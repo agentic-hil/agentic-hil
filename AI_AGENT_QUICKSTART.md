@@ -33,7 +33,7 @@ Prefer the supported first path unless the firmware project or user clearly says
 <!-- TEMP feature/smooth-installation: PyPI install paths removed so agents install from the branch. REVERT before merge. -->
 Fast path, in order — stop at the first step that works:
 
-Agentic HIL is a Python package, but do **not** reach for a bare `pip install`: on current systems (Ubuntu 24.04+/PEP-668, minimal images) `pip` is frequently absent or externally managed, which sends agents down a dead end of `ensurepip`/`get-pip`/`apt install python3-pip`. Use `uv` as below; if `uv` is missing, bootstrap it (step 4). If you must use `pip`, use a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`) — never the system `pip`.
+Agentic HIL is a Python package, so a plain `pip install` is fine where `pip` works. Just don't fight a missing one: on current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip` — use `uv` as below (bootstrap it in step 4 if missing), or a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`).
 
 1. If `agentic-hil --version` works, do not reinstall.
 2. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
@@ -89,17 +89,15 @@ Expected healthy result: `ok: true` overall with each step ok, and — once `all
 
 ## Configure MCP
 
-Every MCP host starts the same server from the firmware project root:
+`agentic-hil setup --agent <agent>` (above) already registers the server for that agent in the agent's **user-level** config — outside the firmware repo, so the untrusted repo cannot control how the agent launches tools (the same trust boundary as the authoritative config):
 
-```text
-agentic-hil mcp-stdio
-```
+- Claude Code → user scope (`claude mcp add --scope user`, i.e. `~/.claude.json`)
+- Codex → `~/.codex/config.toml` (`[mcp_servers.agentic-hil]`)
+- opencode → `~/.config/opencode/opencode.json` (`mcp.agentic-hil`)
 
-Use the active client's copy/paste block in [MCP host configuration](docs/mcp-hosts.md). Do not translate host syntax into new server or tool semantics. `agentic-hil mcp-config --output .mcp.json` is available only for clients that explicitly support the Claude-compatible `mcpServers` format; it is not valid as `.vscode/mcp.json`, `.codex/config.toml`, or `opencode.json`.
+No `cwd` or absolute path is baked in: every host starts the same command (`agentic-hil mcp-stdio`) from the firmware project root, and `mcp-stdio` discovers the external config from that working directory — refusing to start unless `workspace_root` matches. If `agentic-hil` is not on `PATH`, the generated command uses the resolvable console-script path automatically. See [MCP host configuration](docs/mcp-hosts.md) for the exact per-host rendering and for hosts `setup` does not cover.
 
-If `agentic-hil` is not on `PATH`, use the `uvx` runner form documented in the host guide.
-
-`mcp-stdio` discovers the external config from its project working directory and refuses to start unless `workspace_root` matches that project. An inherited `AGENTIC_HIL_CONFIG` may override discovery only with an absolute path. Do not commit a machine-specific override.
+If you deliberately want a **project-scoped, team-shared** entry checked into the repo instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
 
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, and CAN tool calls pass `bus_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --port <port_id>` process from the same project root; never mix plain text into `mcp-stdio`.
 

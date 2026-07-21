@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ from agentic_hil.cli import (
     initialized_config_path,
     install_skill,
     mcp_config,
+    register_agent_mcp,
     schema,
     setup_project,
     test_schema,
@@ -78,6 +80,9 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
 
+    real_which = shutil.which
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None if name == "claude" else real_which(name))
+
     result = setup_project(agent="claude-code")
 
     assert result["ok"] is True, result
@@ -85,9 +90,68 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert result["steps"]["skill_install"]["ok"] is True
     assert result["steps"]["mcp_config"]["ok"] is True
     assert result["steps"]["doctor"]["ok"] is True
-    assert (workspace / ".mcp.json").is_file()
+    # MCP registration is USER-level, never written into the (untrusted) repo.
+    assert not (workspace / ".mcp.json").exists()
+    claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert "agentic-hil" in claude_json["mcpServers"]
     assert (home / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md").is_file()
     assert project_config_path(workspace).is_file()
+
+
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+def test_register_agent_mcp_codex_writes_user_config_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    result = register_agent_mcp("codex")
+    assert result["ok"] is True
+    toml = (home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert "[mcp_servers.agentic-hil]" in toml
+    assert 'args = ["mcp-stdio"]' in toml
+    assert "enabled = true" in toml
+    # idempotent
+    assert register_agent_mcp("codex").get("skipped") is True
+
+
+def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    cfg = home / ".codex" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('[mcp_servers.other]\ncommand = "other"\n', encoding="utf-8")
+    register_agent_mcp("codex")
+    text = cfg.read_text(encoding="utf-8")
+    assert "[mcp_servers.other]" in text
+    assert "[mcp_servers.agentic-hil]" in text
+
+
+def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    path = home / ".config" / "opencode" / "opencode.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcp": {"other": {"type": "local", "command": ["x"]}}}), encoding="utf-8")
+    result = register_agent_mcp("opencode")
+    assert result["ok"] is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "other" in data["mcp"]
+    entry = data["mcp"]["agentic-hil"]
+    assert entry["type"] == "local"
+    assert entry["command"][-1] == "mcp-stdio"
+
+
+def test_register_agent_mcp_claude_falls_back_to_user_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None)
+    result = register_agent_mcp("claude-code")
+    assert result["ok"] is True
+    assert result["method"] == "file"
+    data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert data["mcpServers"]["agentic-hil"]["args"] == ["mcp-stdio"]
+    assert not (tmp_path / ".mcp.json").exists()
 
 
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:

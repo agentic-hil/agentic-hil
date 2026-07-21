@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from importlib import resources
@@ -242,9 +243,10 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
 
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """One-shot, RTK-style project setup. Prepares a safe state_root, writes the
-    authoritative config, installs the agent skill, writes .mcp.json, and runs
-    doctor -- so an agent needs a single command instead of orchestrating four
-    and hand-fixing the state_root permission snag."""
+    authoritative config, installs the agent skill, registers the MCP server in
+    the agent's USER-level config (outside the repo, per the trust boundary), and
+    runs doctor -- so an agent needs a single command instead of orchestrating
+    four and hand-fixing the state_root permission snag."""
     workspace = Path.cwd().resolve()
     state_actions = ensure_safe_state_root()
 
@@ -255,7 +257,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         config_result = init_config(None, force=True)
 
     skill_result = install_skill(agent, None, force)
-    mcp_result = mcp_config(".mcp.json", force=True)
+    mcp_result = register_agent_mcp(agent, force=True)
     doctor_result = doctor(None) if overall_success(config_result) else {"ok": False, "skipped": True, "summary": "Doctor skipped because configuration was not written."}
 
     ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result))
@@ -479,6 +481,115 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": output}
+
+
+AGENTIC_HIL_MCP_START = "# >>> agentic-hil mcp (managed) >>>"
+AGENTIC_HIL_MCP_END = "# <<< agentic-hil mcp (managed) <<<"
+
+
+def register_agent_mcp(agent: str | None = None, force: bool = False) -> JsonObject:
+    """Register the agentic-hil MCP server for `agent` in that agent's USER-level
+    config, outside the firmware repo. The repo is untrusted under the policy
+    boundary, so the MCP registration must not live in it. No cwd / absolute paths
+    are baked in: the client launches the server in the project directory, where
+    agentic-hil discovers its authoritative config from the cwd."""
+    requested = agent or "claude-code"
+    resolved = resolve_skill_agent(requested)
+    agent_id = resolved.id if resolved else normalize_agent(requested)
+    command = mcp_server_command()
+    if agent_id == "claude-code":
+        return _register_claude_mcp(command, force)
+    if agent_id == "codex":
+        return _register_codex_mcp(command, force)
+    if agent_id == "opencode":
+        return _register_opencode_mcp(command, force)
+    return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents()}
+
+
+def _register_codex_mcp(command: str, force: bool) -> JsonObject:
+    path = Path.home() / ".codex" / "config.toml"
+    block = "\n".join(
+        [
+            AGENTIC_HIL_MCP_START,
+            "[mcp_servers.agentic-hil]",
+            f"command = {json.dumps(command)}",
+            'args = ["mcp-stdio"]',
+            "enabled = true",
+            AGENTIC_HIL_MCP_END,
+        ]
+    )
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    has_managed = AGENTIC_HIL_MCP_START in existing
+    if not has_managed and re.search(r"^\s*\[mcp_servers\.agentic-hil\]", existing, re.MULTILINE):
+        return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged [mcp_servers.agentic-hil] entry already exists; left untouched."}
+    if has_managed and not force:
+        return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Codex MCP entry already registered."}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if has_managed:
+        pattern = re.compile(re.escape(AGENTIC_HIL_MCP_START) + r"[\s\S]*?" + re.escape(AGENTIC_HIL_MCP_END))
+        next_text = pattern.sub(block, existing)
+    else:
+        trimmed = existing.rstrip()
+        separator = "\n\n" if trimmed else ""
+        next_text = f"{trimmed}{separator}{block}\n"
+    path.write_text(next_text, encoding="utf-8")
+    return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
+
+
+def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
+    path = Path.home() / ".config" / "opencode" / "opencode.json"
+    data = _load_json_object(path)
+    if data is None:
+        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched."}
+    servers = data.setdefault("mcp", {})
+    if not isinstance(servers, dict):
+        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched."}
+    if "agentic-hil" in servers and not force:
+        return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
+    data.setdefault("$schema", "https://opencode.ai/config.json")
+    servers["agentic-hil"] = {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "Registered agentic-hil MCP server in the opencode user config."}
+
+
+def _register_claude_mcp(command: str, force: bool) -> JsonObject:
+    if shutil.which("claude"):
+        try:
+            if force:
+                subprocess.run(["claude", "mcp", "remove", "--scope", "user", "agentic-hil"], capture_output=True, text=True, timeout=30, check=False)
+            completed = subprocess.run(["claude", "mcp", "add", "--scope", "user", "agentic-hil", "--", command, "mcp-stdio"], capture_output=True, text=True, timeout=30, check=False)
+            if completed.returncode == 0:
+                return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "claude-cli", "summary": "Registered agentic-hil MCP server via 'claude mcp add --scope user'."}
+            if "already exists" in f"{completed.stdout}{completed.stderr}".lower():
+                return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "claude-cli", "summary": "Claude MCP entry already registered."}
+        except (OSError, subprocess.SubprocessError):
+            pass  # fall through to the direct-write fallback
+    path = Path.home() / ".claude.json"
+    data = _load_json_object(path)
+    if data is None:
+        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched."}
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched."}
+    if "agentic-hil" in servers and not force:
+        return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
+    servers["agentic-hil"] = {"type": "stdio", "command": command, "args": ["mcp-stdio"]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Registered agentic-hil MCP server in ~/.claude.json (user scope)."}
+
+
+def _load_json_object(path: Path) -> dict | None:
+    """{} when missing, the parsed mapping when valid, None when the file exists
+    but is not a JSON object (so callers never clobber unparseable config)."""
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def doctor(config_path: str | None = None) -> JsonObject:
