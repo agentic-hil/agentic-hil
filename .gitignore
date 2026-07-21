@@ -11,4 +11,5 @@ dist/
 .venv/
 .agentic-hil/
 .mcp.json
+!plugins/agentic-hil/.mcp.json
 uv.lock

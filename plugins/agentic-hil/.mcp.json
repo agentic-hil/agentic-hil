@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentic-hil": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/agentic-hil/agentic-hil@feature/smooth-installation", "agentic-hil", "mcp-stdio"]
+    }
+  }
+}

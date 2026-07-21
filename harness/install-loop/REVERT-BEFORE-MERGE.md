@@ -13,6 +13,9 @@ branch. Undo ALL of them before merging to master.
    `<!-- TEMP feature/smooth-installation ... -->`.
 2. **README.md** — same: PyPI install commands replaced with the branch git
    source (`pip install`, `uvx --from`, `uv tool install`).
+3. **plugins/agentic-hil/.mcp.json** — the Claude plugin's MCP command uses
+   `uvx --from git+…@feature/smooth-installation …`. Restore the PyPI form:
+   `"args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]`.
 
 Nothing on master should contain `@feature/smooth-installation` or
 `TEMP feature/smooth-installation` after the revert.
@@ -28,6 +31,9 @@ These are real fixes/features, not TEMP scaffolding. They must survive the merge
 - The **"do not reach for a bare `pip install`"** guidance block in
   `AI_AGENT_QUICKSTART.md` (steers agents to uv; avoids the pip-missing dead end).
 - The `agentic-hil setup --agent <agent>` "Configure Each Project" section.
+- The **Claude Code plugin**: `plugins/agentic-hil/` (`.claude-plugin/plugin.json`,
+  `.mcp.json`, bundled skill) + `.claude-plugin/marketplace.json` — native
+  `claude plugin install` for Claude Code (skill + MCP, no manual setup step).
 
 ## Revert method (surgical — NOT a file restore)
 `git checkout master -- AI_AGENT_QUICKSTART.md` would ALSO wipe the keepers above.
