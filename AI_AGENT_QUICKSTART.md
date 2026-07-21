@@ -33,6 +33,8 @@ Prefer the supported first path unless the firmware project or user clearly says
 <!-- TEMP feature/smooth-installation: PyPI install paths removed so agents install from the branch. REVERT before merge. -->
 Fast path, in order — stop at the first step that works:
 
+Agentic HIL is a Python package, but do **not** reach for a bare `pip install`: on current systems (Ubuntu 24.04+/PEP-668, minimal images) `pip` is frequently absent or externally managed, which sends agents down a dead end of `ensurepip`/`get-pip`/`apt install python3-pip`. Use `uv` as below; if `uv` is missing, bootstrap it (step 4). If you must use `pip`, use a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`) — never the system `pip`.
+
 1. If `agentic-hil --version` works, do not reinstall.
 2. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
 

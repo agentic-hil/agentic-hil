@@ -17,14 +17,26 @@ branch. Undo ALL of them before merging to master.
 Nothing on master should contain `@feature/smooth-installation` or
 `TEMP feature/smooth-installation` after the revert.
 
-## Easiest revert
-The doc edits are isolated in the commit tagged `TEMP:` on this branch:
+## KEEP — do NOT revert (permanent improvements on this branch)
+These are real fixes/features, not TEMP scaffolding. They must survive the merge:
+- `agentic-hil setup` one-shot command (`src/agentic_hil/cli.py`, `config.py`, tests) — feat commit.
+- `.mcp.json` resolvable-command fix (`src/agentic_hil/cli.py`) — fix commit.
+- The **"do not reach for a bare `pip install`"** guidance block in
+  `AI_AGENT_QUICKSTART.md` (steers agents to uv; avoids the pip-missing dead end).
+- The `agentic-hil setup --agent <agent>` "Configure Each Project" section.
+
+## Revert method (surgical — NOT a file restore)
+`git checkout master -- AI_AGENT_QUICKSTART.md` would ALSO wipe the keepers above.
+Instead revert only the package-source swap:
 ```
 git log --oneline --grep TEMP
-git revert <temp-commit-sha>
-# or restore the two files from master:
-git checkout master -- AI_AGENT_QUICKSTART.md README.md
+git revert <temp-commit-sha>     # then re-apply any keeper hunks it undoes, or
+# manually: replace every `git+https://…/agentic-hil@feature/smooth-installation`
+#           with the PyPI form (`agentic-hil` name / plain repo URL),
+#           restore the PyPI fast-path steps, remove the `TEMP …` HTML comment.
 ```
+Verify: no `@feature/smooth-installation` or `TEMP feature/smooth-installation`
+remains, AND the setup section + pip-guidance block are still present.
 
 ## Not shipped (no revert needed on master)
 `harness/install-loop/run-install-prompt.sh` (its `BRANCH` default) and the
