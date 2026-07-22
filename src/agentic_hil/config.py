@@ -342,6 +342,51 @@ def user_state_root() -> Path:
     return safe_directory(root / "agentic-hil")
 
 
+def ensure_safe_state_root() -> list[str]:
+    """Create and validate the default state directory without changing existing
+    permissions. Unsafe ownership or replaceable ancestors fail closed. This
+    validator itself never chmods; ``setup`` performs any user-owned tightening
+    explicitly beforehand via tighten_owned_writable_ancestors()."""
+    secure_user_directory(user_state_root())
+    return []
+
+
+def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
+    """Remove group/other write from the *current user's own* directories (and a
+    final regular file such as a launcher) along ``target``'s chain, so the
+    fail-closed trust validators accept a umask-002 / private-group home without
+    the operator hand-fixing permissions.
+
+    Only components owned by the current user are ever changed; the walk stops at
+    the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
+    never touches shared or system directories. Sticky world-writable dirs (e.g.
+    ``/tmp``) are left as-is. Returns a list of the changes made. POSIX only; on
+    Windows the ACL model differs and this is a no-op."""
+    if os.name == "nt":
+        return []
+    actions: list[str] = []
+    path = Path(os.path.abspath(os.path.expanduser(str(target))))
+    euid = os.geteuid()
+    existing = path
+    while not os.path.lexists(existing) and existing != existing.parent:
+        existing = existing.parent
+    for component in (existing, *existing.parents):
+        try:
+            info = os.lstat(component)
+        except OSError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            break  # never chmod through a symlinked component; the validator rejects it
+        if info.st_uid != euid:
+            break  # never touch directories we do not own (e.g. /home, /)
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and mode & stat.S_ISVTX):
+            with suppress(OSError):
+                os.chmod(component, mode & ~0o022)
+                actions.append(f"removed group/other write on {component}")
+    return actions
+
+
 def project_state_directory(config: AgenticHILConfig) -> Path:
     identity = "\0".join(
         [
@@ -417,7 +462,7 @@ def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
         os.close(descriptor)
 
 
-def validate_windows_state_root(root: Path) -> None:
+def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root") -> None:
     import ctypes
     from ctypes import wintypes
 
@@ -433,7 +478,7 @@ def validate_windows_state_root(root: Path) -> None:
     get_security.restype = wintypes.DWORD
     result = get_security(str(root), 1, 0x00000005, ctypes.byref(owner_sid), None, ctypes.byref(dacl), None, ctypes.byref(security_descriptor))
     if result:
-        raise ConfigError("unsafe_configured_path", "state_root Windows ownership and ACL could not be inspected.", {"field": "state_root", "path": str(root), "winerror": result})
+        raise ConfigError("unsafe_configured_path", f"{label} Windows ownership and ACL could not be inspected.", {"field": field, "path": str(root), "winerror": result})
 
     open_token = advapi32.OpenProcessToken
     open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
@@ -477,23 +522,23 @@ def validate_windows_state_root(root: Path) -> None:
                 raise ctypes.WinError(ctypes.get_last_error())
             trusted_owner = bool(equal_sid(owner_sid, candidate))
         if not trusted_owner:
-            raise ConfigError("unsafe_configured_path", "state_root must be owned by the current Windows user.", {"field": "state_root", "path": str(root)})
+            raise ConfigError("unsafe_configured_path", f"{label} must have a trusted Windows owner.", {"field": field, "path": str(root)})
         if not dacl.value or windows_acl_grants_untrusted_access(advapi32, dacl, current_sid, 0x500D0116):
-            raise ConfigError("unsafe_configured_path", "state_root must not grant write access to other Windows principals.", {"field": "state_root", "path": str(root)})
+            raise ConfigError("unsafe_configured_path", f"{label} must not grant write access to other Windows principals.", {"field": field, "path": str(root)})
         for ancestor in root.parents:
             ancestor_dacl = ctypes.c_void_p()
             ancestor_descriptor = ctypes.c_void_p()
             result = get_security(str(ancestor), 1, 0x00000004, None, None, ctypes.byref(ancestor_dacl), None, ctypes.byref(ancestor_descriptor))
             if result:
-                raise ConfigError("unsafe_configured_path", "state_root ancestor ACL could not be inspected.", {"field": "state_root", "path": str(ancestor), "winerror": result})
+                raise ConfigError("unsafe_configured_path", f"{label} ancestor ACL could not be inspected.", {"field": field, "path": str(ancestor), "winerror": result})
             try:
                 if not ancestor_dacl.value or windows_acl_grants_untrusted_access(advapi32, ancestor_dacl, current_sid, 0x100D0040, include_inherit_only=False):
-                    raise ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", {"field": "state_root", "path": str(ancestor)})
+                    raise ConfigError("unsafe_configured_path", f"{label} has a replaceable Windows ancestor directory.", {"field": field, "path": str(ancestor)})
             finally:
                 if ancestor_descriptor:
                     local_free(ancestor_descriptor)
     except OSError as error:
-        raise ConfigError("unsafe_configured_path", "state_root Windows ownership and ACL could not be inspected.", {"field": "state_root", "path": str(root), "backend_error": str(error)}) from error
+        raise ConfigError("unsafe_configured_path", f"{label} Windows ownership and ACL could not be inspected.", {"field": field, "path": str(root), "backend_error": str(error)}) from error
     finally:
         if token:
             close_handle(token)
@@ -797,6 +842,220 @@ def safe_directory(directory: str | Path) -> Path:
     return path
 
 
+def secure_user_directory(directory: str | Path) -> Path:
+    """Create and pin a user-controlled directory, rejecting replaceable
+    ancestors and unsafe ownership/modes instead of repairing them in place."""
+    path = absolute_without_symlinks(Path(directory))
+    if os.name == "nt":
+        handles = _windows_hold_directory_chain(path, create=True)
+        try:
+            validate_windows_state_root(path, field="user_config", label="User configuration directory")
+        finally:
+            _close_windows_handles(handles)
+        return path
+
+    descriptors = _hold_posix_directory_chain(path, create=True)
+    try:
+        euid = os.geteuid()
+        for index, descriptor in enumerate(descriptors):
+            opened = os.fstat(descriptor)
+            mode = stat.S_IMODE(opened.st_mode)
+            final = index == len(descriptors) - 1
+            unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
+            if (final and opened.st_uid != euid) or unsafe_write:
+                raise ConfigError(
+                    "unsafe_configured_path",
+                    "User configuration directories must be owned by the current user and must have no replaceable components.",
+                    {"field": "user_config", "path": str(path)},
+                )
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return path
+
+
+def secure_optional_read_text(file_path: str | Path, *, encoding: str = "utf-8") -> str | None:
+    """Read a trusted user file or return None when it is absent.
+
+    The directory chain, file type, link count, owner, and write permissions are
+    validated while the opened file descriptor/handle pins the object.
+    """
+    path = absolute_without_symlinks(Path(file_path))
+    secure_user_directory(path.parent)
+    try:
+        with safe_open_binary(path) as handle:
+            opened = os.fstat(handle.fileno())
+            if os.name == "nt":
+                validate_windows_state_root(path, field="user_config", label="User configuration file")
+            elif opened.st_uid != os.geteuid() or bool(stat.S_IMODE(opened.st_mode) & 0o022):
+                raise ConfigError(
+                    "unsafe_configured_path",
+                    "User configuration files must be owned by the current user and not writable by other users.",
+                    {"field": "user_config", "path": str(path)},
+                )
+            return handle.read().decode(encoding)
+    except FileNotFoundError:
+        return None
+
+
+def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace one trusted user file with owner-only content."""
+    path = absolute_without_symlinks(Path(file_path))
+    secure_user_directory(path.parent)
+    # Refuse unsafe existing aliases/ACLs before atomic replacement. Merely
+    # replacing a hardlink would hide that a caller selected the wrong object.
+    secure_optional_read_text(path, encoding=encoding)
+    atomic_write_text(path, text, encoding=encoding)
+    written = secure_optional_read_text(path, encoding=encoding)
+    if written is None:
+        raise ConfigError("unsafe_configured_path", "User configuration file disappeared after replacement.", {"field": "user_config", "path": str(path)})
+
+
+def secure_remove_file(file_path: str | Path) -> None:
+    """Remove a trusted single-link file, primarily for transaction rollback."""
+    path = absolute_without_symlinks(Path(file_path))
+    secure_user_directory(path.parent)
+    if secure_optional_read_text(path) is None:
+        return
+    if os.name == "nt":
+        handles = _windows_hold_directory_chain(path.parent)
+        try:
+            safe_file_path(path)
+            path.unlink()
+        finally:
+            _close_windows_handles(handles)
+        return
+    parent_descriptor = _open_directory_fd(path.parent)
+    try:
+        opened = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_uid != os.geteuid():
+            raise ConfigError("unsafe_configured_path", "Rollback target must be an owned single-link regular file.", {"field": "user_config", "path": str(path)})
+        os.unlink(path.name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+@contextmanager
+def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
+    """Cross-process sidecar lock for a trusted user-file transaction."""
+    path = absolute_without_symlinks(Path(file_path))
+    secure_user_directory(path.parent)
+    lock_path = path.with_name(f".{path.name}.agentic-hil.lock")
+    secure_optional_read_text(lock_path)
+    with safe_file_lock(lock_path):
+        # Validate the object created/opened by safe_file_lock before trusting the
+        # lock. A secure parent prevents another identity from swapping it later.
+        # Windows opens this sidecar without read sharing, so reopening it here
+        # fails even though the lock itself is valid. ``safe_file_lock`` already
+        # validates the opened file handle; retain that handle and only validate
+        # the path/ACL chain while it is held.
+        if os.name == "nt":
+            validate_windows_state_root(lock_path, field="user_config", label="User config lock")
+        else:
+            secure_optional_read_text(lock_path)
+        yield
+
+
+def trusted_persistent_executable(
+    executable: str | Path,
+    *,
+    workspace: str | Path,
+    disallowed_roots: list[str | Path] | None = None,
+) -> str:
+    """Pin a stable executable outside the workspace and cache/temp roots.
+
+    One owner-controlled POSIX launcher symlink is supported for pipx-style
+    ``~/.local/bin`` installs. Both the link and its direct target are pinned and
+    validated; nested links and changing links fail closed.
+    """
+    requested = Path(executable).expanduser()
+    if not requested.is_absolute():
+        raise ConfigError("mcp_command_untrusted", "The MCP server command must resolve to an absolute path.", {"path": str(requested)})
+    path = absolute_without_symlinks(requested)
+    workspace_path = absolute_without_symlinks(Path(workspace))
+    forbidden = [workspace_path, *(absolute_without_symlinks(Path(root).expanduser()) for root in disallowed_roots or [])]
+
+    def reject_forbidden(candidate: Path) -> None:
+        if any(is_path_within_frozen(candidate, root) for root in forbidden):
+            raise ConfigError("mcp_command_untrusted", "The MCP server command must not come from the workspace or a temporary/cache directory.", {"path": str(candidate)})
+
+    reject_forbidden(path)
+
+    if os.name == "nt":
+        handles = _windows_hold_directory_chain(path.parent)
+        try:
+            with safe_open_binary(path):
+                validate_windows_state_root(path, field="mcp_command", label="MCP server executable")
+        finally:
+            _close_windows_handles(handles)
+        return str(path)
+
+    def trusted_parent_chain(candidate: Path) -> list[int]:
+        descriptors = _hold_posix_directory_chain(candidate.parent)
+        try:
+            for index, descriptor in enumerate(descriptors):
+                opened = os.fstat(descriptor)
+                mode = stat.S_IMODE(opened.st_mode)
+                final = index == len(descriptors) - 1
+                unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
+                if unsafe_write or (final and opened.st_uid not in {0, os.geteuid()}):
+                    raise ConfigError("mcp_command_untrusted", "The MCP server executable has an untrusted or replaceable parent directory.", {"path": str(candidate)})
+            return descriptors
+        except BaseException:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+
+    def validate_executable_file(candidate: Path) -> None:
+        reject_forbidden(candidate)
+        target_descriptors = trusted_parent_chain(candidate)
+        try:
+            with safe_open_binary(candidate) as handle:
+                opened = os.fstat(handle.fileno())
+                mode = stat.S_IMODE(opened.st_mode)
+                if opened.st_uid not in {0, os.geteuid()} or mode & 0o022 or not mode & 0o111:
+                    raise ConfigError("mcp_command_untrusted", "The MCP server executable must be trusted, executable, and not writable by other users.", {"path": str(candidate)})
+        finally:
+            for descriptor in reversed(target_descriptors):
+                os.close(descriptor)
+
+    descriptors = trusted_parent_chain(path)
+    try:
+        parent_descriptor = descriptors[-1]
+        first = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(first.st_mode):
+            if first.st_uid not in {0, os.geteuid()} or first.st_nlink != 1:
+                raise ConfigError("mcp_command_untrusted", "The MCP launcher symlink must have a trusted owner and one link.", {"path": str(path)})
+            link_value = os.readlink(path.name, dir_fd=parent_descriptor)
+            current = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            if not os.path.samestat(first, current):
+                raise ConfigError("mcp_command_untrusted", "The MCP launcher symlink changed during validation.", {"path": str(path)})
+            direct_target = Path(link_value)
+            direct_target = absolute_without_symlinks(direct_target if direct_target.is_absolute() else path.parent / direct_target)
+            try:
+                resolved_target = direct_target.resolve(strict=True)
+            except OSError as error:
+                raise ConfigError("mcp_command_untrusted", "The MCP launcher symlink target does not exist.", {"path": str(path)}) from error
+            if resolved_target != direct_target:
+                raise ConfigError("mcp_command_untrusted", "The MCP launcher symlink target must not contain another symlink.", {"path": str(path), "target": str(direct_target)})
+            validate_executable_file(direct_target)
+            final = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            if not os.path.samestat(first, final):
+                raise ConfigError("mcp_command_untrusted", "The MCP launcher symlink changed during validation.", {"path": str(path)})
+            return str(path)
+        if not stat.S_ISREG(first.st_mode):
+            raise ConfigError("mcp_command_untrusted", "The MCP server command must be a regular executable or one trusted launcher symlink.", {"path": str(path)})
+        validate_executable_file(path)
+        final = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if not os.path.samestat(first, final):
+            raise ConfigError("mcp_command_untrusted", "The MCP server executable changed during validation.", {"path": str(path)})
+        return str(path)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
     path = _validated_absolute_file_path(file_path, workspace)
     try:
@@ -849,6 +1108,36 @@ def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
         raise
     except OSError as error:
         os.close(descriptor)
+        _raise_unsafe_path_error(error, path)
+        raise
+
+
+def _hold_posix_directory_chain(directory: Path, *, create: bool = False) -> list[int]:
+    """Open every POSIX directory component and retain all descriptors."""
+    path = absolute_without_symlinks(directory)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parts = path.parts
+    descriptors: list[int] = []
+    try:
+        descriptors.append(os.open(parts[0], flags))
+        for part in parts[1:]:
+            if create:
+                with suppress(FileExistsError):
+                    os.mkdir(part, mode=0o700, dir_fd=descriptors[-1])
+            descriptor = os.open(part, flags, dir_fd=descriptors[-1])
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode):
+                os.close(descriptor)
+                raise ConfigError("unsafe_configured_path", "Configured path component is not a directory.", {"path": str(path)})
+            descriptors.append(descriptor)
+        return descriptors
+    except ConfigError:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
         _raise_unsafe_path_error(error, path)
         raise
 

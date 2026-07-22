@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
+### Added
+
+- `agentic-hil setup --agent <agent>`: one-shot project setup (authoritative config + skill install + MCP registration + doctor) in a single command. It prepares a safe external `state_root` and, before the fail-closed trust validators run, silently tightens the operator's own group/other-writable directories along the config, state, and MCP-launcher chains so setup succeeds on default umask-002 / private-group homes without hand-fixing permissions. Only user-owned components are changed — the walk stops at the first foreign-owned or symlinked ancestor, never touching shared or system directories — and every change is reported in the result's `permission_changes`.
+- Per-agent USER-level MCP registration by `setup`: Codex `~/.codex/config.toml`, opencode `~/.config/opencode/opencode.json`, and Claude Code `~/.claude.json`. Each file is merged directly with secure atomic writes outside the repository to preserve the policy trust boundary; registration is idempotent and fails closed on unsafe files.
+- Claude Code plugin (`plugins/agentic-hil/` plus `.claude-plugin/marketplace.json`): distributes the version-matched setup skill without persisting an unverifiable portable MCP command. The skill requires an exact persistent package install and delegates user-level MCP registration to `setup`, which records the verified absolute console-script path. The repo is also discoverable by the Vercel `skills` CLI (`npx skills add`) for cross-agent skill distribution.
+
+### Changed
+
+- MCP registration stores only a verified absolute persistent console-script path and rejects bare PATH commands, transient runners, workspace virtual environments, unsafe symlink chains, and unsafe ownership or permissions. Stable user-owned pipx/uv-tool links remain supported after their link and resolved target chains pass validation.
+- `AI_AGENT_QUICKSTART.md` leads with `agentic-hil setup`, documents the MCP registration as user-level per agent, and adds guidance for pip-less environments (Ubuntu 24.04+/PEP-668).
+
 ## [0.3.0] - 2026-07-20
 
 ### Added

@@ -1,0 +1,15 @@
+{
+  "name": "agentic-hil",
+  "description": "Official Claude Code plugins for Agentic Hardware-in-the-Loop.",
+  "owner": { "name": "agentic-hil" },
+  "plugins": [
+    {
+      "name": "agentic-hil",
+      "displayName": "Agentic Hardware-in-the-Loop",
+      "description": "Safe embedded firmware development with hardware-in-the-loop targets via policy-gated MCP tools.",
+      "source": "./plugins/agentic-hil",
+      "version": "0.4.0",
+      "license": "Apache-2.0"
+    }
+  ]
+}

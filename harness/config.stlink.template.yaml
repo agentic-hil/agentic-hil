@@ -1,0 +1,77 @@
+# Authoritative Agentic HIL config TEMPLATE for the STM32CubeProgrammer CLI
+# backend (debugger.type "stlink" -- ST's standard tool). run-all.sh renders
+# __WORKSPACE__ / __STATE__ / __CUBECLI__ to real absolute guest paths and points
+# AGENTIC_HIL_CONFIG at the result. Only used when STM32CubeProgrammer is present.
+workspace_root: "__WORKSPACE__"
+state_root: "__STATE__"
+
+target:
+  name: "nucleo-f446re-demo"
+  controller: "stm32f446ret6"
+
+debugger:
+  type: "stlink"                 # STM32CubeProgrammer CLI (STM32_Programmer_CLI)
+  executable: "__CUBECLI__"      # absolute path; Linux auto-discovery only checks PATH
+  probe_id: null
+  target_type: null
+  interface: "SWD"
+  timeout_s: 60
+
+# The stlink backend has no typed debug sessions; debug.* is unused but must stay
+# schema-valid.
+debug:
+  gdb_executable: null
+  allowed_symbols: []
+  allow_all_symbols: false
+  max_dump_size_bytes: 1048576
+
+artifacts:
+  allowed_roots:
+    - "build"
+  upload_directory: ".agentic-hil/artifacts"
+  allowed_extensions:
+    - ".elf"
+    - ".hex"
+    - ".bin"
+  max_upload_size_mb: 64
+  allow_upload: false
+
+com_ports:
+  dut_uart:
+    device: "/dev/ttyACM0"
+    baudrate: 115200
+
+can_buses: {}
+
+adapters: {}
+
+devices:
+  dut:
+    debugger: true
+    uart: "dut_uart"
+
+validation:
+  require_existing_file: true
+  require_allowed_root: true
+  require_allowed_extension: true
+  compute_sha256: true
+  inspect_known_formats: true
+
+permissions:
+  allow_probe: true
+  allow_flash: true
+  allow_reset: true
+  allow_com_read: true
+  allow_com_write: false
+  allow_can_read: false
+  allow_can_write: false
+  allow_adapter_read: false
+  allow_adapter_write: false
+  allow_raw_debugger_commands: false
+  allow_mass_erase: false
+
+reports:
+  directory: ".agentic-hil/reports"
+
+logs:
+  directory: ".agentic-hil/logs"

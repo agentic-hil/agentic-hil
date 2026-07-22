@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -17,11 +19,29 @@ SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
 
 
 @pytest.fixture(autouse=True)
-def isolated_config_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    config_root = tmp_path / "user-config"
+def isolated_config_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Path:
+    original_home = Path.home()
+    original_local_appdata = Path(os.environ.get("LOCALAPPDATA") or original_home / "AppData" / "Local")
+    # Windows rejects trust-boundary paths below the replaceable per-user Temp
+    # ACL, so use protected Local AppData there. On POSIX, keep user policy/state
+    # outside workspaces that use tmp_path as cwd; pytest owns tmp_path.parent.
+    sandbox_parent = original_local_appdata if os.name == "nt" else tmp_path.parent
+    test_sandbox = sandbox_parent / f"agentic-hil-pytest-{os.getpid()}-{uuid.uuid4().hex}"
+    home_root = test_sandbox / "home"
+    config_root = test_sandbox / "config"
+    state_root = test_sandbox / "state"
+    request.addfinalizer(lambda: shutil.rmtree(test_sandbox, ignore_errors=True))
+    home_root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_root))
+    monkeypatch.setenv("USERPROFILE", str(home_root))
     monkeypatch.setenv("APPDATA", str(config_root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
-    state_root = tmp_path.parent / f"{tmp_path.name}-user-state"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home_root / ".cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home_root / ".local" / "share"))
     monkeypatch.setenv("LOCALAPPDATA", str(state_root))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)

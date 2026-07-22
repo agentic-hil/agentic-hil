@@ -1,0 +1,77 @@
+# Authoritative Agentic HIL config template (external policy model).
+# run-all.sh renders this to an EXTERNAL file outside the workspace and points
+# AGENTIC_HIL_CONFIG at it. __WORKSPACE__ / __STATE__ are filled with real
+# absolute guest paths at run time; the OpenOCD script paths below are the
+# Ubuntu apt-openocd defaults -- adjust if your openocd installs elsewhere.
+workspace_root: "__WORKSPACE__"
+state_root: "__STATE__"
+
+target:
+  name: "nucleo-f446re-demo"
+  controller: "stm32f446ret6"
+
+debugger:
+  type: "openocd"
+  executable: null
+  probe_id: null
+  target_type: null
+  interface_cfg: "/usr/share/openocd/scripts/interface/stlink.cfg"
+  target_cfg: "/usr/share/openocd/scripts/target/stm32f4x.cfg"
+  timeout_s: 60
+
+debug:
+  gdb_executable: null
+  allowed_symbols: ["delay", "main"]
+  allow_all_symbols: false
+  max_dump_size_bytes: 1048576
+
+artifacts:
+  allowed_roots:
+    - "build"
+  upload_directory: ".agentic-hil/artifacts"
+  allowed_extensions:
+    - ".elf"
+    - ".hex"
+    - ".bin"
+  max_upload_size_mb: 64
+  allow_upload: false
+
+com_ports:
+  dut_uart:
+    device: "/dev/ttyACM0"
+    baudrate: 115200
+
+can_buses: {}
+
+adapters: {}
+
+devices:
+  dut:
+    debugger: true
+    uart: "dut_uart"
+
+validation:
+  require_existing_file: true
+  require_allowed_root: true
+  require_allowed_extension: true
+  compute_sha256: true
+  inspect_known_formats: true
+
+permissions:
+  allow_probe: true
+  allow_flash: true
+  allow_reset: true
+  allow_com_read: true
+  allow_com_write: false
+  allow_can_read: false
+  allow_can_write: false
+  allow_adapter_read: false
+  allow_adapter_write: false
+  allow_raw_debugger_commands: false
+  allow_mass_erase: false
+
+reports:
+  directory: ".agentic-hil/reports"
+
+logs:
+  directory: ".agentic-hil/logs"
