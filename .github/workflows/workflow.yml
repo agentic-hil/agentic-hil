@@ -10,7 +10,153 @@ permissions:
   contents: read
 
 jobs:
+  validate_release:
+    name: Validate release metadata
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      - name: Verify release metadata and local contracts
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          import os
+          import pathlib
+          import re
+          import tomllib
+
+          root = pathlib.Path(".")
+          project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+          package_version = project["version"]
+          if project["name"] != "agentic-hil":
+              raise SystemExit("Python package name must be agentic-hil")
+          registry = json.loads((root / "server.json").read_text(encoding="utf-8"))
+          plugin = json.loads((root / "plugins/agentic-hil/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
+          marketplace = json.loads((root / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
+          changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+          plugin_skill_path = root / "plugins/agentic-hil/skills/agentic-hil-config-setup/SKILL.md"
+          plugin_skill = plugin_skill_path.read_text(encoding="utf-8")
+
+          init_tree = ast.parse((root / "src/agentic_hil/__init__.py").read_text(encoding="utf-8"))
+          init_version = next(
+              ast.literal_eval(node.value)
+              for node in init_tree.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+          )
+
+          def skill_version(path: str) -> str:
+              content = (root / path).read_text(encoding="utf-8")
+              match = re.search(r'^\s*agentic_hil_version:\s*["\']([^"\']+)["\']\s*$', content, re.MULTILINE)
+              if match is None:
+                  raise SystemExit(f"{path} has no agentic_hil_version metadata")
+              return match.group(1)
+
+          if (root / "plugins/agentic-hil/.mcp.json").exists():
+              raise SystemExit("plugin must not persist a portable bare or transient MCP server command")
+          required_plugin_guidance = [
+              f'uv tool install --upgrade "agentic-hil=={package_version}"',
+              "agentic-hil setup --agent claude",
+          ]
+          if any(command not in plugin_skill for command in required_plugin_guidance):
+              raise SystemExit("plugin skill must pin the persistent package and delegate MCP registration to setup")
+
+          changelog_release = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
+          if changelog_release is None:
+              raise SystemExit("CHANGELOG.md has no released semantic version heading")
+
+          versions = {
+              "pyproject.toml": package_version,
+              "src/agentic_hil/__init__.py": init_version,
+              "server.json": registry["version"],
+              "server.json package": registry["packages"][0]["version"],
+              "plugin.json": plugin["version"],
+              "marketplace.json": marketplace["plugins"][0]["version"],
+              "CHANGELOG.md": changelog_release.group(1),
+              "packaged skill": skill_version("src/agentic_hil/skills/agentic-hil-config-setup/SKILL.md"),
+              "plugin skill": skill_version("plugins/agentic-hil/skills/agentic-hil-config-setup/SKILL.md"),
+          }
+          release_tag = os.environ.get("RELEASE_TAG")
+          if release_tag:
+              versions["release tag"] = release_tag.removeprefix("v")
+          if set(versions.values()) != {package_version}:
+              details = ", ".join(f"{source}={version}" for source, version in sorted(versions.items()))
+              raise SystemExit(f"release metadata versions differ: {details}")
+          if registry["packages"][0]["identifier"] != "agentic-hil":
+              raise SystemExit("server.json package identifier must be agentic-hil")
+
+          expected_registry = {
+              "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+              "name": "io.github.agentic-hil/agentic-hil",
+              "title": "Agentic HIL",
+              "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
+              "version": package_version,
+              "repository": {
+                  "url": "https://github.com/agentic-hil/agentic-hil",
+                  "source": "github",
+                  "id": "1278450589",
+              },
+              "websiteUrl": "https://github.com/agentic-hil/agentic-hil",
+              "packages": [
+                  {
+                      "registryType": "pypi",
+                      "registryBaseUrl": "https://pypi.org",
+                      "identifier": "agentic-hil",
+                      "version": package_version,
+                      "runtimeHint": "uvx",
+                      "transport": {"type": "stdio"},
+                      "packageArguments": [{"type": "positional", "value": "mcp-stdio"}],
+                  }
+              ],
+          }
+          if registry != expected_registry:
+              raise SystemExit("server.json differs from the locally validated release contract")
+
+          expected_plugin = {
+              "name": "agentic-hil",
+              "displayName": "Agentic Hardware-in-the-Loop",
+              "version": package_version,
+              "description": "Safe embedded firmware development with local hardware-in-the-loop targets, exposed as policy-gated MCP tools (probe, flash, reset, serial, CAN, test adapters).",
+              "author": {"name": "Hannes Pauli"},
+              "repository": "https://github.com/agentic-hil/agentic-hil",
+              "license": "Apache-2.0",
+              "keywords": ["embedded", "firmware", "hardware-in-the-loop", "mcp", "stm32", "openocd"],
+          }
+          if plugin != expected_plugin:
+              raise SystemExit("plugin.json differs from the locally validated release contract")
+
+          expected_marketplace = {
+              "name": "agentic-hil",
+              "description": "Official Claude Code plugins for Agentic Hardware-in-the-Loop.",
+              "owner": {"name": "agentic-hil"},
+              "plugins": [
+                  {
+                      "name": "agentic-hil",
+                      "displayName": "Agentic Hardware-in-the-Loop",
+                      "description": "Safe embedded firmware development with hardware-in-the-loop targets via policy-gated MCP tools.",
+                      "source": "./plugins/agentic-hil",
+                      "version": package_version,
+                      "license": "Apache-2.0",
+                  }
+              ],
+          }
+          if marketplace != expected_marketplace:
+              raise SystemExit("marketplace.json differs from the locally validated release contract")
+          PY
+
   publish:
+    needs: validate_release
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -22,26 +168,15 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
       - name: Install build tooling
         run: python -m pip install build twine
-
-      - name: Verify release tag matches package version
-        if: github.event_name == 'release'
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          if [[ "${RELEASE_TAG#v}" != "${version}" ]]; then
-            echo "Release tag ${RELEASE_TAG} does not match project version ${version}" >&2
-            exit 1
-          fi
 
       - name: Build distributions
         run: python -m build
@@ -50,12 +185,14 @@ jobs:
         run: twine check dist/*
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
 
   publish-mcp-registry:
     name: Publish to MCP Registry
-    needs: publish
-    if: ${{ always() && ((github.event_name == 'release' && needs.publish.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch)) }}
+    needs:
+      - validate_release
+      - publish
+    if: ${{ always() && needs.validate_release.result == 'success' && ((github.event_name == 'release' && needs.publish.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -63,35 +200,26 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
-      - name: Verify release metadata versions
+      - name: Set registry release version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           python - <<'PY'
-          import json
           import os
           import pathlib
           import tomllib
 
           package_version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-          registry = json.loads(pathlib.Path("server.json").read_text(encoding="utf-8"))
-          versions = {
-              package_version,
-              registry["version"],
-              registry["packages"][0]["version"],
-          }
           release_tag = os.environ.get("RELEASE_TAG")
-          if release_tag:
-              versions.add(release_tag.removeprefix("v"))
-          if len(versions) != 1:
-              raise SystemExit(f"release, package, and registry versions differ: {sorted(versions)}")
+          if release_tag and release_tag.removeprefix("v") != package_version:
+              raise SystemExit("release metadata changed after the validation job")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"MCP_RELEASE_VERSION={package_version}\n")
           PY
@@ -128,7 +256,7 @@ jobs:
           echo "MCP_PUBLISHER=$RUNNER_TEMP/mcp-publisher" >> "$GITHUB_ENV"
           bash .github/scripts/install-mcp-publisher.sh "$RUNNER_TEMP/mcp-publisher"
 
-      - name: Validate server metadata
+      - name: Validate published server metadata
         run: |
           "$MCP_PUBLISHER" validate server.json
 
@@ -157,6 +285,7 @@ jobs:
 
   release-assets:
     name: Attach SBOM and attestations
+    needs: validate_release
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.event_name == 'release'
@@ -166,25 +295,15 @@ jobs:
       attestations: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
       - name: Install build tooling
         run: python -m pip install build cyclonedx-bom
-
-      - name: Verify release tag matches package version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          if [[ "${RELEASE_TAG#v}" != "${version}" ]]; then
-            echo "Release tag ${RELEASE_TAG} does not match project version ${version}" >&2
-            exit 1
-          fi
 
       - name: Build distributions
         run: python -m build
@@ -197,13 +316,13 @@ jobs:
 
       - name: Attest distributions
         id: attest-dists
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/*
 
       - name: Attest SBOM
         id: attest-sbom
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/*
           sbom-path: sbom.cdx.json

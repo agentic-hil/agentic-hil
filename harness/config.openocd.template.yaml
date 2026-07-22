@@ -1,4 +1,4 @@
-# Authoritative Agentic HIL config TEMPLATE (v0.3.0 model).
+# Authoritative Agentic HIL config template (external policy model).
 # run-all.sh renders this to an EXTERNAL file outside the workspace and points
 # AGENTIC_HIL_CONFIG at it. __WORKSPACE__ / __STATE__ are filled with real
 # absolute guest paths at run time; the OpenOCD script paths below are the

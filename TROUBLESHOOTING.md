@@ -23,21 +23,22 @@ Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or 
 Fix — all user-local, never with admin rights. Start with the PyPI/pip package:
 
 ```bash
-python -m pip install --user agentic-hil
+python -m pip install --user --upgrade "agentic-hil>=0.4.0"
 agentic-hil --version
+agentic-hil setup --help
 ```
 
 If that fails, use `uv` or `pipx` instead:
 
 ```bash
-uvx --from agentic-hil agentic-hil --version                                  # run without installing
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version # repository as package source
-uv tool install agentic-hil                                                    # isolated user-local install
+uvx --from "agentic-hil>=0.4.0" agentic-hil --version                           # transient diagnostic only
+uvx --from git+https://github.com/agentic-hil/agentic-hil@v0.4.0 agentic-hil --version # transient repository check
+uv tool install --upgrade "agentic-hil>=0.4.0"                                  # persistent user-local install
 ```
 
-`pipx run --spec agentic-hil agentic-hil` / `pipx install agentic-hil` are equivalents. If `agentic-hil` is installed but not found, add `~/.local/bin` to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+`pipx run --spec "agentic-hil>=0.4.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.4.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
-In `.mcp.json`, a runner form avoids the `PATH` question entirely: `"command": "uvx", "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]`.
+Do not store `uvx`, a workspace virtual environment, or a bare PATH command in `.mcp.json` or a user-level MCP registration. Run `agentic-hil setup --agent <agent>` for Claude Code, Codex, or OpenCode; it verifies the persistent executable and stores its absolute user-bin path. For another host, review that same persistent executable and configure its absolute path as described in [MCP host configuration](docs/mcp-hosts.md).
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 

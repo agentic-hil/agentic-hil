@@ -26,30 +26,31 @@ Install from https://github.com/agentic-hil/agentic-hil and set it up for this p
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
 
-If you want to install it yourself anyway, install the Python package with pip and then use the `agentic-hil` command:
+If you want to install it yourself anyway, install the Python package user-locally and verify the minimum setup-capable version:
 
 ```bash
-pip install agentic-hil
+python -m pip install --user --upgrade "agentic-hil>=0.4.0"
 agentic-hil --version
+agentic-hil setup --help
 ```
 
 If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, use the `uv`/`pipx` paths below instead. Never use `pip install --break-system-packages`.
 
-Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
+For a transient version check only (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
 
 ```bash
 uvx --from agentic-hil agentic-hil --version
 uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
-Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):
+For project setup, install 0.4.0 or newer persistently and let `setup` create the external policy, install the skill, and register the selected host with a verified absolute executable path:
 
 ```bash
-uv tool install agentic-hil      # or: pipx install agentic-hil
-agentic-hil init
-agentic-hil mcp-config --output .mcp.json
-agentic-hil doctor
+uv tool install --upgrade "agentic-hil>=0.4.0"      # or: pipx install "agentic-hil>=0.4.0"
+agentic-hil setup --agent claude-code                # or: codex / opencode
 ```
+
+Do not persist an `uvx`, workspace-virtualenv, or bare `PATH` command as the MCP launcher. See the agent quickstart for the complete fallback chain.
 
 For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
 
@@ -69,13 +70,13 @@ Every hardware action is validated against the selected authoritative configurat
 
 ## MCP Entry
 
-Every MCP host starts the same local stdio server from the firmware project root:
+Every MCP host starts the same local stdio server from the firmware project root, using the reviewed absolute path of its persistent installation:
 
 ```text
-agentic-hil mcp-stdio
+/absolute/path/to/persistent/agentic-hil mcp-stdio
 ```
 
-Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. See [MCP host configuration](docs/mcp-hosts.md) for copy/paste setup for VS Code/GitHub Copilot, JetBrains/CLion, Codex, Claude Code, OpenCode, and generic MCP hosts. `agentic-hil mcp-config --output .mcp.json` generates only the Claude-compatible `mcpServers` form.
+Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil setup --agent <agent>` performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
 `mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` only when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
 
@@ -240,6 +241,7 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 ## Common Commands
 
 ```text
+agentic-hil setup --agent <claude-code|codex|opencode>
 agentic-hil init
 agentic-hil doctor
 agentic-hil debugger-probes

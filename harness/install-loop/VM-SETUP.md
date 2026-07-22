@@ -68,12 +68,20 @@ If `opencode` is not on PATH after the curl installer, add its bin dir
 Power off (`sudo poweroff`), then in VMware take a snapshot named **`agents-ready`**.
 Revert to it anytime you want a pristine agent environment.
 
-## 8. Get the harness (the branch)
+## 8. Get the harness
+
+Choose the harness checkout explicitly. Use `master` for the released harness,
+or the PR branch when the harness itself contains changes under review.
+
 ```bash
-git clone -b feature/smooth-installation \
+HARNESS_BRANCH=master
+git clone -b "$HARNESS_BRANCH" \
   https://github.com/agentic-hil/agentic-hil ~/agentic-hil
 cd ~/agentic-hil
 ```
+
+For example, set `HARNESS_BRANCH=feature/smooth-installation` before cloning to
+exercise the unmerged harness changes from that branch.
 
 ## 9. Authenticate (env vars — the runner redirects HOME, so file-based login is not seen)
 ```bash
@@ -89,21 +97,30 @@ export ANTHROPIC_API_KEY=<your key>
 ```
 
 ## 10. Run the loop
+
+Set the remote ref whose installation and documentation the agent must test.
+The runner deliberately has no implicit branch default.
+
 ```bash
-bash harness/install-loop/run-install-prompt.sh claude
+BRANCH=feature/smooth-installation \
+  bash harness/install-loop/run-install-prompt.sh claude
 # then:   ... codex     |     ... opencode
 ```
-Read `harness/install-loop/transcripts/install-<agent>-*.log`. Each run uses a
-fresh `$HOME`, so agentic-hil installs from nothing every time. The prompt targets
-`git+...@feature/smooth-installation`, so the agent fetches the branch docs/code.
+
+Read `harness/install-loop/transcripts/install-<agent>-*.log`. Each run uses
+fresh user/config/state/cache roots plus a sanitized PATH, so agentic-hil installs
+from nothing every time without seeing real user configuration. The prompt targets
+the explicitly supplied `BRANCH`, so the agent fetches that ref's docs and code.
 
 ## 11. Iterate
-- Improve `AI_AGENT_QUICKSTART.md` on the branch (on your host), commit, push.
+
+- Improve `AI_AGENT_QUICKSTART.md` on the selected branch (on your host), commit, push.
 - Doc edits take effect on the **next run without pulling** in the VM — the agent
   fetches the branch fresh over the network each run.
 - Only if the runner **script** itself changed: `git -C ~/agentic-hil pull`.
 
 ## Notes
+
 - The `--dangerously-*` flags are safe here because the VM is disposable.
 - For repeated clean runs you can also just revert the `agents-ready` snapshot.
 - To later turn this into the hardware HIL harness, add USB passthrough for the

@@ -1,21 +1,21 @@
-# Agentic HIL install + usage eval harness (VMware snapshot, v0.3.0)
+# Agentic HIL install + usage eval harness (VMware snapshot)
 
-Repeatable test of **installing and using** `agentic-hil` (>= 0.3.0) on a clean
+Repeatable test of **installing and using an exact `agentic-hil` artifact** on a clean
 box, driven off a VMware Workstation snapshot. Each run reverts to a pristine
-golden image, so every run starts bit-identical. It exercises **both debugger
-backends** on the real board: OpenOCD and STM32CubeProgrammer CLI (ST's standard
-tool, the `stlink` backend).
+golden image, so every run starts bit-identical. It always exercises OpenOCD and,
+when installed in the image, STM32CubeProgrammer CLI (the `stlink` backend).
 
 ## What it tests, and how repeatable each layer is
 
 | Layer | What it proves | Repeatable? |
 |-------|----------------|-------------|
-| Install replay (`run-all.sh`, part 1) | The documented `AI_AGENT_QUICKSTART.md` fallback chain works on a clean Ubuntu 24.04 (PEP-668): pip --user fails → uv bootstrap → `uv tool install` → skill-install | Yes |
-| Config model (part 3) | `agentic-hil init` writes the canonical deny-by-default config; the run uses an **external** `AGENTIC_HIL_CONFIG` with permissions enabled — the v0.3.0 contract (config outside the repo; `--config` into the repo is refused) | Yes |
+| Install replay (`run-all.sh`, part 1) | The fallback chain installs the caller-supplied exact version or Git commit; the installed version must match `ExpectedVersion` | Yes |
+| Setup transaction (part 3) | `agentic-hil setup` preserves unrelated user config, pins the persistent MCP command, preserves an edited config on rerun, is idempotent, and rolls back an isolated late failure | Yes |
+| Config model | Hardware runs use an **external** `AGENTIC_HIL_CONFIG`; repository test plans contain no hardware policy | Yes |
 | Usage — OpenOCD (`test-reactor`) | flash → uart_open → reset-halt debug session → **run until the `delay` breakpoint** → debug_stop → uart_close | Yes |
 | Usage — stlink / STM32CubeProgrammer (`test-reactor`) | flash (with CubeProgrammer's own `-v` verify) + reset-to-run + uart lifecycle. Runs only if CubeProgrammer is installed, else cleanly skipped | Yes |
 | Integrity (`mcp_probe.py`) | The installed MCP server exposes exactly the frozen 36-tool surface | Yes |
-| Asserts (`assert.sh`) | Version, skill version-match, external config, no repo-local config, init ok, `.mcp.json`, **no sudo / no `--break-system-packages`**, source not vendored, both reactor variants passed (stlink skipped is OK), tool surface matched | Yes |
+| Asserts (`assert.sh`) | Exact version, setup transaction, external config, **no sudo / no `--break-system-packages`**, both reactor variants, and MCP surface; JSON success uses `agentic_hil.report.overall_success` | Yes |
 
 **Why the `delay` breakpoint (OpenOCD only).** The reactor has no UART-content
 assertion action, so it cannot match the `Hello World` banner. `delay` is only
@@ -61,10 +61,16 @@ skipped and the OpenOCD variant still runs.
 ```powershell
 cd harness\host
 .\run-eval.ps1 -Vmx 'C:\VMs\ahil-ubuntu\ahil-ubuntu.vmx' `
-               -GuestUser tester -GuestPass 'secret' -Runs 3
+               -GuestUser tester -GuestPass 'secret' `
+               -InstallSpec 'git+https://github.com/agentic-hil/agentic-hil@<full-pr-head-sha>' `
+               -ExpectedVersion '0.4.0' -Runs 3
 ```
+`InstallSpec` is mandatory and accepts only `agentic-hil==<exact-version>` or the
+official repository at a full 40-character commit SHA. The spec and expected
+version are copied back with every run's artifacts.
+
 Per run: revert to `clean`, copy the harness in, run `run-all.sh` (install →
-configure → OpenOCD reactor → stlink reactor if available → probe) then
+setup transaction → OpenOCD reactor → stlink reactor if available → probe) then
 `assert.sh`, and copy the reports to `harness\artifacts\run-NN\`. Prints
 `PASS/FAIL` per run and a `pass / total` summary (exit 1 if any run failed).
 
@@ -75,7 +81,7 @@ configure → OpenOCD reactor → stlink reactor if available → probe) then
   `__STATE__` / `__CUBECLI__` to real paths, writes them under `~/ahil/`, and
   points `AGENTIC_HIL_CONFIG` at each in turn.
 - `testconfig.openocd.yaml` / `testconfig.stlink.yaml` — the two reactor plans.
-- `guest/run-all.sh` — install → configure → both reactor variants → probe, one process.
+- `guest/run-all.sh` — pinned install → setup transaction → backend reactors → probe, one process.
 - `guest/mcp_probe.py` — lease-free MCP `tools/list` snapshot check.
 - `guest/assert.sh` — deterministic checks; exit code is the verdict.
 - `guest/tools.list.expected` — frozen MCP tool surface (36 tools).
@@ -88,11 +94,11 @@ configure → OpenOCD reactor → stlink reactor if available → probe) then
   tool. Flash+verify+reset+uart only (no typed debug sessions). Runs only when
   CubeProgrammer is installed; otherwise recorded as `skipped` (not a failure).
 - Both drive the **same** physical ST-Link, so `run-all.sh` runs them
-  **sequentially** — never overlap processes against the board (v0.3.0 leases
+  **sequentially** — never overlap processes against the board (leases
   assume a single owner).
 
-## v0.3.0 config model (important)
-- The authoritative config lives **outside** the repo. `agentic-hil init` writes
+## External config model (important)
+- The authoritative config lives **outside** the repo. `agentic-hil setup` writes
   it under `~/.config/agentic-hil/projects/<name>-<hash>/config.yaml`, deny-by-default.
 - `--config <repo-path>` is **rejected** (`config_invalid`). The only sanctioned
   override is `AGENTIC_HIL_CONFIG=<absolute external path>`, which this harness uses.
@@ -105,8 +111,9 @@ configure → OpenOCD reactor → stlink reactor if available → probe) then
   CubeProgrammer's own Windows auto-discovery) needs a Windows guest VM.
 - **One board ⇒ serial runs.** A passed-through ST-Link is visible to the guest
   only; run `-Runs` sequentially.
-- **Network is live.** The snapshot freezes disk, not PyPI/GitHub/astral. Pre-bake
-  a PyPI mirror and pin the `agentic-hil` version, then re-snapshot, to remove it.
+- **Network is live.** Package identity is immutable (exact version or full Git
+  SHA), but availability still depends on PyPI/GitHub/astral. Mirror those inputs
+  and re-snapshot to remove the availability dependency.
 - **No UART-content assertion.** Covered by the `delay` breakpoint (OpenOCD) and
   by CubeProgrammer's `-v` verify (stlink). To also assert the `Hello World`
   banner text, add a small MCP loop after the reactor releases the board.

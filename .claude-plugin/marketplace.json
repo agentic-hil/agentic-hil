@@ -1,5 +1,6 @@
 {
   "name": "agentic-hil",
+  "description": "Official Claude Code plugins for Agentic Hardware-in-the-Loop.",
   "owner": { "name": "agentic-hil" },
   "plugins": [
     {

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Deterministic post-run checks for the v0.3.0 harness (openocd + stlink).
+# Deterministic post-run checks. Every Agentic HIL JSON result is evaluated with
+# the installed package's public agentic_hil.report.overall_success helper.
 # Exit code = verdict. Usage: assert.sh [FIXTURE_DIR]
 set -uo pipefail
 
 FIXTURE="${1:-$HOME/fixture}"
 HARNESS="$(cd "$(dirname "$0")" && pwd)"
 OPENOCD_CONFIG="$HOME/ahil/config.openocd.yaml"
+STLINK_CONFIG="$HOME/ahil/config.stlink.yaml"
 export PATH="$HOME/.local/bin:$PATH"
 
 fail=0
@@ -13,44 +15,69 @@ pass() { echo "PASS: $1"; }
 bad()  { echo "FAIL: $1"; fail=1; }
 note() { echo "NOTE: $1"; }
 
-reactor_passed() {  # report-file
-  [ -f "$1" ] && [ -s "$1" ] && grep -q '"ok": true' "$1" && ! grep -q '"ok": false' "$1"
-}
+AHIL_BIN="$(command -v agentic-hil 2>/dev/null || true)"
+AHIL_PY=""
+if [ -n "$AHIL_BIN" ]; then
+  SHEBANG="$(head -n 1 "$AHIL_BIN" 2>/dev/null || true)"
+  case "$SHEBANG" in
+    '#!'*) AHIL_PY="${SHEBANG#\#!}" ;;
+  esac
+fi
 
-# Classify a reactor report: PASS | PENDING:<action> | FAIL:<reason>.
-# PENDING = the first failing step is a debug_* action that returned
-# not_supported (functions not yet implemented on this backend). Any flash/uart
-# failure is a real FAIL and is never masked.
-classify_reactor() {  # report-file
-python3 - "$1" <<'PY'
-import json, sys
-DEBUG = {"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"}
+report_passed() {  # JSON report
+  [ -n "$AHIL_PY" ] && [ -x "$AHIL_PY" ] && [ -f "$1" ] && [ -s "$1" ] || return 1
+  "$AHIL_PY" - "$1" <<'PY'
+import json
+import sys
+
+from agentic_hil.report import overall_success
+
 try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    print("FAIL:no-report"); sys.exit(0)
-if d.get("ok") is True:
-    print("PASS"); sys.exit(0)
-fs = d.get("failed_step")
-steps = d.get("steps", [])
-if isinstance(fs, int) and 1 <= fs <= len(steps):
-    step = steps[fs - 1]
-    action = step.get("action")
-    res = step.get("result", {}) or {}
-    et = res.get("error_type") or res.get("step_error_type")
-    if action in DEBUG and et == "not_supported":
-        print("PENDING:%s" % action); sys.exit(0)
-    print("FAIL:%s@%s" % (et, action)); sys.exit(0)
-print("FAIL:%s" % (d.get("error_type") or d.get("step_error_type") or "unknown"))
+    result = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(result, dict) and overall_success(result) else 1)
 PY
 }
 
-# --- install succeeded, user-local ---
-if command -v agentic-hil >/dev/null; then pass "agentic-hil on PATH"; else bad "agentic-hil on PATH"; fi
-VER="$(agentic-hil --version 2>/dev/null || true)"
-if [ -n "$VER" ]; then pass "agentic-hil --version -> $VER"; else bad "agentic-hil --version"; fi
+report_failed_cleanly() {  # expected setup failure report
+  [ -n "$AHIL_PY" ] && [ -x "$AHIL_PY" ] && [ -f "$1" ] && [ -s "$1" ] || return 1
+  "$AHIL_PY" - "$1" <<'PY'
+import json
+import sys
 
-# --- agent skill installed and version-matched ---
+from agentic_hil.report import overall_success
+
+try:
+    result = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+valid_failure = isinstance(result, dict) and result.get("ok") is False and not overall_success(result)
+raise SystemExit(0 if valid_failure else 1)
+PY
+}
+
+# --- exact install source and version ---
+if [ -n "$AHIL_BIN" ]; then pass "agentic-hil on PATH ($AHIL_BIN)"; else bad "agentic-hil on PATH"; fi
+if [ -n "$AHIL_PY" ] && [ -x "$AHIL_PY" ]; then pass "agentic-hil interpreter resolved"; else bad "agentic-hil interpreter resolved"; fi
+VER="$(agentic-hil --version 2>/dev/null || true)"
+EXPECTED_VERSION="$(cat "$HARNESS/expected_version.txt" 2>/dev/null || true)"
+INSTALL_SPEC="$(cat "$HARNESS/install_spec.txt" 2>/dev/null || true)"
+if [ -n "$INSTALL_SPEC" ]; then pass "explicit install spec recorded: $INSTALL_SPEC"; else bad "explicit install spec recorded"; fi
+if [ -n "$EXPECTED_VERSION" ] && [ "$VER" = "$EXPECTED_VERSION" ]; then
+  pass "agentic-hil version matches expected $EXPECTED_VERSION"
+else
+  bad "agentic-hil version ($VER) matches expected ($EXPECTED_VERSION)"
+fi
+
+# --- setup transaction and user-level registration ---
+if report_passed "$HARNESS/setup_result.first.json"; then pass "first setup satisfied overall_success"; else bad "first setup satisfied overall_success"; fi
+if report_passed "$HARNESS/setup_result.second.json"; then pass "idempotent setup satisfied overall_success"; else bad "idempotent setup satisfied overall_success"; fi
+if report_failed_cleanly "$HARNESS/setup_result.rollback.json"; then pass "rollback probe failed cleanly"; else bad "rollback probe failed cleanly"; fi
+if [ "$(cat "$HARNESS/preservation_status.txt" 2>/dev/null || true)" = "pass" ]; then pass "setup preserved config and was idempotent"; else bad "setup preserved config and was idempotent"; fi
+if [ "$(cat "$HARNESS/rollback_status.txt" 2>/dev/null || true)" = "pass" ]; then pass "failed setup rolled back new files"; else bad "failed setup rolled back new files"; fi
+if [ "$(cat "$HARNESS/mcp_registration_status.txt" 2>/dev/null || true)" = "pass" ]; then pass "setup preserved user config and pinned the persistent MCP command"; else bad "setup preserved user config and pinned the persistent MCP command"; fi
+
 SKILL="$HOME/.claude/skills/agentic-hil-config-setup/SKILL.md"
 if [ -f "$SKILL" ]; then
   pass "claude-code skill installed"
@@ -59,17 +86,11 @@ if [ -f "$SKILL" ]; then
 else
   bad "claude-code skill installed"
 fi
+if [ ! -f "$FIXTURE/.mcp.json" ]; then pass "setup kept MCP registration outside the repo"; else bad "setup wrote project .mcp.json"; fi
 
-# --- v0.3.0 config model: authoritative config is EXTERNAL, not in the repo ---
-if [ -f "$OPENOCD_CONFIG" ]; then pass "external authoritative config present"; else bad "external authoritative config present"; fi
-if [ ! -f "$FIXTURE/.agentic-hil/config.yaml" ]; then pass "no repo-local config.yaml (external-config model honored)"; else bad "repo-local .agentic-hil/config.yaml exists (should be external)"; fi
-
-# --- `agentic-hil init` works ---
-I="$HARNESS/init_result.json"
-if [ -f "$I" ] && grep -q '"ok": true' "$I"; then pass "agentic-hil init succeeded"; else bad "agentic-hil init succeeded"; fi
-
-# --- project MCP discovery written ---
-if [ -f "$FIXTURE/.mcp.json" ] && grep -q mcp-stdio "$FIXTURE/.mcp.json"; then pass ".mcp.json written and references mcp-stdio"; else bad ".mcp.json written and references mcp-stdio"; fi
+# --- external config model ---
+if [ -f "$OPENOCD_CONFIG" ]; then pass "external OpenOCD config present"; else bad "external OpenOCD config present"; fi
+if [ ! -f "$FIXTURE/.agentic-hil/config.yaml" ]; then pass "no repo-local authoritative config"; else bad "repo-local .agentic-hil/config.yaml exists"; fi
 
 # --- ground rules ---
 T="$HARNESS/transcript.txt"
@@ -79,21 +100,21 @@ if [ -f "$T" ]; then
 else
   bad "transcript.txt present"
 fi
-
-# --- do not vendor agentic-hil source ---
 if [ ! -d "$FIXTURE/src/agentic_hil" ]; then pass "no agentic-hil source vendored into fixture"; else bad "agentic-hil source vendored into fixture"; fi
 
-# --- usage: OpenOCD reactor sequence (with delay breakpoint) ---
-if reactor_passed "$HARNESS/reactor_report.openocd.json"; then pass "openocd test-reactor sequence passed"; else bad "openocd test-reactor sequence passed"; fi
+# --- hardware results: exact public success predicate ---
+if report_passed "$HARNESS/doctor_report.openocd.json"; then pass "openocd doctor satisfied overall_success"; else bad "openocd doctor satisfied overall_success"; fi
+if report_passed "$HARNESS/reactor_report.openocd.json"; then pass "openocd reactor satisfied overall_success"; else bad "openocd reactor satisfied overall_success"; fi
 
-# --- usage: stlink (STM32CubeProgrammer) reactor sequence, if installed ---
 STATUS="$(cat "$HARNESS/stlink_status.txt" 2>/dev/null || echo unknown)"
 if [ "$STATUS" = "present" ]; then
-  if reactor_passed "$HARNESS/reactor_report.stlink.json"; then pass "stlink test-reactor sequence passed"; else bad "stlink test-reactor sequence passed"; fi
+  if [ -f "$STLINK_CONFIG" ]; then pass "external stlink config present"; else bad "external stlink config present"; fi
+  if report_passed "$HARNESS/doctor_report.stlink.json"; then pass "stlink doctor satisfied overall_success"; else bad "stlink doctor satisfied overall_success"; fi
+  if report_passed "$HARNESS/reactor_report.stlink.json"; then pass "stlink reactor satisfied overall_success"; else bad "stlink reactor satisfied overall_success"; fi
 elif [ "$STATUS" = "skipped" ]; then
-  note "stlink variant skipped (STM32CubeProgrammer CLI not installed) -- not a failure"
+  note "stlink variant skipped (STM32CubeProgrammer CLI not installed)"
 else
-  bad "stlink status unknown (run-all.sh did not record it)"
+  bad "stlink status known"
 fi
 
 # --- install integrity: MCP tool surface snapshot ---

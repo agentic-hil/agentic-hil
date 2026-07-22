@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "agentic-hil": {
-      "command": "uvx",
-      "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]
-    }
-  }
-}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,7 +37,7 @@ from agentic_hil.cli import (
     test_schema,
 )
 from agentic_hil.comports import ComPortService
-from agentic_hil.config import ConfigError, load_config, project_config_path
+from agentic_hil.config import ConfigError, load_config, project_config_path, trusted_persistent_executable
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService
@@ -61,7 +62,7 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
 
     result = init_config()
 
-    assert result["ok"] is True
+    assert result["ok"] is True, json.dumps(result)
     assert result["path"] == str(config_path)
     config_text = config_path.read_text(encoding="utf-8")
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
@@ -75,10 +76,8 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    home = Path.home()
+    command = _trusted_test_mcp_command(monkeypatch)
 
     real_which = shutil.which
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None if name == "claude" else real_which(name))
@@ -94,24 +93,107 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert not (workspace / ".mcp.json").exists()
     claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
     assert "agentic-hil" in claude_json["mcpServers"]
+    assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
     assert (home / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md").is_file()
     assert project_config_path(workspace).is_file()
 
 
+def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_config()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    result = setup_project(agent="claude-code", force=True)
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["skipped"] is True
+    assert config_path.read_bytes() == before
+
+
+def test_setup_rolls_back_new_config_skill_registration_and_mcp_config_on_late_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    real_register = cli_module.register_agent_mcp
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        written = real_register(*args, **kwargs)
+        assert written["ok"] is True
+        return {"ok": False, "error_type": "injected_failure", "summary": "late MCP failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
+    config_path = initialized_config_path(workspace)
+    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    agents_path = Path.home() / ".codex" / "AGENTS.md"
+    mcp_path = Path.home() / ".codex" / "config.toml"
+
+    result = setup_project(agent="codex")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    assert not config_path.exists()
+    assert not skill_path.exists()
+    assert not agents_path.exists()
+    assert not mcp_path.exists()
+
+
+def test_setup_preserves_absolute_config_override_as_only_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    override = Path.home() / "operator-policy" / "config.yaml"
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(override))
+    assert init_config()["ok"] is True
+    before = override.read_bytes()
+    if os.name != "nt":
+        override.chmod(0o400)
+
+    result = setup_project(agent="opencode", force=True)
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["path"] == str(override)
+    assert result["steps"]["config"]["skipped"] is True
+    assert override.read_bytes() == before
+    assert not project_config_path(workspace).exists()
+
+
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
-    return home
+    del tmp_path, monkeypatch
+    return Path.home()
+
+
+def _trusted_test_mcp_command(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Use the installed Python launcher as a stable, trusted test executable."""
+    command = str(Path(sys.executable).resolve())
+    monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: command)
+    return command
 
 
 def test_register_agent_mcp_codex_writes_user_config_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
     result = register_agent_mcp("codex")
     assert result["ok"] is True
     toml = (home / ".codex" / "config.toml").read_text(encoding="utf-8")
     assert "[mcp_servers.agentic-hil]" in toml
+    assert f"command = {json.dumps(command)}" in toml
     assert 'args = ["mcp-stdio"]' in toml
     assert "enabled = true" in toml
     # idempotent
@@ -120,6 +202,7 @@ def test_register_agent_mcp_codex_writes_user_config_toml(tmp_path: Path, monkey
 
 def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
     cfg = home / ".codex" / "config.toml"
     cfg.parent.mkdir(parents=True)
     cfg.write_text('[mcp_servers.other]\ncommand = "other"\n', encoding="utf-8")
@@ -131,6 +214,7 @@ def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkey
 
 def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
     path = home / ".config" / "opencode" / "opencode.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"mcp": {"other": {"type": "local", "command": ["x"]}}}), encoding="utf-8")
@@ -140,16 +224,19 @@ def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypat
     assert "other" in data["mcp"]
     entry = data["mcp"]["agentic-hil"]
     assert entry["type"] == "local"
+    assert entry["command"][0] == command
     assert entry["command"][-1] == "mcp-stdio"
 
 
-def test_register_agent_mcp_claude_falls_back_to_user_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None)
     result = register_agent_mcp("claude-code")
     assert result["ok"] is True
     assert result["method"] == "file"
     data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert data["mcpServers"]["agentic-hil"]["command"] == command
     assert data["mcpServers"]["agentic-hil"]["args"] == ["mcp-stdio"]
     assert not (tmp_path / ".mcp.json").exists()
 
@@ -192,16 +279,20 @@ def test_doctor_reports_named_debugger_selectors(tmp_path: Path, monkeypatch: py
     assert result["devices"]["dut_b"]["debugger"] == "probe_b"
 
 
-def test_mcp_config_writes_project_mcp_json(tmp_path: Path) -> None:
+def test_mcp_config_writes_project_mcp_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    command = _trusted_test_mcp_command(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     output_path = tmp_path / ".mcp.json"
     result = mcp_config(str(output_path))
     assert result["ok"] is True
     content = json.loads(output_path.read_text(encoding="utf-8"))
-    assert content["mcpServers"]["agentic-hil"]["command"] == "agentic-hil"
+    assert content["mcpServers"]["agentic-hil"]["command"] == command
     assert "mcp-stdio" in content["mcpServers"]["agentic-hil"]["args"]
 
 
-def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
+def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _trusted_test_mcp_command(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     output_path = tmp_path / ".mcp.json"
     output_path.write_text("{}", encoding="utf-8")
     result = mcp_config(str(output_path))
@@ -209,6 +300,391 @@ def test_mcp_config_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert result["error_type"] == "mcp_config_exists"
     result_forced = mcp_config(str(output_path), force=True)
     assert result_forced["ok"] is True
+
+
+@pytest.mark.parametrize("alias_kind", ["hardlink", "symlink"])
+def test_mcp_config_force_rejects_alias_without_changing_victim(
+    alias_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trusted_test_mcp_command(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    victim = tmp_path / "victim.json"
+    output_path = tmp_path / ".mcp.json"
+    existing = '{"keep": true}\n'
+    victim.write_text(existing, encoding="utf-8")
+    try:
+        if alias_kind == "hardlink":
+            os.link(victim, output_path)
+        else:
+            output_path.symlink_to(victim)
+    except OSError as error:
+        pytest.skip(f"{alias_kind} unavailable: {error}")
+
+    with pytest.raises(ConfigError) as excinfo:
+        mcp_config(str(output_path), force=True)
+
+    assert excinfo.value.error_type == "unsafe_configured_path"
+    assert victim.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        '[mcp_servers."agentic-hil"]\ncommand = "custom"\n',
+        '[mcp_servers]\n"agentic-hil" = { command = "custom" }\n',
+        'mcp_servers = { "agentic-hil" = { command = "custom" } }\n',
+    ],
+    ids=["quoted-table", "parent-table", "top-level-inline-table"],
+)
+def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(
+    existing: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp("codex")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "mcp_config_conflict"
+    assert path.read_text(encoding="utf-8") == existing
+
+
+def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True)
+    existing = '[mcp_servers."agentic-hil"\ncommand = "custom"\n'
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp("codex", force=True)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"
+    assert path.read_text(encoding="utf-8") == existing
+
+
+def test_register_agent_mcp_codex_migrates_managed_workspace_command_without_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    path = home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True)
+    stale = str(workspace / "old-venv" / "agentic-hil")
+    path.write_text(
+        "# >>> agentic-hil mcp (managed) >>>\n"
+        "[mcp_servers.agentic-hil]\n"
+        f"command = {json.dumps(stale)}\n"
+        'args = ["mcp-stdio"]\n'
+        "enabled = true\n"
+        "# <<< agentic-hil mcp (managed) <<<\n",
+        encoding="utf-8",
+    )
+
+    result = register_agent_mcp("codex")
+
+    assert result["ok"] is True, json.dumps(result)
+    assert result["migrated"] is True
+    assert f"command = {json.dumps(command)}" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "existing"),
+    [
+        ("claude-code", Path(".claude.json"), '{"mcpServers": {}, "mcpServers": {}}'),
+        ("opencode", Path(".config/opencode/opencode.json"), '{"mcp": {"other": 1, "other": 2}}'),
+    ],
+)
+def test_register_agent_mcp_rejects_duplicate_json_keys_without_changes(
+    agent: str,
+    relative_path: Path,
+    existing: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp(agent, force=True)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"
+    assert path.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "existing"),
+    [
+        (
+            "claude-code",
+            Path(".claude.json"),
+            '{"mcpServers": {"agentic-hil": {"command": "custom", "args": ["serve"], "env": {"TOKEN": "keep"}}}}',
+        ),
+        (
+            "opencode",
+            Path(".config/opencode/opencode.json"),
+            '{"mcp": {"agentic-hil": {"type": "remote", "url": "https://example.invalid/mcp"}}}',
+        ),
+    ],
+)
+def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_conflict(
+    agent: str,
+    relative_path: Path,
+    existing: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp(agent, force=True)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "mcp_config_conflict"
+    assert path.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "document", "entry_path"),
+    [
+        (
+            "claude-code",
+            Path(".claude.json"),
+            {"keep": 1, "mcpServers": {"agentic-hil": {"type": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]}}},
+            ("mcpServers", "agentic-hil", "command"),
+        ),
+        (
+            "opencode",
+            Path(".config/opencode/opencode.json"),
+            {"keep": 1, "mcp": {"agentic-hil": {"type": "local", "command": ["uvx", "--from", "agentic-hil", "agentic-hil", "mcp-stdio"], "enabled": True}}},
+            ("mcp", "agentic-hil", "command"),
+        ),
+    ],
+)
+def test_register_agent_mcp_migrates_recognized_legacy_json_entry(
+    agent: str,
+    relative_path: Path,
+    document: dict,
+    entry_path: tuple[str, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = register_agent_mcp(agent)
+
+    assert result["ok"] is True
+    assert result["migrated"] is True
+    migrated = json.loads(path.read_text(encoding="utf-8"))
+    value = migrated[entry_path[0]][entry_path[1]][entry_path[2]]
+    assert value == command or value == [command, "mcp-stdio"]
+    assert migrated["keep"] == 1
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "container"),
+    [
+        ("claude-code", Path(".claude.json"), "mcpServers"),
+        ("opencode", Path(".config/opencode/opencode.json"), "mcp"),
+    ],
+)
+def test_register_agent_mcp_migrates_managed_workspace_command_without_force(
+    agent: str,
+    relative_path: Path,
+    container: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    stale = str(workspace / "old-venv" / "agentic-hil")
+    entry = (
+        {"type": "stdio", "command": stale, "args": ["mcp-stdio"]}
+        if agent == "claude-code"
+        else {"type": "local", "command": [stale, "mcp-stdio"], "enabled": True}
+    )
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({container: {"agentic-hil": entry}}), encoding="utf-8")
+
+    result = register_agent_mcp(agent)
+
+    assert result["ok"] is True
+    assert result["migrated"] is True
+    migrated = json.loads(path.read_text(encoding="utf-8"))[container]["agentic-hil"]["command"]
+    assert migrated == command or migrated == [command, "mcp-stdio"]
+
+
+@pytest.mark.parametrize("command", ["agentic-hil", "bin/agentic-hil", "uvx"])
+def test_register_agent_mcp_rejects_non_absolute_injected_command(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path.home() / ".claude.json"
+
+    with pytest.raises(ConfigError) as excinfo:
+        register_agent_mcp("claude-code", command=command)
+
+    assert excinfo.value.error_type == "mcp_command_untrusted"
+    assert not path.exists()
+
+
+def test_register_agent_mcp_rejects_workspace_injected_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    command = workspace / "agentic-hil"
+
+    with pytest.raises(ConfigError) as excinfo:
+        register_agent_mcp("claude-code", command=str(command))
+
+    assert excinfo.value.error_type == "mcp_command_untrusted"
+    assert not (Path.home() / ".claude.json").exists()
+
+
+def test_register_agent_mcp_rejects_temp_and_uv_cache_injected_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_command = tmp_path / "agentic-hil"
+    uv_cache = Path.home() / "uv-cache"
+    monkeypatch.setenv("UV_CACHE_DIR", str(uv_cache))
+
+    for command in (temp_command, uv_cache / "archive" / "agentic-hil"):
+        with pytest.raises(ConfigError) as excinfo:
+            register_agent_mcp("claude-code", command=str(command))
+        assert excinfo.value.error_type == "mcp_command_untrusted"
+
+    assert not (Path.home() / ".claude.json").exists()
+
+
+def test_default_mcp_path_is_rejected_when_home_is_inside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("HOME", str(workspace))
+    monkeypatch.setenv("USERPROFILE", str(workspace))
+
+    with pytest.raises(ConfigError) as excinfo:
+        register_agent_mcp("claude-code", command=sys.executable)
+
+    assert excinfo.value.error_type == "unsafe_configured_path"
+    assert not (workspace / ".claude.json").exists()
+
+
+def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    path = home / ".claude.json"
+    victim = home / "victim.json"
+    existing = '{"mcpServers": {"custom": {}}}'
+    victim.write_text(existing, encoding="utf-8")
+    try:
+        os.link(victim, path)
+    except OSError as error:
+        pytest.skip(f"hardlinks unavailable: {error}")
+
+    with pytest.raises(ConfigError) as excinfo:
+        register_agent_mcp("claude-code", command=sys.executable)
+
+    assert excinfo.value.error_type == "unsafe_configured_path"
+    assert victim.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_register_agent_mcp_rejects_group_writable_user_config_without_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _isolated_home(tmp_path, monkeypatch)
+    path = home / ".claude.json"
+    existing = '{"mcpServers": {"custom": {}}}'
+    path.write_text(existing, encoding="utf-8")
+    path.chmod(0o660)
+
+    with pytest.raises(ConfigError) as excinfo:
+        register_agent_mcp("claude-code", command=sys.executable)
+
+    assert excinfo.value.error_type == "unsafe_configured_path"
+    assert path.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink contract")
+def test_trusted_persistent_executable_accepts_safe_pipx_style_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    launcher_dir = tmp_path / "home" / ".local" / "bin"
+    target_dir = tmp_path / "home" / ".local" / "share" / "pipx" / "venvs" / "agentic-hil" / "bin"
+    workspace.mkdir()
+    launcher_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    target = target_dir / "agentic-hil"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o700)
+    launcher = launcher_dir / "agentic-hil"
+    launcher.symlink_to(target)
+
+    assert trusted_persistent_executable(launcher, workspace=workspace) == str(launcher)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink contract")
+@pytest.mark.parametrize("forbidden_kind", ["workspace", "cache"])
+def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
+    forbidden_kind: str,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    cache = tmp_path / "uv-cache"
+    launcher_dir = tmp_path / "home" / ".local" / "bin"
+    workspace.mkdir()
+    cache.mkdir()
+    launcher_dir.mkdir(parents=True)
+    forbidden_root = workspace if forbidden_kind == "workspace" else cache
+    target = forbidden_root / "agentic-hil"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o700)
+    launcher = launcher_dir / "agentic-hil"
+    launcher.symlink_to(target)
+
+    with pytest.raises(ConfigError) as excinfo:
+        trusted_persistent_executable(launcher, workspace=workspace, disallowed_roots=[cache])
+
+    assert excinfo.value.error_type == "mcp_command_untrusted"
 
 
 def test_mcp_stdio_reports_missing_discovered_config(
@@ -585,12 +1061,55 @@ def test_artifact_validation_blocks_outside_root(tmp_path: Path) -> None:
     assert result["error_type"] == "artifact_validation_failed"
 
 
-def test_skill_install_supports_agent_aliases(tmp_path: Path) -> None:
-    target = tmp_path / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+def test_skill_install_supports_agent_aliases() -> None:
+    target = Path.home() / "skills" / "agentic-hil-config-setup" / "SKILL.md"
     result = install_skill("open-code", str(target))
     assert result["ok"] is True
     assert result["agent"] == "opencode"
     assert "agentic_hil_version" in target.read_text(encoding="utf-8")
+
+
+def test_skill_install_force_preserves_unmanaged_skill_and_reports_conflict() -> None:
+    target = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    target.parent.mkdir(parents=True)
+    existing = "---\nname: unrelated-user-skill\n---\nKeep this content.\n"
+    target.write_text(existing, encoding="utf-8")
+
+    result = install_skill("claude-code", force=True)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "skill_conflict"
+    assert target.read_text(encoding="utf-8") == existing
+
+
+def test_codex_skill_update_rolls_back_skill_and_registration_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert install_skill("codex")["ok"] is True
+    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    agents_path = Path.home() / ".codex" / "AGENTS.md"
+    current_skill = skill_path.read_text(encoding="utf-8")
+    old_skill = re.sub(r'agentic_hil_version: "[^"]+"', 'agentic_hil_version: "0.0.0"', current_skill)
+    assert old_skill != current_skill
+    skill_path.write_bytes(old_skill.encode("utf-8"))
+    current_agents = agents_path.read_text(encoding="utf-8")
+    old_agents = re.sub(r"Agentic HIL version: `[^`]+`", "Agentic HIL version: `0.0.0`", current_agents)
+    assert old_agents != current_agents
+    agents_path.write_bytes(old_agents.encode("utf-8"))
+
+    from agentic_hil import cli as cli_module
+
+    def fail_registration_write(*_args: object, **_kwargs: object) -> dict:
+        assert skill_path.read_text(encoding="utf-8") == current_skill
+        raise ConfigError("injected_failure", "registration write failed")
+
+    monkeypatch.setattr(cli_module, "upsert_marked_block", fail_registration_write)
+
+    with pytest.raises(ConfigError, match="registration write failed"):
+        install_skill("codex")
+
+    assert skill_path.read_text(encoding="utf-8") == old_skill
+    assert agents_path.read_text(encoding="utf-8") == old_agents
 
 
 def test_load_config_reports_unreadable_path_as_config_error(tmp_path: Path) -> None:

@@ -30,55 +30,61 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 ## Start Agentic HIL
 
-Fast path, in order — stop at the first step that works:
+Fast path, in order — stop at the first persistent installation that works:
 
-Agentic HIL is a Python package, so a plain `pip install` is fine where `pip` works. Just don't fight a missing one: on current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip` — use `uv` as below (bootstrap it in step 6 if missing), or a throwaway venv's pip (`python3 -m venv .venv && .venv/bin/pip install …`).
+Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
 
-1. If `agentic-hil --version` works, do not reinstall.
-2. Try the normal user-local pip install first:
+1. Reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
 ```bash
-python -m pip install --user agentic-hil
 agentic-hil --version
+agentic-hil setup --help
 ```
 
-If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, continue with the runner paths below.
+An older version must be upgraded; a successful `--version` call by itself is not sufficient.
 
-3. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+2. Try the normal user-local pip installation first:
 
 ```bash
-uvx --from agentic-hil agentic-hil --version
+python -m pip install --user --upgrade "agentic-hil>=0.4.0"
 ```
 
-4. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
+3. If Python is externally managed, the console script is not reliably on `PATH`, or `pip` is unavailable, use an isolated persistent tool installation:
 
 ```bash
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uv tool install --upgrade "agentic-hil>=0.4.0"
 ```
 
-5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic-hil agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil agentic-hil --version`.
-6. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
+If PyPI lookup is unavailable but the release tag is reachable, use the repository as the persistent package source (this does not create a checkout):
+
+```bash
+uv tool install --upgrade "git+https://github.com/agentic-hil/agentic-hil@v0.4.0"
+```
+
+4. If `uv` is missing but `pipx` is available, use `pipx install "agentic-hil>=0.4.0"` (or `pipx upgrade agentic-hil` for an older pipx-managed installation). The repository-source equivalent is `pipx install "git+https://github.com/agentic-hil/agentic-hil@v0.4.0"`.
+5. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-then rerun step 3. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+Then rerun step 3. A missing installer is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
 
-If the `pip --user` command is not reliably on `PATH`, use an isolated persistent install for the MCP server entry (still user-local, still no admin rights):
+After installation, open a new shell if requested and verify both the minimum version and the setup command:
 
 ```bash
-uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil
+agentic-hil --version
+agentic-hil setup --help
 ```
 
-`pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
+`uv tool` and `pipx` place `agentic-hil` into their user-level executable directory. If it is not on `PATH`, use `uv tool update-shell` or `pipx ensurepath` and start a new shell — never use administrator rights.
 
 ## Install Agent Skill
 
 Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
-agentic-hil skill-install --agent <agent>          # or: uvx --from agentic-hil agentic-hil skill-install --agent <agent>
+agentic-hil skill-install --agent <agent>
 ```
 
 Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The installed `agentic-hil` distribution is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
@@ -88,7 +94,7 @@ Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude
 **Cross-agent alternative (no Python pre-install):** this repo is also discoverable by the Vercel [`skills`](https://github.com/vercel-labs/skills) CLI, so the skill can be dropped into every agent at once without installing `agentic-hil` first:
 
 ```bash
-npx skills add https://github.com/agentic-hil/agentic-hil --skill agentic-hil-config-setup -a claude-code -a codex -a opencode
+npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil-config-setup -a claude-code -a codex -a opencode
 ```
 
 It installs into `~/.agents/skills/` (read by Codex and OpenCode, symlinked for Claude Code). This distributes only the guidance skill — the MCP server and the deny-by-default project config still come from `agentic-hil setup --agent <agent>`.
@@ -101,7 +107,7 @@ In every firmware project that should use Agentic HIL:
 agentic-hil setup --agent <agent>
 ```
 
-`setup` is the one-shot path: it prepares a safe external `state_root`, writes the deny-by-default authoritative config, installs the agent skill, writes `.mcp.json`, and runs `doctor` — one command instead of running `init`, `skill-install`, `mcp-config`, and `doctor` yourself, and it fixes the common group-writable `state_root` ancestor snag automatically. It returns one JSON result with a per-step breakdown.
+`setup` is the one-shot path: it prepares a safe external `state_root`, writes the deny-by-default authoritative config, installs the agent skill, registers the MCP server in the selected agent's user-level configuration, and runs `doctor` — one command instead of running `init`, `skill-install`, agent-specific MCP registration, and `doctor` yourself. It returns one JSON result with a per-step breakdown. It does not write a project `.mcp.json`; that remains an explicit `mcp-config` operation.
 
 The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. Ask the human operator to review resource and permission changes. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
 
@@ -113,15 +119,15 @@ Expected healthy result: `ok: true` overall with each step ok, and — once `all
 
 `agentic-hil setup --agent <agent>` (above) already registers the server for that agent in the agent's **user-level** config — outside the firmware repo, so the untrusted repo cannot control how the agent launches tools (the same trust boundary as the authoritative config):
 
-- Claude Code → user scope (`claude mcp add --scope user`, i.e. `~/.claude.json`)
+- Claude Code → `~/.claude.json` user scope (secure direct merge)
 - Codex → `~/.codex/config.toml` (`[mcp_servers.agentic-hil]`)
 - opencode → `~/.config/opencode/opencode.json` (`mcp.agentic-hil`)
 
-No `cwd` or absolute path is baked in: every host starts the same command (`agentic-hil mcp-stdio`) from the firmware project root, and `mcp-stdio` discovers the external config from that working directory — refusing to start unless `workspace_root` matches. If `agentic-hil` is not on `PATH`, the generated command uses the resolvable console-script path automatically. See [MCP host configuration](docs/mcp-hosts.md) for the exact per-host rendering and for hosts `setup` does not cover.
+No `cwd` is baked in. `setup` resolves the installed console script, rejects transient, workspace-local, unsafe-symlink, or otherwise untrusted candidates, and stores its verified absolute persistent user-bin path. A user-owned pipx/uv-tool link is accepted only when both the link path and its fully resolved target chain pass the ownership, permission, and location checks. The host starts that executable with `mcp-stdio` from the firmware project root; config discovery then refuses to start unless `workspace_root` matches. See [MCP host configuration](docs/mcp-hosts.md) for the exact per-host rendering and for hosts `setup` does not cover.
 
-If you deliberately want a **project-scoped, team-shared** entry checked into the repo instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
+If you deliberately want a **project-scoped, machine-local** entry instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form with the same verified absolute executable. That file is not portable or team-shared: keep it uncommitted. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
 
-**Claude Code, optional:** a native plugin under `plugins/agentic-hil/` bundles this skill and the MCP server. Install it with `/plugin marketplace add https://github.com/agentic-hil/agentic-hil` then `/plugin install agentic-hil@agentic-hil` (or `claude --plugin-dir ./plugins/agentic-hil` to test). It is an alternative to the skill+MCP part of `agentic-hil setup --agent claude` — use one or the other for the MCP registration, not both. Either way, still run `agentic-hil setup --agent claude` (or at least `agentic-hil init`) once per firmware project for the deny-by-default authoritative config.
+**Claude Code, optional:** a native plugin under `plugins/agentic-hil/` distributes the setup skill but deliberately stores no MCP server command. A portable plugin cannot know the verified absolute path of a persistent user-local executable, and `uvx` is not a durable installation boundary. Install the plugin with `/plugin marketplace add https://github.com/agentic-hil/agentic-hil` then `/plugin install agentic-hil@agentic-hil` (or `claude --plugin-dir ./plugins/agentic-hil` to test), install the exact package version required by its skill, and run `agentic-hil setup --agent claude`. `setup` performs the trusted user-level registration; the plugin does not replace that step.
 
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, and CAN tool calls pass `bus_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --port <port_id>` process from the same project root; never mix plain text into `mcp-stdio`.
 

@@ -5,8 +5,9 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -17,10 +18,21 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
+    absolute_without_symlinks,
+    atomic_write_text,
     config_schema_text,
     ensure_safe_state_root,
+    is_path_within_frozen,
     load_authoritative_config,
+    load_config,
     project_config_path,
+    safe_directory,
+    secure_atomic_write_text,
+    secure_optional_read_text,
+    secure_remove_file,
+    secure_user_directory,
+    secure_user_file_lock,
+    trusted_persistent_executable,
     user_state_root,
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
@@ -112,6 +124,12 @@ class SkillAgent:
     aliases: tuple[str, ...]
     default_target_path: str
     registration: str
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: Path
+    content: str | None
 
 
 def skill_agents() -> list[SkillAgent]:
@@ -241,60 +259,172 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
 
 
-def setup_project(agent: str, force: bool = False) -> JsonObject:
-    """One-shot, RTK-style project setup. Prepares a safe state_root, writes the
-    authoritative config, installs the agent skill, registers the MCP server in
-    the agent's USER-level config (outside the repo, per the trust boundary), and
-    runs doctor -- so an agent needs a single command instead of orchestrating
-    four and hand-fixing the state_root permission snag."""
-    workspace = Path.cwd().resolve()
-    state_actions = ensure_safe_state_root()
-
-    config_path = project_config_path(workspace)
-    if config_path.exists() and not force:
-        config_result: JsonObject = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept (use --force to overwrite).", "path": str(config_path)}
-    else:
-        config_result = init_config(None, force=True)
-
-    skill_result = install_skill(agent, None, force)
-    mcp_result = register_agent_mcp(agent, force=True)
-    doctor_result = doctor(None) if overall_success(config_result) else {"ok": False, "skipped": True, "summary": "Doctor skipped because configuration was not written."}
-
-    ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result))
-    return {
-        "ok": ok,
-        "tool": "agentic_hil_setup",
-        "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup finished with errors; inspect steps.",
-        "agent": agent,
-        "state_root_changes": state_actions,
-        "steps": {
-            "config": config_result,
-            "skill_install": skill_result,
-            "mcp_config": mcp_result,
-            "doctor": doctor_result,
-        },
+def _agent_mcp_config_path(agent_id: str) -> Path:
+    paths = {
+        "claude-code": Path.home() / ".claude.json",
+        "codex": Path.home() / ".codex" / "config.toml",
+        "opencode": Path.home() / ".config" / "opencode" / "opencode.json",
     }
+    return _external_user_path(paths[agent_id], "MCP user configuration")
 
 
-def init_config(config_path: str | None = None, force: bool = False) -> JsonObject:
+def _external_user_path(path: Path, label: str) -> Path:
+    absolute = absolute_without_symlinks(path)
+    workspace = absolute_without_symlinks(Path.cwd())
+    if is_path_within_frozen(absolute, workspace):
+        raise ConfigError("unsafe_configured_path", f"{label} must be stored outside the project workspace.", {"field": "user_config", "path": str(absolute), "workspace_root": str(workspace)})
+    return absolute
+
+
+def _setup_mutation_paths(agent: SkillAgent, config_path: Path) -> list[Path]:
+    skill_path = _external_user_path(Path(agent.default_target_path), "Default agent skill")
+    paths = [config_path, skill_path, _agent_mcp_config_path(agent.id)]
+    if agent.registration == "agents-md":
+        paths.append(Path(skill_install_root(str(skill_path))) / "AGENTS.md")
+    return paths
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _capture_file_snapshots(paths: list[Path]) -> list[FileSnapshot]:
+    snapshots: list[FileSnapshot] = []
+    seen: set[str] = set()
+    for path in paths:
+        absolute = absolute_without_symlinks(path)
+        identity = os.path.normcase(str(absolute))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        snapshots.append(FileSnapshot(absolute, secure_optional_read_text(absolute)))
+    return snapshots
+
+
+def _restore_file_snapshots(snapshots: list[FileSnapshot]) -> list[JsonObject]:
+    errors: list[JsonObject] = []
+    for snapshot in reversed(snapshots):
+        try:
+            current = secure_optional_read_text(snapshot.path)
+            if current == snapshot.content:
+                continue
+            if snapshot.content is None:
+                secure_remove_file(snapshot.path)
+            else:
+                secure_atomic_write_text(snapshot.path, snapshot.content)
+        except BaseException as error:
+            errors.append({"path": str(snapshot.path), "exception_type": type(error).__name__, "summary": str(error)})
+    return errors
+
+
+def _skipped_setup_step(summary: str) -> JsonObject:
+    return {"ok": False, "skipped": True, "summary": summary}
+
+
+def setup_project(agent: str, force: bool = False) -> JsonObject:
+    """Set up one project transactionally without replacing hardware policy."""
+    workspace = Path.cwd().resolve()
+    resolved_agent = resolve_skill_agent(agent)
+    if resolved_agent is None:
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's setup paths.", "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
+
+    config_path = initialized_config_path(workspace)
+    config_exists = _path_entry_exists(config_path)
+    state_actions = ensure_safe_state_root()
+    command = mcp_server_command()
+    config_result: JsonObject
+    skill_result = _skipped_setup_step("Skill installation was not reached.")
+    mcp_result = _skipped_setup_step("MCP registration was not reached.")
+    doctor_result = _skipped_setup_step("Doctor was not reached.")
+
+    mutation_paths = _setup_mutation_paths(resolved_agent, config_path)
+    if config_exists:
+        mutation_paths.remove(config_path)
+    with ExitStack() as locks:
+        for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
+            locks.enter_context(secure_user_file_lock(path))
+        snapshots = _capture_file_snapshots(mutation_paths)
+        try:
+            if config_exists:
+                config_result = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept; setup never replaces operator policy.", "path": str(config_path)}
+            else:
+                config_result = init_config(None, force=False, _locked=True)
+
+            if overall_success(config_result):
+                # Validate policy before mutating global agent files.
+                doctor_result = doctor(None)
+            if overall_success(config_result) and overall_success(doctor_result):
+                skill_result = install_skill(agent, None, force, _locked=True)
+            if all(overall_success(result) for result in (config_result, doctor_result, skill_result)):
+                mcp_result = register_agent_mcp(agent, force=force, command=command, _locked=True)
+        except BaseException as error:
+            rollback_errors = _restore_file_snapshots(snapshots)
+            if isinstance(error, ConfigError) and rollback_errors:
+                error.details["rollback_errors"] = rollback_errors
+            raise
+
+        ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result))
+        rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
+        return {
+            "ok": ok and not rollback_errors,
+            "tool": "agentic_hil_setup",
+            "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup failed; committed file changes were rolled back.",
+            "agent": agent,
+            "state_root_changes": state_actions,
+            "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
+            "steps": {
+                "config": config_result,
+                "skill_install": skill_result,
+                "mcp_config": mcp_result,
+                "doctor": doctor_result,
+            },
+        }
+
+
+def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
-    if target_path.exists() and not force:
+    if _path_entry_exists(target_path) and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}", encoding="utf-8")
-    previous = os.environ.pop(CONFIG_ENV, None)
+    if not _locked:
+        with secure_user_file_lock(target_path):
+            return init_config(config_path, force, _locked=True)
+    existing = secure_optional_read_text(target_path)
+    text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
+    secure_user_directory(target_path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
+    temporary_path = Path(temporary_name)
     try:
-        load_authoritative_config(workspace)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        load_config(str(temporary_path), str(workspace))
     except ConfigError as error:
         result = error.to_dict()
-        result["summary"] = "Agentic HIL starter configuration was written but failed validation."
+        result["summary"] = "Agentic HIL starter configuration failed validation; the authoritative file was not changed."
         result["path"] = str(target_path)
         return result
     finally:
-        if previous is not None:
-            os.environ[CONFIG_ENV] = previous
+        secure_remove_file(temporary_path)
+
+    snapshot = FileSnapshot(target_path, existing)
+    try:
+        secure_atomic_write_text(target_path, text)
+        load_authoritative_config(workspace)
+    except ConfigError as error:
+        rollback_errors = _restore_file_snapshots([snapshot])
+        result = error.to_dict()
+        result["summary"] = "Agentic HIL starter configuration failed final validation and was rolled back."
+        result["path"] = str(target_path)
+        if rollback_errors:
+            result["rollback_errors"] = rollback_errors
+        return result
     available_com_ports = list_available_com_ports()
     return {
         "ok": True,
@@ -307,7 +437,17 @@ def init_config(config_path: str | None = None, force: bool = False) -> JsonObje
 
 
 def initialized_config_path(workspace: Path) -> Path:
-    return project_config_path(workspace)
+    configured = os.environ.get(CONFIG_ENV)
+    if configured:
+        requested = Path(configured).expanduser()
+        if not requested.is_absolute():
+            raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
+        target = absolute_without_symlinks(requested)
+    else:
+        target = project_config_path(workspace)
+    if is_path_within_frozen(target, workspace):
+        raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
+    return target
 
 
 def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
@@ -455,15 +595,39 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
+def _mcp_cache_roots() -> list[Path]:
+    cache_roots: list[Path] = [Path(tempfile.gettempdir()), Path.home() / ".cache", Path.home() / "Library" / "Caches"]
+    for variable in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
+        if value := os.environ.get(variable):
+            cache_roots.append(Path(value).expanduser())
+    if local_app_data := os.environ.get("LOCALAPPDATA"):
+        cache_roots.append(Path(local_app_data) / "uv" / "cache")
+    return cache_roots
+
+
+def _trusted_mcp_command(command: str) -> str:
+    return trusted_persistent_executable(command, workspace=Path.cwd(), disallowed_roots=_mcp_cache_roots())
+
+
 def mcp_server_command() -> str:
-    """Command an MCP client should spawn for this install. Prefer the bare name
-    when it resolves on PATH (portable); otherwise the absolute console-script
-    path next to this interpreter (e.g. a project venv) so the entry still works
-    when the install is not on PATH -- no manual .mcp.json editing needed."""
-    if shutil.which("agentic-hil"):
-        return "agentic-hil"
+    """Return one pinned, persistent console-script path or fail closed."""
+
+    candidates: list[str] = []
+    if found := shutil.which("agentic-hil"):
+        candidates.append(found)
     script = Path(sys.executable).parent / ("agentic-hil.exe" if os.name == "nt" else "agentic-hil")
-    return str(script) if script.exists() else "agentic-hil"
+    candidates.append(str(script))
+    rejected: list[JsonObject] = []
+    for candidate in dict.fromkeys(candidates):
+        try:
+            return _trusted_mcp_command(candidate)
+        except (ConfigError, OSError) as error:
+            rejected.append({"path": str(candidate), "reason": str(error)})
+    raise ConfigError(
+        "mcp_command_untrusted",
+        "No stable trusted Agentic HIL executable was found. Install it persistently with 'uv tool install agentic-hil' or 'pipx install agentic-hil'.",
+        {"rejected_candidates": rejected},
+    )
 
 
 def mcp_config_text() -> str:
@@ -475,39 +639,65 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
     if output is None:
         sys.stdout.write(text)
         return {"ok": True}
-    output_path = Path(output)
-    if output_path.exists() and not force:
+    workspace = absolute_without_symlinks(Path.cwd())
+    requested = Path(output).expanduser()
+    output_path = absolute_without_symlinks(requested if requested.is_absolute() else workspace / requested)
+    if not is_path_within_frozen(output_path, workspace):
+        raise ConfigError("unsafe_configured_path", "MCP project configuration output must stay inside the current workspace.", {"path": str(output_path), "workspace_root": str(workspace)})
+    if _path_entry_exists(output_path) and not force:
         return {"ok": False, "error_type": "mcp_config_exists", "summary": "MCP configuration already exists. Use --force to overwrite it.", "path": output}
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(text, encoding="utf-8")
-    return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": output}
+    safe_directory(output_path.parent)
+    atomic_write_text(output_path, text, workspace=workspace)
+    return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": str(output_path)}
 
 
 AGENTIC_HIL_MCP_START = "# >>> agentic-hil mcp (managed) >>>"
 AGENTIC_HIL_MCP_END = "# <<< agentic-hil mcp (managed) <<<"
 
 
-def register_agent_mcp(agent: str | None = None, force: bool = False) -> JsonObject:
+def register_agent_mcp(agent: str | None = None, force: bool = False, *, command: str | None = None, _locked: bool = False) -> JsonObject:
     """Register the agentic-hil MCP server for `agent` in that agent's USER-level
     config, outside the firmware repo. The repo is untrusted under the policy
-    boundary, so the MCP registration must not live in it. No cwd / absolute paths
-    are baked in: the client launches the server in the project directory, where
-    agentic-hil discovers its authoritative config from the cwd."""
+    boundary, so the MCP registration must not live in it. The pinned, trusted
+    absolute launcher path is stored deliberately; the client still launches the
+    server in the project directory, where it discovers its authoritative config."""
     requested = agent or "claude-code"
     resolved = resolve_skill_agent(requested)
     agent_id = resolved.id if resolved else normalize_agent(requested)
-    command = mcp_server_command()
+    if agent_id not in {"claude-code", "codex", "opencode"}:
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents()}
+    command = mcp_server_command() if command is None else _trusted_mcp_command(command)
+    if not _locked:
+        with secure_user_file_lock(_agent_mcp_config_path(agent_id)):
+            return register_agent_mcp(agent, force, command=command, _locked=True)
     if agent_id == "claude-code":
         return _register_claude_mcp(command, force)
     if agent_id == "codex":
         return _register_codex_mcp(command, force)
     if agent_id == "opencode":
         return _register_opencode_mcp(command, force)
-    return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents()}
+    raise AssertionError(f"unhandled supported agent: {agent_id}")
+
+
+def _parse_toml(text: str) -> tuple[dict | None, str | None]:
+    if not text.strip():
+        return {}, None
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            return None, "Python 3.10 needs the optional 'tomli' package to merge an existing Codex config safely."
+    try:
+        loaded = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        return None, str(error)
+    return loaded if isinstance(loaded, dict) else None, None
 
 
 def _register_codex_mcp(command: str, force: bool) -> JsonObject:
-    path = Path.home() / ".codex" / "config.toml"
+    path = _agent_mcp_config_path("codex")
     block = "\n".join(
         [
             AGENTIC_HIL_MCP_START,
@@ -518,76 +708,130 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
             AGENTIC_HIL_MCP_END,
         ]
     )
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    has_managed = AGENTIC_HIL_MCP_START in existing
-    if not has_managed and re.search(r"^\s*\[mcp_servers\.agentic-hil\]", existing, re.MULTILINE):
-        return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged [mcp_servers.agentic-hil] entry already exists; left untouched."}
-    if has_managed and not force:
-        return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Codex MCP entry already registered."}
-    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = secure_optional_read_text(path) or ""
+    parsed, parse_error = _parse_toml(existing)
+    if parsed is None:
+        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Existing Codex config.toml is not valid TOML or cannot be parsed safely; left untouched.", "parse_error": parse_error}
+    start_count = existing.count(AGENTIC_HIL_MCP_START)
+    end_count = existing.count(AGENTIC_HIL_MCP_END)
+    if start_count != end_count or start_count > 1:
+        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Codex config.toml contains malformed or duplicate Agentic HIL managed markers; left untouched."}
+    has_managed = start_count == 1
+    servers = parsed.get("mcp_servers", {})
+    entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
+    desired_entry = {"command": command, "args": ["mcp-stdio"], "enabled": True}
+    if not has_managed and entry is not None:
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched."}
+    if has_managed and not isinstance(entry, dict):
+        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
+    if has_managed and entry == desired_entry:
+        return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Codex MCP entry already registered with the trusted launcher."}
     if has_managed:
         pattern = re.compile(re.escape(AGENTIC_HIL_MCP_START) + r"[\s\S]*?" + re.escape(AGENTIC_HIL_MCP_END))
-        next_text = pattern.sub(block, existing)
+        next_text = pattern.sub(lambda _match: block, existing)
     else:
         trimmed = existing.rstrip()
         separator = "\n\n" if trimmed else ""
         next_text = f"{trimmed}{separator}{block}\n"
-    path.write_text(next_text, encoding="utf-8")
-    return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
+    next_parsed, next_parse_error = _parse_toml(next_text)
+    if next_parsed is None:
+        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Generated Codex config.toml failed TOML validation; existing config was left untouched.", "parse_error": next_parse_error}
+    secure_atomic_write_text(path, next_text)
+    return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "migrated": has_managed, "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
+
+
+def _claude_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
+    if entry == desired:
+        return "current"
+    legacy_entries = (
+        {"type": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]},
+        {"command": "uvx", "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]},
+        {"type": "stdio", "command": "uvx", "args": ["--from", "agentic-hil", "agentic-hil", "mcp-stdio"]},
+    )
+    if entry in legacy_entries:
+        return "legacy"
+    if isinstance(entry, dict) and set(entry) == {"type", "command", "args"} and entry.get("type") == "stdio" and entry.get("args") == ["mcp-stdio"]:
+        configured = entry.get("command")
+        if isinstance(configured, str) and Path(configured).expanduser().is_absolute():
+            return "managed"
+    return None
+
+
+def _opencode_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
+    if entry == desired:
+        return "current"
+    legacy_commands = (
+        ["agentic-hil", "mcp-stdio"],
+        ["uvx", "--from", "agentic-hil", "agentic-hil", "mcp-stdio"],
+    )
+    if entry in ({"type": "local", "command": value, "enabled": True} for value in legacy_commands):
+        return "legacy"
+    if isinstance(entry, dict) and set(entry) == {"type", "command", "enabled"} and entry.get("type") == "local" and entry.get("enabled") is True:
+        configured = entry.get("command")
+        if isinstance(configured, list) and len(configured) == 2 and configured[1] == "mcp-stdio" and isinstance(configured[0], str) and Path(configured[0]).expanduser().is_absolute():
+            return "managed"
+    return None
 
 
 def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
-    path = Path.home() / ".config" / "opencode" / "opencode.json"
+    path = _agent_mcp_config_path("opencode")
     data = _load_json_object(path)
     if data is None:
         return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched."}
     servers = data.setdefault("mcp", {})
     if not isinstance(servers, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched."}
-    if "agentic-hil" in servers and not force:
+    desired_entry: JsonObject = {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
+    existing_entry = servers.get("agentic-hil")
+    kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
+    if "agentic-hil" in servers and kind is None:
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched."}
+    if kind == "current":
         return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
     data.setdefault("$schema", "https://opencode.ai/config.json")
-    servers["agentic-hil"] = {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return {"ok": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "Registered agentic-hil MCP server in the opencode user config."}
+    servers["agentic-hil"] = desired_entry
+    secure_atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    return {"ok": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "migrated": kind in {"legacy", "managed"}, "summary": "Registered agentic-hil MCP server in the opencode user config."}
 
 
 def _register_claude_mcp(command: str, force: bool) -> JsonObject:
-    if shutil.which("claude"):
-        try:
-            if force:
-                subprocess.run(["claude", "mcp", "remove", "--scope", "user", "agentic-hil"], capture_output=True, text=True, timeout=30, check=False)
-            completed = subprocess.run(["claude", "mcp", "add", "--scope", "user", "agentic-hil", "--", command, "mcp-stdio"], capture_output=True, text=True, timeout=30, check=False)
-            if completed.returncode == 0:
-                return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "claude-cli", "summary": "Registered agentic-hil MCP server via 'claude mcp add --scope user'."}
-            if "already exists" in f"{completed.stdout}{completed.stderr}".lower():
-                return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "claude-cli", "summary": "Claude MCP entry already registered."}
-        except (OSError, subprocess.SubprocessError):
-            pass  # fall through to the direct-write fallback
-    path = Path.home() / ".claude.json"
+    path = _agent_mcp_config_path("claude-code")
     data = _load_json_object(path)
     if data is None:
         return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched."}
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched."}
-    if "agentic-hil" in servers and not force:
+    desired_entry: JsonObject = {"type": "stdio", "command": command, "args": ["mcp-stdio"]}
+    existing_entry = servers.get("agentic-hil")
+    kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
+    if "agentic-hil" in servers and kind is None:
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched."}
+    if kind == "current":
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
-    servers["agentic-hil"] = {"type": "stdio", "command": command, "args": ["mcp-stdio"]}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Registered agentic-hil MCP server in ~/.claude.json (user scope)."}
+    servers["agentic-hil"] = desired_entry
+    secure_atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "migrated": kind in {"legacy", "managed"}, "summary": "Registered agentic-hil MCP server in ~/.claude.json (user scope)."}
 
 
 def _load_json_object(path: Path) -> dict | None:
     """{} when missing, the parsed mapping when valid, None when the file exists
     but is not a JSON object (so callers never clobber unparseable config)."""
-    if not path.exists():
+    text = secure_optional_read_text(path)
+    if text is None:
         return {}
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        loaded: dict[str, object] = {}
+        for key, value in pairs:
+            if key in loaded:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            loaded[key] = value
+        return loaded
+
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except (OSError, json.JSONDecodeError):
+        loaded = json.loads(text or "{}", object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, ValueError):
         return None
     return loaded if isinstance(loaded, dict) else None
 
@@ -665,7 +909,7 @@ def validate_legacy_config_selector(config_path: str | None, workspace: Path, ex
         )
 
 
-def install_skill(agent: str | None = None, target: str | None = None, force: bool = False) -> JsonObject:
+def install_skill(agent: str | None = None, target: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     requested_agent = agent or "opencode"
     resolved_agent = resolve_skill_agent(requested_agent)
     if resolved_agent is None and target is None:
@@ -673,24 +917,47 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
     agent_id = resolved_agent.id if resolved_agent else normalize_agent(requested_agent)
     agent_name = resolved_agent.display_name if resolved_agent else agent_id
     source_path = bundled_skill_path()
-    target_path = Path(target or resolved_agent.default_target_path)  # type: ignore[union-attr]
+    target_path = absolute_without_symlinks(Path(target or resolved_agent.default_target_path))  # type: ignore[union-attr]
+    if target is None:
+        target_path = _external_user_path(target_path, "Default agent skill")
+    if not _locked:
+        mutation_paths = [target_path]
+        if resolved_agent is not None and resolved_agent.registration == "agents-md":
+            mutation_paths.append(Path(skill_install_root(str(target_path))) / "AGENTS.md")
+        with ExitStack() as locks:
+            for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
+                locks.enter_context(secure_user_file_lock(path))
+            snapshots = _capture_file_snapshots(mutation_paths)
+            try:
+                result = install_skill(agent, target, force, _locked=True)
+            except BaseException as error:
+                rollback_errors = _restore_file_snapshots(snapshots)
+                if isinstance(error, ConfigError) and rollback_errors:
+                    error.details["rollback_errors"] = rollback_errors
+                raise
+            if overall_success(result):
+                return result
+            rollback_errors = _restore_file_snapshots(snapshots)
+            result["rollback"] = {"attempted": True, "ok": not rollback_errors, "errors": rollback_errors}
+            return result
     source_text = source_path.read_text(encoding="utf-8")
     source_version = skill_version(source_text) or __version__
-    if target_path.exists():
-        existing_text = target_path.read_text(encoding="utf-8")
+    existing_text = secure_optional_read_text(target_path)
+    if existing_text is not None:
         if existing_text == source_text:
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
             return {"ok": True, "summary": f"Agentic HIL {agent_name} skill is already installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": False, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
         existing_version = skill_version(existing_text)
-        if is_agentic_hil_setup_skill(existing_text) and existing_version != source_version:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(source_text, encoding="utf-8")
+        managed_skill = is_agentic_hil_setup_skill(existing_text)
+        if not managed_skill:
+            return {"ok": False, "error_type": "skill_conflict", "summary": "Target skill file contains unmanaged content and was left untouched; --force never replaces foreign skills.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
+        if existing_version != source_version:
+            secure_atomic_write_text(target_path, source_text)
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
             return {"ok": True, "summary": f"Agentic HIL {agent_name} skill updated to match the current CLI package.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "previous_version": existing_version, "version": source_version, "installed": False, "updated": True, "registered": registration.get("ok") is True if registration else False, "registration": registration}
         if not force:
-            return {"ok": False, "error_type": "skill_exists", "summary": "Target skill file already exists with different content and no CLI-version drift. Use --force to overwrite it.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(source_text, encoding="utf-8")
+            return {"ok": False, "error_type": "skill_exists", "summary": "Managed Agentic HIL skill differs from the packaged copy. Use --force to repair it.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
+    secure_atomic_write_text(target_path, source_text)
     registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
     return {"ok": True, "summary": f"Agentic HIL {agent_name} skill installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": True, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
 
@@ -751,14 +1018,13 @@ def codex_registration_block(target_path: str, version: str, requested_agent: st
 
 
 def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+    existing = secure_optional_read_text(file_path) or ""
     pattern = re.compile(rf"{re.escape(AGENTIC_HIL_REGISTRATION_START)}[\s\S]*?{re.escape(AGENTIC_HIL_REGISTRATION_END)}")
     trimmed = existing.rstrip()
     separator = "\n\n" if trimmed else ""
     next_text = pattern.sub(block, existing) if pattern.search(existing) else f"{trimmed}{separator}{block}\n"
     if next_text != existing:
-        file_path.write_text(next_text, encoding="utf-8")
+        secure_atomic_write_text(file_path, next_text)
         return {"updated": True}
     return {"updated": False}
 

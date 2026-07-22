@@ -2,21 +2,26 @@
 """Minimal MCP stdio probe: assert the installed server exposes exactly the
 expected tool surface (install-integrity check). Lease-free -- it only does
 `initialize` + `tools/list`, no hardware tool calls. The server discovers its
-policy from AGENTIC_HIL_CONFIG (inherited from the environment); v0.3.0 forbids
-passing --config, so none is given.
+policy from AGENTIC_HIL_CONFIG (inherited from the environment), so no
+repository-controlled --config argument is given.
 
 Usage: mcp_probe.py [FIXTURE_DIR]
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 FIXTURE = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "fixture"
 HARNESS = Path(__file__).resolve().parent
+RESPONSE_TIMEOUT_S = 10.0
 
 
 def dig(obj, *path):
@@ -40,15 +45,33 @@ def main() -> int:
         bufsize=1,
         env=env,
     )
+    response_lines: queue.Queue[str | None] = queue.Queue()
+
+    def read_stdout() -> None:
+        try:
+            for line in proc.stdout:
+                response_lines.put(line)
+        finally:
+            response_lines.put(None)
+
+    stdout_thread = threading.Thread(target=read_stdout, name="mcp-probe-stdout", daemon=True)
+    stdout_thread.start()
 
     def send(obj):
         proc.stdin.write(json.dumps(obj) + "\n")
         proc.stdin.flush()
 
     def recv():
+        deadline = time.monotonic() + RESPONSE_TIMEOUT_S
         while True:
-            line = proc.stdout.readline()
-            if not line:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"MCP response timed out after {RESPONSE_TIMEOUT_S:g}s")
+            try:
+                line = response_lines.get(timeout=remaining)
+            except queue.Empty as error:
+                raise TimeoutError(f"MCP response timed out after {RESPONSE_TIMEOUT_S:g}s") from error
+            if line is None:
                 raise RuntimeError("mcp server closed stdout")
             line = line.strip()
             if line:
@@ -71,14 +94,14 @@ def main() -> int:
         checks.append({"name": "tool surface matches snapshot", "ok": not missing and not added,
                        "detail": f"count={len(names)} missing={sorted(missing)} added={sorted(added)}"})
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proc.stdin.close()
-        except Exception:
-            pass
         try:
             proc.wait(timeout=5)
-        except Exception:
+        except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
+        stdout_thread.join(timeout=1)
 
     for c in checks:
         print(("PASS" if c["ok"] else "FAIL") + f": {c['name']} ({c['detail']})")
