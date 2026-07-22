@@ -7,7 +7,7 @@ import re
 import shutil
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -32,6 +32,7 @@ from agentic_hil.config import (
     secure_remove_file,
     secure_user_directory,
     secure_user_file_lock,
+    tighten_owned_writable_ancestors,
     trusted_persistent_executable,
     user_state_root,
 )
@@ -325,6 +326,28 @@ def _skipped_setup_step(summary: str) -> JsonObject:
     return {"ok": False, "skipped": True, "summary": summary}
 
 
+def _smooth_setup_permissions(config_path: Path, mutation_paths: list[Path]) -> list[str]:
+    """Silently tighten the current user's own group/other-writable directories
+    (state, authoritative config, per-agent MCP config, and the MCP launcher
+    chains) so the fail-closed trust validators accept a umask-002 / private-group
+    home without the operator hand-fixing permissions. Only user-owned components
+    are ever changed. POSIX only; on Windows this is a no-op."""
+    targets: list[Path] = [user_state_root(), config_path, *mutation_paths]
+    for candidate in _mcp_command_candidates():
+        targets.append(Path(candidate))
+        with suppress(OSError):
+            targets.append(Path(os.path.realpath(candidate)))
+    actions: list[str] = []
+    seen: set[str] = set()
+    for target in targets:
+        key = os.path.normcase(str(target))
+        if key in seen:
+            continue
+        seen.add(key)
+        actions.extend(tighten_owned_writable_ancestors(target))
+    return actions
+
+
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """Set up one project transactionally without replacing hardware policy."""
     workspace = Path.cwd().resolve()
@@ -334,6 +357,10 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
 
     config_path = initialized_config_path(workspace)
     config_exists = _path_entry_exists(config_path)
+    mutation_paths = _setup_mutation_paths(resolved_agent, config_path)
+    # Smooth the common umask-002 friction before the fail-closed validators run,
+    # tightening only the operator's own writable dirs.
+    permission_changes = _smooth_setup_permissions(config_path, mutation_paths)
     state_actions = ensure_safe_state_root()
     command = mcp_server_command()
     config_result: JsonObject
@@ -341,7 +368,6 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     mcp_result = _skipped_setup_step("MCP registration was not reached.")
     doctor_result = _skipped_setup_step("Doctor was not reached.")
 
-    mutation_paths = _setup_mutation_paths(resolved_agent, config_path)
     if config_exists:
         mutation_paths.remove(config_path)
     with ExitStack() as locks:
@@ -375,6 +401,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
             "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup failed; committed file changes were rolled back.",
             "agent": agent,
             "state_root_changes": state_actions,
+            "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
             "steps": {
                 "config": config_result,
@@ -609,16 +636,21 @@ def _trusted_mcp_command(command: str) -> str:
     return trusted_persistent_executable(command, workspace=Path.cwd(), disallowed_roots=_mcp_cache_roots())
 
 
-def mcp_server_command() -> str:
-    """Return one pinned, persistent console-script path or fail closed."""
-
+def _mcp_command_candidates() -> list[str]:
+    """The console-script locations we consider for the pinned MCP launcher."""
     candidates: list[str] = []
     if found := shutil.which("agentic-hil"):
         candidates.append(found)
     script = Path(sys.executable).parent / ("agentic-hil.exe" if os.name == "nt" else "agentic-hil")
     candidates.append(str(script))
+    return list(dict.fromkeys(candidates))
+
+
+def mcp_server_command() -> str:
+    """Return one pinned, persistent console-script path or fail closed."""
+
     rejected: list[JsonObject] = []
-    for candidate in dict.fromkeys(candidates):
+    for candidate in _mcp_command_candidates():
         try:
             return _trusted_mcp_command(candidate)
         except (ConfigError, OSError) as error:

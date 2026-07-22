@@ -37,7 +37,14 @@ from agentic_hil.cli import (
     test_schema,
 )
 from agentic_hil.comports import ComPortService
-from agentic_hil.config import ConfigError, load_config, project_config_path, trusted_persistent_executable
+from agentic_hil.config import (
+    ConfigError,
+    load_config,
+    project_config_path,
+    tighten_owned_writable_ancestors,
+    trusted_persistent_executable,
+    user_state_root,
+)
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService
@@ -183,6 +190,8 @@ def _trusted_test_mcp_command(monkeypatch: pytest.MonkeyPatch) -> str:
     """Use the installed Python launcher as a stable, trusted test executable."""
     command = str(Path(sys.executable).resolve())
     monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: command)
+    # Keep setup's permission smoothing from touching the real test venv launcher.
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", list)
     return command
 
 
@@ -685,6 +694,61 @@ def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
         trusted_persistent_executable(launcher, workspace=workspace, disallowed_roots=[cache])
 
     assert excinfo.value.error_type == "mcp_command_untrusted"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
+def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_path: Path) -> None:
+    state_dir = tmp_path / "home" / ".local" / "state" / "agentic-hil"
+    state_dir.mkdir(parents=True)
+    for directory in (tmp_path / "home", tmp_path / "home" / ".local", tmp_path / "home" / ".local" / "state"):
+        directory.chmod(0o775)
+    launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
+    launcher.parent.mkdir(parents=True)
+    launcher.parent.chmod(0o775)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o775)
+
+    actions = tighten_owned_writable_ancestors(launcher)
+
+    assert actions, "expected the group-writable components to be reported"
+    launcher_mode = launcher.stat().st_mode
+    assert not (launcher_mode & 0o022), "launcher must lose group/other write"
+    assert launcher_mode & 0o100, "launcher must stay owner-executable"
+    for directory in (launcher.parent, tmp_path / "home" / ".local", tmp_path / "home"):
+        assert not (directory.stat().st_mode & 0o022), f"{directory} still group/other-writable"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
+def test_setup_smooths_group_writable_home_and_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_config_environment: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+
+    home = Path.home()
+    state_parent = user_state_root().parent
+    state_parent.mkdir(parents=True, exist_ok=True)
+    config_home = isolated_config_environment
+    config_home.mkdir(parents=True, exist_ok=True)
+    writable = [home, config_home, state_parent]
+    for directory in writable:
+        directory.chmod(0o775)
+    assert all(directory.stat().st_mode & 0o020 for directory in writable)
+
+    result = setup_project(agent="codex")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["permission_changes"], "setup should report the tightened directories"
+    for directory in writable:
+        assert not (directory.stat().st_mode & 0o022), f"{directory} still group/other-writable"
+    # The registration landed in the user-level config, never the repo.
+    assert (home / ".codex" / "config.toml").is_file()
+    assert not (workspace / ".mcp.json").exists()
 
 
 def test_mcp_stdio_reports_missing_discovered_config(

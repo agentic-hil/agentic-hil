@@ -344,10 +344,47 @@ def user_state_root() -> Path:
 
 def ensure_safe_state_root() -> list[str]:
     """Create and validate the default state directory without changing existing
-    permissions. Unsafe ownership or replaceable ancestors fail closed; setup
-    must never silently chmod a user's home-directory hierarchy."""
+    permissions. Unsafe ownership or replaceable ancestors fail closed. This
+    validator itself never chmods; ``setup`` performs any user-owned tightening
+    explicitly beforehand via tighten_owned_writable_ancestors()."""
     secure_user_directory(user_state_root())
     return []
+
+
+def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
+    """Remove group/other write from the *current user's own* directories (and a
+    final regular file such as a launcher) along ``target``'s chain, so the
+    fail-closed trust validators accept a umask-002 / private-group home without
+    the operator hand-fixing permissions.
+
+    Only components owned by the current user are ever changed; the walk stops at
+    the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
+    never touches shared or system directories. Sticky world-writable dirs (e.g.
+    ``/tmp``) are left as-is. Returns a list of the changes made. POSIX only; on
+    Windows the ACL model differs and this is a no-op."""
+    if os.name == "nt":
+        return []
+    actions: list[str] = []
+    path = Path(os.path.abspath(os.path.expanduser(str(target))))
+    euid = os.geteuid()
+    existing = path
+    while not os.path.lexists(existing) and existing != existing.parent:
+        existing = existing.parent
+    for component in (existing, *existing.parents):
+        try:
+            info = os.lstat(component)
+        except OSError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            break  # never chmod through a symlinked component; the validator rejects it
+        if info.st_uid != euid:
+            break  # never touch directories we do not own (e.g. /home, /)
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and mode & stat.S_ISVTX):
+            with suppress(OSError):
+                os.chmod(component, mode & ~0o022)
+                actions.append(f"removed group/other write on {component}")
+    return actions
 
 
 def project_state_directory(config: AgenticHILConfig) -> Path:
