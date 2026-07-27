@@ -290,9 +290,31 @@ $functionAst = $ast.Find({{
 if ($null -eq $functionAst) {{ throw 'Function not found.' }}
 Invoke-Expression $functionAst.Extent.Text
 
+$full = [Security.AccessControl.FileSystemRights]::FullControl
+$inherit = [Security.AccessControl.InheritanceFlags]"ObjectInherit, ContainerInherit"
+$allow = [Security.AccessControl.AccessControlType]::Allow
+$cleanAcl = Get-Acl -LiteralPath '{escaped_clean}'
+# Runner temp directories may grant extra principals write access, so pin the
+# trusted-only case instead of inheriting whatever the host provides.
+$cleanAcl.SetAccessRuleProtection($true, $false)
+foreach ($trusted in @(
+    [Security.Principal.WindowsIdentity]::GetCurrent().User,
+    (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'),
+    (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544')
+)) {{
+    $cleanAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+        $trusted,
+        $full,
+        $inherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        $allow
+    )))
+}}
+Set-Acl -LiteralPath '{escaped_clean}' -AclObject $cleanAcl
+
 $clean = @(Get-UntrustedWriteIdentity -LiteralPath '{escaped_clean}')
 if ($clean.Count -ne 0) {{
-    throw "Unexpected identities on a user-owned directory: $($clean -join ', ')"
+    throw "Unexpected identities on a trusted-only directory: $($clean -join ', ')"
 }}
 
 $everyone = New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'
