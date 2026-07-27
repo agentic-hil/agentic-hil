@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from .adapters import adapter_for, build_agent_command
 from .fixtures import prepare_fixture
+from .refresh_login import export as export_refreshed
 from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
 
@@ -176,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"event": "eval_followup_exit", "exit_code": second.returncode}), flush=True)
         return second.returncode
     finally:
+        # The agent CLI may have refreshed a token. Stage it for the host while
+        # this container's tmpfs still exists, then remove every copy.
+        with contextlib.suppress(OSError):
+            export_refreshed(credential_kinds)
         scrub(credential_kinds)
 
 

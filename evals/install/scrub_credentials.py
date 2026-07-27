@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 HOME = Path("/home/eval")
+# Where a possibly refreshed login is staged for the host to collect. It must be
+# gone before verification, which never sees a credential.
+REFRESHED_DIRECTORY = HOME / ".agentic-hil-eval" / "refreshed"
 AUTH_PATHS = {
     "codex-auth": HOME / ".codex" / "auth.json",
     "claude-auth": HOME / ".claude" / ".credentials.json",
@@ -21,6 +25,10 @@ def scrub(kinds: list[str]) -> None:
             path.unlink()
         if path.exists():
             raise RuntimeError(f"credential path could not be scrubbed: {path}")
+
+    shutil.rmtree(REFRESHED_DIRECTORY, ignore_errors=True)
+    if REFRESHED_DIRECTORY.exists():
+        raise RuntimeError(f"credential path could not be scrubbed: {REFRESHED_DIRECTORY}")
 
 
 def main(argv: list[str] | None = None) -> int:

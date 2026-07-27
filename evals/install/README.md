@@ -247,6 +247,18 @@ as redactable data. The host home is never mounted.
 > once on this machine so it refreshes here, then rerun — and refuses outright
 > when the refresh token itself is gone. Both checks run before any model budget
 > is spent. Pass `-NoFileLogin` to forbid file logins entirely.
+>
+> `--refresh-login` (`-RefreshLogin`) closes the gap from the other side, which
+> is what an unattended long run needs: the agent container stages whatever the
+> CLI left at the login path — following the symlink, because a CLI that writes
+> in place leaves the new token on tmpfs where it would die with the container —
+> and the host reads it out of the volume before the scrubber wipes it and
+> before verification runs. It replaces the stored login only when the returned
+> document still carries an access and a refresh token, keeps the previous file
+> as `<name>.agentic-hil-eval.bak`, and writes atomically. The mount stays
+> read-only, so the container never writes that file itself; but the document it
+> returns does replace it, and no check can tell a token refreshed for you from
+> a valid token for another account. That is why it is a switch, not a default.
 
 Default cases:
 
@@ -383,6 +395,8 @@ Options:
 - `-NoFileLogin`: refuse a stored interactive login and require an evaluation
   credential in the environment. Useful on a shared machine or in CI, where
   invalidating someone's session would be someone else's problem;
+- `-RefreshLogin`: write a token the agent CLI refreshed back over the stored
+  login it came from, so a rotated token is not lost (see below);
 - `-DryRun`: print the expanded plan without starting a container;
 - `-TimeoutSeconds`: per-job timeout.
 

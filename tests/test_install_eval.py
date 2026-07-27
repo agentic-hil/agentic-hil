@@ -15,6 +15,7 @@ from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
 from evals.install.credentials import authentication_failure, credential_health
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
+from evals.install.refresh_login import BACKUP_SUFFIX, apply_refreshed_login
 from evals.install.report import format_report, load_results, report_results, unstable_groups
 from evals.install.routing import classify, followup_lines, route_of
 from evals.install.runner import (
@@ -351,6 +352,37 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
         ),
         encoding="utf-8",
     )
+
+
+def _claude_login(access: str = "a-token", refresh: str = "r-token") -> str:
+    return json.dumps({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh}})
+
+
+def test_refreshed_login_replaces_the_file_and_keeps_the_previous_one(tmp_path: Path) -> None:
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(), encoding="utf-8")
+
+    refreshed = _claude_login(access="new-token")
+    outcome = apply_refreshed_login("claude-auth", path, refreshed)
+
+    assert "replaced" in outcome
+    assert path.read_text(encoding="utf-8") == refreshed
+    assert path.with_name(path.name + BACKUP_SUFFIX).read_text(encoding="utf-8") == _claude_login()
+
+
+def test_refreshed_login_is_rejected_unless_it_is_still_a_login(tmp_path: Path) -> None:
+    path = tmp_path / ".credentials.json"
+    original = _claude_login()
+    path.write_text(original, encoding="utf-8")
+
+    # Anything that is not a usable login must never replace one.
+    assert "rejected" in apply_refreshed_login("claude-auth", path, "not json")
+    assert "rejected" in apply_refreshed_login("claude-auth", path, json.dumps({"claudeAiOauth": {}}))
+    assert "rejected" in apply_refreshed_login("claude-auth", path, json.dumps({"other": "shape"}))
+    assert apply_refreshed_login("claude-auth", path, original) == "unchanged"
+
+    assert path.read_text(encoding="utf-8") == original
+    assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
 
 
 def test_dead_login_is_recognised_before_and_during_a_run(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from typing import Any
 from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .credentials import authentication_failure, credential_health
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
+from .refresh_login import apply_refreshed_login
 from .report import report_results, result_group, unstable_groups
 from .routing import routing_results
 from .source import create_source_snapshot, source_digest
@@ -271,6 +272,38 @@ def verifier_container_command(
         "evals.install.verifier",
         "--job",
         "/job.json",
+    ]
+
+
+def credential_export_command(
+    *,
+    docker: str,
+    image: str,
+    container_name: str,
+    home_volume: str,
+    kinds: tuple[str, ...],
+) -> list[str]:
+    """Read the staged logins out of the home volume, without network or write access."""
+    return [
+        docker,
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        *docker_security_options(),
+        "--network",
+        "none",
+        "--workdir",
+        "/opt",
+        "--mount",
+        docker_mount("volume", home_volume, "/home/eval", readonly=True),
+        "--entrypoint",
+        "/usr/bin/python3",
+        image,
+        "-m",
+        "evals.install.refresh_login",
+        "--kinds",
+        *kinds,
     ]
 
 
@@ -547,6 +580,7 @@ def run_one(
     host_source_root: Path,
     output_root: Path,
     image_id: str | None,
+    refresh_login: bool = False,
 ) -> dict[str, Any]:
     run_id = slug(f"{case.id}-{job.agent}-{job.model}-r{job.repetition}")
     run_directory = output_root / run_id
@@ -616,6 +650,29 @@ def run_one(
             raise RuntimeError(timeout_cleanup_error)
         if timed_out:
             failure = f"agent timed out after {job.timeout_seconds}s"
+
+        if credential_files and refresh_login:
+            # The agent CLI may have refreshed a token; collect it before the
+            # scrubber removes every copy, and put it back where it came from.
+            export_result = run_capture(
+                credential_export_command(
+                    docker=docker,
+                    image=matrix.image,
+                    container_name=f"{agent_container}-export",
+                    home_volume=home_volume,
+                    kinds=tuple(kind for kind, _path in credential_files),
+                ),
+                60,
+            )
+            if export_result.returncode == 0:
+                with contextlib.suppress(ValueError):
+                    returned = json.loads(export_result.stdout or "{}")
+                    for kind, path in credential_files:
+                        content = returned.get(kind)
+                        if not isinstance(content, str) or not content.strip():
+                            continue
+                        redaction_secrets = list(dict.fromkeys((*redaction_secrets, content)))
+                        print(f"{kind}: {apply_refreshed_login(kind, path, content)}", file=sys.stderr)
 
         if credential_files:
             scrubber_command = credential_scrubber_command(
@@ -842,11 +899,12 @@ def run_matrix(args: argparse.Namespace) -> int:
             state, detail = credential_health(kind, path)
             if state == "expired":
                 raise RuntimeError(f"the {kind} login is unusable: {detail}. Sign in again, then rerun.")
-            if state == "stale":
+            if state == "stale" and not args.refresh_login:
                 raise RuntimeError(
                     f"the {kind} login would be refreshed inside the container: {detail}. Refreshing it "
                     f"there can rotate the token and leave this machine's copy rejected. Start the agent "
-                    f"CLI once on this machine so it refreshes here, then rerun."
+                    f"CLI once on this machine so it refreshes here, or pass --refresh-login to write the "
+                    f"refreshed token back, then rerun."
                 )
             print(
                 f"WARNING: {kind} is a stored interactive login. Refreshing it inside the container can "
@@ -871,6 +929,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                 host_source_root=host_source_root,
                 output_root=output_root,
                 image_id=image_id,
+                refresh_login=args.refresh_login,
             )
 
         results = []
@@ -984,6 +1043,11 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--source-root", default=str(REPOSITORY_ROOT))
     run_parser.add_argument("--output", required=True)
     run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument(
+        "--refresh-login",
+        action="store_true",
+        help="write a token the agent CLI refreshed back over the stored login it came from",
+    )
     run_parser.set_defaults(function=run_matrix)
 
     report_parser = subparsers.add_parser("report", help="summarise a finished evaluation output directory")

@@ -14,6 +14,7 @@ param(
     [int]$TimeoutSeconds = 1800,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
+    [switch]$RefreshLogin,
     [switch]$DryRun
 )
 
@@ -296,6 +297,9 @@ try {
     }
     else {
         $runArguments += @("--docker", (Get-DockerCli))
+        if ($RefreshLogin) {
+            $runArguments += "--refresh-login"
+        }
     }
     & $virtualEnvironmentPython @runArguments
     $runExitCode = $LASTEXITCODE
