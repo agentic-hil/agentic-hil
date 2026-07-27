@@ -186,8 +186,15 @@ $Cases = Expand-Selection `
 if (-not $Output) {
     $Output = Join-Path $repositoryRoot ("evals\install\artifacts\run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 }
-New-Item -ItemType Directory -Force -Path $Output | Out-Null
-$Output = (Resolve-Path -LiteralPath $Output).Path
+# The runner creates the artifact directory itself and refuses an existing one,
+# so that a run can never overwrite earlier evidence.
+if (-not [IO.Path]::IsPathRooted($Output)) {
+    $Output = Join-Path (Get-Location).Path $Output
+}
+$Output = [IO.Path]::GetFullPath($Output)
+if (Test-Path -LiteralPath $Output) {
+    throw "The artifact directory already exists: $Output. Choose another -Output."
+}
 
 Write-Host "== Installation evaluation"
 Write-Host "Repository: $repositoryRoot"
@@ -214,7 +221,7 @@ foreach ($case in $Cases) {
     $casePaths += ((Resolve-Path -LiteralPath $casePath).Path -replace "\\", "/")
 }
 
-$matrixPath = Join-Path $Output "matrix.json"
+$matrixPath = Join-Path ([IO.Path]::GetTempPath()) ("agentic-hil-eval-matrix-" + [Guid]::NewGuid().ToString("N") + ".json")
 Write-JsonFile -Path $matrixPath -Document @{
     schema_version = 1
     image = "agentic-hil-install-eval:local"
@@ -262,6 +269,8 @@ try {
     if (-not (Get-ChildItem -Path $Output -Filter "result.json" -Recurse -File -ErrorAction SilentlyContinue)) {
         throw "The matrix run produced no results (exit code $runExitCode). See the message above."
     }
+    # Keep the exact input beside the evidence it produced.
+    Copy-Item -LiteralPath $matrixPath -Destination (Join-Path $Output "matrix.json")
 
     Write-Host ""
     Write-Host "== Report"
@@ -270,6 +279,7 @@ try {
 }
 finally {
     Pop-Location
+    Remove-Item -LiteralPath $matrixPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
