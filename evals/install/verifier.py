@@ -412,6 +412,26 @@ def skill_path(agent: str) -> Path:
     return HOME / ".config" / "opencode" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
 
 
+def skill_registered(agent: str, installed_skill: Path) -> tuple[bool, str]:
+    """Whether the agent CLI will actually find the installed skill.
+
+    Codex loads skills through an AGENTS.md entry; the other CLIs discover them
+    by their location, so the installed path is the registration.
+    """
+    if agent != "codex":
+        expected_parent = skill_path(agent).parent
+        return installed_skill.parent == expected_parent, f"discovered from {expected_parent}"
+
+    agents_md = HOME / ".codex" / "AGENTS.md"
+    safe, detail = safe_owned_path(agents_md, HOME)
+    if not safe:
+        return False, detail
+    if not agents_md.is_file():
+        return False, f"missing Codex skill registration: {agents_md}"
+    registered = installed_skill.parent.name in agents_md.read_text(encoding="utf-8")
+    return registered, f"{agents_md} references the skill: {registered}"
+
+
 def registration(agent: str) -> tuple[str, list[str], dict[str, Any]]:
     path = agent_config_path(agent, HOME)
     safe, detail = safe_owned_path(path, HOME)
@@ -875,16 +895,21 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("authoritative config is safe", lambda: valid_authoritative_config(configs[0]))
         try:
             skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)
+            # Comparing against the digest-matched package rejects a hand-written
+            # stub that merely carries the expected version line.
+            packaged_skill = TRUSTED_PACKAGE_ROOT / "agentic_hil" / "skills" / installed_skill.parent.name / installed_skill.name
             skill_matches = (
                 skill_safe
                 and installed_skill.is_file()
-                and f'agentic_hil_version: "{target["expected_version"]}"'
-                in installed_skill.read_text(encoding="utf-8")
+                and installed_skill.read_bytes() == packaged_skill.read_bytes()
             )
+            if skill_matches:
+                skill_detail = f"{installed_skill} is byte-identical to the trusted package copy"
         except Exception as error:
             skill_matches = False
             skill_detail = f"{type(error).__name__}: {error}"
         checks.append(Check("matching agent skill installed", skill_matches, skill_detail))
+        add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
 
         registered_ok = False
         try:

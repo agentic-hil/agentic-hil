@@ -1072,7 +1072,8 @@ def codex_registration_block(target_path: str, version: str, requested_agent: st
 - Skill path: `{target_path}`
 - Agentic HIL version: `{version}`
 - Agentic HIL is for embedded firmware development with local hardware-in-the-loop targets.
-- For Agentic HIL setup, configuration, MCP, or embedded hardware workflows, read and follow this skill before acting.
+- Read and follow this skill before acting on any firmware or hardware request: flashing, resetting, probing, debugging, UART or CAN traffic, bench adapters, firmware artifacts, and hardware test runs, as well as Agentic HIL setup, configuration, and MCP registration.
+- Do not invoke a debugger, serial device, or CAN adapter directly when an Agentic HIL tool covers the request.
 - If this version differs from `agentic-hil --version`, run `agentic-hil skill-install --agent {requested_agent}`.
 {AGENTIC_HIL_REGISTRATION_END}"""
 

@@ -498,6 +498,37 @@ def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_con
     assert path.read_text(encoding="utf-8") == existing
 
 
+def _packaged_skill_text() -> str:
+    skill = Path(__file__).resolve().parents[1] / "src" / "agentic_hil" / "skills"
+    return (skill / "agentic-hil-config-setup" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_skill_routes_firmware_work_to_agentic_hil() -> None:
+    text = _packaged_skill_text()
+
+    for tool in ("flash_firmware", "reset_target", "probe_target", "com_read", "can_send", "debug_set_breakpoint"):
+        assert tool in text, tool
+    # The skill is worthless if it does not name what it replaces.
+    for raw in ("openocd", "gdb", "minicom", "candump"):
+        assert raw in text, raw
+
+
+def test_skill_only_names_tools_the_server_exposes() -> None:
+    contract = Path(__file__).resolve().parents[1] / "harness" / "guest" / "tools.list.expected"
+    exposed = set(contract.read_text(encoding="utf-8").split())
+    # Underscored identifiers in backticks are tool names; these two are not.
+    not_a_tool = {"agentic_hil", "permission_denied"}
+
+    referenced = {
+        token
+        for token in re.findall(r"`([a-z][a-z0-9_]*)`", _packaged_skill_text())
+        if "_" in token
+    } - not_a_tool
+
+    assert referenced, "the skill names no tools at all"
+    assert referenced <= exposed, sorted(referenced - exposed)
+
+
 @pytest.mark.parametrize("agent", ["claude-code", "opencode"])
 def test_register_agent_mcp_never_repoints_an_operator_owned_absolute_command(
     agent: str,
