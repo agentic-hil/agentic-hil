@@ -13,7 +13,7 @@ param(
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 1800,
     [switch]$SkipBuild,
-    [switch]$AllowFileLogin,
+    [switch]$NoFileLogin,
     [switch]$DryRun
 )
 
@@ -162,17 +162,15 @@ function New-AgentJob {
         )
     }
 
-    if (-not $AllowFileLogin) {
-        # Refreshing a stored login inside the container can rotate its refresh
-        # token, which leaves the copy on this machine rejected by the provider.
+    if ($NoFileLogin) {
         throw (
-            "$Agent has no evaluation credential, only the interactive login at $($fileCredential.Path). " +
-            "Running with it can invalidate that login on this machine, because the container refreshes " +
-            "the token and the provider may rotate it. Set one of $($environmentNames -join ', ') instead " +
-            "-- for Claude Code, 'claude setup-token' mints one for automation -- or pass -AllowFileLogin " +
-            "to use the stored login anyway."
+            "$Agent has no evaluation credential, and -NoFileLogin forbids the interactive login at " +
+            "$($fileCredential.Path). Set one of $($environmentNames -join ', ') instead; for Claude Code, " +
+            "'claude setup-token' mints one for automation."
         )
     }
+    # Refreshing a stored login inside the container can rotate its refresh
+    # token, which leaves the copy on this machine rejected by the provider.
     Write-Host "$Agent : using the stored interactive login; a refresh may invalidate it here" -ForegroundColor Yellow
 
     # The matrix stores only the variable name; the runner reads the path from it.

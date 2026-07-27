@@ -241,9 +241,10 @@ as redactable data. The host home is never mounted.
 > copy and is destroyed with it, while this machine keeps the old one — which
 > the provider then rejects, even though the file was never written. Prefer a
 > credential minted for automation: an API key in the environment, or
-> `claude setup-token` for `CLAUDE_CODE_OAUTH_TOKEN`. The runner warns whenever a
-> file login is used, refuses one whose refresh token has already expired, and
-> the Windows script requires `-AllowFileLogin` before touching one at all.
+> `claude setup-token` for `CLAUDE_CODE_OAUTH_TOKEN`. A file login still works
+> and stays the documented fallback: the runner warns whenever one is used and
+> refuses one whose refresh token has already expired, before any model budget is
+> spent. Pass `-NoFileLogin` to forbid them outright.
 
 Default cases:
 
@@ -377,9 +378,9 @@ Options:
   `evals/install/artifacts/`;
 - `-SkipBuild`: reuse the current image. The image embeds the evaluator and
   verifier, so skip the build only when `evals/` is unchanged;
-- `-AllowFileLogin`: permit a stored interactive login when no evaluation
-  credential is set. Without it the script stops rather than risk invalidating
-  that login (see the warning above);
+- `-NoFileLogin`: refuse a stored interactive login and require an evaluation
+  credential in the environment. Useful on a shared machine or in CI, where
+  invalidating someone's session would be someone else's problem;
 - `-DryRun`: print the expanded plan without starting a container;
 - `-TimeoutSeconds`: per-job timeout.
 
