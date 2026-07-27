@@ -15,6 +15,7 @@ If you were given only the Agentic HIL repository URL and asked to set it up: ru
 ## Ground Rules
 
 - Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
+- Install Agentic HIL outside the firmware project. `setup` stores the absolute path of a persistent user-local executable as the MCP server command and rejects every candidate inside the project, so a project-local virtual environment fails with `mcp_command_untrusted`. This still holds when you were told to work only inside the project: the installation is user-local, only the configuration is bound to that project.
 - Never use `pip install --break-system-packages`, and do not install into the system Python (PEP 668 environments will refuse, and they are right).
 - Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 - If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
@@ -43,7 +44,7 @@ agentic-hil setup --help
 
 An older version must be upgraded; a successful `--version` call by itself is not sufficient.
 
-2. Try the normal user-local pip installation first:
+2. Try the normal user-local pip installation first, never into a virtual environment inside the firmware project:
 
 ```bash
 python -m pip install --user --upgrade "agentic-hil>=0.4.0"
