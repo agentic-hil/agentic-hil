@@ -22,6 +22,7 @@ from typing import Any
 from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .report import report_results, result_group, unstable_groups
+from .routing import routing_results
 from .source import create_source_snapshot, source_digest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -940,6 +941,13 @@ def parser() -> argparse.ArgumentParser:
     report_parser = subparsers.add_parser("report", help="summarise a finished evaluation output directory")
     report_parser.add_argument("--output", required=True)
     report_parser.set_defaults(function=report_results)
+
+    routing_parser = subparsers.add_parser(
+        "routing",
+        help="show how each run answered the firmware question: MCP server, CLI, or neither",
+    )
+    routing_parser.add_argument("--output", required=True)
+    routing_parser.set_defaults(function=routing_results)
     return root
 
 

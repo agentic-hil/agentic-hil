@@ -14,6 +14,7 @@ from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.report import format_report, load_results, report_results, unstable_groups
+from evals.install.routing import classify, followup_lines, route_of
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -348,6 +349,71 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
         ),
         encoding="utf-8",
     )
+
+
+def _claude_line(name: str, payload: dict) -> str:
+    return json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": payload}]}})
+
+
+def test_routing_counts_actions_not_documents() -> None:
+    lines = [
+        # The skill lists the raw commands it replaces; reading it is not running them.
+        _claude_line("Read", {"file_path": "/home/eval/.claude/skills/agentic-hil-config-setup/SKILL.md"}),
+        _claude_line("Bash", {"command": "cat /workspace/source/AI_AGENT_QUICKSTART.md"}),
+        _claude_line("mcp__agentic-hil__probe_target", {}),
+    ]
+
+    classified = classify(lines)
+
+    assert classified["raw_commands"] == []
+    assert classified["mcp_calls"] == 1
+    assert classified["cli_calls"] == 0
+    assert classified["skill_referenced"]
+    assert route_of({"followup": True, **classified}) == "mcp"
+
+
+def test_routing_counts_a_raw_command_only_when_it_is_run() -> None:
+    searched = classify(
+        [_claude_line("Bash", {"command": 'find /workspace -name "*.gdb" -o -name "openocd.cfg"'})]
+    )
+    looked_up = classify([_claude_line("Bash", {"command": "which openocd || echo missing"})])
+    chained = classify([_claude_line("Bash", {"command": "cd /tmp && openocd -f board.cfg"})])
+
+    assert searched["raw_commands"] == []
+    assert looked_up["raw_commands"] == []
+    assert chained["raw_commands"] == ["openocd"]
+
+
+def test_routing_separates_the_cli_and_raw_paths() -> None:
+    cli = classify([_claude_line("Bash", {"command": "agentic-hil debugger-probes 2>&1"})])
+    raw = classify([_claude_line("Bash", {"command": "openocd -f board.cfg"})])
+    read_only = classify(
+        [_claude_line("Bash", {"command": "cat /home/eval/.config/agentic-hil/projects/p1/config.yaml"})]
+    )
+
+    assert route_of({"followup": True, **cli}) == "cli"
+    assert route_of({"followup": True, **raw}) == "raw"
+    assert route_of({"followup": True, **read_only}) == "config-file"
+
+
+def test_routing_reads_only_the_second_session(tmp_path: Path) -> None:
+    log = tmp_path / "agent.log"
+    log.write_text(
+        "\n".join(
+            [
+                _claude_line("Bash", {"command": "openocd -f board.cfg"}),
+                json.dumps({"event": "eval_followup_start"}),
+                _claude_line("mcp__agentic-hil__probe_target", {}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    classified = classify(followup_lines(log))
+
+    # The installation phase is not what the routing case measures.
+    assert classified["raw_commands"] == []
+    assert classified["mcp_calls"] == 1
 
 
 def test_tool_evidence_is_asked_for_in_a_second_session() -> None:

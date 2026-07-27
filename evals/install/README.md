@@ -321,6 +321,23 @@ transcript path for each failure, and the pass rate per case and per agent. It
 exits non-zero while any run fails independent verification, so it works as a
 gate as well as a summary.
 
+## Which surface answered
+
+```bash
+python -m evals.install routing --output evals/install/artifacts/run-001
+```
+
+The verifier proves that a hardware question was answered through an Agentic HIL
+tool, but a CLI call and an MCP call leave the same evidence inside the
+container. This command reads the follow-up session's transcript on the host and
+reports the surface each run used — `MCP`, `CLI`, `RAW`, or `CONFIG-FILE` — and
+exits non-zero while any measured run did not use the MCP server.
+
+It classifies the agent's own tool invocations, never the documents it read: the
+skill lists the raw commands it replaces, so counting text would mark every run
+as reaching for `openocd`. The Windows script runs this automatically whenever
+the `firmware-routing` case is part of the selection.
+
 ## One command on Windows
 
 The whole loop — build the versioned image, resolve credentials, generate the

@@ -304,6 +304,15 @@ try {
     Write-Host "== Report"
     & $virtualEnvironmentPython -m evals.install report --output $Output
     $reportExitCode = $LASTEXITCODE
+
+    if ($Cases -contains "firmware-routing") {
+        Write-Host ""
+        Write-Host "== Firmware routing"
+        # Which surface answered the hardware question: the MCP server, the CLI,
+        # a raw command, or the configuration file.
+        & $virtualEnvironmentPython -m evals.install routing --output $Output
+        $routingExitCode = $LASTEXITCODE
+    }
 }
 finally {
     Pop-Location
@@ -311,6 +320,11 @@ finally {
 }
 
 Write-Host ""
+if ($reportExitCode -eq 0 -and $routingExitCode -and $routingExitCode -ne 0) {
+    Write-Host "Every run passed verification, but not every one used the MCP server." -ForegroundColor Yellow
+    Write-Host "Read the routing report above: the skill has to send firmware work through MCP."
+    exit $routingExitCode
+}
 if ($reportExitCode -eq 0) {
     Write-Host "Every run passed independent verification." -ForegroundColor Green
     exit 0
