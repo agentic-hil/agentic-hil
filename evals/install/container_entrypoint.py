@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     adapter = adapter_for(job["agent"])
     prepare_fixture(adapter.id, job["case"]["fixture"], HOME)
     guide, install_spec = prepare_workspace(job)
-    prompt = job["case"]["prompt"].format(
+    prompt = job["case"]["prompt_template"].format(
         workspace=WORKSPACE,
         guide=guide,
         install_spec=install_spec,

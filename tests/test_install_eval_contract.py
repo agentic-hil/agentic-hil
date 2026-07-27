@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 from pathlib import Path
 
@@ -10,6 +11,48 @@ from evals.install.runner import expected_mcp_tools, job_payload
 from evals.install.verifier import target_mcp_tools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CONTAINER_ENTRYPOINT = REPOSITORY_ROOT / "evals" / "install" / "container_entrypoint.py"
+
+
+def _job_key_accesses(source: str) -> tuple[set[str], set[str]]:
+    """Collect the ``job[...]`` and ``job["case"][...]`` keys a module reads."""
+    top_level: set[str] = set()
+    case: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Constant):
+            continue
+        key = node.slice.value
+        if not isinstance(key, str):
+            continue
+        container = node.value
+        if isinstance(container, ast.Name) and container.id == "job":
+            top_level.add(key)
+        elif (
+            isinstance(container, ast.Subscript)
+            and isinstance(container.value, ast.Name)
+            and container.value.id == "job"
+            and isinstance(container.slice, ast.Constant)
+            and container.slice.value == "case"
+        ):
+            case.add(key)
+    return top_level, case
+
+
+def test_container_entrypoint_reads_only_keys_the_runner_writes() -> None:
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    payload = job_payload(
+        matrix,
+        matrix.cases[0],
+        matrix.jobs[0],
+        REPOSITORY_ROOT,
+        REPOSITORY_ROOT,
+    )
+    top_level, case = _job_key_accesses(CONTAINER_ENTRYPOINT.read_text(encoding="utf-8"))
+
+    assert case, "the entrypoint must read the case description"
+    assert "prompt_template" in case, "the prompt key must stay bound to the runner payload"
+    assert top_level <= set(payload), sorted(top_level - set(payload))
+    assert case <= set(payload["case"]), sorted(case - set(payload["case"]))
 
 
 def test_job_binds_mcp_contract_from_target_source() -> None:
