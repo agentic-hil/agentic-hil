@@ -13,3 +13,4 @@ dist/
 .mcp.json
 !plugins/agentic-hil/.mcp.json
 uv.lock
+evals/install/artifacts/

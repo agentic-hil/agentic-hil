@@ -1,0 +1,283 @@
+# LLM installation evaluation
+
+This evaluator measures whether a selected **agent CLI and model** can follow
+the Agentic HIL installation guide in a clean environment. Agent CLI and model
+are independent matrix axes.
+
+It is a stochastic evaluation, not a replacement for unit tests or the
+deterministic hardware harness.
+
+## Trust boundary
+
+Each run uses two mandatory containers, an optional credential scrubber
+container, and two new Docker volumes:
+
+1. The agent container receives network access, a fresh home, a fresh firmware
+   workspace, the selected model, an allowlisted source snapshot, and only
+   explicitly named authentication inputs. It installs and configures Agentic
+   HIL.
+2. The agent container exits. If file credentials were used, a no-network
+   scrubber removes their temporary home links before evidence is inspected.
+3. A verifier container mounts the same home and
+   workspace read-only, without network or provider credentials. Root-owned
+   verifier code computes the verdict.
+4. Both raw volumes are always deleted. Removal is verified; cleanup failure
+   changes the run to `error` and reports the exact remaining Docker resource
+   name.
+
+Agent prose and exit status never determine PASS alone. The verifier checks:
+
+- installed package bytes against a host-generated package digest;
+- exact version, console entry point, and PEP 610 origin/commit metadata;
+- static safety of the persistent user-local launcher;
+- `setup --help`, `doctor`, and MCP probes through a root-owned Python runtime
+  using a verifier-staged copy of the digest-matched package;
+- unchanged, secret-free local source snapshot;
+- no source checkout, `.mcp.json`, or authoritative config in firmware project;
+- no observed use of guarded PATH commands such as `sudo` or
+  `--break-system-packages` (diagnostic, not a syscall audit);
+- external config bound to exact workspace, external state root, safe modes,
+  no symlink path components, and deny-by-default permissions/resources;
+- correct agent skill and version;
+- preserved unrelated operator configuration;
+- user-level MCP registration using exact trusted launcher;
+- MCP `initialize` and the target revision's exact `tools/list` contract;
+- fail-closed startup from another workspace.
+
+The container runs as a non-root user with a read-only root filesystem, all
+capabilities dropped, `no-new-privileges`, process/memory/CPU limits, no Docker
+socket, no host home, and no devices.
+
+## Build
+
+### Windows prerequisite
+
+One command prepares the complete Windows development/evaluation environment:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\evals\install\setup-environment-windows.ps1
+```
+
+Before changing the machine, setup checks Git, every discoverable Python
+runtime, `.venv`, WSL, Docker Desktop, and the Docker daemon. It prints the
+complete plan and waits for confirmation. Inspect only:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\evals\install\setup-environment-windows.ps1 -PreflightOnly
+```
+
+Setup reuses an existing Python 3.10 or newer. Python 3.13 is installed
+per-user only as a fallback when neither the host nor an existing `.venv` has a
+compatible runtime. Missing Git also uses a per-user install. The script then
+creates or updates `.venv`, installs development dependencies, prepares WSL2
+plus Docker Desktop, starts the daemon, and builds the versioned eval image.
+Repository quality checks remain a separate concern and run only when
+`-RunChecks` is explicitly selected.
+
+When WSL is missing, the plan shows the exact privileged install command before
+Windows opens UAC. Project code is never run elevated. An existing WSL
+installation is updated without elevation. Confirm the install UAC dialog with
+**Yes**; canceling it offers retry or clean deferral. Exit code `10` means
+Windows must restart, and exit code `20` means setup paused for user action. In
+either case completed host steps remain usable and rerunning the same command
+resumes safely. Fatal failures print one actionable message instead of a
+PowerShell stack trace.
+
+Options:
+
+- `-PreflightOnly`: show the complete plan without changing anything;
+- `-SkipDocker`: prepare only Python/Git/project tooling;
+- `-SkipImageBuild`: install Docker but defer image build;
+- `-RunChecks`: additionally run Ruff and evaluator unit tests after setup;
+- `-NoStartDocker`: install Docker Desktop without launching it and defer the
+  eval-image build;
+- `-NonInteractive`: forbid UAC, license, and other UI prompts; setup exits `20`
+  before the first mutation when user action would be required;
+- `-AcceptPackageAgreements`: explicitly permit non-interactive winget source
+  and package agreement acceptance when Git or Python must be installed.
+
+Docker-only helper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\evals\install\install-docker-windows.ps1
+```
+
+The helper performs the same read-only preflight and consent step. It downloads
+the official installer, verifies its Authenticode signer, selects the WSL2
+backend, disables Windows-container support, adds `docker.exe` to user PATH,
+starts Docker Desktop, and waits for a Linux `docker info` response. Before
+first start it announces Docker Desktop's license dialog; review and accept it
+before the wait timeout expires.
+
+### Eval image
+
+From repository root:
+
+```bash
+python -m evals.install build
+```
+
+The Dockerfile pins all three agent CLI versions. Every result also records the
+built image ID. Override CLI pins explicitly:
+
+```bash
+python -m evals.install build \
+  --codex-version 0.145.0 \
+  --claude-version 2.1.218 \
+  --opencode-version 1.18.3
+```
+
+The default image tag is `agentic-hil-install-eval:local`.
+
+## Configure matrix
+
+Copy [`matrix.example.json`](matrix.example.json). Each job selects an agent
+CLI, one explicit model, and explicit authentication sources:
+
+```json
+{
+  "agent": "opencode",
+  "model": "anthropic/claude-sonnet-4-6",
+  "credentials": ["ANTHROPIC_API_KEY"],
+  "repetitions": 3
+}
+```
+
+All listed environment variables are required for that job. No adapter
+automatically receives every provider key found on the host.
+
+Common environment credentials:
+
+| Adapter | Authentication variable names |
+|---|---|
+| `codex` | `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or `OPENAI_API_KEY` |
+| `claude-code` | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` |
+| `opencode` | provider API key selected by model |
+
+Only variable names enter the Docker command. Docker inherits values from the
+host environment. Exact, JSON-escaped, and URL-encoded values are redacted from
+bounded logs; verifier objects, failures, and final results are recursively
+redacted too. Credential values are never written to matrix, job, verification,
+result, or summary JSON. In CI, map the protected secret store directly to
+these environment names; do not generate a repository `.env` file.
+
+The authenticated agent process can necessarily use its credential and has
+network access. Use short-lived/scoped evaluation credentials and only trusted
+guide/source revisions. Artifact redaction prevents normal persistence; it is
+not a defense against a deliberately malicious process exfiltrating a secret.
+
+File-based OAuth sessions are optional for Codex and OpenCode. The matrix stores
+only the name of a host environment variable containing an absolute path
+outside the repository:
+
+```json
+{
+  "agent": "codex",
+  "model": "gpt-5.4",
+  "credential_files": [
+    {
+      "kind": "codex-auth",
+      "path_environment": "CODEX_AUTH_FILE"
+    }
+  ]
+}
+```
+
+Supported kinds:
+
+- `codex-auth`: Codex file-backed login, normally `~/.codex/auth.json`;
+- `opencode-auth`: OpenCode provider login, normally
+  `~/.local/share/opencode/auth.json`.
+
+For example on Windows:
+
+```powershell
+$env:CODEX_AUTH_FILE = Join-Path $env:USERPROFILE ".codex\auth.json"
+```
+
+The runner mounts only that file read-only. The agent entrypoint copies it to
+container tmpfs and exposes a temporary link from the disposable home. A
+separate no-network scrubber removes the link/file before verification. Both
+raw volumes are then deleted. The credential file's host path is also treated
+as redactable data. The host home is never mounted.
+
+Default cases:
+
+- `quickstart`: clean install and setup;
+- `preserve-user-config`: unrelated agent configuration must survive merge;
+- `unsafe-existing-config`: unmanaged conflicting MCP entry must cause safe,
+  byte-preserving stop without partial setup state.
+
+`target.mode: "local"` creates a temporary allowlisted snapshot containing only
+`pyproject.toml`, package/build metadata, public guide/readme/license files, and
+`src/agentic_hil/**`. `.git`, `.env`, unrelated untracked files, artifacts, and
+the rest of the host checkout are not mounted. This supports uncommitted
+documentation work without exposing repository-local secrets.
+
+For release evaluation, use `target.mode: "remote"` with immutable values:
+
+```json
+{
+  "mode": "remote",
+  "expected_version": "0.4.0",
+  "install_spec": "git+https://github.com/agentic-hil/agentic-hil@0123456789abcdef0123456789abcdef01234567",
+  "expected_commit": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+
+Mutable branches are rejected. The guide URL is derived from the same full
+commit. If `guide_url` is present for readability, it must exactly equal the
+official commit-pinned raw URL. Remote evaluation also requires
+`--source-root` at that commit with clean `pyproject.toml` and
+`src/agentic_hil`, plus clean `harness/guest/tools.list.expected`, so the host
+can produce trusted package and target-specific MCP contract evidence.
+
+## Inspect plan
+
+No Docker or model call:
+
+```bash
+python -m evals.install run \
+  --matrix evals/install/matrix.example.json \
+  --output evals/install/artifacts/dry-run \
+  --dry-run
+```
+
+Dry-run prints expanded case, agent, model, repetition, mounts, and forwarded
+environment **names**.
+
+## Run
+
+Set provider credentials in host environment, then:
+
+```bash
+python -m evals.install run \
+  --matrix evals/install/matrix.example.json \
+  --output evals/install/artifacts/run-001
+```
+
+Artifacts per run:
+
+- `job.json`: immutable test input and local source digest/Git state;
+- `agent.log`: redacted raw agent CLI stream;
+- `verification.json`: independent checks;
+- `result.json`: common result envelope;
+- `verifier.stderr.log`: verifier diagnostics.
+
+Matrix root contains `summary.json`. Any failed verification, timeout, missing
+image, or agent infrastructure error yields a non-zero runner exit.
+
+Live-model runs consume network, time, and API budget. Keep deterministic
+`pytest` checks as normal PR gates. Run a small model smoke set manually or in a
+protected scheduled job; use repetitions and pass rate before judging guide
+quality.
+
+## No USB in this executor
+
+Installation evaluation intentionally stops after `doctor` and lease-free MCP
+`initialize`/`tools/list`. No `--device`, USB forwarding, Docker socket, or
+privileged container exists here.
+
+Real hardware remains a separate executor described in [`../hil/`](../hil/).
+Both can emit the same result envelope without forcing Windows/WSL, native Linux,
+VMware, and Docker into one runtime.

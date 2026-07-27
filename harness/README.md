@@ -118,14 +118,14 @@ setup transaction → OpenOCD reactor → stlink reactor if available → probe)
   by CubeProgrammer's `-v` verify (stlink). To also assert the `Hello World`
   banner text, add a small MCP loop after the reactor releases the board.
 
-## Optional: agent-eval layer (NOT a gate)
-Replace the install part of `run-all.sh` with a headless Claude Code run to also
-measure whether an agent *interprets the docs* correctly:
-```bash
-CLAUDE_CODE_OAUTH_TOKEN=... claude -p \
-  "Install from https://github.com/agentic-hil/agentic-hil and set it up for this project." \
-  --dangerously-skip-permissions --output-format stream-json > transcript.jsonl
-```
-Get the token with `claude setup-token` on the host and pass it per run as an env
-var — never bake it into the snapshot. Run N times, report the pass rate; a single
-run is not deterministic.
+## LLM installation evaluation is a separate executor
+
+Do not replace this deterministic hardware install with an agent call. The
+containerized [`evals/install`](../evals/install/README.md) runner tests agent
+CLI/model combinations and installation-guide interpretation independently. It
+ends at `doctor` plus lease-free MCP `initialize`/`tools/list`; this harness
+remains the real-silicon proof for the same immutable package spec.
+
+Release policy may require both result types. They share
+[`evals/result.schema.json`](../evals/result.schema.json), but do not share a
+runtime or USB transport.

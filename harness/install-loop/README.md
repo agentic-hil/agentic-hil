@@ -6,6 +6,11 @@ Repeat until all three install cleanly. This is a **doc-optimization loop**, not
 pass/fail gate. No hardware is involved. Run it only inside the disposable VM
 described in `VM-SETUP.md`.
 
+For a versioned matrix, explicit model selection, Docker isolation, and an
+independent machine verdict, use [`evals/install`](../../evals/install/README.md).
+This older loop remains useful for quickly reading one agent's transcript while
+editing documentation.
+
 ## Branch-targeted
 
 The runner requires `BRANCH` explicitly. The prompt installs that remote ref's

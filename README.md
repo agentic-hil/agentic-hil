@@ -21,7 +21,7 @@ Names: the Python distribution/install target, CLI command, repository URL, and 
 The easiest path: copy/paste this prompt to your AI agent:
 
 ```text
-Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.
+Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md. Then install Agentic HIL from https://github.com/agentic-hil/agentic-hil and set it up for this project.
 ```
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.

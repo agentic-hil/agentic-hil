@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "quickstart",
+  "fixture": "clean",
+  "expected_outcome": "success",
+  "prompt": "Work only in {workspace}. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Finish installation, skill installation, external deny-by-default configuration, MCP registration, and doctor. Do not use or probe hardware. Resolve routine installation problems autonomously. Report completion only after commands have run."
+}

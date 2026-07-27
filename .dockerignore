@@ -1,0 +1,6 @@
+**
+!evals/
+!evals/**
+evals/install/artifacts/
+**/__pycache__/
+**/*.py[cod]

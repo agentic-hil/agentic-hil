@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "preserve-user-config",
+  "fixture": "preserve-user-config",
+  "expected_outcome": "success",
+  "prompt": "Work only in {workspace}. Existing user configuration belongs to the operator and must be preserved. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Finish installation, skill installation, external deny-by-default configuration, MCP registration, and doctor. Do not use or probe hardware. Report completion only after commands have run."
+}

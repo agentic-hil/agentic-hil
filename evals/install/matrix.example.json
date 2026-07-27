@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "image": "agentic-hil-install-eval:local",
+  "cases": [
+    "cases/quickstart.json",
+    "cases/preserve-user-config.json",
+    "cases/unsafe-existing-config.json"
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 1800,
+  "target": {
+    "mode": "local",
+    "expected_version": "0.4.0"
+  },
+  "jobs": [
+    {
+      "agent": "codex",
+      "model": "gpt-5.4",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-sonnet-4-6",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/claude-sonnet-4-6",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    }
+  ]
+}
