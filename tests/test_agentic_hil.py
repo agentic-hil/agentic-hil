@@ -188,6 +188,19 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return Path.home()
 
 
+def _isolated_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Select a workspace that never contains the test interpreter.
+
+    register_agent_mcp rejects an MCP command inside the current workspace. A
+    repository-local ``.venv`` would otherwise fail these tests for that reason
+    alone whenever pytest starts in the repository root.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
 def _trusted_test_mcp_command(monkeypatch: pytest.MonkeyPatch) -> str:
     """Use the installed Python launcher as a stable, trusted test executable."""
     command = str(Path(sys.executable).resolve())
@@ -198,6 +211,7 @@ def _trusted_test_mcp_command(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 def test_register_agent_mcp_codex_writes_user_config_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     result = register_agent_mcp("codex")
@@ -212,6 +226,7 @@ def test_register_agent_mcp_codex_writes_user_config_toml(tmp_path: Path, monkey
 
 
 def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     cfg = home / ".codex" / "config.toml"
@@ -224,6 +239,7 @@ def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkey
 
 
 def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / ".config" / "opencode" / "opencode.json"
@@ -240,6 +256,7 @@ def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypat
 
 
 def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None)
@@ -354,6 +371,7 @@ def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
@@ -371,6 +389,7 @@ def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
@@ -392,6 +411,7 @@ def test_register_agent_mcp_codex_migrates_managed_workspace_command_without_for
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
@@ -428,6 +448,7 @@ def test_register_agent_mcp_rejects_duplicate_json_keys_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
@@ -463,6 +484,7 @@ def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_con
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
@@ -501,6 +523,7 @@ def test_register_agent_mcp_migrates_recognized_legacy_json_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
@@ -534,6 +557,7 @@ def test_register_agent_mcp_migrates_managed_workspace_command_without_force(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     stale = str(workspace / "old-venv" / "agentic-hil")
@@ -621,6 +645,7 @@ def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     path = home / ".claude.json"
     victim = home / "victim.json"
@@ -643,6 +668,7 @@ def test_register_agent_mcp_rejects_group_writable_user_config_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     path = home / ".claude.json"
     existing = '{"mcpServers": {"custom": {}}}'
