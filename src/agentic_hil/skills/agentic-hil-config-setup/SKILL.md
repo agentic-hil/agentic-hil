@@ -43,12 +43,24 @@ For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.
 
-## Answer hardware questions from the configuration, not from guesses
+## Answer hardware questions by calling a tool
 
-`agentic-hil doctor` reports the loaded configuration, target, devices, COM
-ports, CAN buses, and whether the debugger check is permitted. Read it before
-describing the bench, and prefer `debugger_probes_list` or `com_ports_list` over
-assuming what is attached.
+Reading the configuration file tells you what is *configured*; it never tells
+you what the hardware is doing, so it does not answer the question. Call the
+tool that matches the question — `probe_target`, `debugger_probes_list`,
+`com_ports_list`, `get_last_report` — and report what it returns.
+
+A refusal is an answer. When the authoritative configuration denies an action
+the tool returns `permission_denied`; report that refusal as the result. Do not
+fall back to reading the configuration file, and do not fall back to a raw
+command.
+
+`agentic-hil setup` registers the MCP server in the agent's user configuration,
+and most agent CLIs load it on their next start. Until then the same tools are
+reachable from the command line — `agentic-hil debugger-probes` — which is the
+answer to a hardware question asked in the same session as the installation.
+`agentic-hil doctor` reports the loaded configuration and whether hardware
+access is permitted, but it is a configuration check, not a hardware call.
 
 ## Configure the bridge
 
