@@ -92,7 +92,8 @@ def format_report(results: list[dict[str, Any]], output_root: Path | str) -> str
         agent = result.get("agent") if isinstance(result.get("agent"), dict) else {}
         case = result.get("case") if isinstance(result.get("case"), dict) else {}
         duration = result.get("duration_seconds")
-        elapsed = f" in {duration:.0f}s" if isinstance(duration, (int, float)) else ""
+        # Whole seconds make two distinct repetitions look like one duplicated run.
+        elapsed = f" in {duration:.1f}s" if isinstance(duration, (int, float)) else ""
         status = str(result.get("status", "unknown")).upper()
         case_id = case.get("id", "unknown-case")
         cli = agent.get("cli", "unknown-agent")
