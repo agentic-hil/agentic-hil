@@ -498,6 +498,37 @@ def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_con
     assert path.read_text(encoding="utf-8") == existing
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_register_agent_mcp_never_repoints_an_operator_owned_absolute_command(
+    agent: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    operator_command = tmp_path / "operator" / "agentic-hil"
+    relative_path = Path(".claude.json") if agent == "claude-code" else Path(".config/opencode/opencode.json")
+    entry = (
+        {"type": "stdio", "command": str(operator_command), "args": ["mcp-stdio"]}
+        if agent == "claude-code"
+        else {"type": "local", "command": [str(operator_command), "mcp-stdio"], "enabled": True}
+    )
+    container = "mcpServers" if agent == "claude-code" else "mcp"
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = json.dumps({container: {"agentic-hil": entry}})
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp(agent)
+
+    # A JSON config carries no managed marker, so an absolute command outside the
+    # workspace that is not a trusted launcher belongs to the operator.
+    assert result["ok"] is False
+    assert result["error_type"] == "mcp_config_conflict"
+    assert path.read_text(encoding="utf-8") == existing
+
+
 @pytest.mark.parametrize(
     ("agent", "relative_path", "document", "entry_path"),
     [

@@ -772,6 +772,30 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "migrated": has_managed, "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
 
 
+def _replaceable_agentic_hil_command(configured: object) -> bool:
+    """Whether a stale absolute command can be attributed to this installation.
+
+    A JSON agent config carries no managed marker, so shape alone cannot tell our
+    own earlier entry from one an operator wrote. A workspace-local command is
+    replaceable by definition, and anything else must pass the same trust check
+    as a new command. An operator's own absolute path satisfies neither and is
+    reported as a conflict instead of being silently repointed.
+    """
+    if not isinstance(configured, str):
+        return False
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        return False
+    with suppress(OSError, ValueError):
+        if is_path_within_frozen(path, Path.cwd().resolve()):
+            return True
+    try:
+        _trusted_mcp_command(str(path))
+    except (ConfigError, OSError, ValueError):
+        return False
+    return True
+
+
 def _claude_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
     if entry == desired:
         return "current"
@@ -782,10 +806,14 @@ def _claude_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
     )
     if entry in legacy_entries:
         return "legacy"
-    if isinstance(entry, dict) and set(entry) == {"type", "command", "args"} and entry.get("type") == "stdio" and entry.get("args") == ["mcp-stdio"]:
-        configured = entry.get("command")
-        if isinstance(configured, str) and Path(configured).expanduser().is_absolute():
-            return "managed"
+    if (
+        isinstance(entry, dict)
+        and set(entry) == {"type", "command", "args"}
+        and entry.get("type") == "stdio"
+        and entry.get("args") == ["mcp-stdio"]
+        and _replaceable_agentic_hil_command(entry.get("command"))
+    ):
+        return "managed"
     return None
 
 
@@ -800,7 +828,7 @@ def _opencode_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
         return "legacy"
     if isinstance(entry, dict) and set(entry) == {"type", "command", "enabled"} and entry.get("type") == "local" and entry.get("enabled") is True:
         configured = entry.get("command")
-        if isinstance(configured, list) and len(configured) == 2 and configured[1] == "mcp-stdio" and isinstance(configured[0], str) and Path(configured[0]).expanduser().is_absolute():
+        if isinstance(configured, list) and len(configured) == 2 and configured[1] == "mcp-stdio" and _replaceable_agentic_hil_command(configured[0]):
             return "managed"
     return None
 

@@ -91,13 +91,21 @@ def fixture_content(agent: str, fixture: str) -> str | None:
             }
         }
         if fixture == "unsafe-existing-config":
+            # The conflicting entry keeps the plain shape an operator would
+            # write, so the case exercises how setup classifies it. The sentinel
+            # rides along in a separate entry the operator also owns.
             servers = {
+                "operator-tool": {
+                    "type": "local",
+                    "command": ["/usr/bin/true"],
+                    "enabled": True,
+                    "environment": {SENTINEL_KEY: SENTINEL_VALUE},
+                },
                 "agentic-hil": {
                     "type": "local",
                     "command": ["/operator/agentic-hil", "mcp-stdio"],
                     "enabled": True,
-                    "environment": {SENTINEL_KEY: SENTINEL_VALUE},
-                }
+                },
             }
         return (
             json.dumps(
