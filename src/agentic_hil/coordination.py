@@ -216,9 +216,7 @@ class HardwareCoordinator:
         self.owner_marker = secrets.token_hex(32)
         self.owner_started_at = utc_now_iso()
         self.config_sha256 = hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
-        self.root = trusted_state_directory(config.state_root, "coordination")
-        self.lock_directory = trusted_state_directory(config.state_root, "coordination", "locks")
-        self.record_directory = trusted_state_directory(config.state_root, "coordination", "records")
+        self._state_directories: dict[tuple[str, ...], Path] = {}
         self.project_key = project_resource(config)
         self.project_lock: _LifetimeLock | None = None
         self.leases: dict[str, HardwareLease] = {}
@@ -227,6 +225,30 @@ class HardwareCoordinator:
         self.incident_resources: set[str] = set()
         self._state = "open"
         self._guard = threading.RLock()
+
+    def _state_directory(self, *parts: str) -> Path:
+        """Create coordination state only once hardware coordination is used.
+
+        Answering ``initialize`` or ``tools/list`` must not require a writable
+        state root, so the trusted directory chain is built on first use.
+        """
+        directory = self._state_directories.get(parts)
+        if directory is None:
+            directory = trusted_state_directory(self.config.state_root, *parts)
+            self._state_directories[parts] = directory
+        return directory
+
+    @property
+    def root(self) -> Path:
+        return self._state_directory("coordination")
+
+    @property
+    def lock_directory(self) -> Path:
+        return self._state_directory("coordination", "locks")
+
+    @property
+    def record_directory(self) -> Path:
+        return self._state_directory("coordination", "records")
 
     def acquire(self, *resources: str) -> HardwareLease:
         normalized = sorted(set(resource for resource in resources if resource))

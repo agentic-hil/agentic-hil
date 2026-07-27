@@ -42,6 +42,23 @@ def config_for(workspace: Path, **kwargs):
     return load_config(str(write_config(workspace, **kwargs)))
 
 
+def test_coordinator_creates_no_state_before_hardware_is_coordinated(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    coordination_root = Path(config.state_root) / "coordination"
+
+    coordinator = HardwareCoordinator(config, "probe")
+
+    # An MCP client that only calls initialize or tools/list must work against a
+    # read-only state root, so construction alone may not create state.
+    assert not coordination_root.exists()
+
+    lease = coordinator.acquire("physical:test")
+    try:
+        assert coordination_root.is_dir()
+    finally:
+        lease.release()
+
+
 def test_live_owner_blocks_second_coordinator_before_resource_use(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     first = HardwareCoordinator(config, "first")
