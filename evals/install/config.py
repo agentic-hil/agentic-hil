@@ -47,6 +47,9 @@ class Case:
     prompt_template: str
     fixture: str
     expected_outcome: str
+    # Whether the case additionally requires evidence that a hardware request
+    # was answered through an Agentic HIL tool rather than a raw command.
+    requires_tool_use: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,12 @@ def _positive_integer(value: Any, label: str) -> int:
     return value
 
 
+def _boolean(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be true or false")
+    return value
+
+
 def _repetitions(value: Any, label: str) -> int:
     """A single run cannot separate a stable result from a lucky one."""
     count = _positive_integer(value, label)
@@ -116,6 +125,7 @@ def load_case(path: Path) -> Case:
         prompt_template=_string(raw.get("prompt"), "case.prompt"),
         fixture=_string(raw.get("fixture", "clean"), "case.fixture"),
         expected_outcome=_string(raw.get("expected_outcome", "success"), "case.expected_outcome"),
+        requires_tool_use=_boolean(raw.get("requires_tool_use", False), "case.requires_tool_use"),
     )
 
 

@@ -34,7 +34,10 @@ RUN install -d /opt/eval-guard/bin \
     && chmod 0755 /opt/evals/install/guard.py \
     && ln -s /opt/evals/install/guard.py /opt/eval-guard/bin/python \
     && ln -s /opt/evals/install/guard.py /opt/eval-guard/bin/python3 \
-    && ln -s /opt/evals/install/guard.py /opt/eval-guard/bin/sudo
+    && ln -s /opt/evals/install/guard.py /opt/eval-guard/bin/sudo \
+    && for name in openocd pyocd st-flash st-info st-util JLinkExe gdb gdb-multiarch arm-none-eabi-gdb screen minicom picocom cansend candump cangen; do \
+         ln -s /opt/evals/install/guard.py "/opt/eval-guard/bin/$name"; \
+       done
 
 ENV HOME=/home/eval \
     USERPROFILE=/home/eval \

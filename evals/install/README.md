@@ -240,7 +240,13 @@ Default cases:
 - `quickstart`: clean install and setup;
 - `preserve-user-config`: unrelated agent configuration must survive merge;
 - `unsafe-existing-config`: unmanaged conflicting MCP entry must cause safe,
-  byte-preserving stop without partial setup state.
+  byte-preserving stop without partial setup state;
+- `firmware-routing`: after setup, a plain hardware question must be answered
+  through an Agentic HIL tool. The container shadows `openocd`, `pyocd`, `gdb`,
+  `screen`, `minicom`, `candump`, and their neighbours with the PATH guard, so
+  reaching for one is recorded and fails the run. Dispatching a tool writes
+  report state under the configured state root, which installing, setting up,
+  and `doctor` do not — that file is the evidence the case requires.
 
 `target.mode: "local"` creates a temporary allowlisted snapshot containing only
 `pyproject.toml`, package/build metadata, public guide/readme/license files, and

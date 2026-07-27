@@ -4,7 +4,8 @@
   "cases": [
     "cases/quickstart.json",
     "cases/preserve-user-config.json",
-    "cases/unsafe-existing-config.json"
+    "cases/unsafe-existing-config.json",
+    "cases/firmware-routing.json"
   ],
   "repetitions": 2,
   "max_repetitions": 5,

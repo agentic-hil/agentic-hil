@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from evals.install import guard, scrub_credentials
 from evals.install import runner as install_runner
-from evals.install import scrub_credentials
 from evals.install.adapters import adapter_for, build_agent_command
-from evals.install.config import CredentialFile, Job, load_matrix
+from evals.install.config import CredentialFile, Job, load_case, load_matrix
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.report import format_report, load_results, report_results, unstable_groups
 from evals.install.runner import (
@@ -58,6 +58,7 @@ def test_example_matrix_expands_agents_and_cases_separately() -> None:
         "quickstart",
         "preserve-user-config",
         "unsafe-existing-config",
+        "firmware-routing",
     }
 
     models = Counter(agent for agent, _model in {(job.agent, job.model) for job in matrix.jobs})
@@ -333,6 +334,28 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
         ),
         encoding="utf-8",
     )
+
+
+def test_only_the_routing_case_demands_tool_evidence() -> None:
+    cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
+    demanding = {
+        load_case(path).id for path in sorted(cases.glob("*.json")) if load_case(path).requires_tool_use
+    }
+
+    assert demanding == {"firmware-routing"}
+
+
+def test_guard_refuses_hardware_commands_and_records_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(guard.sys, "argv", ["/opt/eval-guard/bin/openocd", "-f", "board.cfg"])
+
+    assert guard.main() == 126
+
+    events = (tmp_path / ".agentic-hil-eval" / "guard-events.jsonl").read_text(encoding="utf-8")
+    recorded = json.loads(events.splitlines()[0])
+    assert recorded["command"] == "openocd"
+    assert "Agentic HIL" in recorded["reason"]
 
 
 @pytest.mark.parametrize("field", ["repetitions", "max_repetitions"])

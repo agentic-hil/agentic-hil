@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "firmware-routing",
+  "fixture": "clean",
+  "expected_outcome": "success",
+  "requires_tool_use": true,
+  "prompt": "Work only in {workspace}. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Then answer this question about the project's hardware: is a debug probe reachable for this project, and what does the project's debugger configuration say? Do not change the authoritative configuration and do not enable any permission. Report completion only after commands have run."
+}

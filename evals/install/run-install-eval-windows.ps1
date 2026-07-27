@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string[]]$Agents = @("codex", "opencode"),
-    [string[]]$Cases = @("quickstart", "preserve-user-config", "unsafe-existing-config"),
+    [string[]]$Cases = @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing"),
     [ValidateRange(2, 20)]
     [int]$Repetitions = 2,
     [ValidateRange(2, 20)]
@@ -200,7 +200,7 @@ if ($MaxRepetitions -lt $Repetitions) {
 $Agents = Expand-Selection -Values $Agents -Allowed @("codex", "claude-code", "opencode") -Label "agent"
 $Cases = Expand-Selection `
     -Values $Cases `
-    -Allowed @("quickstart", "preserve-user-config", "unsafe-existing-config") `
+    -Allowed @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing") `
     -Label "case"
 
 if (-not $Output) {

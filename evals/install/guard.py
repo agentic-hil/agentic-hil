@@ -9,6 +9,27 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Reaching for these instead of an Agentic HIL tool bypasses the hardware gate.
+HARDWARE_COMMANDS = frozenset(
+    {
+        "openocd",
+        "pyocd",
+        "st-flash",
+        "st-info",
+        "st-util",
+        "JLinkExe",
+        "gdb",
+        "gdb-multiarch",
+        "arm-none-eabi-gdb",
+        "screen",
+        "minicom",
+        "picocom",
+        "cansend",
+        "candump",
+        "cangen",
+    }
+)
+
 
 def record(command: str, arguments: list[str], reason: str) -> None:
     directory = Path.home() / ".agentic-hil-eval"
@@ -30,6 +51,14 @@ def main() -> int:
     if command == "sudo":
         record(command, arguments, "administrator command forbidden")
         print("sudo is forbidden in Agentic HIL install eval", file=sys.stderr)
+        return 126
+
+    if command in HARDWARE_COMMANDS:
+        record(command, arguments, "hardware access must go through Agentic HIL tools")
+        print(
+            f"{command} is forbidden in the Agentic HIL install eval; use the Agentic HIL tools",
+            file=sys.stderr,
+        )
         return 126
 
     if "--break-system-packages" in arguments:

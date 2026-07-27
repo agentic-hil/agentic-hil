@@ -412,6 +412,29 @@ def skill_path(agent: str) -> Path:
     return HOME / ".config" / "opencode" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
 
 
+def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
+    """Whether an Agentic HIL tool actually ran for this project.
+
+    Dispatching a tool writes report state under the configured state root.
+    Installing, setting up, and running doctor do not, so the file's presence
+    separates a hardware question answered through Agentic HIL from one answered
+    by guesswork or by a raw command.
+    """
+    import yaml
+
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        return False, f"authoritative config is not a mapping: {config_path}"
+    state_root = document.get("state_root")
+    if not isinstance(state_root, str):
+        return False, "authoritative config declares no state_root"
+
+    recorded = sorted(Path(state_root).glob("projects/*/reports/report-state.json"))
+    if not recorded:
+        return False, f"no Agentic HIL tool dispatch recorded under {state_root}"
+    return True, f"dispatch recorded: {recorded[0]}"
+
+
 def skill_registered(agent: str, installed_skill: Path) -> tuple[bool, str]:
     """Whether the agent CLI will actually find the installed skill.
 
@@ -893,6 +916,11 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
         add("one authoritative config exists", lambda: (len(configs) == 1, f"count={len(configs)}"))
         if len(configs) == 1:
             add("authoritative config is safe", lambda: valid_authoritative_config(configs[0]))
+            if case.get("requires_tool_use"):
+                add(
+                    "hardware request answered through an Agentic HIL tool",
+                    lambda: tool_dispatch_recorded(configs[0]),
+                )
         try:
             skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)
             # Comparing against the digest-matched package rejects a hand-written
