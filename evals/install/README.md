@@ -235,6 +235,16 @@ separate no-network scrubber removes the link/file before verification. Both
 raw volumes are then deleted. The credential file's host path is also treated
 as redactable data. The host home is never mounted.
 
+> **A stored interactive login can be spent by the evaluation.** The agent CLI
+> refreshes the token inside the container, and providers commonly rotate the
+> refresh token when they do. The rotated token lands in the container's tmpfs
+> copy and is destroyed with it, while this machine keeps the old one — which
+> the provider then rejects, even though the file was never written. Prefer a
+> credential minted for automation: an API key in the environment, or
+> `claude setup-token` for `CLAUDE_CODE_OAUTH_TOKEN`. The runner warns whenever a
+> file login is used, refuses one whose refresh token has already expired, and
+> the Windows script requires `-AllowFileLogin` before touching one at all.
+
 Default cases:
 
 - `quickstart`: clean install and setup;
@@ -367,6 +377,9 @@ Options:
   `evals/install/artifacts/`;
 - `-SkipBuild`: reuse the current image. The image embeds the evaluator and
   verifier, so skip the build only when `evals/` is unchanged;
+- `-AllowFileLogin`: permit a stored interactive login when no evaluation
+  credential is set. Without it the script stops rather than risk invalidating
+  that login (see the warning above);
 - `-DryRun`: print the expanded plan without starting a container;
 - `-TimeoutSeconds`: per-job timeout.
 

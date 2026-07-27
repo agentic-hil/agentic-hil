@@ -4,6 +4,7 @@ import argparse
 import json
 from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from evals.install import guard, scrub_credentials
 from evals.install import runner as install_runner
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
+from evals.install.credentials import authentication_failure, credential_health
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.report import format_report, load_results, report_results, unstable_groups
 from evals.install.routing import classify, followup_lines, route_of
@@ -349,6 +351,33 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
         ),
         encoding="utf-8",
     )
+
+
+def test_dead_login_is_recognised_before_and_during_a_run(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "auth.json"
+
+    def claude(access_hours: float, refresh_hours: float) -> tuple[str, str]:
+        path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "expiresAt": int((now.timestamp() + access_hours * 3600) * 1000),
+                        "refreshTokenExpiresAt": int((now.timestamp() + refresh_hours * 3600) * 1000),
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return credential_health("claude-auth", path, now=now)
+
+    assert claude(2, 200)[0] == "ok"
+    # An expired access token is routine; only a dead refresh token is fatal.
+    assert claude(-1, 200)[0] == "stale"
+    assert claude(-1, -1)[0] == "expired"
+
+    assert authentication_failure('{"error":{"message":"Token refresh failed: 401"}}') is not None
+    assert authentication_failure("agentic-hil setup completed") is None
 
 
 def _claude_line(name: str, payload: dict) -> str:

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Case, CredentialFile, Job, Matrix, load_matrix
+from .credentials import authentication_failure, credential_health
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .report import report_results, result_group, unstable_groups
 from .routing import routing_results
@@ -516,6 +517,18 @@ def auth_values(job: Job) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
+AUTHENTICATION_LOG_CHARS = 8000
+
+
+def agent_authentication_failure(run_directory: Path) -> str | None:
+    """Whether the agent CLI refused to start because its login is unusable."""
+    log_path = run_directory / "agent.log"
+    if not log_path.is_file():
+        return None
+    text = log_path.read_text(encoding="utf-8", errors="replace")[-AUTHENTICATION_LOG_CHARS:]
+    return authentication_failure(text)
+
+
 def ensure_auth(job: Job) -> None:
     missing = [name for name in job.credentials if not os.environ.get(name)]
     if missing:
@@ -641,6 +654,10 @@ def run_one(
         agent_ok = agent_exit_code == 0 or expected_safe_failure
         if not timed_out and agent_ok and verifier_exit_code == 0 and verification.get("ok") is True:
             status = "passed"
+        elif agent_exit_code != 0 and (phrase := agent_authentication_failure(run_directory)):
+            # A dead login is not a result about the installation guide.
+            status = "error"
+            failure = f"agent could not authenticate ({phrase}); the stored login needs to be renewed"
         else:
             status = "failed"
             failure = failure or "agent or independent verification failed"
@@ -819,6 +836,18 @@ def run_matrix(args: argparse.Namespace) -> int:
             raise RuntimeError(f"Docker CLI not found: {args.docker}")
         for job in matrix.jobs:
             ensure_auth(job)
+        # A login that can no longer be refreshed fails every run in the matrix,
+        # so refuse before spending model budget on it.
+        for kind, path in sorted({pair for job in matrix.jobs for pair in resolved_credential_files(job)}):
+            state, detail = credential_health(kind, path)
+            if state == "expired":
+                raise RuntimeError(f"the {kind} login is unusable: {detail}. Sign in again, then rerun.")
+            print(
+                f"WARNING: {kind} is a stored interactive login. Refreshing it inside the container can "
+                f"rotate the token and invalidate this machine's copy; an API key or a token minted for "
+                f"automation avoids that. State: {detail}",
+                file=sys.stderr,
+            )
 
         image_id = image_digest(docker, matrix.image)
         if image_id is None:
@@ -838,7 +867,19 @@ def run_matrix(args: argparse.Namespace) -> int:
                 image_id=image_id,
             )
 
-        results = [execute(case, job) for case in matrix.cases for job in matrix.jobs]
+        results = []
+        aborted: str | None = None
+        for case in matrix.cases:
+            for job in matrix.jobs:
+                result = execute(case, job)
+                results.append(result)
+                # Every later run would fail the same way and cost the same.
+                if result["status"] == "error" and "could not authenticate" in (result.get("failure") or ""):
+                    aborted = str(result["failure"])
+                    print(f"ERROR: {aborted}; stopping the matrix", file=sys.stderr)
+                    break
+            if aborted:
+                break
 
         # Every run gets its own container and its own pair of volumes, so a
         # repetition never inherits state from the one before it.
@@ -846,7 +887,7 @@ def run_matrix(args: argparse.Namespace) -> int:
         templates: dict[tuple[str, str], Job] = {}
         for job in matrix.jobs:
             templates.setdefault((job.agent, job.model), job)
-        while True:
+        while not aborted:
             pending = [
                 group
                 for group in unstable_groups(results)
@@ -876,6 +917,7 @@ def run_matrix(args: argparse.Namespace) -> int:
             "passed": sum(result["status"] == "passed" for result in results),
             "failed": sum(result["status"] == "failed" for result in results),
             "errors": sum(result["status"] == "error" for result in results),
+            "aborted": aborted,
             "unstable": [
                 {"case": case_id, "agent": agent, "model": model}
                 for case_id, agent, model in unstable_groups(results)
