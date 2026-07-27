@@ -43,6 +43,7 @@ WORKSPACE = Path("/workspace/project")
 SOURCE = Path("/workspace/source")
 OTHER_WORKSPACE = Path("/tmp/agentic-hil-other-project")
 RESPONSE_TIMEOUT_SECONDS = 10.0
+PROBE_DIAGNOSTIC_CHARS = 800
 VERIFIER_PYTHON = Path("/opt/install-eval-verifier/bin/python")
 TRUSTED_PACKAGE_ROOT = Path("/tmp/install-eval-trusted-package")
 LAUNCHER_PYTHON_ALLOWLIST = (Path("/usr/bin/python3"),)
@@ -577,22 +578,44 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
         env=trusted_environment(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
     )
     lines: queue.Queue[str | None] = queue.Queue()
+    received: list[str] = []
+    diagnostics: list[str] = []
 
     def reader() -> None:
         assert process.stdout is not None
         try:
             for line in process.stdout:
+                received.append(line)
                 lines.put(line)
         finally:
             lines.put(None)
 
+    def error_reader() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            diagnostics.append(line)
+
+    def explain(reason: str) -> str:
+        """Report why the server never answered instead of discarding its output."""
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+        error_thread.join(timeout=1)
+        stdout_tail = "".join(received)[-PROBE_DIAGNOSTIC_CHARS:].strip()
+        stderr_tail = "".join(diagnostics)[-PROBE_DIAGNOSTIC_CHARS:].strip()
+        return (
+            f"{reason}; exit={process.poll()}; "
+            f"stdout={stdout_tail or '<empty>'}; stderr={stderr_tail or '<empty>'}"
+        )
+
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
+    error_thread = threading.Thread(target=error_reader, daemon=True)
+    error_thread.start()
     try:
         assert process.stdin is not None
         process.stdin.write(
@@ -619,6 +642,8 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
         tools = listed.get("result", {}).get("tools", [])
         names = {item["name"] for item in tools if isinstance(item, dict) and isinstance(item.get("name"), str)}
         return initialized, names
+    except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+        raise RuntimeError(explain(f"{type(error).__name__}: {error}")) from error
     finally:
         with contextlib.suppress(Exception):
             if process.stdin is not None:
@@ -629,6 +654,7 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
             process.kill()
             process.wait(timeout=3)
         thread.join(timeout=1)
+        error_thread.join(timeout=1)
 
 
 def wrong_workspace_fails(arguments: list[str]) -> tuple[bool, str]:

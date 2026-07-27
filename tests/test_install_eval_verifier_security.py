@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -129,3 +131,23 @@ def test_trusted_staging_never_follows_ignored_symlink(
         verifier.prepare_trusted_package(package)
 
     assert not trusted_root.exists()
+
+
+def test_mcp_probe_reports_why_the_server_refused_to_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    refusal = "import sys; sys.stderr.write('state_root refused\\n'); raise SystemExit(3)"
+    monkeypatch.setattr(
+        verifier,
+        "trusted_command",
+        lambda arguments: [sys.executable, "-c", refusal],
+    )
+    monkeypatch.setattr(verifier, "trusted_environment", lambda: dict(os.environ))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        verifier.mcp_probe(["mcp-stdio"], tmp_path)
+
+    message = str(excinfo.value)
+    assert "state_root refused" in message, message
+    assert "exit=3" in message, message

@@ -265,6 +265,21 @@ def test_source_digest_ignores_generated_directories(tmp_path: Path) -> None:
     assert source_digest(tmp_path) != first
 
 
+def test_source_digest_ignores_install_build_metadata(tmp_path: Path) -> None:
+    package = tmp_path / "src" / "agentic_hil"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("one\n", encoding="utf-8")
+    first = source_digest(tmp_path)
+
+    # A plain "pip install <directory>" writes this beside the package, so an
+    # unmodified snapshot must still match after a successful installation.
+    metadata = tmp_path / "src" / "agentic_hil.egg-info"
+    metadata.mkdir()
+    (metadata / "PKG-INFO").write_text("Name: agentic-hil\n", encoding="utf-8")
+
+    assert source_digest(tmp_path) == first
+
+
 def test_docker_command_forwards_secret_name_not_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "super-secret-value")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-cross-provider-boundary")

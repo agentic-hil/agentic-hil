@@ -17,6 +17,10 @@ IGNORED_DIRECTORY_NAMES = {
     "build",
     "dist",
 }
+# A normal ``pip install <directory>`` lets the build backend write
+# ``<package>.egg-info`` into the tree it builds from. That is expected install
+# output, not a modified source snapshot.
+IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
 IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
 SNAPSHOT_ROOT_FILES = (
     "AI_AGENT_QUICKSTART.md",
@@ -74,7 +78,7 @@ def source_files(root: Path) -> list[Path]:
         retained_directories: list[str] = []
         for name in sorted(directory_names):
             candidate = parent / name
-            if name in IGNORED_DIRECTORY_NAMES:
+            if name in IGNORED_DIRECTORY_NAMES or name.endswith(IGNORED_DIRECTORY_SUFFIXES):
                 continue
             info = candidate.lstat()
             if stat.S_ISLNK(info.st_mode):
