@@ -17,6 +17,18 @@ def agent_config_path(agent: str, home: Path) -> Path:
     raise ValueError(f"unsupported agent fixture: {agent}")
 
 
+def sentinel_value(agent: str, document: dict) -> str | None:
+    """Read the operator sentinel from wherever the agent's schema allows it."""
+    if agent != "opencode":
+        return document.get(SENTINEL_KEY)
+    for entry in document.get("mcp", {}).values():
+        if isinstance(entry, dict):
+            environment = entry.get("environment")
+            if isinstance(environment, dict) and SENTINEL_KEY in environment:
+                return environment[SENTINEL_KEY]
+    return None
+
+
 def fixture_content(agent: str, fixture: str) -> str | None:
     if fixture == "clean":
         return None
@@ -68,11 +80,14 @@ def fixture_content(agent: str, fixture: str) -> str | None:
         )
 
     if agent == "opencode":
+        # OpenCode rejects unknown top-level keys and refuses to start, so the
+        # operator sentinel lives inside the server entry it owns.
         servers = {
             "operator-tool": {
                 "type": "local",
                 "command": ["/usr/bin/true"],
                 "enabled": True,
+                "environment": {SENTINEL_KEY: SENTINEL_VALUE},
             }
         }
         if fixture == "unsafe-existing-config":
@@ -81,13 +96,13 @@ def fixture_content(agent: str, fixture: str) -> str | None:
                     "type": "local",
                     "command": ["/operator/agentic-hil", "mcp-stdio"],
                     "enabled": True,
+                    "environment": {SENTINEL_KEY: SENTINEL_VALUE},
                 }
             }
         return (
             json.dumps(
                 {
                     "$schema": "https://opencode.ai/config.json",
-                    SENTINEL_KEY: SENTINEL_VALUE,
                     "mcp": servers,
                 },
                 indent=2,

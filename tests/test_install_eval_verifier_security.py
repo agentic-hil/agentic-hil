@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from evals.install import verifier
+from evals.install.fixtures import agent_config_path, fixture_content
 from evals.install.source import create_source_snapshot, source_digest
 
 
@@ -131,6 +133,53 @@ def test_trusted_staging_never_follows_ignored_symlink(
         verifier.prepare_trusted_package(package)
 
     assert not trusted_root.exists()
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    path = agent_config_path(agent, tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seeded = fixture_content(agent, "unsafe-existing-config")
+    assert seeded is not None
+    path.write_text(seeded, encoding="utf-8")
+    assert verifier.unmanaged_entry_untouched(agent)[0]
+
+    # The agent CLI owns this file too and records its own state while running.
+    if agent == "codex":
+        path.write_text(seeded + '\n[projects."/workspace"]\ntrust_level = "trusted"\n', encoding="utf-8")
+    else:
+        document = json.loads(seeded)
+        document["agent_cli_bookkeeping"] = {"lastSession": "abc"}
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    assert verifier.unmanaged_entry_untouched(agent)[0]
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_unmanaged_entry_check_rejects_a_rewritten_operator_entry(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    path = agent_config_path(agent, tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seeded = fixture_content(agent, "unsafe-existing-config")
+    assert seeded is not None
+
+    path.write_text(seeded.replace("/operator/agentic-hil", "/home/eval/.local/bin/agentic-hil"), encoding="utf-8")
+    accepted, detail = verifier.unmanaged_entry_untouched(agent)
+    assert not accepted, detail
+
+    if agent == "codex":
+        path.write_text(f"{verifier.MANAGED_MCP_MARKERS[0]}\n{seeded}", encoding="utf-8")
+        accepted, detail = verifier.unmanaged_entry_untouched(agent)
+        assert not accepted, detail
+        assert "managed marker" in detail
 
 
 def test_mcp_probe_reports_why_the_server_refused_to_start(

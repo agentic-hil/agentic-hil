@@ -26,10 +26,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
 from .fixtures import (
-    SENTINEL_KEY,
     SENTINEL_VALUE,
     agent_config_path,
     fixture_content,
+    sentinel_value,
 )
 from .source import (
     IGNORED_DIRECTORY_NAMES,
@@ -429,6 +429,53 @@ def registration(agent: str) -> tuple[str, list[str], dict[str, Any]]:
     return command, entry.get("args", []), entry
 
 
+MANAGED_MCP_MARKERS = (
+    "# >>> agentic-hil mcp (managed) >>>",
+    "# <<< agentic-hil mcp (managed) <<<",
+)
+
+
+def agent_config_document(agent: str, text: str) -> tuple[dict[str, Any], str]:
+    """Parse an agent configuration and name its MCP server container."""
+    if agent == "codex":
+        return tomllib.loads(text), "mcp_servers"
+    return json.loads(text), "mcpServers" if agent == "claude-code" else "mcp"
+
+
+def operator_sentinel_intact(agent: str, path: Path) -> bool:
+    document, _ = agent_config_document(agent, path.read_text(encoding="utf-8"))
+    return sentinel_value(agent, document) == SENTINEL_VALUE
+
+
+def unmanaged_entry_untouched(agent: str) -> tuple[bool, str]:
+    """Check the operator's conflicting entry instead of the whole file.
+
+    The agent CLI under test owns this file too and rewrites its own bookkeeping
+    while it runs, so a byte comparison would report the CLI rather than a setup
+    that failed to leave an unmanaged entry alone.
+    """
+    path = agent_config_path(agent, HOME)
+    text = path.read_text(encoding="utf-8")
+    expected_text = fixture_content(agent, "unsafe-existing-config")
+    if expected_text is None:
+        return False, "the unsafe fixture has no expected content"
+
+    marker = next((item for item in MANAGED_MCP_MARKERS if item in text), None)
+    if marker is not None:
+        return False, f"managed marker written into operator config: {marker}"
+
+    actual, container = agent_config_document(agent, text)
+    expected, _ = agent_config_document(agent, expected_text)
+    if sentinel_value(agent, actual) != sentinel_value(agent, expected):
+        return False, "operator sentinel changed"
+
+    actual_entry = actual.get(container, {}).get("agentic-hil")
+    expected_entry = expected.get(container, {}).get("agentic-hil")
+    if actual_entry != expected_entry:
+        return False, f"unmanaged entry changed to {actual_entry}"
+    return True, "unmanaged agentic-hil entry and operator sentinel unchanged"
+
+
 def fixture_preserved(agent: str, fixture: str) -> tuple[bool, str]:
     path = agent_config_path(agent, HOME)
     if not path.is_file():
@@ -439,20 +486,18 @@ def fixture_preserved(agent: str, fixture: str) -> tuple[bool, str]:
     if fixture == "clean":
         return True, str(path)
     if fixture == "unsafe-existing-config":
-        expected = fixture_content(agent, fixture)
-        return path.read_text(encoding="utf-8") == expected, "unsafe operator config must remain byte-identical"
+        return operator_sentinel_intact(agent, path), "operator sentinel must survive a rejected setup"
 
     if agent == "codex":
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         preserved = (
-            data.get(SENTINEL_KEY) == SENTINEL_VALUE
+            sentinel_value(agent, data) == SENTINEL_VALUE
             and data.get("model") == "operator-default"
             and data.get("mcp_servers", {}).get("operator-tool", {}).get("command") == "/usr/bin/true"
         )
     else:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        server_key = "mcpServers" if agent == "claude-code" else "mcp"
-        preserved = data.get(SENTINEL_KEY) == SENTINEL_VALUE and "operator-tool" in data.get(server_key, {})
+        data, server_key = agent_config_document(agent, path.read_text(encoding="utf-8"))
+        preserved = sentinel_value(agent, data) == SENTINEL_VALUE and "operator-tool" in data.get(server_key, {})
     return preserved, "operator sentinel and unrelated MCP entry preserved"
 
 
@@ -893,16 +938,9 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("MCP initialize and tools/list succeed", probe_check)
             add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"]))
     else:
-        expected_config = fixture_content(agent, case["fixture"])
         add("setup conflict left no authoritative config", lambda: (not configs, f"count={len(configs)}"))
         add("setup conflict left no skill", lambda: (not installed_skill.exists(), str(installed_skill)))
-        add(
-            "unsafe MCP config remains byte-identical",
-            lambda: (
-                agent_config_path(agent, HOME).read_text(encoding="utf-8") == expected_config,
-                str(agent_config_path(agent, HOME)),
-            ),
-        )
+        add("unmanaged MCP entry left untouched", lambda: unmanaged_entry_untouched(agent))
 
     ok = all(check.ok for check in checks)
     return {

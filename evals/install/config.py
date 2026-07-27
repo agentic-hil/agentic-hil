@@ -92,7 +92,8 @@ def _positive_integer(value: Any, label: str) -> int:
 
 
 def load_case(path: Path) -> Case:
-    raw = _object(json.loads(path.read_text(encoding="utf-8")), "case")
+    # Windows editors and PowerShell write UTF-8 with a byte order mark.
+    raw = _object(json.loads(path.read_text(encoding="utf-8-sig")), "case")
     if raw.get("schema_version") != 1:
         raise ValueError("case.schema_version must be 1")
     return Case(
@@ -181,7 +182,7 @@ def _credential_files(raw: Any, label: str, agent: str) -> tuple[CredentialFile,
 
 def load_matrix(path: str | Path) -> Matrix:
     matrix_path = Path(path).resolve()
-    raw = _object(json.loads(matrix_path.read_text(encoding="utf-8")), "matrix")
+    raw = _object(json.loads(matrix_path.read_text(encoding="utf-8-sig")), "matrix")
     if raw.get("schema_version") != 1:
         raise ValueError("matrix.schema_version must be 1")
 

@@ -10,7 +10,7 @@ from evals.install import runner as install_runner
 from evals.install import scrub_credentials
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_matrix
-from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content
+from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -263,6 +263,33 @@ def test_source_digest_ignores_generated_directories(tmp_path: Path) -> None:
 
     (tmp_path / "source.py").write_text("two\n", encoding="utf-8")
     assert source_digest(tmp_path) != first
+
+
+@pytest.mark.parametrize("fixture", ["preserve-user-config", "unsafe-existing-config"])
+def test_opencode_fixture_uses_only_keys_opencode_accepts(fixture: str) -> None:
+    content = fixture_content("opencode", fixture)
+    assert content is not None
+    document = json.loads(content)
+
+    # An unknown top-level key makes OpenCode reject the file and refuse to
+    # start, which would fail the case before the agent can install anything.
+    assert set(document) == {"$schema", "mcp"}
+    assert sentinel_value("opencode", document) == SENTINEL_VALUE
+
+
+def test_matrix_and_case_accept_a_windows_byte_order_mark(tmp_path: Path) -> None:
+    example = REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json"
+    case_source = REPOSITORY_ROOT / "evals" / "install" / "cases" / "quickstart.json"
+    case = tmp_path / "quickstart.json"
+    case.write_bytes(b"\xef\xbb\xbf" + case_source.read_bytes())
+    matrix = tmp_path / "matrix.json"
+    document = json.loads(example.read_text(encoding="utf-8"))
+    document["cases"] = [case.name]
+    matrix.write_bytes(b"\xef\xbb\xbf" + json.dumps(document).encode("utf-8"))
+
+    loaded = load_matrix(matrix)
+
+    assert loaded.cases[0].id == "quickstart"
 
 
 def test_source_digest_ignores_install_build_metadata(tmp_path: Path) -> None:
