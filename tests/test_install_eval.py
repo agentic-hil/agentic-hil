@@ -44,6 +44,20 @@ def test_agent_command_keeps_model_as_explicit_axis(agent: str, model: str, mode
     assert command[-1] == "install"
 
 
+@pytest.mark.parametrize(
+    ("agent", "isolating_flag"),
+    [("codex", "--ignore-user-config"), ("claude-code", "--strict-mcp-config")],
+)
+def test_only_the_isolated_session_ignores_the_agent_user_config(agent: str, isolating_flag: str) -> None:
+    isolated = build_agent_command(agent, "model", "prompt")
+    connected = build_agent_command(agent, "model", "prompt", isolated=False)
+
+    # The installation phase must be hermetic; the phase that has to use the
+    # registered MCP server must read the configuration setup wrote.
+    assert isolating_flag in isolated
+    assert isolating_flag not in connected
+
+
 def test_adapter_aliases_resolve_to_setup_agent_names() -> None:
     assert adapter_for("codex-cli").id == "codex"
     assert adapter_for("claude").id == "claude-code"

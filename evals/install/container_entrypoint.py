@@ -163,10 +163,14 @@ def main(argv: list[str] | None = None) -> int:
             agent=adapter.id,
         )
         print(json.dumps({"event": "eval_followup_start"}), flush=True)
+        # The follow-up must see what setup registered, so it drops the
+        # isolation that keeps the installation phase hermetic.
+        followup_environment = dict(environment)
+        followup_environment.pop("OPENCODE_CONFIG", None)
         second = subprocess.run(
-            build_agent_command(adapter.id, job["model"], followup),
+            build_agent_command(adapter.id, job["model"], followup, isolated=False),
             cwd=WORKSPACE,
-            env=environment,
+            env=followup_environment,
             check=False,
         )
         print(json.dumps({"event": "eval_followup_exit", "exit_code": second.returncode}), flush=True)

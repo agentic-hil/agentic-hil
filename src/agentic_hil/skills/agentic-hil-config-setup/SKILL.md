@@ -55,12 +55,21 @@ the tool returns `permission_denied`; report that refusal as the result. Do not
 fall back to reading the configuration file, and do not fall back to a raw
 command.
 
-`agentic-hil setup` registers the MCP server in the agent's user configuration,
-and most agent CLIs load it on their next start. Until then the same tools are
-reachable from the command line — `agentic-hil debugger-probes` — which is the
-answer to a hardware question asked in the same session as the installation.
-`agentic-hil doctor` reports the loaded configuration and whether hardware
-access is permitted, but it is a configuration check, not a hardware call.
+Reach the tools through the `agentic-hil` MCP server, not through the command
+line. The MCP surface is the supported one: it is the interface `setup`
+registers, the one an operator can reason about, and the one whose calls are
+coordinated and reported as hardware actions.
+
+`agentic-hil setup` registers that server in the agent's user configuration, and
+agent CLIs load MCP servers when they start. If the server is not available in
+the current session — typically the session that just installed it — say so and
+ask the user to restart the agent. Do not answer the hardware question from the
+configuration file, from a raw command, or from the `agentic-hil` CLI instead.
+
+The CLI stays the right tool for installing, configuring, and diagnosing:
+`agentic-hil init`, `agentic-hil setup`, and `agentic-hil doctor` report what is
+configured and whether hardware access is permitted. None of them is a hardware
+call, and none of them answers a question about the hardware itself.
 
 ## Configure the bridge
 

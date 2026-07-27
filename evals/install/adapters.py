@@ -48,8 +48,14 @@ def adapter_for(name: str) -> AgentAdapter:
     raise ValueError(f"unsupported agent {name!r}; expected one of: {allowed}")
 
 
-def build_agent_command(agent: str, model: str, prompt: str) -> list[str]:
-    """Build a non-interactive command while keeping agent and model separate."""
+def build_agent_command(agent: str, model: str, prompt: str, *, isolated: bool = True) -> list[str]:
+    """Build a non-interactive command while keeping agent and model separate.
+
+    An isolated session ignores the agent CLI's user configuration, which keeps
+    the installation phase hermetic. A session that has to exercise what setup
+    registered — the MCP server and the skill — must read that configuration,
+    so it runs without the isolating flags.
+    """
     adapter = adapter_for(agent)
     if not model.strip():
         raise ValueError("model must not be empty")
@@ -61,7 +67,7 @@ def build_agent_command(agent: str, model: str, prompt: str) -> list[str]:
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--ephemeral",
-            "--ignore-user-config",
+            *(["--ignore-user-config"] if isolated else []),
             "--json",
             "--model",
             model,
@@ -73,7 +79,7 @@ def build_agent_command(agent: str, model: str, prompt: str) -> list[str]:
             "--print",
             "--dangerously-skip-permissions",
             "--no-session-persistence",
-            "--strict-mcp-config",
+            *(["--strict-mcp-config"] if isolated else []),
             "--output-format",
             "stream-json",
             # Claude Code rejects --print with stream-json unless it is verbose.
