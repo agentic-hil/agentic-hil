@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+# A token that expires during the run makes the agent CLI refresh inside the
+# container. The provider may rotate the refresh token when it does, and the
+# rotated value dies with the container while this machine keeps the old one.
+# Refreshing on the host beforehand avoids that entirely.
+REFRESH_MARGIN = timedelta(hours=1)
 
 # An agent CLI reports an unusable login before it does anything else, so these
 # phrases separate a dead credential from a failure the evaluation is about.
@@ -56,8 +62,8 @@ def credential_health(kind: str, path: Path, now: datetime | None = None) -> tup
         if refresh_expiry is not None and refresh_expiry <= moment:
             return "expired", f"the refresh token expired at {refresh_expiry.isoformat()}"
         access_expiry = _moment(section.get("expiresAt"))
-        if access_expiry is not None and access_expiry <= moment:
-            return "stale", f"the access token expired at {access_expiry.isoformat()}; a refresh is due"
+        if access_expiry is not None and access_expiry <= moment + REFRESH_MARGIN:
+            return "stale", f"the access token expires at {access_expiry.isoformat()}; a refresh is due"
         return "ok", f"valid until {access_expiry.isoformat()}" if access_expiry else "no expiry stated"
 
     if kind == "opencode-auth":
@@ -67,10 +73,10 @@ def credential_health(kind: str, path: Path, now: datetime | None = None) -> tup
         usable = []
         for name, provider in providers.items():
             expiry = _moment(provider.get("expires"))
-            if expiry is None or expiry > moment:
+            if expiry is None or expiry > moment + REFRESH_MARGIN:
                 usable.append(f"{name} valid")
             elif provider.get("refresh"):
-                usable.append(f"{name} stale, refresh stored")
+                usable.append(f"{name} stale, refresh due")
             else:
                 usable.append(f"{name} expired without a refresh token")
         if all("expired without" in entry for entry in usable):

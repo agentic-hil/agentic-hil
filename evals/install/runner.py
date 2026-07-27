@@ -842,6 +842,12 @@ def run_matrix(args: argparse.Namespace) -> int:
             state, detail = credential_health(kind, path)
             if state == "expired":
                 raise RuntimeError(f"the {kind} login is unusable: {detail}. Sign in again, then rerun.")
+            if state == "stale":
+                raise RuntimeError(
+                    f"the {kind} login would be refreshed inside the container: {detail}. Refreshing it "
+                    f"there can rotate the token and leave this machine's copy rejected. Start the agent "
+                    f"CLI once on this machine so it refreshes here, then rerun."
+                )
             print(
                 f"WARNING: {kind} is a stored interactive login. Refreshing it inside the container can "
                 f"rotate the token and invalidate this machine's copy; an API key or a token minted for "

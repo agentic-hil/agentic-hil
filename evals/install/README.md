@@ -242,9 +242,11 @@ as redactable data. The host home is never mounted.
 > the provider then rejects, even though the file was never written. Prefer a
 > credential minted for automation: an API key in the environment, or
 > `claude setup-token` for `CLAUDE_CODE_OAUTH_TOKEN`. A file login still works
-> and stays the documented fallback: the runner warns whenever one is used and
-> refuses one whose refresh token has already expired, before any model budget is
-> spent. Pass `-NoFileLogin` to forbid them outright.
+> and stays the documented fallback. To keep it intact the runner refuses to
+> start when the access token would expire during the run — start the agent CLI
+> once on this machine so it refreshes here, then rerun — and refuses outright
+> when the refresh token itself is gone. Both checks run before any model budget
+> is spent. Pass `-NoFileLogin` to forbid file logins entirely.
 
 Default cases:
 

@@ -372,8 +372,11 @@ def test_dead_login_is_recognised_before_and_during_a_run(tmp_path: Path) -> Non
         return credential_health("claude-auth", path, now=now)
 
     assert claude(2, 200)[0] == "ok"
-    # An expired access token is routine; only a dead refresh token is fatal.
+    # A token that expires during the run is refreshed inside the container,
+    # which is what can rotate it out from under this machine.
+    assert claude(0.5, 200)[0] == "stale"
     assert claude(-1, 200)[0] == "stale"
+    # Nothing left to refresh with.
     assert claude(-1, -1)[0] == "expired"
 
     assert authentication_failure('{"error":{"message":"Token refresh failed: 401"}}') is not None
