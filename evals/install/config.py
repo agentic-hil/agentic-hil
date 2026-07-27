@@ -65,12 +65,17 @@ class Job:
     credential_files: tuple[CredentialFile, ...]
 
 
+MINIMUM_REPETITIONS = 2
+MAXIMUM_REPETITIONS = 20
+
+
 @dataclass(frozen=True)
 class Matrix:
     target: Target
     cases: tuple[Case, ...]
     jobs: tuple[Job, ...]
     image: str
+    max_repetitions: int = MINIMUM_REPETITIONS
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:
@@ -89,6 +94,16 @@ def _positive_integer(value: Any, label: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{label} must be a positive integer")
     return value
+
+
+def _repetitions(value: Any, label: str) -> int:
+    """A single run cannot separate a stable result from a lucky one."""
+    count = _positive_integer(value, label)
+    if count < MINIMUM_REPETITIONS:
+        raise ValueError(f"{label} must be at least {MINIMUM_REPETITIONS}")
+    if count > MAXIMUM_REPETITIONS:
+        raise ValueError(f"{label} must not exceed {MAXIMUM_REPETITIONS}")
+    return count
 
 
 def load_case(path: Path) -> Case:
@@ -207,7 +222,7 @@ def load_matrix(path: str | Path) -> Matrix:
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("case ids must be unique")
     image = _string(raw.get("image", "agentic-hil-install-eval:local"), "image")
-    default_repetitions = _positive_integer(raw.get("repetitions", 1), "repetitions")
+    default_repetitions = _repetitions(raw.get("repetitions", MINIMUM_REPETITIONS), "repetitions")
     default_timeout = _positive_integer(raw.get("timeout_seconds", 1800), "timeout_seconds")
     if "pass_environment" in raw:
         raise ValueError("matrix.pass_environment is unsupported; declare jobs[].credentials explicitly")
@@ -221,7 +236,7 @@ def load_matrix(path: str | Path) -> Matrix:
         item = _object(value, f"jobs[{index}]")
         adapter = adapter_for(_string(item.get("agent"), f"jobs[{index}].agent"))
         model = _string(item.get("model"), f"jobs[{index}].model")
-        repetitions = _positive_integer(item.get("repetitions", default_repetitions), f"jobs[{index}].repetitions")
+        repetitions = _repetitions(item.get("repetitions", default_repetitions), f"jobs[{index}].repetitions")
         timeout = _positive_integer(item.get("timeout_seconds", default_timeout), f"jobs[{index}].timeout_seconds")
         if "pass_environment" in item:
             raise ValueError(f"jobs[{index}].pass_environment is unsupported; use jobs[{index}].credentials")
@@ -254,4 +269,18 @@ def load_matrix(path: str | Path) -> Matrix:
     job_ids = [(job.agent, job.model, job.repetition) for job in jobs]
     if len(job_ids) != len(set(job_ids)):
         raise ValueError("agent, model, and repetition combinations must be unique")
-    return Matrix(target=target, cases=cases, jobs=tuple(jobs), image=image)
+
+    planned = max(job.repetition for job in jobs)
+    max_repetitions = _repetitions(
+        raw.get("max_repetitions", max(MINIMUM_REPETITIONS + 3, planned)),
+        "max_repetitions",
+    )
+    if max_repetitions < planned:
+        raise ValueError(f"max_repetitions must not be below the planned {planned} repetitions")
+    return Matrix(
+        target=target,
+        cases=cases,
+        jobs=tuple(jobs),
+        image=image,
+        max_repetitions=max_repetitions,
+    )

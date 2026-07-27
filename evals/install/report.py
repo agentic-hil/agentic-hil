@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,34 @@ def load_results(output_root: Path | str) -> list[dict[str, Any]]:
     if not results:
         raise ValueError(f"no run results were found under {root}")
     return results
+
+
+def result_group(result: dict[str, Any]) -> tuple[str, str, str]:
+    """The case, agent CLI, and model whose repetitions must agree."""
+    case = result.get("case") if isinstance(result.get("case"), dict) else {}
+    agent = result.get("agent") if isinstance(result.get("agent"), dict) else {}
+    return (
+        str(case.get("id", "unknown-case")),
+        str(agent.get("cli", "unknown-agent")),
+        str(agent.get("model", "unknown-model")),
+    )
+
+
+def group_statuses(results: list[dict[str, Any]]) -> dict[tuple[str, str, str], list[str]]:
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for result in results:
+        grouped.setdefault(result_group(result), []).append(str(result.get("status", "unknown")))
+    return grouped
+
+
+def unstable_groups(results: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    """Combinations whose repetitions disagreed with each other.
+
+    One passing and one failing run of the same combination means the pass was
+    luck or the failure was noise. Neither is a result, so the matrix repeats
+    that combination until it agrees with itself or hits its ceiling.
+    """
+    return sorted(group for group, statuses in group_statuses(results).items() if len(set(statuses)) > 1)
 
 
 def failed_checks(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -80,6 +109,18 @@ def format_report(results: list[dict[str, Any]], output_root: Path | str) -> str
     lines.extend(_grouped_rates(results, "case", "id"))
     lines.extend(["", "By agent:"])
     lines.extend(_grouped_rates(results, "agent", "cli"))
+
+    statuses = group_statuses(results)
+    unstable = unstable_groups(results)
+    if unstable:
+        lines.extend(["", "Unstable — repetitions disagreed:"])
+        for group in unstable:
+            case_id, cli, model = group
+            counted = ", ".join(
+                f"{count}x {status}"
+                for status, count in sorted(Counter(statuses[group]).items())
+            )
+            lines.append(f"  {case_id} | {cli} {model}: {counted}")
     return "\n".join(lines)
 
 

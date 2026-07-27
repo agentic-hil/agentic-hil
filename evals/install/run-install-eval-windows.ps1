@@ -2,12 +2,14 @@
 param(
     [string[]]$Agents = @("codex", "opencode"),
     [string[]]$Cases = @("quickstart", "preserve-user-config", "unsafe-existing-config"),
-    [ValidateRange(1, 20)]
-    [int]$Repetitions = 1,
+    [ValidateRange(2, 20)]
+    [int]$Repetitions = 2,
+    [ValidateRange(2, 20)]
+    [int]$MaxRepetitions = 5,
     [string]$Output,
-    [string]$CodexModel = "gpt-5.6-sol",
-    [string]$ClaudeModel = "claude-sonnet-4-6",
-    [string]$OpencodeModel = "openai/gpt-5.6-sol",
+    [string[]]$CodexModels = @("gpt-5.6-sol"),
+    [string[]]$ClaudeModels = @("claude-sonnet-4-6"),
+    [string[]]$OpencodeModels = @("openai/gpt-5.6-sol"),
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 1800,
     [switch]$SkipBuild,
@@ -34,6 +36,23 @@ if (-not (Test-Path -LiteralPath $virtualEnvironmentPython -PathType Leaf)) {
     )
 }
 
+function Split-Values {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Values)
+
+    # "powershell -File" passes "a,b" as one string, so accept both that and a
+    # real array from an interactive session.
+    $items = @()
+    foreach ($value in $Values) {
+        foreach ($part in ([string]$value -split ",")) {
+            $name = $part.Trim()
+            if ($name) {
+                $items += $name
+            }
+        }
+    }
+    return @($items | Select-Object -Unique)
+}
+
 function Expand-Selection {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Values,
@@ -41,25 +60,16 @@ function Expand-Selection {
         [Parameter(Mandatory)][string]$Label
     )
 
-    # "powershell -File" passes "a,b" as one string, so accept both that and a
-    # real array from an interactive session.
-    $selected = @()
-    foreach ($value in $Values) {
-        foreach ($part in ([string]$value -split ",")) {
-            $name = $part.Trim()
-            if (-not $name) {
-                continue
-            }
-            if ($Allowed -notcontains $name) {
-                throw "Unsupported $Label '$name'. Choose from: $($Allowed -join ', ')."
-            }
-            $selected += $name
+    $selected = Split-Values -Values $Values
+    foreach ($name in $selected) {
+        if ($Allowed -notcontains $name) {
+            throw "Unsupported $Label '$name'. Choose from: $($Allowed -join ', ')."
         }
     }
     if ($selected.Count -eq 0) {
         throw "At least one $Label is required."
     }
-    return @($selected | Select-Object -Unique)
+    return $selected
 }
 
 function Get-DockerCli {
@@ -184,6 +194,9 @@ if ($LASTEXITCODE -ne 0 -or -not $projectVersion) {
     throw "The project version could not be read from pyproject.toml."
 }
 
+if ($MaxRepetitions -lt $Repetitions) {
+    throw "-MaxRepetitions ($MaxRepetitions) must not be below -Repetitions ($Repetitions)."
+}
 $Agents = Expand-Selection -Values $Agents -Allowed @("codex", "claude-code", "opencode") -Label "agent"
 $Cases = Expand-Selection `
     -Values $Cases `
@@ -207,16 +220,22 @@ Write-Host "== Installation evaluation"
 Write-Host "Repository: $repositoryRoot"
 Write-Host "Version:    $($projectVersion.Trim())"
 Write-Host "Output:     $Output"
-Write-Host "Cases:      $($Cases -join ', ') x $Repetitions repetition(s)"
+Write-Host "Cases:      $($Cases -join ', ')"
+Write-Host "Runs:       $Repetitions repetitions per combination, up to $MaxRepetitions while they disagree"
 
 $models = @{
-    "codex" = $CodexModel
-    "claude-code" = $ClaudeModel
-    "opencode" = $OpencodeModel
+    "codex" = (Split-Values -Values $CodexModels)
+    "claude-code" = (Split-Values -Values $ClaudeModels)
+    "opencode" = (Split-Values -Values $OpencodeModels)
 }
 $jobs = @()
 foreach ($agent in $Agents) {
-    $jobs += New-AgentJob -Agent $agent -Model $models[$agent]
+    if ($models[$agent].Count -eq 0) {
+        throw "At least one model is required for $agent."
+    }
+    foreach ($model in $models[$agent]) {
+        $jobs += New-AgentJob -Agent $agent -Model $model
+    }
 }
 
 $casePaths = @()
@@ -234,6 +253,7 @@ Write-JsonFile -Path $matrixPath -Document @{
     image = "agentic-hil-install-eval:local"
     cases = $casePaths
     repetitions = $Repetitions
+    max_repetitions = $MaxRepetitions
     timeout_seconds = $TimeoutSeconds
     target = @{
         mode = "local"
@@ -241,7 +261,7 @@ Write-JsonFile -Path $matrixPath -Document @{
     }
     jobs = $jobs
 }
-Write-Host "Matrix:     $matrixPath"
+Write-Host "Jobs:       $($jobs.Count) agent/model combination(s)"
 
 Push-Location $repositoryRoot
 try {
@@ -278,6 +298,7 @@ try {
     }
     # Keep the exact input beside the evidence it produced.
     Copy-Item -LiteralPath $matrixPath -Destination (Join-Path $Output "matrix.json")
+    Write-Host "Matrix:     $(Join-Path $Output 'matrix.json')"
 
     Write-Host ""
     Write-Host "== Report"

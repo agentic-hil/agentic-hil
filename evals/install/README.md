@@ -146,6 +146,39 @@ CLI, one explicit model, and explicit authentication sources:
 All listed environment variables are required for that job. No adapter
 automatically receives every provider key found on the host.
 
+## What decides a verdict
+
+Every job is one agent CLI, one model, one case, and one repetition. Each run
+gets its own container and its own pair of volumes, so no repetition inherits
+state from the one before it.
+
+The criteria come from three places, none of them inside the container:
+
+1. **The case** — `expected_outcome` is `success` or `safe-failure`, which
+   selects the check list and whether a non-zero agent exit is expected.
+2. **Host-generated evidence**, computed before the container starts and passed
+   in read-only as `/job.json`: expected version, a digest of `src/agentic_hil`,
+   the source snapshot digest, and the target revision's exact MCP tool names
+   with their digest.
+3. **Fixed invariants** the verifier enforces regardless of case: a non-root
+   verifier, a symlink-free package tree, deny-by-default permissions, a trusted
+   launcher, no source vendored into the firmware project, no authority files in
+   the repository, and an untriggered PATH guard.
+
+A run passes only when it did not time out, the agent exit matches the expected
+outcome, the verifier exits zero, and **every** check passed. A failure to
+remove the container or its volumes afterwards raises the run to `error` even
+when all checks passed.
+
+## Repetitions and escalation
+
+A single run cannot separate a stable result from a lucky one, so `repetitions`
+is at least 2 and the loader rejects 1. When the repetitions of one
+case/agent/model combination disagree — one passed, another failed — the runner
+keeps repeating that combination until it agrees with itself or reaches
+`max_repetitions`. Combinations that still disagree at the ceiling are listed
+under `unstable` in `summary.json` and in the report.
+
 Common environment credentials:
 
 | Adapter | Authentication variable names |
@@ -292,14 +325,18 @@ It defaults to Codex and OpenCode across all three cases. Select a subset,
 change models, or repeat runs for a pass rate:
 
 ```powershell
-.\evals\install\run-install-eval-windows.ps1 -Agents codex -Cases unsafe-existing-config -Repetitions 3
+.\evals\install\run-install-eval-windows.ps1 `
+  -Agents codex -Cases unsafe-existing-config `
+  -CodexModels "gpt-5.6-sol,gpt-5.4" -Repetitions 3
 ```
 
 Options:
 
 - `-Agents`, `-Cases`: comma-separated selections;
-- `-Repetitions`: repeat every job; a single run is not a pass rate;
-- `-CodexModel`, `-ClaudeModel`, `-OpencodeModel`: model per agent CLI;
+- `-CodexModels`, `-ClaudeModels`, `-OpencodeModels`: comma-separated model
+  lists; every model becomes its own job for that agent CLI;
+- `-Repetitions`: repetitions per combination, minimum 2;
+- `-MaxRepetitions`: ceiling while repetitions disagree (default 5);
 - `-Output`: artifact directory; defaults to a timestamped directory under
   `evals/install/artifacts/`;
 - `-SkipBuild`: reuse the current image. The image embeds the evaluator and

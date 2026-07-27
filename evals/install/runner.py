@@ -21,7 +21,7 @@ from typing import Any
 
 from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
-from .report import report_results
+from .report import report_results, result_group, unstable_groups
 from .source import create_source_snapshot, source_digest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -825,8 +825,8 @@ def run_matrix(args: argparse.Namespace) -> int:
         output_root = Path(args.output).resolve()
         output_root.mkdir(parents=True, exist_ok=False)
 
-        results = [
-            run_one(
+        def execute(case: Case, job: Job) -> dict[str, Any]:
+            return run_one(
                 docker=docker,
                 matrix=matrix,
                 case=case,
@@ -836,9 +836,36 @@ def run_matrix(args: argparse.Namespace) -> int:
                 output_root=output_root,
                 image_id=image_id,
             )
-            for case in matrix.cases
-            for job in matrix.jobs
-        ]
+
+        results = [execute(case, job) for case in matrix.cases for job in matrix.jobs]
+
+        # Every run gets its own container and its own pair of volumes, so a
+        # repetition never inherits state from the one before it.
+        cases_by_id = {case.id: case for case in matrix.cases}
+        templates: dict[tuple[str, str], Job] = {}
+        for job in matrix.jobs:
+            templates.setdefault((job.agent, job.model), job)
+        while True:
+            pending = [
+                group
+                for group in unstable_groups(results)
+                if sum(1 for result in results if result_group(result) == group) < matrix.max_repetitions
+            ]
+            if not pending:
+                break
+            for group in pending:
+                case_id, agent, model = group
+                done = sum(1 for result in results if result_group(result) == group)
+                print(
+                    f"repetitions disagreed for {case_id} | {agent} {model} after {done}; running another",
+                    file=sys.stderr,
+                )
+                results.append(
+                    execute(
+                        cases_by_id[case_id],
+                        dataclasses.replace(templates[(agent, model)], repetition=done + 1),
+                    )
+                )
         summary = {
             "schema_version": 1,
             "kind": "install-matrix",
@@ -848,6 +875,10 @@ def run_matrix(args: argparse.Namespace) -> int:
             "passed": sum(result["status"] == "passed" for result in results),
             "failed": sum(result["status"] == "failed" for result in results),
             "errors": sum(result["status"] == "error" for result in results),
+            "unstable": [
+                {"case": case_id, "agent": agent, "model": model}
+                for case_id, agent, model in unstable_groups(results)
+            ],
             "results": [{"id": result["id"], "status": result["status"]} for result in results],
         }
         (output_root / "summary.json").write_text(

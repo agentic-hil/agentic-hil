@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from evals.install import scrub_credentials
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_matrix
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
-from evals.install.report import format_report, load_results, report_results
+from evals.install.report import format_report, load_results, report_results, unstable_groups
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -58,7 +59,13 @@ def test_example_matrix_expands_agents_and_cases_separately() -> None:
         "preserve-user-config",
         "unsafe-existing-config",
     }
-    assert len(matrix.jobs) * len(matrix.cases) == 9
+
+    models = Counter(agent for agent, _model in {(job.agent, job.model) for job in matrix.jobs})
+    assert all(count >= 2 for count in models.values()), models
+
+    repetitions = Counter((job.agent, job.model) for job in matrix.jobs)
+    assert set(repetitions.values()) == {2}, repetitions
+    assert matrix.max_repetitions > 2
 
 
 def test_remote_matrix_rejects_mutable_ref(tmp_path: Path) -> None:
@@ -328,6 +335,57 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
     )
 
 
+@pytest.mark.parametrize("field", ["repetitions", "max_repetitions"])
+def test_matrix_refuses_a_single_run_as_a_result(field: str, tmp_path: Path) -> None:
+    example = REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json"
+    document = json.loads(example.read_text(encoding="utf-8"))
+    document["cases"] = [str(REPOSITORY_ROOT / "evals" / "install" / "cases" / "quickstart.json")]
+    document[field] = 1
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least 2"):
+        load_matrix(matrix)
+
+
+def test_escalation_ceiling_may_not_undercut_the_planned_repetitions(tmp_path: Path) -> None:
+    example = REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json"
+    document = json.loads(example.read_text(encoding="utf-8"))
+    document["cases"] = [str(REPOSITORY_ROOT / "evals" / "install" / "cases" / "quickstart.json")]
+    document["repetitions"] = 4
+    document["max_repetitions"] = 3
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not be below the planned"):
+        load_matrix(matrix)
+
+
+def _result(case_id: str, agent: str, model: str, status: str) -> dict:
+    return {
+        "id": f"{case_id}-{agent}-{model}-{status}",
+        "status": status,
+        "agent": {"cli": agent, "model": model},
+        "case": {"id": case_id},
+        "checks": [],
+    }
+
+
+def test_disagreeing_repetitions_are_reported_as_unstable() -> None:
+    agreeing = [_result("quickstart", "codex", "m", "passed") for _ in range(2)]
+    disagreeing = [
+        _result("quickstart", "opencode", "m", "passed"),
+        _result("quickstart", "opencode", "m", "failed"),
+    ]
+
+    assert unstable_groups(agreeing) == []
+    assert unstable_groups(agreeing + disagreeing) == [("quickstart", "opencode", "m")]
+
+    report = format_report(agreeing + disagreeing, Path("out"))
+    assert "Unstable — repetitions disagreed:" in report
+    assert "quickstart | opencode m: 1x failed, 1x passed" in report
+
+
 def test_report_names_every_failed_check_and_the_transcript(tmp_path: Path) -> None:
     _write_result(tmp_path, "quickstart-a", "passed", [{"name": "installed", "ok": True}])
     _write_result(
@@ -553,7 +611,7 @@ def test_dry_run_cross_products_cases_and_jobs_without_secret_values(
     plan = dry_run_plan(matrix, REPOSITORY_ROOT, REPOSITORY_ROOT, "docker")
     serialized = json.dumps(plan)
 
-    assert len(plan["runs"]) == 9
+    assert len(plan["runs"]) == len(matrix.cases) * len(matrix.jobs)
     assert "super-secret-value" not in serialized
 
 
