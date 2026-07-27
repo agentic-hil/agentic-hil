@@ -20,7 +20,7 @@ MOUNTED_CREDENTIALS = Path("/run/agentic-hil-secrets")
 TEMPORARY_CREDENTIALS = Path("/tmp/agentic-hil-credentials")
 CREDENTIAL_KINDS = {
     "codex": {"codex-auth"},
-    "claude-code": set(),
+    "claude-code": {"claude-auth"},
     "opencode": {"opencode-auth"},
 }
 

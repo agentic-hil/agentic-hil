@@ -29,6 +29,7 @@ COPY evals /opt/evals
 RUN install -d /opt/eval-guard/bin \
     && install -d /run/agentic-hil-secrets \
     && touch /run/agentic-hil-secrets/codex-auth \
+    && touch /run/agentic-hil-secrets/claude-auth \
     && touch /run/agentic-hil-secrets/opencode-auth \
     && chmod 0755 /opt/evals/install/guard.py \
     && ln -s /opt/evals/install/guard.py /opt/eval-guard/bin/python \

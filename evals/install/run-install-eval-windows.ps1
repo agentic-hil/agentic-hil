@@ -128,6 +128,13 @@ function New-AgentJob {
                 Path = Join-Path $env:USERPROFILE ".codex\auth.json"
             }
         }
+        "claude-code" {
+            @{
+                Kind = "claude-auth"
+                Variable = "CLAUDE_AUTH_FILE"
+                Path = Join-Path $env:USERPROFILE ".claude\.credentials.json"
+            }
+        }
         "opencode" {
             @{
                 Kind = "opencode-auth"
@@ -139,8 +146,8 @@ function New-AgentJob {
     }
     if ($null -eq $fileCredential -or -not (Test-Path -LiteralPath $fileCredential.Path -PathType Leaf)) {
         throw (
-            "No credential is available for $Agent. Set one of: $($environmentNames -join ', '). " +
-            "Codex and OpenCode also accept a file login."
+            "No credential is available for $Agent. Set one of: $($environmentNames -join ', '), " +
+            "or sign the agent CLI in so its own login file exists."
         )
     }
 

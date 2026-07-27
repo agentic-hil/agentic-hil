@@ -6,6 +6,7 @@ from pathlib import Path
 HOME = Path("/home/eval")
 AUTH_PATHS = {
     "codex-auth": HOME / ".codex" / "auth.json",
+    "claude-auth": HOME / ".claude" / ".credentials.json",
     "opencode-auth": HOME / ".local" / "share" / "opencode" / "auth.json",
 }
 

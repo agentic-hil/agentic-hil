@@ -27,7 +27,7 @@ RESERVED_ENVIRONMENT = {
 }
 CREDENTIAL_FILE_KINDS = {
     "codex": {"codex-auth"},
-    "claude-code": set(),
+    "claude-code": {"claude-auth"},
     "opencode": {"opencode-auth"},
 }
 

@@ -166,7 +166,7 @@ network access. Use short-lived/scoped evaluation credentials and only trusted
 guide/source revisions. Artifact redaction prevents normal persistence; it is
 not a defense against a deliberately malicious process exfiltrating a secret.
 
-File-based OAuth sessions are optional for Codex and OpenCode. The matrix stores
+File-based OAuth sessions are optional for every agent CLI. The matrix stores
 only the name of a host environment variable containing an absolute path
 outside the repository:
 
@@ -186,6 +186,7 @@ outside the repository:
 Supported kinds:
 
 - `codex-auth`: Codex file-backed login, normally `~/.codex/auth.json`;
+- `claude-auth`: Claude Code login, normally `~/.claude/.credentials.json`;
 - `opencode-auth`: OpenCode provider login, normally
   `~/.local/share/opencode/auth.json`.
 

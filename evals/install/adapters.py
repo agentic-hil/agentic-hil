@@ -76,6 +76,8 @@ def build_agent_command(agent: str, model: str, prompt: str) -> list[str]:
             "--strict-mcp-config",
             "--output-format",
             "stream-json",
+            # Claude Code rejects --print with stream-json unless it is verbose.
+            "--verbose",
             "--model",
             model,
             prompt,

@@ -267,6 +267,49 @@ def test_source_digest_ignores_generated_directories(tmp_path: Path) -> None:
     assert source_digest(tmp_path) != first
 
 
+def test_claude_stream_json_output_is_paired_with_verbose() -> None:
+    command = build_agent_command("claude-code", "claude-sonnet-4-6", "install it")
+
+    # Claude Code rejects --print with stream-json unless it is also verbose,
+    # which fails the run in seconds before the agent does anything.
+    assert "--output-format" in command
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in command
+
+
+@pytest.mark.parametrize(
+    ("agent", "kind"),
+    [("codex", "codex-auth"), ("claude-code", "claude-auth"), ("opencode", "opencode-auth")],
+)
+def test_every_agent_cli_accepts_its_own_file_login(agent: str, kind: str, tmp_path: Path) -> None:
+    matrix = _matrix_with_credential_file(tmp_path, agent, kind)
+
+    assert load_matrix(matrix).jobs[0].credential_files[0].kind == kind
+
+
+def test_file_login_kind_stays_bound_to_its_agent(tmp_path: Path) -> None:
+    matrix = _matrix_with_credential_file(tmp_path, "claude-code", "codex-auth")
+
+    with pytest.raises(ValueError, match="unsupported for claude-code"):
+        load_matrix(matrix)
+
+
+def _matrix_with_credential_file(directory: Path, agent: str, kind: str) -> Path:
+    example = REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json"
+    document = json.loads(example.read_text(encoding="utf-8"))
+    document["cases"] = [str(REPOSITORY_ROOT / "evals" / "install" / "cases" / "quickstart.json")]
+    document["jobs"] = [
+        {
+            "agent": agent,
+            "model": "test-model",
+            "credential_files": [{"kind": kind, "path_environment": "TEST_AUTH_FILE"}],
+        }
+    ]
+    matrix = directory / "matrix.json"
+    matrix.write_text(json.dumps(document), encoding="utf-8")
+    return matrix
+
+
 def _write_result(directory: Path, identifier: str, status: str, checks: list[dict]) -> None:
     run_directory = directory / identifier
     run_directory.mkdir(parents=True)
