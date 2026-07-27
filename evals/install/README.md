@@ -267,6 +267,49 @@ Artifacts per run:
 Matrix root contains `summary.json`. Any failed verification, timeout, missing
 image, or agent infrastructure error yields a non-zero runner exit.
 
+## Read the verdict
+
+```bash
+python -m evals.install report --output evals/install/artifacts/run-001
+```
+
+The report prints one line per run, every failed check with its detail, the
+transcript path for each failure, and the pass rate per case and per agent. It
+exits non-zero while any run fails independent verification, so it works as a
+gate as well as a summary.
+
+## One command on Windows
+
+The whole loop — build the versioned image, resolve credentials, generate the
+matrix, run it, print the report — runs from a single script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\evals\install\run-install-eval-windows.ps1
+```
+
+It defaults to Codex and OpenCode across all three cases. Select a subset,
+change models, or repeat runs for a pass rate:
+
+```powershell
+.\evals\install\run-install-eval-windows.ps1 -Agents codex -Cases unsafe-existing-config -Repetitions 3
+```
+
+Options:
+
+- `-Agents`, `-Cases`: comma-separated selections;
+- `-Repetitions`: repeat every job; a single run is not a pass rate;
+- `-CodexModel`, `-ClaudeModel`, `-OpencodeModel`: model per agent CLI;
+- `-Output`: artifact directory; defaults to a timestamped directory under
+  `evals/install/artifacts/`;
+- `-SkipBuild`: reuse the current image. The image embeds the evaluator and
+  verifier, so skip the build only when `evals/` is unchanged;
+- `-DryRun`: print the expanded plan without starting a container;
+- `-TimeoutSeconds`: per-job timeout.
+
+For each agent the script prefers an environment credential and falls back to
+the documented Codex or OpenCode file login. It stops before spending model
+budget when an agent has neither.
+
 Live-model runs consume network, time, and API budget. Keep deterministic
 `pytest` checks as normal PR gates. Run a small model smoke set manually or in a
 protected scheduled job; use repetitions and pass rate before judging guide

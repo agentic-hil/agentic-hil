@@ -21,6 +21,7 @@ from typing import Any
 
 from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
+from .report import report_results
 from .source import create_source_snapshot, source_digest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -904,6 +905,10 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--output", required=True)
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.set_defaults(function=run_matrix)
+
+    report_parser = subparsers.add_parser("report", help="summarise a finished evaluation output directory")
+    report_parser.add_argument("--output", required=True)
+    report_parser.set_defaults(function=report_results)
     return root
 
 

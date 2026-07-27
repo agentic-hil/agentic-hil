@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from evals.install import scrub_credentials
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_matrix
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
+from evals.install.report import format_report, load_results, report_results
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -263,6 +265,59 @@ def test_source_digest_ignores_generated_directories(tmp_path: Path) -> None:
 
     (tmp_path / "source.py").write_text("two\n", encoding="utf-8")
     assert source_digest(tmp_path) != first
+
+
+def _write_result(directory: Path, identifier: str, status: str, checks: list[dict]) -> None:
+    run_directory = directory / identifier
+    run_directory.mkdir(parents=True)
+    (run_directory / "result.json").write_text(
+        json.dumps(
+            {
+                "id": identifier,
+                "status": status,
+                "agent": {"cli": "codex", "model": "test-model"},
+                "case": {"id": "quickstart"},
+                "checks": checks,
+                "duration_seconds": 12.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_report_names_every_failed_check_and_the_transcript(tmp_path: Path) -> None:
+    _write_result(tmp_path, "quickstart-a", "passed", [{"name": "installed", "ok": True}])
+    _write_result(
+        tmp_path,
+        "quickstart-b",
+        "failed",
+        [
+            {"name": "installed", "ok": True},
+            {"name": "MCP initialize", "ok": False, "detail": "server closed stdout"},
+        ],
+    )
+
+    results = load_results(tmp_path)
+    report = format_report(results, tmp_path)
+
+    assert "Pass rate: 1/2" in report
+    assert "failed check: MCP initialize :: server closed stdout" in report
+    assert str(tmp_path / "quickstart-b" / "agent.log") in report
+    # A passing run needs no triage pointer.
+    assert str(tmp_path / "quickstart-a" / "agent.log") not in report
+
+
+def test_report_exit_code_reflects_independent_verification(tmp_path: Path) -> None:
+    _write_result(tmp_path, "quickstart-a", "passed", [{"name": "installed", "ok": True}])
+    assert report_results(argparse.Namespace(output=str(tmp_path))) == 0
+
+    _write_result(tmp_path, "quickstart-b", "failed", [{"name": "installed", "ok": False}])
+    assert report_results(argparse.Namespace(output=str(tmp_path))) == 1
+
+
+def test_report_refuses_a_directory_without_results(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no run results"):
+        load_results(tmp_path)
 
 
 @pytest.mark.parametrize("fixture", ["preserve-user-config", "unsafe-existing-config"])

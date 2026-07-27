@@ -15,6 +15,7 @@ WINDOWS_ONLY = pytest.mark.skipif(
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "setup-environment-windows.ps1"
 DOCKER_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "install-docker-windows.ps1"
+LOOP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "run-install-eval-windows.ps1"
 
 
 def _windows_powershell() -> Path:
@@ -71,11 +72,12 @@ def _copy_setup_fixture(tmp_path: Path) -> tuple[Path, Path]:
 @WINDOWS_ONLY
 def test_windows_install_eval_scripts_parse_in_windows_powershell() -> None:
     escaped_paths = [
-        str(path).replace("'", "''") for path in (SETUP_SCRIPT, DOCKER_SCRIPT)
+        str(path).replace("'", "''") for path in (SETUP_SCRIPT, DOCKER_SCRIPT, LOOP_SCRIPT)
     ]
+    quoted = ",".join(f"'{path}'" for path in escaped_paths)
     command = (
         "$failed=$false; "
-        f"foreach($path in @('{escaped_paths[0]}','{escaped_paths[1]}')) {{ "
+        f"foreach($path in @({quoted})) {{ "
         "$tokens=$null; $errors=$null; "
         "[void][System.Management.Automation.Language.Parser]::ParseFile("
         "$path,[ref]$tokens,[ref]$errors); "
