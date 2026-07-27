@@ -241,8 +241,11 @@ Default cases:
 - `preserve-user-config`: unrelated agent configuration must survive merge;
 - `unsafe-existing-config`: unmanaged conflicting MCP entry must cause safe,
   byte-preserving stop without partial setup state;
-- `firmware-routing`: after setup, a plain hardware question must be answered
-  through an Agentic HIL tool. The container shadows `openocd`, `pyocd`, `gdb`,
+- `firmware-routing`: a plain hardware question, asked in a **second agent
+  session**, must be answered through an Agentic HIL tool. The second session
+  matters: an agent CLI discovers skills when it starts, so the session that
+  installs the skill can never be the one measured for following it. The
+  container shadows `openocd`, `pyocd`, `gdb`,
   `screen`, `minicom`, `candump`, and their neighbours with the PATH guard, so
   reaching for one is recorded and fails the run. Dispatching a tool writes
   report state under the configured state root, which installing, setting up,

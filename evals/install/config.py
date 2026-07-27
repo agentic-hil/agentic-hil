@@ -50,6 +50,9 @@ class Case:
     # Whether the case additionally requires evidence that a hardware request
     # was answered through an Agentic HIL tool rather than a raw command.
     requires_tool_use: bool = False
+    # Asked in a second agent session, which is the first one that can have
+    # discovered the skill installed by the first.
+    followup_prompt: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,8 +90,8 @@ def _object(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
-def _string(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _string(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or not (value.strip() or allow_empty):
         raise ValueError(f"{label} must be a non-empty string")
     return value.strip()
 
@@ -126,6 +129,7 @@ def load_case(path: Path) -> Case:
         fixture=_string(raw.get("fixture", "clean"), "case.fixture"),
         expected_outcome=_string(raw.get("expected_outcome", "success"), "case.expected_outcome"),
         requires_tool_use=_boolean(raw.get("requires_tool_use", False), "case.requires_tool_use"),
+        followup_prompt=_string(raw.get("followup_prompt", ""), "case.followup_prompt", allow_empty=True),
     )
 
 

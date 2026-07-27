@@ -148,7 +148,29 @@ def main(argv: list[str] | None = None) -> int:
         command = build_agent_command(adapter.id, job["model"], prompt)
         completed = subprocess.run(command, cwd=WORKSPACE, env=environment, check=False)
         print(json.dumps({"event": "eval_agent_exit", "exit_code": completed.returncode}), flush=True)
-        return completed.returncode
+        if completed.returncode != 0:
+            return completed.returncode
+
+        # An agent CLI discovers skills when it starts, so the skill installed
+        # during the session above is only in context for a fresh session.
+        followup_template = job["case"].get("followup_prompt")
+        if not followup_template:
+            return completed.returncode
+        followup = followup_template.format(
+            workspace=WORKSPACE,
+            guide=guide,
+            install_spec=install_spec,
+            agent=adapter.id,
+        )
+        print(json.dumps({"event": "eval_followup_start"}), flush=True)
+        second = subprocess.run(
+            build_agent_command(adapter.id, job["model"], followup),
+            cwd=WORKSPACE,
+            env=environment,
+            check=False,
+        )
+        print(json.dumps({"event": "eval_followup_exit", "exit_code": second.returncode}), flush=True)
+        return second.returncode
     finally:
         scrub(credential_kinds)
 

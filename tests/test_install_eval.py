@@ -336,6 +336,17 @@ def _write_result(directory: Path, identifier: str, status: str, checks: list[di
     )
 
 
+def test_tool_evidence_is_asked_for_in_a_second_session() -> None:
+    case = load_case(REPOSITORY_ROOT / "evals" / "install" / "cases" / "firmware-routing.json")
+
+    # An agent CLI discovers skills at startup, so the session that installs the
+    # skill cannot be the one measured for following it.
+    assert case.requires_tool_use
+    assert case.followup_prompt
+    assert "hardware" in case.followup_prompt
+    assert "Install Agentic HIL" not in case.followup_prompt
+
+
 def test_only_the_routing_case_demands_tool_evidence() -> None:
     cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
     demanding = {
