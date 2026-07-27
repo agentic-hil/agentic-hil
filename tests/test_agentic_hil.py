@@ -85,6 +85,8 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     monkeypatch.chdir(workspace)
     home = Path.home()
     command = _trusted_test_mcp_command(monkeypatch)
+    config_path = project_config_path(workspace)
+    assert not config_path.exists(), "setup must bootstrap before any project config exists"
 
     real_which = shutil.which
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None if name == "claude" else real_which(name))
@@ -102,7 +104,7 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert "agentic-hil" in claude_json["mcpServers"]
     assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
     assert (home / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md").is_file()
-    assert project_config_path(workspace).is_file()
+    assert config_path.is_file()
 
 
 def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
@@ -1205,6 +1207,19 @@ def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
             assert result.get("error_type") != "unknown_tool", f"{name} is advertised but not dispatched"
     finally:
         service.close()
+
+
+def test_setup_is_cli_only_and_cannot_be_called_over_mcp(tmp_path: Path) -> None:
+    assert "setup" not in MCP_TOOL_NAMES
+    config = load_config(str(write_config(tmp_path)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "setup")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unknown_tool"
 
 
 def test_mcp_initialize_rejects_unsupported_protocol_version(tmp_path: Path) -> None:
