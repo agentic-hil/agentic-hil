@@ -936,12 +936,22 @@ def secure_remove_file(file_path: str | Path) -> None:
         os.close(parent_descriptor)
 
 
+def user_file_lock_path(file_path: str | Path) -> Path:
+    """The sidecar a locked transaction leaves beside its file.
+
+    It outlives the transaction, so anything that cleans up a directory this
+    tool wrote has to know the name.
+    """
+    path = Path(file_path)
+    return path.with_name(f".{path.name}.agentic-hil.lock")
+
+
 @contextmanager
 def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
     """Cross-process sidecar lock for a trusted user-file transaction."""
     path = absolute_without_symlinks(Path(file_path))
     secure_user_directory(path.parent)
-    lock_path = path.with_name(f".{path.name}.agentic-hil.lock")
+    lock_path = user_file_lock_path(path)
     secure_optional_read_text(lock_path)
     with safe_file_lock(lock_path):
         # Validate the object created/opened by safe_file_lock before trusting the

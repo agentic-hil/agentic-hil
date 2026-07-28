@@ -34,6 +34,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     tighten_owned_writable_ancestors,
     trusted_persistent_executable,
+    user_file_lock_path,
     user_state_root,
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
@@ -1050,24 +1051,39 @@ def is_agentic_hil_setup_skill(text: str, name: str = SKILL_NAME) -> bool:
 
 
 def legacy_skill_paths(target_path: Path) -> list[Path]:
-    """Where an earlier release of this skill would sit beside the new one."""
+    """Where an earlier release of this skill would sit beside the new one.
+
+    Only paths that are there now. Snapshotting or probing an absent one would
+    create its directory chain and make whatever occupies that name a
+    precondition of installing under the current one.
+    """
     if not (target_path.name == SKILL_FILE and target_path.parent.name == SKILL_NAME):
         return []
-    return [target_path.parent.parent / name / SKILL_FILE for name in LEGACY_SKILL_NAMES]
+    candidates = (target_path.parent.parent / name / SKILL_FILE for name in LEGACY_SKILL_NAMES)
+    return [path for path in candidates if path.is_file()]
 
 
 def remove_legacy_skills(target_path: Path) -> list[str]:
     """Delete skills this project installed under an earlier name.
 
     Only a file carrying that name's managed frontmatter is removed, so a
-    directory the user owns is never touched. The empty directory goes too.
+    directory the user owns is never touched. The directory goes with it, along
+    with the lock sidecar an earlier release left beside the skill.
     """
     removed = []
     for path in legacy_skill_paths(target_path):
+        # Plain stat first: reading through the validated path would create the
+        # directory chain, which would plant the very directory being removed.
+        if not path.is_file():
+            continue
         text = secure_optional_read_text(path)
         if text is None or not is_agentic_hil_setup_skill(text, path.parent.name):
             continue
         path.unlink()
+        with suppress(OSError):
+            # An earlier release locked this file and the sidecar outlives the
+            # transaction, so without it the directory can never be empty.
+            user_file_lock_path(path).unlink()
         with suppress(OSError):
             path.parent.rmdir()
         removed.append(str(path))

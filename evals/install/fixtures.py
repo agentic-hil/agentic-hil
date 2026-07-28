@@ -7,6 +7,11 @@ SENTINEL_KEY = "agentic_hil_eval_sentinel"
 SENTINEL_VALUE = "operator-owned-do-not-change"
 
 SKILL_NAME = "agentic-hil"
+# Codex has no skills mechanism of its own, so setup writes the routing rules
+# into AGENTS.md between these markers. A control arm that removed only the
+# skill directory would leave those rules in place and measure nothing.
+REGISTRATION_START = "<!-- Agentic HIL skill registration start -->"
+REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
 # The name an earlier release installed this skill under. Setup has to remove
 # it, or the agent is offered two skills for the same job.
 LEGACY_SKILL_NAME = "agentic-hil-config-setup"
@@ -81,6 +86,25 @@ def prepare_workspace_fixture(name: str, workspace: Path) -> list[str]:
     (build / "app.elf").write_bytes(b"\x7fELF\x01\x01\x01\x00" + bytes(56))
     written.append("build/app.elf")
     return written
+
+
+def registration_path(agent: str, home: Path) -> Path:
+    """Where setup writes the routing rules for an agent without skills."""
+    return skills_directory(agent, home).parent / "AGENTS.md"
+
+
+def remove_registration_block(path: Path) -> bool:
+    """Strip the marked routing block, leaving everything the operator wrote."""
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    start = text.find(REGISTRATION_START)
+    end = text.find(REGISTRATION_END)
+    if start == -1 or end == -1 or end < start:
+        return False
+    remainder = text[:start] + text[end + len(REGISTRATION_END) :].lstrip("\n")
+    path.write_text(remainder, encoding="utf-8")
+    return True
 
 
 def skills_directory(agent: str, home: Path) -> Path:

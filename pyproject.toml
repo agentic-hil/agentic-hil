@@ -79,6 +79,10 @@ agentic_hil = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The evaluation harness under evals/ is not a package that gets installed, so
+# the repository root has to be importable. "python -m pytest" adds it, a bare
+# "pytest" does not, which is how CI collected zero evaluation tests.
+pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "--strict-markers"
 

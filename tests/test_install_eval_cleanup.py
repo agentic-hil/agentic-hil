@@ -14,7 +14,7 @@ def _source_tree(root: Path) -> Path:
     package = root / "src" / "agentic_hil"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
-    contract = root / "harness" / "guest" / "tools.list.expected"
+    contract = root / "evals" / "install" / "tools.list.expected"
     contract.parent.mkdir(parents=True)
     contract.write_text("probe_target\n", encoding="utf-8")
     return root

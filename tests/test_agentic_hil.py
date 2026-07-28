@@ -19,6 +19,7 @@ from conftest import (
     write_config,
 )
 
+from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
@@ -45,6 +46,7 @@ from agentic_hil.config import (
     project_config_path,
     tighten_owned_writable_ancestors,
     trusted_persistent_executable,
+    user_file_lock_path,
     user_state_root,
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
@@ -522,7 +524,9 @@ def test_skill_frontmatter_survives_a_windows_checkout() -> None:
     crlf = _packaged_skill_text().replace("\n", "\r\n")
 
     assert is_agentic_hil_setup_skill(crlf)
-    assert skill_version(crlf) == skill_version(_packaged_skill_text())
+    # Against the package version, not against the same function's own output:
+    # comparing two computed values passes when both are None.
+    assert skill_version(crlf) == __version__
 
 
 def test_plugin_skill_carries_the_packaged_guidance() -> None:
@@ -561,7 +565,7 @@ def test_gateway_tool_descriptions_name_what_they_replace() -> None:
 
 
 def test_skill_only_names_tools_the_server_exposes() -> None:
-    contract = Path(__file__).resolve().parents[1] / "harness" / "guest" / "tools.list.expected"
+    contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
     # Underscored identifiers in backticks are tool names; these two are not.
     not_a_tool = {"agentic_hil", "permission_denied"}
@@ -1291,6 +1295,40 @@ def test_skill_install_removes_the_name_it_superseded() -> None:
     assert not legacy.parent.exists()
     assert result["legacy_skills_removed"] == [str(legacy)]
     assert (Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
+
+
+def test_skill_install_removes_the_lock_an_earlier_release_left_behind() -> None:
+    # The previous release locked its skill, and the sidecar outlives the
+    # transaction, so without removing it the directory can never be empty.
+    legacy = _legacy_skill("agentic-hil-config-setup", managed=True)
+    sidecar = user_file_lock_path(legacy)
+    sidecar.write_bytes(b"")
+
+    install_skill("claude-code")
+
+    assert not sidecar.exists()
+    assert not legacy.parent.exists()
+
+
+def test_skill_install_does_not_plant_the_directory_it_removes() -> None:
+    # Probing through the validated read would create the directory chain, so a
+    # machine that never had the old release would end up with it anyway.
+    install_skill("claude-code")
+
+    assert not (Path.home() / ".claude" / "skills" / "agentic-hil-config-setup").exists()
+
+
+def test_skill_install_ignores_a_foreign_directory_at_the_old_name() -> None:
+    # Whatever occupies the superseded name must not become a precondition of
+    # installing under the current one.
+    stranger = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup"
+    stranger.mkdir(parents=True)
+    (stranger / "notes.txt").write_bytes(b"someone else's file\n")
+
+    result = install_skill("claude-code")
+
+    assert result["ok"] is True
+    assert (stranger / "notes.txt").read_bytes() == b"someone else's file\n"
 
 
 def test_skill_install_keeps_a_foreign_skill_that_uses_an_old_name() -> None:

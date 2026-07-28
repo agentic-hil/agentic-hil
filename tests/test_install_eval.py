@@ -502,11 +502,40 @@ def test_routing_reads_a_command_the_way_a_shell_would() -> None:
 
 def test_routing_lets_the_guard_overrule_the_transcript() -> None:
     # The transcript shows what the agent typed; the PATH guard records what was
-    # executed. Where they disagree, the container's evidence decides.
+    # executed. Where they disagree, the container's evidence decides — in both
+    # directions, and absent evidence decides nothing.
     typed = {"followup": True, "raw_commands": ["openocd"], "mcp_calls": 1, "cli_calls": 0, "config_reads": 0}
+    silent = {**typed, "raw_commands": []}
 
     assert route_of({**typed, "guard_triggered": False}) == "mcp"
     assert route_of({**typed, "guard_triggered": True}) == "raw"
+    assert route_of({**typed, "guard_triggered": None}) == "raw"
+    # A command the guard recorded but the transcript never spelled out.
+    assert route_of({**silent, "guard_triggered": True}) == "raw"
+    assert route_of({**silent, "guard_triggered": None}) == "mcp"
+
+
+def test_guard_verdict_is_read_from_the_verification_result() -> None:
+    from evals.install.routing import GUARD_CHECK, guard_triggered
+
+    fired = {"checks": [{"name": GUARD_CHECK, "ok": False, "detail": "openocd"}]}
+    silent = {"checks": [{"name": GUARD_CHECK, "ok": True, "detail": "none"}]}
+
+    assert guard_triggered(fired) is True
+    assert guard_triggered(silent) is False
+    # An older result carries no such check. Missing evidence is not evidence.
+    assert guard_triggered({"checks": [{"name": "something else", "ok": True, "detail": ""}]}) is None
+    assert guard_triggered({}) is None
+
+
+def test_routing_sees_a_command_on_a_later_line() -> None:
+    # shlex treats a newline as whitespace, so without splitting lines first a
+    # script's second command is folded into the first one's arguments.
+    classified = classify(
+        [_claude_line("Bash", {"command": "cd /workspace/project\nopenocd -f openocd.cfg\n"})]
+    )
+
+    assert classified["raw_commands"] == ["openocd"]
 
 
 def test_routing_separates_the_cli_and_raw_paths() -> None:
@@ -590,6 +619,29 @@ def test_routing_gate_covers_the_treatment_arm_only() -> None:
     # A control run that skips MCP is the measurement, not a regression.
     assert routing_results(args, analysed) == 0
     assert routing_results(args, [entry("firmware-routing", 0)]) == 1
+
+
+def test_the_control_arm_removes_every_copy_of_the_rules(tmp_path: Path) -> None:
+    from evals.install.fixtures import REGISTRATION_START, registration_path, remove_registration_block
+
+    # Codex has no skills directory: setup writes the same routing rules into
+    # AGENTS.md, so removing only the skill would leave the control arm with
+    # them under another name.
+    agents = registration_path("codex", tmp_path)
+    agents.parent.mkdir(parents=True)
+    agents.write_text(
+        f"# Operator notes\n\nKeep me.\n\n{REGISTRATION_START}\n"
+        "- Do not invoke a debugger directly.\n"
+        "<!-- Agentic HIL skill registration end -->\n",
+        encoding="utf-8",
+    )
+
+    assert remove_registration_block(agents) is True
+    remaining = agents.read_text(encoding="utf-8")
+    assert "Keep me." in remaining
+    assert "debugger" not in remaining
+    # Nothing to remove is not a failure, it is the shape every other agent has.
+    assert remove_registration_block(registration_path("claude-code", tmp_path)) is False
 
 
 def test_the_tempting_workspace_really_offers_the_way_around(tmp_path: Path) -> None:

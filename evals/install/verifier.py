@@ -27,10 +27,12 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 from .fixtures import (
     LEGACY_SKILL_NAME,
+    REGISTRATION_START,
     SENTINEL_VALUE,
     SKILL_NAME,
     agent_config_path,
     fixture_content,
+    registration_path,
     sentinel_value,
 )
 from .source import (
@@ -425,6 +427,20 @@ def legacy_skill_paths(agent: str) -> list[Path]:
     return [skills_root(agent) / name / "SKILL.md" for name in LEGACY_SKILL_NAMES]
 
 
+def no_skill_rules_left(agent: str) -> tuple[bool, str]:
+    """Whether the control arm really ran without any copy of the skill's rules."""
+    left = []
+    installed = skill_path(agent)
+    if installed.exists():
+        left.append(str(installed))
+    registration = registration_path(agent, HOME)
+    if registration.is_file() and REGISTRATION_START in registration.read_text(encoding="utf-8"):
+        left.append(f"{registration} still carries the registration block")
+    if left:
+        return False, "still present: " + ", ".join(left)
+    return True, f"{installed} is absent and no registration block remains"
+
+
 def no_superseded_skill(agent: str) -> tuple[bool, str]:
     """Whether setup left an earlier name of this skill behind.
 
@@ -476,8 +492,11 @@ def skill_registered(agent: str, installed_skill: Path) -> tuple[bool, str]:
         return False, detail
     if not agents_md.is_file():
         return False, f"missing Codex skill registration: {agents_md}"
-    registered = installed_skill.parent.name in agents_md.read_text(encoding="utf-8")
-    return registered, f"{agents_md} references the skill: {registered}"
+    # The full path, not the directory name: "agentic-hil" appears in that file
+    # for the MCP server and the CLI too, so a name match proves nothing about
+    # which skill was registered.
+    registered = str(installed_skill) in agents_md.read_text(encoding="utf-8")
+    return registered, f"{agents_md} references {installed_skill}: {registered}"
 
 
 def registration(agent: str) -> tuple[str, list[str], dict[str, Any]]:
@@ -948,14 +967,10 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 )
         if case.get("remove_skill_before_followup"):
             # The control arm measures the tools without the skill, so the run is
-            # only valid if the skill really was gone when the question was asked.
-            add(
-                "skill uninstalled before the measured session",
-                lambda: (
-                    not installed_skill.exists(),
-                    f"{installed_skill} is absent" if not installed_skill.exists() else f"{installed_skill} still installed",
-                ),
-            )
+            # only valid if every copy of the skill's rules was gone when the
+            # question was asked — including the block setup writes into
+            # AGENTS.md for an agent that has no skills directory.
+            add("skill uninstalled before the measured session", lambda: no_skill_rules_left(agent))
         else:
             try:
                 skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)

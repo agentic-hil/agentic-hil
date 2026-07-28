@@ -4,8 +4,8 @@ This evaluator measures whether a selected **agent CLI and model** can follow
 the Agentic HIL installation guide in a clean environment. Agent CLI and model
 are independent matrix axes.
 
-It is a stochastic evaluation, not a replacement for unit tests or the
-deterministic hardware harness.
+It is a stochastic evaluation, not a replacement for unit tests or for a
+deterministic hardware run against a real board (see [`../hil`](../hil)).
 
 ## Trust boundary
 
@@ -316,7 +316,7 @@ Mutable branches are rejected. The guide URL is derived from the same full
 commit. If `guide_url` is present for readability, it must exactly equal the
 official commit-pinned raw URL. Remote evaluation also requires
 `--source-root` at that commit with clean `pyproject.toml` and
-`src/agentic_hil`, plus clean `harness/guest/tools.list.expected`, so the host
+`src/agentic_hil`, plus clean `evals/install/tools.list.expected`, so the host
 can produce trusted package and target-specific MCP contract evidence.
 
 ## Inspect plan

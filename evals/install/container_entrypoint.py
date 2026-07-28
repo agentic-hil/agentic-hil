@@ -9,7 +9,14 @@ import subprocess
 from pathlib import Path
 
 from .adapters import adapter_for, build_agent_command
-from .fixtures import SKILL_NAME, prepare_fixture, prepare_workspace_fixture, skills_directory
+from .fixtures import (
+    SKILL_NAME,
+    prepare_fixture,
+    prepare_workspace_fixture,
+    registration_path,
+    remove_registration_block,
+    skills_directory,
+)
 from .refresh_login import export as export_refreshed
 from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
@@ -173,7 +180,21 @@ def main(argv: list[str] | None = None) -> int:
             # registration setup wrote, so the follow-up measures the tools alone.
             skill = skills_directory(adapter.id, HOME) / SKILL_NAME
             shutil.rmtree(skill)
-            print(json.dumps({"event": "eval_skill_removed", "path": str(skill)}), flush=True)
+            # Codex reads its rules from AGENTS.md, not from a skills directory.
+            # Leaving that block would hand the control arm the skill's routing
+            # rules under another name.
+            registration = registration_path(adapter.id, HOME)
+            unregistered = remove_registration_block(registration)
+            print(
+                json.dumps(
+                    {
+                        "event": "eval_skill_removed",
+                        "path": str(skill),
+                        "registration_block_removed": unregistered,
+                    }
+                ),
+                flush=True,
+            )
 
         print(json.dumps({"event": "eval_followup_start"}), flush=True)
         # The follow-up must see what setup registered, so it drops the

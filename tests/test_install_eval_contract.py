@@ -83,7 +83,7 @@ def test_target_mcp_contract_rejects_digest_mismatch() -> None:
 
 
 def test_source_mcp_contract_must_be_sorted_and_unique(tmp_path: Path) -> None:
-    contract = tmp_path / "harness" / "guest" / "tools.list.expected"
+    contract = tmp_path / "evals" / "install" / "tools.list.expected"
     contract.parent.mkdir(parents=True)
     contract.write_text("z_tool\na_tool\nz_tool\n", encoding="utf-8")
 
@@ -96,7 +96,7 @@ def test_eval_image_does_not_embed_current_checkout_tool_contract() -> None:
         encoding="utf-8"
     )
 
-    assert "COPY harness/guest/tools.list.expected" not in dockerfile
+    assert "COPY evals/install/tools.list.expected" not in dockerfile
 
 
 def test_eval_image_allocates_an_unused_non_root_uid() -> None:

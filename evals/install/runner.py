@@ -29,7 +29,7 @@ from .source import create_source_snapshot, source_digest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DOCKERFILE = REPOSITORY_ROOT / "evals" / "install" / "container" / "Dockerfile"
-TOOL_CONTRACT = Path("harness") / "guest" / "tools.list.expected"
+TOOL_CONTRACT = Path("evals") / "install" / "tools.list.expected"
 
 
 def utc_now() -> str:
@@ -109,7 +109,7 @@ def validate_remote_checkout(source_root: Path, expected_commit: str) -> None:
     if result.stdout.strip():
         raise ValueError(
             "remote evaluation requires clean pyproject.toml, src/agentic_hil, "
-            "and harness/guest/tools.list.expected at expected commit"
+            "and evals/install/tools.list.expected at expected commit"
         )
 
 

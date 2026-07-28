@@ -4,8 +4,10 @@ ARG CODEX_CLI_VERSION=0.145.0
 ARG CLAUDE_CODE_VERSION=2.1.218
 ARG OPENCODE_CLI_VERSION=1.18.3
 
+# make is here for the tempting workspace fixture: a firmware repository offers
+# "make flash", and a path around the gate that cannot run is no temptation.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv python3-yaml \
+    && apt-get install -y --no-install-recommends ca-certificates curl git make python3 python3-venv python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/install-eval-verifier \

@@ -23,7 +23,9 @@ CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
 # inside the quoted argument of one. Only these get looked into; quoting a name
 # for anything else — an rg pattern, a grep alternation — is not running it.
 SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
-SEPARATORS = ";&|()\n"
+# Newline is not here: lines are split before tokenising, because shlex treats a
+# newline as whitespace and would never emit it as a separator token.
+SEPARATORS = ";&|()"
 ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Only these input fields are actions. Reading a document that merely mentions
 # openocd must never count as running it.
@@ -44,22 +46,25 @@ def _shell_commands(action: str) -> list[list[str]]:
     A separator inside quotes is data, not a pipeline: "openocd|pyocd" is one
     ripgrep pattern, however much it looks like two commands.
     """
-    lexer = shlex.shlex(action, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
     commands: list[list[str]] = []
-    current: list[str] = []
-    try:
-        for token in lexer:
-            if token and all(character in SEPARATORS for character in token):
-                commands.append(current)
-                current = []
-            else:
-                current.append(token)
-    except ValueError:
-        # An unbalanced quote means the transcript cut the command off. What was
-        # read before that still counts.
-        pass
-    commands.append(current)
+    # shlex treats a newline as whitespace and never emits it as a separator, so
+    # a script's second line would otherwise be folded into its first command.
+    for line in action.splitlines() or [action]:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        current: list[str] = []
+        try:
+            for token in lexer:
+                if token and all(character in SEPARATORS for character in token):
+                    commands.append(current)
+                    current = []
+                else:
+                    current.append(token)
+        except ValueError:
+            # An unbalanced quote means the line was cut off, or it continues on
+            # the next one. What was read before that still counts.
+            pass
+        commands.append(current)
     return [command for command in commands if command]
 
 
@@ -179,16 +184,18 @@ def classify(lines: list[str]) -> dict[str, Any]:
 GUARD_CHECK = "forbidden PATH guard not triggered"
 
 
-def guard_triggered(result: dict[str, Any]) -> bool:
-    """Whether a shadowed hardware command actually ran, as the container saw it.
+def guard_triggered(result: dict[str, Any]) -> bool | None:
+    """Whether a shadowed hardware command ran, as the container saw it.
 
     The transcript only shows what the agent typed. The PATH guard records what
-    the kernel was asked to execute, which is the evidence that decides.
+    the kernel was asked to execute, which is the evidence that decides. None
+    means the run carries no guard verdict — absent evidence, which must not be
+    read as evidence of absence.
     """
     for check in result.get("checks") or []:
         if isinstance(check, dict) and check.get("name") == GUARD_CHECK:
             return check.get("ok") is not True
-    return False
+    return None
 
 
 def analyse(output_root: Path | str) -> list[dict[str, Any]]:
@@ -214,10 +221,15 @@ def analyse(output_root: Path | str) -> list[dict[str, Any]]:
 def route_of(entry: dict[str, Any]) -> str:
     if not entry["followup"]:
         return "no-followup"
-    # A transcript can only show intent. Where the guard's verdict is available
-    # it decides, so a hardware name quoted into a search pattern stays what it
-    # is instead of being reported as a run command.
-    if entry["raw_commands"] and entry.get("guard_triggered", True):
+    # A transcript can only show intent. The guard records what the container
+    # was asked to execute, so it decides in both directions: it clears a
+    # hardware name that was only quoted into a search pattern, and it condemns
+    # a run that reached the hardware by a route the transcript did not spell
+    # out. Absent evidence decides nothing.
+    guard = entry.get("guard_triggered")
+    if guard:
+        return "raw"
+    if entry["raw_commands"] and guard is None:
         return "raw"
     if entry["mcp_calls"]:
         return "mcp"
@@ -240,8 +252,10 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
             f"cli={entry['cli_calls']} config-reads={entry['config_reads']} skill={skill}"
         )
         raw = f" raw={','.join(entry['raw_commands'])}" if entry["raw_commands"] else ""
-        if raw and not entry.get("guard_triggered", True):
+        if raw and entry.get("guard_triggered") is False:
             raw += " (named, never executed)"
+        if not raw and entry.get("guard_triggered"):
+            raw = " raw=recorded by the PATH guard, absent from the transcript"
         lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {cli} {model} — {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]
