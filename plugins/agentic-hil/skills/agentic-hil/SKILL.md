@@ -41,10 +41,15 @@ you what the hardware is doing, so it does not answer the question. Call the
 tool that matches the question — `probe_target`, `debugger_probes_list`,
 `com_ports_list`, `get_last_report` — and report what it returns.
 
-A refusal is an answer. When the authoritative configuration denies an action
-the tool returns `permission_denied`. Report that refusal as the result, name
-the permission that is denied, and ask the user before changing it. Never work
-around it with a raw command, with the configuration file, or with the CLI.
+A refusal is an answer, and it is not the end of the job. When the authoritative
+configuration denies an action the tool returns `permission_denied`. Do not stop
+there: finish through the gate. `get_last_report` and `classify_last_error` say
+what the attempt recorded and why it failed, and `debugger_info` or
+`probe_target` say whether the hardware would have been reachable at all.
+
+Report those findings together with the refusal, name the permission that is
+denied, and ask the user before changing it. Never work around it with a raw
+command, with the configuration file, or with the CLI.
 
 ## Reach the tools through the MCP server
 
