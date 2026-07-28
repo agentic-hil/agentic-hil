@@ -1,0 +1,6 @@
+# The packaged skill is compared byte for byte by the installer and by the
+# installation evaluation, and its frontmatter is matched line by line, so
+# everything checks out with the same line endings on every platform.
+* text=auto eol=lf
+*.png binary
+*.ico binary

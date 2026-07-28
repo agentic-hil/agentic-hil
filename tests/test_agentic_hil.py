@@ -30,10 +30,12 @@ from agentic_hil.cli import (
     init_config,
     initialized_config_path,
     install_skill,
+    is_agentic_hil_setup_skill,
     mcp_config,
     register_agent_mcp,
     schema,
     setup_project,
+    skill_version,
     test_schema,
 )
 from agentic_hil.comports import ComPortService
@@ -511,6 +513,16 @@ def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     # The skill is worthless if it does not name what it replaces.
     for raw in ("openocd", "gdb", "minicom", "candump"):
         assert raw in text, raw
+
+
+def test_skill_frontmatter_survives_a_windows_checkout() -> None:
+    # git converts the packaged skill to CRLF on Windows unless .gitattributes
+    # pins it; refusing to recognise it there would report this project's own
+    # skill as a foreign one and stop setup.
+    crlf = _packaged_skill_text().replace("\n", "\r\n")
+
+    assert is_agentic_hil_setup_skill(crlf)
+    assert skill_version(crlf) == skill_version(_packaged_skill_text())
 
 
 def test_plugin_skill_carries_the_packaged_guidance() -> None:

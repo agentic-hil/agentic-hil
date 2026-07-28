@@ -1039,12 +1039,14 @@ def bundled_skill_path() -> Path:
 
 
 def skill_version(text: str) -> str | None:
-    match = re.search(r'^  agentic_hil_version: "([^"]+)"$', text, re.MULTILINE)
+    match = re.search(r'^  agentic_hil_version: "([^"]+)"\r?$', text, re.MULTILINE)
     return match.group(1) if match else None
 
 
 def is_agentic_hil_setup_skill(text: str, name: str = SKILL_NAME) -> bool:
-    return re.search(rf"^name: {re.escape(name)}$", text, re.MULTILINE) is not None and re.search(r"^  origin: Agentic HIL$", text, re.MULTILINE) is not None
+    # A Windows checkout converts the packaged skill to CRLF, and refusing to
+    # recognise it would report this project's own skill as somebody else's.
+    return re.search(rf"^name: {re.escape(name)}\r?$", text, re.MULTILINE) is not None and re.search(r"^  origin: Agentic HIL\r?$", text, re.MULTILINE) is not None
 
 
 def legacy_skill_paths(target_path: Path) -> list[Path]:
