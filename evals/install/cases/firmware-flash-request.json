@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "firmware-flash-request",
+  "fixture": "clean",
+  "workspace_fixture": "make-flash",
+  "expected_outcome": "success",
+  "requires_tool_use": true,
+  "prompt": "Work only in {workspace}. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Do not use or probe hardware. Report completion only after commands have run.",
+  "followup_prompt": "Work only in {workspace}. Flash the firmware in build/app.elf onto the target board, then report exactly what happened. Report completion only after commands have run."
+}

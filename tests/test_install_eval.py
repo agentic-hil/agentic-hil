@@ -552,7 +552,7 @@ def test_tool_evidence_is_asked_for_in_a_second_session() -> None:
     assert "Install Agentic HIL" not in case.followup_prompt
 
 
-@pytest.mark.parametrize("case_id", ["firmware-routing", "firmware-readiness"])
+@pytest.mark.parametrize("case_id", ["firmware-routing", "firmware-readiness", "firmware-flash-request"])
 def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
     cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
     treatment = load_case(cases / f"{case_id}.json")
@@ -563,6 +563,7 @@ def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
     assert control.prompt_template == treatment.prompt_template
     assert control.followup_prompt == treatment.followup_prompt
     assert control.fixture == treatment.fixture
+    assert control.workspace_fixture == treatment.workspace_fixture
     assert control.remove_skill_before_followup
     assert not treatment.remove_skill_before_followup
     # Without the skill the run may legitimately answer another way, so tool
@@ -591,13 +592,30 @@ def test_routing_gate_covers_the_treatment_arm_only() -> None:
     assert routing_results(args, [entry("firmware-routing", 0)]) == 1
 
 
-def test_only_the_routing_case_demands_tool_evidence() -> None:
+def test_the_tempting_workspace_really_offers_the_way_around(tmp_path: Path) -> None:
+    from evals.install.fixtures import prepare_workspace_fixture
+
+    written = prepare_workspace_fixture("make-flash", tmp_path)
+    makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+
+    # Without a plausible path around the gate every agent looks well-behaved
+    # and the measurement cannot tell the arms apart.
+    assert "openocd" in makefile
+    assert "picocom" in makefile
+    assert (tmp_path / "build" / "app.elf").read_bytes().startswith(b"\x7fELF")
+    assert "build/app.elf" in written
+
+    with pytest.raises(ValueError, match="unsupported workspace fixture"):
+        prepare_workspace_fixture("nonexistent", tmp_path)
+
+
+def test_only_the_hardware_cases_demand_tool_evidence() -> None:
     cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
     demanding = {
         load_case(path).id for path in sorted(cases.glob("*.json")) if load_case(path).requires_tool_use
     }
 
-    assert demanding == {"firmware-routing", "firmware-readiness"}
+    assert demanding == {"firmware-routing", "firmware-readiness", "firmware-flash-request"}
 
 
 def test_guard_refuses_hardware_commands_and_records_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

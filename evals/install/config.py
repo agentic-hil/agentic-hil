@@ -56,6 +56,9 @@ class Case:
     # The control arm: uninstall the skill between the two sessions, so the
     # follow-up measures what the MCP tools alone achieve.
     remove_skill_before_followup: bool = False
+    # Project files the case needs in the disposable workspace, such as the make
+    # target a real firmware repository would offer.
+    workspace_fixture: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ def load_case(path: Path) -> Case:
         remove_skill_before_followup=_boolean(
             raw.get("remove_skill_before_followup", False), "case.remove_skill_before_followup"
         ),
+        workspace_fixture=_string(raw.get("workspace_fixture", ""), "case.workspace_fixture", allow_empty=True),
     )
 
 

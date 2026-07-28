@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .adapters import adapter_for, build_agent_command
-from .fixtures import SKILL_NAME, prepare_fixture, skills_directory
+from .fixtures import SKILL_NAME, prepare_fixture, prepare_workspace_fixture, skills_directory
 from .refresh_login import export as export_refreshed
 from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
@@ -37,6 +37,10 @@ def prepare_workspace(job: dict) -> tuple[str, str]:
         "# Firmware project\n\nDisposable project used only for Agentic HIL installation evaluation.\n",
         encoding="utf-8",
     )
+    fixture = job["case"].get("workspace_fixture")
+    if fixture:
+        written = prepare_workspace_fixture(fixture, WORKSPACE)
+        print(json.dumps({"event": "eval_workspace_fixture", "fixture": fixture, "files": written}), flush=True)
 
     target = job["target"]
     if target["mode"] == "local":

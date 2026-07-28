@@ -220,7 +220,9 @@ $Cases = Expand-Selection `
         "firmware-routing",
         "firmware-routing-without-skill",
         "firmware-readiness",
-        "firmware-readiness-without-skill"
+        "firmware-readiness-without-skill",
+        "firmware-flash-request",
+        "firmware-flash-request-without-skill"
     ) `
     -Label "case"
 
