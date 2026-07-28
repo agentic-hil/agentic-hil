@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .adapters import adapter_for, build_agent_command
-from .fixtures import prepare_fixture
+from .fixtures import SKILL_NAME, prepare_fixture, skills_directory
 from .refresh_login import export as export_refreshed
 from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
@@ -164,6 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             install_spec=install_spec,
             agent=adapter.id,
         )
+        if job["case"].get("remove_skill_before_followup"):
+            # The control arm. Uninstalling between the sessions leaves the MCP
+            # registration setup wrote, so the follow-up measures the tools alone.
+            skill = skills_directory(adapter.id, HOME) / SKILL_NAME
+            shutil.rmtree(skill)
+            print(json.dumps({"event": "eval_skill_removed", "path": str(skill)}), flush=True)
+
         print(json.dumps({"event": "eval_followup_start"}), flush=True)
         # The follow-up must see what setup registered, so it drops the
         # isolation that keeps the installation phase hermetic.

@@ -53,6 +53,9 @@ class Case:
     # Asked in a second agent session, which is the first one that can have
     # discovered the skill installed by the first.
     followup_prompt: str = ""
+    # The control arm: uninstall the skill between the two sessions, so the
+    # follow-up measures what the MCP tools alone achieve.
+    remove_skill_before_followup: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,9 @@ def load_case(path: Path) -> Case:
         expected_outcome=_string(raw.get("expected_outcome", "success"), "case.expected_outcome"),
         requires_tool_use=_boolean(raw.get("requires_tool_use", False), "case.requires_tool_use"),
         followup_prompt=_string(raw.get("followup_prompt", ""), "case.followup_prompt", allow_empty=True),
+        remove_skill_before_followup=_boolean(
+            raw.get("remove_skill_before_followup", False), "case.remove_skill_before_followup"
+        ),
     )
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 SENTINEL_KEY = "agentic_hil_eval_sentinel"
 SENTINEL_VALUE = "operator-owned-do-not-change"
 
+SKILL_NAME = "agentic-hil"
 # The name an earlier release installed this skill under. Setup has to remove
 # it, or the agent is offered two skills for the same job.
 LEGACY_SKILL_NAME = "agentic-hil-config-setup"

@@ -213,7 +213,7 @@ if ($MaxRepetitions -lt $Repetitions) {
 $Agents = Expand-Selection -Values $Agents -Allowed @("codex", "claude-code", "opencode") -Label "agent"
 $Cases = Expand-Selection `
     -Values $Cases `
-    -Allowed @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing") `
+    -Allowed @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing", "firmware-routing-without-skill") `
     -Label "case"
 
 if (-not $Output) {
@@ -321,7 +321,7 @@ try {
     & $virtualEnvironmentPython -m evals.install report --output $Output
     $reportExitCode = $LASTEXITCODE
 
-    if ($Cases -contains "firmware-routing") {
+    if (@($Cases | Where-Object { $_ -like "firmware-routing*" }).Count -gt 0) {
         Write-Host ""
         Write-Host "== Firmware routing"
         # Which surface answered the hardware question: the MCP server, the CLI,

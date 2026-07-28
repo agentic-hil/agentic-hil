@@ -11,12 +11,7 @@ metadata:
 Agentic HIL is this project's hardware gate. Every request that would touch the
 target board goes through its MCP tools, which enforce the authoritative
 configuration's workspace binding, permissions, and limits. A direct debugger,
-serial, or CAN invocation bypasses that gate and is never the right answer when
-an Agentic HIL tool exists for the job.
-
-Names: the Python distribution/install target, CLI command, repository URL, and
-MCP server name use `agentic-hil`. Python imports, pytest plugin names,
-fixtures, and Python examples use `agentic_hil`.
+serial, or CAN invocation bypasses that gate.
 
 ## Route firmware work to these tools
 
@@ -39,10 +34,6 @@ not open `/dev/tty*`, `COM*`, or a SocketCAN interface yourself. Reach for a raw
 command only when no Agentic HIL tool covers the request, and say plainly that
 you are stepping outside the gate.
 
-For automated regression runs the installed package registers a pytest plugin:
-the `agentic_hil` fixture drives the same tools through
-`agentic_hil.call(name, arguments)`, against the same discovered configuration.
-
 ## Answer hardware questions by calling a tool
 
 Reading the configuration file tells you what is *configured*; it never tells
@@ -51,48 +42,35 @@ tool that matches the question — `probe_target`, `debugger_probes_list`,
 `com_ports_list`, `get_last_report` — and report what it returns.
 
 A refusal is an answer. When the authoritative configuration denies an action
-the tool returns `permission_denied`; report that refusal as the result. Do not
-fall back to reading the configuration file, and do not fall back to a raw
-command.
+the tool returns `permission_denied`. Report that refusal as the result, name
+the permission that is denied, and ask the user before changing it. Never work
+around it with a raw command, with the configuration file, or with the CLI.
 
-Reach the tools through the `agentic-hil` MCP server, not through the command
-line. The MCP surface is the supported one: it is the interface `setup`
-registers, the one an operator can reason about, and the one whose calls are
-coordinated and reported as hardware actions.
+## Reach the tools through the MCP server
 
-`agentic-hil setup` registers that server in the agent's user configuration, and
-agent CLIs load MCP servers when they start. If the server is not available in
-the current session — typically the session that just installed it — say so and
-ask the user to restart the agent. Do not answer the hardware question from the
-configuration file, from a raw command, or from the `agentic-hil` CLI instead.
+Use the `agentic-hil` MCP server, not the command line. That is the interface
+`setup` registers, the one an operator can reason about, and the one whose calls
+are coordinated and reported as hardware actions. Agent CLIs load MCP servers
+when they start, so when the server is missing — typically in the session that
+just installed it — say so and ask the user to restart the agent rather than
+answering the hardware question another way.
 
-The CLI stays the right tool for installing, configuring, and diagnosing:
-`agentic-hil init`, `agentic-hil setup`, and `agentic-hil doctor` report what is
-configured and whether hardware access is permitted. None of them is a hardware
-call, and none of them answers a question about the hardware itself.
+The CLI installs, configures, and diagnoses: `agentic-hil init`, `agentic-hil
+setup`, and `agentic-hil doctor` report what is configured and whether hardware
+access is permitted. None of them is a hardware call.
 
-## Configure the bridge
+## Configuration and regression runs
 
-Agentic HIL discovers one authoritative configuration file under the current
-user's Agentic HIL projects directory; `AGENTIC_HIL_CONFIG` may provide an
-explicit absolute-path override. That file holds the workspace binding, hardware
-resources, permissions, and limits.
+One authoritative configuration file holds the workspace binding, hardware
+resources, permissions, and limits. It lives under the current user's Agentic
+HIL projects directory, never inside the repository; `AGENTIC_HIL_CONFIG` may
+give an explicit absolute-path override. `agentic-hil init` creates it and
+prints its path; ask the operator to review any permission change.
 
-From the firmware project directory:
+For automated regression runs the installed package registers a pytest plugin:
+the `agentic_hil` fixture drives the same tools through
+`agentic_hil.call(name, arguments)`, against the same discovered configuration.
 
-```bash
-agentic-hil init
-agentic-hil doctor
-```
-
-`agentic-hil init` prints the generated config path. Ask the human operator to
-review permission changes, and set `AGENTIC_HIL_CONFIG` only when an explicit
-absolute-path override is needed. Do not create a hardware configuration inside
-the repository.
-
-## When a tool refuses
-
-A `permission_denied` result means the authoritative configuration denies that
-action on purpose. Stop, tell the user which permission is denied, and ask
-before changing it. Never work around a refusal with a raw debugger command,
-direct serial access, or direct CAN access.
+Names: the Python distribution, CLI command, repository URL, and MCP server name
+use `agentic-hil`; Python imports, the pytest plugin, and fixtures use
+`agentic_hil`.

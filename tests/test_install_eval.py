@@ -17,7 +17,7 @@ from evals.install.credentials import authentication_failure, credential_health
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.refresh_login import BACKUP_SUFFIX, apply_refreshed_login
 from evals.install.report import format_report, load_results, report_results, unstable_groups
-from evals.install.routing import SKILL_NAME, classify, followup_lines, route_of
+from evals.install.routing import SKILL_NAME, classify, followup_lines, route_of, routing_results
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -524,6 +524,44 @@ def test_tool_evidence_is_asked_for_in_a_second_session() -> None:
     assert case.followup_prompt
     assert "hardware" in case.followup_prompt
     assert "Install Agentic HIL" not in case.followup_prompt
+
+
+def test_the_control_arm_differs_only_in_the_skill() -> None:
+    cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
+    treatment = load_case(cases / "firmware-routing.json")
+    control = load_case(cases / "firmware-routing-without-skill.json")
+
+    # Same prompts, same fixture: the skill is the only thing that varies, or
+    # the difference in routing cannot be attributed to it.
+    assert control.prompt_template == treatment.prompt_template
+    assert control.followup_prompt == treatment.followup_prompt
+    assert control.fixture == treatment.fixture
+    assert control.remove_skill_before_followup
+    assert not treatment.remove_skill_before_followup
+    # Without the skill the run may legitimately answer another way, so tool
+    # evidence is measured rather than required.
+    assert not control.requires_tool_use
+
+
+def test_routing_gate_covers_the_treatment_arm_only() -> None:
+    def entry(case_id: str, mcp_calls: int) -> dict:
+        return {
+            "group": (case_id, "codex", "model"),
+            "status": "passed",
+            "followup": True,
+            "mcp_calls": mcp_calls,
+            "cli_calls": 0,
+            "raw_commands": [],
+            "config_reads": 1 if not mcp_calls else 0,
+            "skill_referenced": bool(mcp_calls),
+        }
+
+    args = argparse.Namespace(output="unused")
+    analysed = [entry("firmware-routing", 2), entry("firmware-routing-without-skill", 0)]
+
+    # A control run that skips MCP is the measurement, not a regression.
+    assert routing_results(args, analysed) == 0
+    assert routing_results(args, [entry("firmware-routing", 0)]) == 1
 
 
 def test_only_the_routing_case_demands_tool_evidence() -> None:

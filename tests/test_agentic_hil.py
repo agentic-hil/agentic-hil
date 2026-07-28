@@ -513,6 +513,20 @@ def test_skill_routes_firmware_work_to_agentic_hil() -> None:
         assert raw in text, raw
 
 
+def test_plugin_skill_carries_the_packaged_guidance() -> None:
+    # A plugin install is an alternative to setup, not a lesser one: it has to
+    # deliver the same routing rules, so the bodies may not drift apart.
+    packaged = _packaged_skill_text()
+    plugin_path = Path(__file__).resolve().parents[1] / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md"
+    plugin = plugin_path.read_text(encoding="utf-8")
+    body = packaged.split("---\n", 2)[2].strip()
+
+    assert body in plugin
+    # What only the plugin can say: it registers no server command of its own.
+    assert 'uv tool install --upgrade "agentic-hil==' in plugin
+    assert "agentic-hil setup --agent claude" in plugin
+
+
 def test_gateway_tool_descriptions_name_what_they_replace() -> None:
     # A tool description is the only routing hint every session sees; a skill
     # has to be discovered and loaded first.

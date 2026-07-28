@@ -26,7 +26,9 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
 from .fixtures import (
+    LEGACY_SKILL_NAME,
     SENTINEL_VALUE,
+    SKILL_NAME,
     agent_config_path,
     fixture_content,
     sentinel_value,
@@ -404,8 +406,7 @@ def config_files() -> list[Path]:
     return sorted(root.glob("*/config.yaml")) if root.is_dir() else []
 
 
-SKILL_NAME = "agentic-hil"
-LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
+LEGACY_SKILL_NAMES = (LEGACY_SKILL_NAME,)
 
 
 def skills_root(agent: str) -> Path:
@@ -945,24 +946,35 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     "hardware request answered through an Agentic HIL tool",
                     lambda: tool_dispatch_recorded(configs[0]),
                 )
-        try:
-            skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)
-            # Comparing against the digest-matched package rejects a hand-written
-            # stub that merely carries the expected version line.
-            packaged_skill = TRUSTED_PACKAGE_ROOT / "agentic_hil" / "skills" / installed_skill.parent.name / installed_skill.name
-            skill_matches = (
-                skill_safe
-                and installed_skill.is_file()
-                and installed_skill.read_bytes() == packaged_skill.read_bytes()
+        if case.get("remove_skill_before_followup"):
+            # The control arm measures the tools without the skill, so the run is
+            # only valid if the skill really was gone when the question was asked.
+            add(
+                "skill uninstalled before the measured session",
+                lambda: (
+                    not installed_skill.exists(),
+                    f"{installed_skill} is absent" if not installed_skill.exists() else f"{installed_skill} still installed",
+                ),
             )
-            if skill_matches:
-                skill_detail = f"{installed_skill} is byte-identical to the trusted package copy"
-        except Exception as error:
-            skill_matches = False
-            skill_detail = f"{type(error).__name__}: {error}"
-        checks.append(Check("matching agent skill installed", skill_matches, skill_detail))
-        add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
-        add("superseded skill removed", lambda: no_superseded_skill(agent))
+        else:
+            try:
+                skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)
+                # Comparing against the digest-matched package rejects a hand-written
+                # stub that merely carries the expected version line.
+                packaged_skill = TRUSTED_PACKAGE_ROOT / "agentic_hil" / "skills" / installed_skill.parent.name / installed_skill.name
+                skill_matches = (
+                    skill_safe
+                    and installed_skill.is_file()
+                    and installed_skill.read_bytes() == packaged_skill.read_bytes()
+                )
+                if skill_matches:
+                    skill_detail = f"{installed_skill} is byte-identical to the trusted package copy"
+            except Exception as error:
+                skill_matches = False
+                skill_detail = f"{type(error).__name__}: {error}"
+            checks.append(Check("matching agent skill installed", skill_matches, skill_detail))
+            add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
+            add("superseded skill removed", lambda: no_superseded_skill(agent))
 
         registered_ok = False
         try:

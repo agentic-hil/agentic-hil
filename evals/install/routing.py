@@ -11,6 +11,10 @@ from .report import result_group
 
 FOLLOWUP_START = "eval_followup_start"
 SKILL_NAME = "agentic-hil"
+# The control arm of the A/B measurement: the skill is uninstalled before the
+# question is asked, so its runs report what the MCP tools achieve alone. They
+# are measured, never gated.
+CONTROL_SUFFIX = "-without-skill"
 
 CLI_CALL = re.compile(r"\bagentic-hil\s+(debugger-probes|com-ports|doctor|lease-status|test-reactor)\b")
 CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
@@ -167,17 +171,32 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
         lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {cli} {model} — {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]
-    routed = [entry for entry in measured if route_of(entry) == "mcp"]
-    lines.extend(["", f"Answered through the MCP server: {len(routed)}/{len(measured)}"])
+    gated = [entry for entry in measured if not is_control(entry)]
+    control = [entry for entry in measured if is_control(entry)]
+    lines.extend(["", f"Answered through the MCP server: {_rate(gated)} with the skill installed"])
+    if control:
+        lines.append(f"{' ' * 33}{_rate(control)} with the skill uninstalled")
+        lines.append("The difference is what the skill adds over the tool descriptions alone.")
     if not measured:
         lines.append("No run asked a follow-up question; the routing case was not part of this matrix.")
     return "\n".join(lines)
 
 
-def routing_results(args: argparse.Namespace) -> int:
-    analysed = analyse(args.output)
+def is_control(entry: dict[str, Any]) -> bool:
+    return str(entry["group"][0]).endswith(CONTROL_SUFFIX)
+
+
+def _rate(entries: list[dict[str, Any]]) -> str:
+    routed = [entry for entry in entries if route_of(entry) == "mcp"]
+    return f"{len(routed)}/{len(entries)}"
+
+
+def routing_results(args: argparse.Namespace, analysed: list[dict[str, Any]] | None = None) -> int:
+    analysed = analyse(args.output) if analysed is None else analysed
     print(format_routing_report(analysed, args.output))
-    measured = [entry for entry in analysed if entry["followup"]]
-    if not measured:
+    # Only the arm that has the skill is a gate. The control arm is the thing
+    # being measured; a run of it that skips MCP is a result, not a regression.
+    gated = [entry for entry in analysed if entry["followup"] and not is_control(entry)]
+    if not gated:
         return 0
-    return 0 if all(route_of(entry) == "mcp" for entry in measured) else 1
+    return 0 if all(route_of(entry) == "mcp" for entry in gated) else 1

@@ -275,6 +275,12 @@ Default cases:
   reaching for one is recorded and fails the run. Dispatching a tool writes
   report state under the configured state root, which installing, setting up,
   and `doctor` do not — that file is the evidence the case requires.
+- `firmware-routing-without-skill`: the control arm. Identical prompts and
+  fixture, but the skill is uninstalled between the two sessions, so the
+  measured session has the MCP registration and the tool descriptions and
+  nothing else. The difference between the two arms is what the skill adds; the
+  control arm is reported, never gated, because answering another way without
+  the skill is a result rather than a regression.
 
 `target.mode: "local"` creates a temporary allowlisted snapshot containing only
 `pyproject.toml`, package/build metadata, public guide/readme/license files, and
