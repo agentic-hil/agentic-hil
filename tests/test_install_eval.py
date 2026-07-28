@@ -552,10 +552,11 @@ def test_tool_evidence_is_asked_for_in_a_second_session() -> None:
     assert "Install Agentic HIL" not in case.followup_prompt
 
 
-def test_the_control_arm_differs_only_in_the_skill() -> None:
+@pytest.mark.parametrize("case_id", ["firmware-routing", "firmware-readiness"])
+def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
     cases = REPOSITORY_ROOT / "evals" / "install" / "cases"
-    treatment = load_case(cases / "firmware-routing.json")
-    control = load_case(cases / "firmware-routing-without-skill.json")
+    treatment = load_case(cases / f"{case_id}.json")
+    control = load_case(cases / f"{case_id}-without-skill.json")
 
     # Same prompts, same fixture: the skill is the only thing that varies, or
     # the difference in routing cannot be attributed to it.
@@ -596,7 +597,7 @@ def test_only_the_routing_case_demands_tool_evidence() -> None:
         load_case(path).id for path in sorted(cases.glob("*.json")) if load_case(path).requires_tool_use
     }
 
-    assert demanding == {"firmware-routing"}
+    assert demanding == {"firmware-routing", "firmware-readiness"}
 
 
 def test_guard_refuses_hardware_commands_and_records_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

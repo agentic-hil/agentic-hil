@@ -166,6 +166,9 @@ def classify(lines: list[str]) -> dict[str, Any]:
     calls = invocations(lines)
     return {
         "mcp_calls": sum(1 for name, _action in calls if _is_mcp_tool(name)),
+        # A question with several parts needs several tools. Counting distinct
+        # ones separates following a route from calling the same tool twice.
+        "mcp_tools": sorted({name for name, _action in calls if _is_mcp_tool(name)}),
         "cli_calls": sum(1 for _name, action in calls if CLI_CALL.search(action)),
         "raw_commands": sorted({name for _tool, action in calls for name in raw_commands(action)}),
         "config_reads": sum(1 for _name, action in calls if CONFIG_READ.search(action)),
@@ -233,8 +236,8 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
         # is the agent going to look, not the agent loading it.
         skill = "no" if not entry["skill_referenced"] else "looked-for" if is_control(entry) else "yes"
         detail = (
-            f"mcp={entry['mcp_calls']} cli={entry['cli_calls']} "
-            f"config-reads={entry['config_reads']} skill={skill}"
+            f"mcp={entry['mcp_calls']} tools={len(entry.get('mcp_tools', []))} "
+            f"cli={entry['cli_calls']} config-reads={entry['config_reads']} skill={skill}"
         )
         raw = f" raw={','.join(entry['raw_commands'])}" if entry["raw_commands"] else ""
         if raw and not entry.get("guard_triggered", True):
@@ -247,6 +250,9 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
     lines.extend(["", f"Answered through the MCP server: {_rate(gated)} with the skill installed"])
     if control:
         lines.append(f"{' ' * 33}{_rate(control)} with the skill uninstalled")
+        lines.append(
+            f"Distinct Agentic HIL tools per run: {_mean_tools(gated)} with, {_mean_tools(control)} without"
+        )
         lines.append("The difference is what the skill adds over the tool descriptions alone.")
     if not measured:
         lines.append("No run asked a follow-up question; the routing case was not part of this matrix.")
@@ -255,6 +261,12 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
 
 def is_control(entry: dict[str, Any]) -> bool:
     return str(entry["group"][0]).endswith(CONTROL_SUFFIX)
+
+
+def _mean_tools(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return "n/a"
+    return f"{sum(len(entry.get('mcp_tools', [])) for entry in entries) / len(entries):.1f}"
 
 
 def _rate(entries: list[dict[str, Any]]) -> str:

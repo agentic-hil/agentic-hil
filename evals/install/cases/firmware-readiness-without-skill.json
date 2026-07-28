@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "firmware-readiness-without-skill",
+  "fixture": "clean",
+  "expected_outcome": "success",
+  "requires_tool_use": false,
+  "remove_skill_before_followup": true,
+  "prompt": "Work only in {workspace}. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Do not use or probe hardware. Report completion only after commands have run.",
+  "followup_prompt": "Work only in {workspace}. Find out whether this project can flash firmware right now: whether a debug probe is reachable, whether flashing is permitted, and what the most recent run reported. Report each of the three answers together with what you did to get it. Report completion only after commands have run."
+}
