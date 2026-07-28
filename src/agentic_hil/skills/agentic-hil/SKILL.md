@@ -1,5 +1,5 @@
 ---
-name: agentic-hil-config-setup
+name: agentic-hil
 description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, driving bench adapters, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
 metadata:
   origin: Agentic HIL

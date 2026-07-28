@@ -45,7 +45,7 @@ jobs:
           plugin = json.loads((root / "plugins/agentic-hil/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
           marketplace = json.loads((root / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
           changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-          plugin_skill_path = root / "plugins/agentic-hil/skills/agentic-hil-config-setup/SKILL.md"
+          plugin_skill_path = root / "plugins/agentic-hil/skills/agentic-hil/SKILL.md"
           plugin_skill = plugin_skill_path.read_text(encoding="utf-8")
 
           init_tree = ast.parse((root / "src/agentic_hil/__init__.py").read_text(encoding="utf-8"))
@@ -84,8 +84,8 @@ jobs:
               "plugin.json": plugin["version"],
               "marketplace.json": marketplace["plugins"][0]["version"],
               "CHANGELOG.md": changelog_release.group(1),
-              "packaged skill": skill_version("src/agentic_hil/skills/agentic-hil-config-setup/SKILL.md"),
-              "plugin skill": skill_version("plugins/agentic-hil/skills/agentic-hil-config-setup/SKILL.md"),
+              "packaged skill": skill_version("src/agentic_hil/skills/agentic-hil/SKILL.md"),
+              "plugin skill": skill_version("plugins/agentic-hil/skills/agentic-hil/SKILL.md"),
           }
           release_tag = os.environ.get("RELEASE_TAG")
           if release_tag:

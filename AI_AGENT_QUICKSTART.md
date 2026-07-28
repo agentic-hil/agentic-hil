@@ -82,7 +82,7 @@ agentic-hil setup --help
 
 ## Install Agent Skill
 
-Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
+Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
 agentic-hil skill-install --agent <agent>
@@ -95,7 +95,7 @@ Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude
 **Cross-agent alternative (no Python pre-install):** this repo is also discoverable by the Vercel [`skills`](https://github.com/vercel-labs/skills) CLI, so the skill can be dropped into every agent at once without installing `agentic-hil` first:
 
 ```bash
-npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil-config-setup -a claude-code -a codex -a opencode
+npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil -a claude-code -a codex -a opencode
 ```
 
 It installs into `~/.agents/skills/` (read by Codex and OpenCode, symlinked for Claude Code). This distributes only the guidance skill — the MCP server and the deny-by-default project config still come from `agentic-hil setup --agent <agent>`.

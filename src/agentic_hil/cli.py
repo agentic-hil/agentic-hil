@@ -112,7 +112,10 @@ logs:
   directory: ".agentic-hil/logs"
 """
 
-SKILL_NAME = "agentic-hil-config-setup"
+SKILL_NAME = "agentic-hil"
+# Earlier releases installed the same skill under these names. Leaving one in
+# place would offer the agent two skills for the same job.
+LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
 SKILL_FILE = "SKILL.md"
 AGENTIC_HIL_REGISTRATION_START = "<!-- Agentic HIL skill registration start -->"
 AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
@@ -373,7 +376,10 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     with ExitStack() as locks:
         for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
             locks.enter_context(secure_user_file_lock(path))
-        snapshots = _capture_file_snapshots(mutation_paths)
+        # Same as install_skill: rollback covers the superseded skill, the lock
+        # does not, so removing it can take its empty directory too.
+        legacy_paths = legacy_skill_paths(_external_user_path(Path(resolved_agent.default_target_path), "Default agent skill"))
+        snapshots = _capture_file_snapshots([*mutation_paths, *legacy_paths])
         try:
             if config_exists:
                 config_result = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept; setup never replaces operator policy.", "path": str(config_path)}
@@ -987,7 +993,9 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
         with ExitStack() as locks:
             for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
                 locks.enter_context(secure_user_file_lock(path))
-            snapshots = _capture_file_snapshots(mutation_paths)
+            # The superseded skill is snapshotted for rollback but never locked:
+            # its sidecar lock would keep the directory alive after the file goes.
+            snapshots = _capture_file_snapshots([*mutation_paths, *legacy_skill_paths(target_path)])
             try:
                 result = install_skill(agent, target, force, _locked=True)
             except BaseException as error:
@@ -1002,11 +1010,15 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
             return result
     source_text = source_path.read_text(encoding="utf-8")
     source_version = skill_version(source_text) or __version__
+    legacy_note: JsonObject = {}
+    removed_legacy = remove_legacy_skills(target_path)
+    if removed_legacy:
+        legacy_note = {"legacy_skills_removed": removed_legacy}
     existing_text = secure_optional_read_text(target_path)
     if existing_text is not None:
         if existing_text == source_text:
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
-            return {"ok": True, "summary": f"Agentic HIL {agent_name} skill is already installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": False, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
+            return {"ok": True, **legacy_note, "summary": f"Agentic HIL {agent_name} skill is already installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": False, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
         existing_version = skill_version(existing_text)
         managed_skill = is_agentic_hil_setup_skill(existing_text)
         if not managed_skill:
@@ -1014,12 +1026,12 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
         if existing_version != source_version:
             secure_atomic_write_text(target_path, source_text)
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
-            return {"ok": True, "summary": f"Agentic HIL {agent_name} skill updated to match the current CLI package.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "previous_version": existing_version, "version": source_version, "installed": False, "updated": True, "registered": registration.get("ok") is True if registration else False, "registration": registration}
+            return {"ok": True, **legacy_note, "summary": f"Agentic HIL {agent_name} skill updated to match the current CLI package.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "previous_version": existing_version, "version": source_version, "installed": False, "updated": True, "registered": registration.get("ok") is True if registration else False, "registration": registration}
         if not force:
             return {"ok": False, "error_type": "skill_exists", "summary": "Managed Agentic HIL skill differs from the packaged copy. Use --force to repair it.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
     secure_atomic_write_text(target_path, source_text)
     registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
-    return {"ok": True, "summary": f"Agentic HIL {agent_name} skill installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": True, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
+    return {"ok": True, **legacy_note, "summary": f"Agentic HIL {agent_name} skill installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": True, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}
 
 
 def bundled_skill_path() -> Path:
@@ -1031,8 +1043,33 @@ def skill_version(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def is_agentic_hil_setup_skill(text: str) -> bool:
-    return re.search(rf"^name: {re.escape(SKILL_NAME)}$", text, re.MULTILINE) is not None and re.search(r"^  origin: Agentic HIL$", text, re.MULTILINE) is not None
+def is_agentic_hil_setup_skill(text: str, name: str = SKILL_NAME) -> bool:
+    return re.search(rf"^name: {re.escape(name)}$", text, re.MULTILINE) is not None and re.search(r"^  origin: Agentic HIL$", text, re.MULTILINE) is not None
+
+
+def legacy_skill_paths(target_path: Path) -> list[Path]:
+    """Where an earlier release of this skill would sit beside the new one."""
+    if not (target_path.name == SKILL_FILE and target_path.parent.name == SKILL_NAME):
+        return []
+    return [target_path.parent.parent / name / SKILL_FILE for name in LEGACY_SKILL_NAMES]
+
+
+def remove_legacy_skills(target_path: Path) -> list[str]:
+    """Delete skills this project installed under an earlier name.
+
+    Only a file carrying that name's managed frontmatter is removed, so a
+    directory the user owns is never touched. The empty directory goes too.
+    """
+    removed = []
+    for path in legacy_skill_paths(target_path):
+        text = secure_optional_read_text(path)
+        if text is None or not is_agentic_hil_setup_skill(text, path.parent.name):
+            continue
+        path.unlink()
+        with suppress(OSError):
+            path.parent.rmdir()
+        removed.append(str(path))
+    return removed
 
 
 def normalize_agent(agent: str) -> str:

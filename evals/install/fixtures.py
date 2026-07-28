@@ -6,6 +6,22 @@ from pathlib import Path
 SENTINEL_KEY = "agentic_hil_eval_sentinel"
 SENTINEL_VALUE = "operator-owned-do-not-change"
 
+# The name an earlier release installed this skill under. Setup has to remove
+# it, or the agent is offered two skills for the same job.
+LEGACY_SKILL_NAME = "agentic-hil-config-setup"
+LEGACY_SKILL_TEXT = f"""---
+name: {LEGACY_SKILL_NAME}
+description: Superseded Agentic HIL skill installed by an earlier release.
+metadata:
+  origin: Agentic HIL
+  agentic_hil_version: "0.3.0"
+---
+
+# Agentic HIL
+
+An earlier release of Agentic HIL installed this skill under this name.
+"""
+
 
 def agent_config_path(agent: str, home: Path) -> Path:
     if agent == "codex":
@@ -14,6 +30,16 @@ def agent_config_path(agent: str, home: Path) -> Path:
         return home / ".claude.json"
     if agent == "opencode":
         return home / ".config" / "opencode" / "opencode.json"
+    raise ValueError(f"unsupported agent fixture: {agent}")
+
+
+def skills_directory(agent: str, home: Path) -> Path:
+    if agent == "codex":
+        return home / ".codex" / "skills"
+    if agent == "claude-code":
+        return home / ".claude" / "skills"
+    if agent == "opencode":
+        return home / ".config" / "opencode" / "skills"
     raise ValueError(f"unsupported agent fixture: {agent}")
 
 
@@ -122,6 +148,13 @@ def fixture_content(agent: str, fixture: str) -> str | None:
 
 
 def prepare_fixture(agent: str, fixture: str, home: Path) -> None:
+    if fixture == "preserve-user-config":
+        # An upgrade starts from the previous release, so this case starts there
+        # too: the superseded skill is already installed.
+        legacy = skills_directory(agent, home) / LEGACY_SKILL_NAME / "SKILL.md"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(LEGACY_SKILL_TEXT, encoding="utf-8")
+
     content = fixture_content(agent, fixture)
     if content is None:
         return

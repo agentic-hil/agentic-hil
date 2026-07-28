@@ -404,12 +404,36 @@ def config_files() -> list[Path]:
     return sorted(root.glob("*/config.yaml")) if root.is_dir() else []
 
 
-def skill_path(agent: str) -> Path:
+SKILL_NAME = "agentic-hil"
+LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
+
+
+def skills_root(agent: str) -> Path:
     if agent == "codex":
-        return HOME / ".codex" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+        return HOME / ".codex" / "skills"
     if agent == "claude-code":
-        return HOME / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
-    return HOME / ".config" / "opencode" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+        return HOME / ".claude" / "skills"
+    return HOME / ".config" / "opencode" / "skills"
+
+
+def skill_path(agent: str) -> Path:
+    return skills_root(agent) / SKILL_NAME / "SKILL.md"
+
+
+def legacy_skill_paths(agent: str) -> list[Path]:
+    return [skills_root(agent) / name / "SKILL.md" for name in LEGACY_SKILL_NAMES]
+
+
+def no_superseded_skill(agent: str) -> tuple[bool, str]:
+    """Whether setup left an earlier name of this skill behind.
+
+    Two installed skills for one job is a routing problem: the agent picks by
+    name and description, and the stale copy competes with the current one.
+    """
+    left = [str(path) for path in legacy_skill_paths(agent) if path.exists()]
+    if left:
+        return False, "still installed: " + ", ".join(left)
+    return True, "no earlier name of this skill is installed"
 
 
 def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
@@ -938,6 +962,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             skill_detail = f"{type(error).__name__}: {error}"
         checks.append(Check("matching agent skill installed", skill_matches, skill_detail))
         add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
+        add("superseded skill removed", lambda: no_superseded_skill(agent))
 
         registered_ok = False
         try:

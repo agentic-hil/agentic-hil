@@ -17,7 +17,7 @@ from evals.install.credentials import authentication_failure, credential_health
 from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
 from evals.install.refresh_login import BACKUP_SUFFIX, apply_refreshed_login
 from evals.install.report import format_report, load_results, report_results, unstable_groups
-from evals.install.routing import classify, followup_lines, route_of
+from evals.install.routing import SKILL_NAME, classify, followup_lines, route_of
 from evals.install.runner import (
     agent_container_command,
     auth_values,
@@ -422,7 +422,7 @@ def _claude_line(name: str, payload: dict) -> str:
 def test_routing_counts_actions_not_documents() -> None:
     lines = [
         # The skill lists the raw commands it replaces; reading it is not running them.
-        _claude_line("Read", {"file_path": "/home/eval/.claude/skills/agentic-hil-config-setup/SKILL.md"}),
+        _claude_line("Read", {"file_path": "/home/eval/.claude/skills/agentic-hil/SKILL.md"}),
         _claude_line("Bash", {"command": "cat /workspace/source/AI_AGENT_QUICKSTART.md"}),
         _claude_line("mcp__agentic-hil__probe_target", {}),
     ]
@@ -434,6 +434,41 @@ def test_routing_counts_actions_not_documents() -> None:
     assert classified["cli_calls"] == 0
     assert classified["skill_referenced"]
     assert route_of({"followup": True, **classified}) == "mcp"
+
+
+def _opencode_line(tool: str, payload: dict) -> str:
+    return json.dumps({"type": "tool", "tool": tool, "state": {"status": "completed", "input": payload}})
+
+
+def test_routing_sees_the_skill_however_the_agent_loads_it() -> None:
+    # Each CLI loads the same skill differently: Claude Code invokes a tool,
+    # Codex reads the file, opencode names it in "name".
+    claude = classify([_claude_line("Skill", {"skill": SKILL_NAME})])
+    codex = classify(
+        [_claude_line("Bash", {"command": f"sed -n '1,240p' /home/eval/.codex/skills/{SKILL_NAME}/SKILL.md"})]
+    )
+    opencode = classify([_opencode_line("skill", {"name": SKILL_NAME})])
+
+    assert claude["skill_referenced"]
+    assert codex["skill_referenced"]
+    assert opencode["skill_referenced"]
+
+
+def test_routing_does_not_mistake_an_mcp_call_for_a_skill_load() -> None:
+    # The skill and the MCP server share the name agentic-hil; only loading the
+    # skill counts as loading it.
+    classified = classify([_claude_line("mcp__agentic-hil__probe_target", {})])
+
+    assert classified["mcp_calls"] == 1
+    assert not classified["skill_referenced"]
+
+
+def test_routing_reads_a_name_field_only_for_the_skill_tool() -> None:
+    # "name" identifies the tool itself all over these transcripts, so reading it
+    # everywhere would turn a mention of openocd into a hardware call.
+    classified = classify([_opencode_line("bash", {"name": "openocd", "title": "openocd -f board.cfg"})])
+
+    assert classified["raw_commands"] == []
 
 
 def test_routing_counts_a_raw_command_only_when_it_is_run() -> None:

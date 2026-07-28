@@ -74,7 +74,7 @@ where = ["src"]
 agentic_hil = [
   "schemas/*.json",
   "templates/*.json",
-  "skills/agentic-hil-config-setup/SKILL.md"
+  "skills/agentic-hil/SKILL.md"
 ]
 
 [tool.pytest.ini_options]

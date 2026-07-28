@@ -103,7 +103,7 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
     assert "agentic-hil" in claude_json["mcpServers"]
     assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
-    assert (home / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md").is_file()
+    assert (home / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
     assert config_path.is_file()
 
 
@@ -145,7 +145,7 @@ def test_setup_rolls_back_new_config_skill_registration_and_mcp_config_on_late_f
 
     monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
     config_path = initialized_config_path(workspace)
-    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil" / "SKILL.md"
     agents_path = Path.home() / ".codex" / "AGENTS.md"
     mcp_path = Path.home() / ".codex" / "config.toml"
 
@@ -500,7 +500,7 @@ def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_con
 
 def _packaged_skill_text() -> str:
     skill = Path(__file__).resolve().parents[1] / "src" / "agentic_hil" / "skills"
-    return (skill / "agentic-hil-config-setup" / "SKILL.md").read_text(encoding="utf-8")
+    return (skill / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_skill_routes_firmware_work_to_agentic_hil() -> None:
@@ -511,6 +511,27 @@ def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     # The skill is worthless if it does not name what it replaces.
     for raw in ("openocd", "gdb", "minicom", "candump"):
         assert raw in text, raw
+
+
+def test_gateway_tool_descriptions_name_what_they_replace() -> None:
+    # A tool description is the only routing hint every session sees; a skill
+    # has to be discovered and loaded first.
+    replaced = {
+        "debugger_info": "openocd",
+        "debugger_probes_list": "st-info",
+        "probe_target": "openocd",
+        "flash_firmware": "st-flash",
+        "reset_target": "st-util",
+        "com_ports_list": "picocom",
+        "com_read": "minicom",
+        "can_buses_list": "candump",
+        "can_send": "cansend",
+        "can_read": "candump",
+    }
+    descriptions = {str(tool["name"]): str(tool["description"]) for tool in MCP_TOOLS}
+
+    for name, raw_command in replaced.items():
+        assert raw_command in descriptions[name], name
 
 
 def test_skill_only_names_tools_the_server_exposes() -> None:
@@ -1216,15 +1237,50 @@ def test_artifact_validation_blocks_outside_root(tmp_path: Path) -> None:
 
 
 def test_skill_install_supports_agent_aliases() -> None:
-    target = Path.home() / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    target = Path.home() / "skills" / "agentic-hil" / "SKILL.md"
     result = install_skill("open-code", str(target))
     assert result["ok"] is True
     assert result["agent"] == "opencode"
     assert "agentic_hil_version" in target.read_text(encoding="utf-8")
 
 
+def _legacy_skill(name: str, managed: bool) -> Path:
+    path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    origin = "  origin: Agentic HIL\n" if managed else "  origin: someone else\n"
+    # Bytes, not write_text: the installer never translates newlines, so a file
+    # it wrote has LF endings on every platform.
+    path.write_bytes(f"---\nname: {name}\nmetadata:\n{origin}---\n\nOlder copy.\n".encode())
+    return path
+
+
+def test_skill_install_removes_the_name_it_superseded() -> None:
+    # Two installed skills for one job compete: the agent picks by name.
+    legacy = _legacy_skill("agentic-hil-config-setup", managed=True)
+
+    result = install_skill("claude-code")
+
+    assert result["ok"] is True
+    assert not legacy.exists()
+    assert not legacy.parent.exists()
+    assert result["legacy_skills_removed"] == [str(legacy)]
+    assert (Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
+
+
+def test_skill_install_keeps_a_foreign_skill_that_uses_an_old_name() -> None:
+    # Only a file this project wrote may be removed; the name alone is no proof.
+    foreign = _legacy_skill("agentic-hil-config-setup", managed=False)
+    existing = foreign.read_text(encoding="utf-8")
+
+    result = install_skill("claude-code")
+
+    assert result["ok"] is True
+    assert "legacy_skills_removed" not in result
+    assert foreign.read_text(encoding="utf-8") == existing
+
+
 def test_skill_install_force_preserves_unmanaged_skill_and_reports_conflict() -> None:
-    target = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    target = Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
     target.parent.mkdir(parents=True)
     existing = "---\nname: unrelated-user-skill\n---\nKeep this content.\n"
     target.write_text(existing, encoding="utf-8")
@@ -1240,7 +1296,7 @@ def test_codex_skill_update_rolls_back_skill_and_registration_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert install_skill("codex")["ok"] is True
-    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil" / "SKILL.md"
     agents_path = Path.home() / ".codex" / "AGENTS.md"
     current_skill = skill_path.read_text(encoding="utf-8")
     old_skill = re.sub(r'agentic_hil_version: "[^"]+"', 'agentic_hil_version: "0.0.0"', current_skill)

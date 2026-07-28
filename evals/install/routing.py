@@ -10,7 +10,7 @@ from .guard import HARDWARE_COMMANDS
 from .report import result_group
 
 FOLLOWUP_START = "eval_followup_start"
-SKILL_NAME = "agentic-hil-config-setup"
+SKILL_NAME = "agentic-hil"
 
 CLI_CALL = re.compile(r"\bagentic-hil\s+(debugger-probes|com-ports|doctor|lease-status|test-reactor)\b")
 CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
@@ -24,6 +24,14 @@ RAW_COMMAND = re.compile(
 # Only these input fields are actions. Reading a document that merely mentions
 # openocd must never count as running it.
 COMMAND_FIELDS = ("command", "file_path", "filePath", "path", "cmd", "skill")
+# opencode's skill tool names what it loads in "name". That field is too generic
+# to read everywhere, so it counts only for the tool whose argument it is.
+SKILL_TOOL_FIELDS = (*COMMAND_FIELDS, "name")
+SKILL_TOOLS = frozenset({"skill", "skills"})
+# The skill shares its name with the MCP server, so a substring search would
+# call every mcp__agentic-hil__* invocation a skill load. Only loading it counts:
+# through the CLI's own skill tool, or by reading the installed file.
+SKILL_PATH = re.compile(rf"skills[/\\]{re.escape(SKILL_NAME)}[/\\]SKILL\.md")
 
 
 def followup_lines(agent_log: Path) -> list[str]:
@@ -35,19 +43,23 @@ def followup_lines(agent_log: Path) -> list[str]:
     return []
 
 
-def _command_text(payload: Any) -> str:
+def _command_text(payload: Any, fields: tuple[str, ...] = COMMAND_FIELDS) -> str:
     if isinstance(payload, str):
         return payload
     if not isinstance(payload, dict):
         return ""
     parts = []
-    for field in COMMAND_FIELDS:
+    for field in fields:
         value = payload.get(field)
         if isinstance(value, str):
             parts.append(value)
         elif isinstance(value, list):
             parts.extend(item for item in value if isinstance(item, str))
     return " ".join(parts)
+
+
+def _fields_for(tool_name: str) -> tuple[str, ...]:
+    return SKILL_TOOL_FIELDS if tool_name.lower() in SKILL_TOOLS else COMMAND_FIELDS
 
 
 def _collect(node: Any, found: list[tuple[str, str]]) -> None:
@@ -60,10 +72,10 @@ def _collect(node: Any, found: list[tuple[str, str]]) -> None:
 
     kind = node.get("type")
     if kind == "tool_use" and isinstance(node.get("name"), str):
-        found.append((node["name"], _command_text(node.get("input"))))
+        found.append((node["name"], _command_text(node.get("input"), _fields_for(node["name"]))))
     elif kind == "tool" and isinstance(node.get("tool"), str):
         state = node.get("state") if isinstance(node.get("state"), dict) else {}
-        found.append((node["tool"], _command_text(state.get("input"))))
+        found.append((node["tool"], _command_text(state.get("input"), _fields_for(node["tool"]))))
     elif kind == "command_execution":
         found.append(("bash", _command_text(node)))
     elif kind == "mcp_tool_call":
@@ -88,7 +100,15 @@ def invocations(lines: list[str]) -> list[tuple[str, str]]:
 
 def _is_mcp_tool(name: str) -> bool:
     lowered = name.lower()
-    return "agentic-hil" in lowered and lowered not in {"bash", "read", "write", "edit"}
+    if lowered in SKILL_TOOLS or lowered in {"bash", "read", "write", "edit"}:
+        return False
+    return "agentic-hil" in lowered
+
+
+def _loads_skill(name: str, action: str) -> bool:
+    if name.lower() in SKILL_TOOLS and SKILL_NAME in action:
+        return True
+    return SKILL_PATH.search(action) is not None
 
 
 def classify(lines: list[str]) -> dict[str, Any]:
@@ -98,7 +118,7 @@ def classify(lines: list[str]) -> dict[str, Any]:
         "cli_calls": sum(1 for _name, action in calls if CLI_CALL.search(action)),
         "raw_commands": sorted({match for _name, action in calls for match in RAW_COMMAND.findall(action)}),
         "config_reads": sum(1 for _name, action in calls if CONFIG_READ.search(action)),
-        "skill_referenced": any(SKILL_NAME in f"{name} {action}" for name, action in calls),
+        "skill_referenced": any(_loads_skill(name, action) for name, action in calls),
     }
 
 

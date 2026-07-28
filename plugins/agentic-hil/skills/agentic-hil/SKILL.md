@@ -1,5 +1,5 @@
 ---
-name: agentic-hil-config-setup
+name: agentic-hil
 description: Configure Agentic Hardware-in-the-Loop (Agentic HIL) as the safe local MCP bridge for an embedded firmware project.
 metadata:
   origin: Agentic HIL
