@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from pathlib import Path
+import shlex
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .guard import HARDWARE_COMMANDS
@@ -18,13 +19,12 @@ CONTROL_SUFFIX = "-without-skill"
 
 CLI_CALL = re.compile(r"\bagentic-hil\s+(debugger-probes|com-ports|doctor|lease-status|test-reactor)\b")
 CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
-# Only a command word counts. Searching for "*.gdb" or asking "which openocd"
-# is not reaching for the hardware.
-RAW_COMMAND = re.compile(
-    r"(?:^|[;&|]|\n)\s*(?:sudo\s+)?("
-    + "|".join(sorted(re.escape(name) for name in HARDWARE_COMMANDS))
-    + r")\b"
-)
+# Agent CLIs wrap their work in a shell, so a hardware command usually sits
+# inside the quoted argument of one. Only these get looked into; quoting a name
+# for anything else — an rg pattern, a grep alternation — is not running it.
+SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
+SEPARATORS = ";&|()\n"
+ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Only these input fields are actions. Reading a document that merely mentions
 # openocd must never count as running it.
 COMMAND_FIELDS = ("command", "file_path", "filePath", "path", "cmd", "skill")
@@ -36,6 +36,53 @@ SKILL_TOOLS = frozenset({"skill", "skills"})
 # call every mcp__agentic-hil__* invocation a skill load. Only loading it counts:
 # through the CLI's own skill tool, or by reading the installed file.
 SKILL_PATH = re.compile(rf"skills[/\\]{re.escape(SKILL_NAME)}[/\\]SKILL\.md")
+
+
+def _shell_commands(action: str) -> list[list[str]]:
+    """Split a shell action into commands, with the shell's own quoting rules.
+
+    A separator inside quotes is data, not a pipeline: "openocd|pyocd" is one
+    ripgrep pattern, however much it looks like two commands.
+    """
+    lexer = shlex.shlex(action, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    commands: list[list[str]] = []
+    current: list[str] = []
+    try:
+        for token in lexer:
+            if token and all(character in SEPARATORS for character in token):
+                commands.append(current)
+                current = []
+            else:
+                current.append(token)
+    except ValueError:
+        # An unbalanced quote means the transcript cut the command off. What was
+        # read before that still counts.
+        pass
+    commands.append(current)
+    return [command for command in commands if command]
+
+
+def raw_commands(action: str, depth: int = 0) -> set[str]:
+    """The hardware commands this action runs, not the ones it merely names."""
+    found: set[str] = set()
+    for words in _shell_commands(action):
+        while words and (words[0] == "sudo" or ENVIRONMENT_ASSIGNMENT.match(words[0])):
+            words = words[1:]
+        if not words:
+            continue
+        name = PurePosixPath(words[0].replace("\\", "/")).name
+        if name in HARDWARE_COMMANDS:
+            found.add(name)
+        elif name in SHELLS and depth < 3:
+            # `bash -lc "openocd -f board.cfg"` runs openocd: the first argument
+            # that is not a flag is a command line of its own.
+            for argument in words[1:]:
+                if argument.startswith("-"):
+                    continue
+                found |= raw_commands(argument, depth + 1)
+                break
+    return found
 
 
 def followup_lines(agent_log: Path) -> list[str]:
@@ -120,10 +167,25 @@ def classify(lines: list[str]) -> dict[str, Any]:
     return {
         "mcp_calls": sum(1 for name, _action in calls if _is_mcp_tool(name)),
         "cli_calls": sum(1 for _name, action in calls if CLI_CALL.search(action)),
-        "raw_commands": sorted({match for _name, action in calls for match in RAW_COMMAND.findall(action)}),
+        "raw_commands": sorted({name for _tool, action in calls for name in raw_commands(action)}),
         "config_reads": sum(1 for _name, action in calls if CONFIG_READ.search(action)),
         "skill_referenced": any(_loads_skill(name, action) for name, action in calls),
     }
+
+
+GUARD_CHECK = "forbidden PATH guard not triggered"
+
+
+def guard_triggered(result: dict[str, Any]) -> bool:
+    """Whether a shadowed hardware command actually ran, as the container saw it.
+
+    The transcript only shows what the agent typed. The PATH guard records what
+    the kernel was asked to execute, which is the evidence that decides.
+    """
+    for check in result.get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == GUARD_CHECK:
+            return check.get("ok") is not True
+    return False
 
 
 def analyse(output_root: Path | str) -> list[dict[str, Any]]:
@@ -139,6 +201,7 @@ def analyse(output_root: Path | str) -> list[dict[str, Any]]:
                 "group": result_group(result),
                 "status": str(result.get("status", "unknown")),
                 "followup": bool(lines),
+                "guard_triggered": guard_triggered(result),
                 **classify(lines),
             }
         )
@@ -148,7 +211,10 @@ def analyse(output_root: Path | str) -> list[dict[str, Any]]:
 def route_of(entry: dict[str, Any]) -> str:
     if not entry["followup"]:
         return "no-followup"
-    if entry["raw_commands"]:
+    # A transcript can only show intent. Where the guard's verdict is available
+    # it decides, so a hardware name quoted into a search pattern stays what it
+    # is instead of being reported as a run command.
+    if entry["raw_commands"] and entry.get("guard_triggered", True):
         return "raw"
     if entry["mcp_calls"]:
         return "mcp"
@@ -163,11 +229,16 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
     lines = [f"Firmware routing report: {Path(output_root)}", ""]
     for entry in analysed:
         case_id, cli, model = entry["group"]
+        # In the control arm the skill is verified absent, so a reference to it
+        # is the agent going to look, not the agent loading it.
+        skill = "no" if not entry["skill_referenced"] else "looked-for" if is_control(entry) else "yes"
         detail = (
             f"mcp={entry['mcp_calls']} cli={entry['cli_calls']} "
-            f"config-reads={entry['config_reads']} skill={'yes' if entry['skill_referenced'] else 'no'}"
+            f"config-reads={entry['config_reads']} skill={skill}"
         )
         raw = f" raw={','.join(entry['raw_commands'])}" if entry["raw_commands"] else ""
+        if raw and not entry.get("guard_triggered", True):
+            raw += " (named, never executed)"
         lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {cli} {model} — {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]

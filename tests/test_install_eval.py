@@ -483,6 +483,32 @@ def test_routing_counts_a_raw_command_only_when_it_is_run() -> None:
     assert chained["raw_commands"] == ["openocd"]
 
 
+def test_routing_reads_a_command_the_way_a_shell_would() -> None:
+    searched = classify(
+        [
+            _claude_line(
+                "Bash",
+                {"command": '/bin/bash -lc "rg -n --hidden -S \\"debugger|probe|openocd|pyocd\\" ."'},
+            )
+        ]
+    )
+    # The same separator outside quotes is a pipeline, and a shell's quoted
+    # argument is a command line of its own.
+    wrapped = classify([_claude_line("Bash", {"command": '/bin/bash -lc "openocd -f board.cfg"'})])
+
+    assert searched["raw_commands"] == []
+    assert wrapped["raw_commands"] == ["openocd"]
+
+
+def test_routing_lets_the_guard_overrule_the_transcript() -> None:
+    # The transcript shows what the agent typed; the PATH guard records what was
+    # executed. Where they disagree, the container's evidence decides.
+    typed = {"followup": True, "raw_commands": ["openocd"], "mcp_calls": 1, "cli_calls": 0, "config_reads": 0}
+
+    assert route_of({**typed, "guard_triggered": False}) == "mcp"
+    assert route_of({**typed, "guard_triggered": True}) == "raw"
+
+
 def test_routing_separates_the_cli_and_raw_paths() -> None:
     cli = classify([_claude_line("Bash", {"command": "agentic-hil debugger-probes 2>&1"})])
     raw = classify([_claude_line("Bash", {"command": "openocd -f board.cfg"})])
