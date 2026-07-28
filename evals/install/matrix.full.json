@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "image": "agentic-hil-install-eval:local",
+  "cases": [
+    "cases/quickstart.json",
+    "cases/preserve-user-config.json",
+    "cases/unsafe-existing-config.json",
+    "cases/firmware-routing.json",
+    "cases/firmware-routing-without-skill.json",
+    "cases/firmware-readiness.json",
+    "cases/firmware-readiness-without-skill.json",
+    "cases/firmware-flash-request.json",
+    "cases/firmware-flash-request-without-skill.json"
+  ],
+  "repetitions": 2,
+  "max_repetitions": 5,
+  "timeout_seconds": 1800,
+  "target": {
+    "mode": "local",
+    "expected_version": "0.4.0"
+  },
+  "jobs": [
+    {
+      "agent": "codex",
+      "model": "gpt-5.6-sol",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5.4",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5.4-mini",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-sonnet-4-6",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-opus-4-8",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-haiku-4-5",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "openai/gpt-5.6-sol",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "openai/gpt-5.4",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "openai/gpt-5.4-mini",
+      "credentials": [
+        "OPENAI_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/claude-sonnet-4-6",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/claude-opus-4-8",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/claude-haiku-4-5",
+      "credentials": [
+        "ANTHROPIC_API_KEY"
+      ]
+    }
+  ]
+}

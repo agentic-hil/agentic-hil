@@ -18,6 +18,7 @@ from conftest import (
     write_authoritative_config,
     write_config,
 )
+from support import trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
@@ -206,8 +207,13 @@ def _isolated_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 def _trusted_test_mcp_command(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Use the installed Python launcher as a stable, trusted test executable."""
-    command = str(Path(sys.executable).resolve())
+    """A launcher the trust rule accepts, standing in for an installed one.
+
+    Not `sys.executable`: on a CI runner the interpreter sits under a
+    world-writable tool cache, which the rule rejects on purpose. Borrowing it
+    made these tests pass on a developer machine and fail everywhere else.
+    """
+    command = str(trusted_launcher())
     monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: command)
     # Keep setup's permission smoothing from touching the real test venv launcher.
     monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", list)
@@ -748,7 +754,7 @@ def test_default_mcp_path_is_rejected_when_home_is_inside_workspace(
     monkeypatch.setenv("USERPROFILE", str(workspace))
 
     with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=sys.executable)
+        register_agent_mcp("claude-code", command=str(trusted_launcher()))
 
     assert excinfo.value.error_type == "unsafe_configured_path"
     assert not (workspace / ".claude.json").exists()
@@ -770,7 +776,7 @@ def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
         pytest.skip(f"hardlinks unavailable: {error}")
 
     with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=sys.executable)
+        register_agent_mcp("claude-code", command=str(trusted_launcher()))
 
     assert excinfo.value.error_type == "unsafe_configured_path"
     assert victim.read_text(encoding="utf-8") == existing
@@ -789,7 +795,7 @@ def test_register_agent_mcp_rejects_group_writable_user_config_without_changes(
     path.chmod(0o660)
 
     with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=sys.executable)
+        register_agent_mcp("claude-code", command=str(trusted_launcher()))
 
     assert excinfo.value.error_type == "unsafe_configured_path"
     assert path.read_text(encoding="utf-8") == existing

@@ -3,11 +3,21 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 pytest_plugins = ["pytester"]
+
+from support import remove_trusted_launcher  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_up_trusted_launcher() -> Iterator[None]:
+    """Remove the session's trusted launcher, wherever a test created it."""
+    yield
+    remove_trusted_launcher()
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"

@@ -1010,7 +1010,17 @@ def trusted_persistent_executable(
                 final = index == len(descriptors) - 1
                 unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
                 if unsafe_write or (final and opened.st_uid not in {0, os.geteuid()}):
-                    raise ConfigError("mcp_command_untrusted", "The MCP server executable has an untrusted or replaceable parent directory.", {"path": str(candidate)})
+                    # Name the component and its mode: the caller cannot fix a
+                    # directory the message does not identify, and one bad
+                    # ancestor of a shared prefix condemns every launcher below.
+                    parents = list(candidate.parents)
+                    position = len(descriptors) - 1 - index
+                    ancestor = parents[position] if 0 <= position < len(parents) else candidate.parent
+                    raise ConfigError(
+                        "mcp_command_untrusted",
+                        "The MCP server executable has an untrusted or replaceable parent directory.",
+                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                    )
             return descriptors
         except BaseException:
             for descriptor in reversed(descriptors):
