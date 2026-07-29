@@ -9,9 +9,13 @@ This guide was verified against the linked host documentation on 2026-07-14.
 Install the server once and initialize the firmware project from its repository root:
 
 ```bash
-uv tool install --upgrade "agentic-hil>=0.4.0"
-agentic-hil init
+agentic-hil setup --agent claude-code   # or: codex / opencode
 ```
+
+`setup` creates the external policy, installs the skill, and registers the host
+with a verified absolute executable path. Install it first if the command is
+missing: [AI_AGENT_QUICKSTART.md](../AI_AGENT_QUICKSTART.md) has the complete
+install chain. The hosts below are the ones `setup` does not cover.
 
 Every host configuration below represents this launch contract:
 

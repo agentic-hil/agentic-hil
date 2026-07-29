@@ -91,17 +91,32 @@ jobs:
               *sorted((root / ".claude-plugin").rglob("*.json")),
           ]
           immutable_reference = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
+          # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
+          # plugin@marketplace syntax Claude Code uses, not a git reference. The
+          # reference group is optional because no pin is as bad as a mutable
+          # one: an unpinned URL installs whatever the default branch holds.
+          repository_reference = re.compile(
+              r"(?:git\+)?https://github\.com/agentic-hil/agentic-hil(?:\.git)?(@[^\s\"'`)]+)?"
+          )
+          installs_from_source = re.compile(r"git\+https://github\.com/agentic-hil/agentic-hil|--from\s+git\+")
           for document in shipped_documents:
-              if not document.is_file():
+              text = document.read_text(encoding="utf-8") if document.is_file() else ""
+              if not text:
                   continue
-              # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
-              # plugin@marketplace syntax Claude Code uses, not a git reference.
-              for reference in re.findall(
-                  r"github\.com/agentic-hil/agentic-hil(?:\.git)?@([^\s\"'`)]+)",
-                  document.read_text(encoding="utf-8"),
-              ):
-                  if not immutable_reference.match(reference):
-                      raise SystemExit(f"{document} pins a mutable reference: agentic-hil@{reference}")
+              for line in text.splitlines():
+                  for match in repository_reference.finditer(line):
+                      reference = match.group(1)
+                      if reference is None:
+                          if installs_from_source.search(line):
+                              raise SystemExit(f"{document} installs from the repository without pinning a reference: {line.strip()}")
+                          continue
+                      if not immutable_reference.match(reference[1:]):
+                          raise SystemExit(f"{document} pins a mutable reference: agentic-hil{reference}")
+                      # A tag pin is offered as the route to take when PyPI is
+                      # unreachable. Pinning a tag other than this release's
+                      # would close that exit during the outage it covers.
+                      if reference.startswith("@v") and reference[1:] != f"v{package_version}":
+                          raise SystemExit(f"{document} pins {reference[1:]}, but this release is v{package_version}")
 
           changelog_release = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
           if changelog_release is None:

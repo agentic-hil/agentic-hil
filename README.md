@@ -40,7 +40,6 @@ For a transient version check only (no `PATH` changes; needs [uv](https://docs.a
 
 ```bash
 uvx --from agentic-hil agentic-hil --version
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
 ```
 
 For project setup, install 0.4.0 or newer persistently and let `setup` create the external policy, install the skill, and register the selected host with a verified absolute executable path:

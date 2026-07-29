@@ -33,7 +33,7 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 Fast path, in order — stop at the first persistent installation that works:
 
-Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
+Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
 
 1. Reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
@@ -95,12 +95,12 @@ Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude
 **Cross-agent alternative (no Python pre-install):** this repo is also discoverable by the Vercel [`skills`](https://github.com/vercel-labs/skills) CLI, so the skill can be dropped into every agent at once without installing `agentic-hil` first:
 
 ```bash
-npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil -a claude-code -a codex -a opencode
+npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil --copy -a claude-code -a codex -a opencode
 ```
 
 It installs into `~/.agents/skills/` (read by Codex and OpenCode, symlinked for Claude Code). This distributes only the guidance skill — the MCP server and the deny-by-default project config still come from `agentic-hil setup --agent <agent>`.
 
-Add `--copy` if you take this route. Agentic HIL refuses to write through a symlinked directory component, because a link in the chain can be repointed between the check and the write, so `setup` would stop with `unsafe_configured_path` and name the linked component. The same applies to a `~/.claude` or `~/.config/opencode` managed by a dotfile tool that symlinks directories: replace the link with a real directory before running `setup`.
+`--copy` is in that command on purpose: without it the CLI symlinks the Claude Code skill directory, and Agentic HIL refuses to write through a symlinked directory component, because a link in the chain can be repointed between the check and the write. `setup` would stop with `unsafe_configured_path` and name the linked component. The same applies to a `~/.claude` or `~/.config/opencode` managed by a dotfile tool that symlinks directories: replace the link with a real directory before running `setup`.
 
 ## Configure Each Project
 
