@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
-    setup_parser = subparsers.add_parser("setup", help="one-shot project setup: config + agent skill + .mcp.json + doctor")
+    setup_parser = subparsers.add_parser("setup", help="one-shot project setup: config + agent skill + user-level MCP registration + doctor")
     setup_parser.add_argument("--agent", default="claude-code")
     setup_parser.add_argument("--force", action="store_true")
 

@@ -1119,8 +1119,10 @@ def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     parts = path.parts
     descriptor = os.open(parts[0], flags)
+    walked = Path(parts[0])
     try:
         for part in parts[1:]:
+            walked = walked / part
             if create:
                 with suppress(FileExistsError):
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
@@ -1140,7 +1142,7 @@ def _open_directory_fd(directory: Path, *, create: bool = False) -> int:
         raise
     except OSError as error:
         os.close(descriptor)
-        _raise_unsafe_path_error(error, path)
+        _raise_unsafe_path_error(error, path, walked)
         raise
 
 
@@ -1174,12 +1176,18 @@ def _hold_posix_directory_chain(directory: Path, *, create: bool = False) -> lis
         raise
 
 
-def _raise_unsafe_path_error(error: OSError, path: Path) -> None:
+def _raise_unsafe_path_error(error: OSError, path: Path, component: Path | None = None) -> None:
     if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+        # Name the component that stopped the walk. A caller told only the full
+        # path has to guess which link to replace, and a symlinked agent
+        # directory is a common, legitimate-looking setup.
+        details = {"path": str(path)}
+        if component is not None and component != path:
+            details["component"] = str(component)
         raise ConfigError(
             "unsafe_configured_path",
             "Configured path contains a symlink or non-directory component.",
-            {"path": str(path)},
+            details,
         ) from error
 
 

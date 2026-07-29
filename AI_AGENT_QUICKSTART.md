@@ -100,6 +100,8 @@ npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil
 
 It installs into `~/.agents/skills/` (read by Codex and OpenCode, symlinked for Claude Code). This distributes only the guidance skill — the MCP server and the deny-by-default project config still come from `agentic-hil setup --agent <agent>`.
 
+Add `--copy` if you take this route. Agentic HIL refuses to write through a symlinked directory component, because a link in the chain can be repointed between the check and the write, so `setup` would stop with `unsafe_configured_path` and name the linked component. The same applies to a `~/.claude` or `~/.config/opencode` managed by a dotfile tool that symlinks directories: replace the link with a real directory before running `setup`.
+
 ## Configure Each Project
 
 In every firmware project that should use Agentic HIL:
