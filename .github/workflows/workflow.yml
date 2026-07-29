@@ -72,6 +72,33 @@ jobs:
           if any(command not in plugin_skill for command in required_plugin_guidance):
               raise SystemExit("plugin skill must pin the persistent package and delegate MCP registration to setup")
 
+          # Testing an installation flow means pinning documents at the branch
+          # under test. Such a pin installs unreviewed code for every reader who
+          # copies the command, so no shipped document may leave with one. This
+          # used to be a checklist in a file somebody had to remember to read.
+          shipped_documents = [
+              root / "AI_AGENT_QUICKSTART.md",
+              root / "README.md",
+              root / "TROUBLESHOOTING.md",
+              root / "llms.txt",
+              root / "server.json",
+              *sorted((root / "plugins").rglob("*.md")),
+              *sorted((root / "plugins").rglob("*.json")),
+              *sorted((root / ".claude-plugin").rglob("*.json")),
+          ]
+          immutable_reference = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
+          for document in shipped_documents:
+              if not document.is_file():
+                  continue
+              # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
+              # plugin@marketplace syntax Claude Code uses, not a git reference.
+              for reference in re.findall(
+                  r"github\.com/agentic-hil/agentic-hil@(\S+?)[\"'\s)]",
+                  document.read_text(encoding="utf-8") + " ",
+              ):
+                  if not immutable_reference.match(reference):
+                      raise SystemExit(f"{document} pins a mutable reference: agentic-hil@{reference}")
+
           changelog_release = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
           if changelog_release is None:
               raise SystemExit("CHANGELOG.md has no released semantic version heading")
