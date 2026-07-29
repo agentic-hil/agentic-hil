@@ -82,7 +82,6 @@ jobs:
               root / "TROUBLESHOOTING.md",
               root / "AGENTS.md",
               root / "SECURITY.md",
-              root / "llms.txt",
               root / "server.json",
               *sorted((root / "docs").rglob("*.md")),
               *sorted((root / "src/agentic_hil/skills").rglob("*.md")),

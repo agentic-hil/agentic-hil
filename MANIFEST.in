@@ -3,7 +3,6 @@ include AGENTS.md
 include AI_AGENT_QUICKSTART.md
 include TROUBLESHOOTING.md
 include SECURITY.md
-include llms.txt
 include LICENSE
 include docs/mcp-hosts.md
 recursive-include src/agentic_hil/schemas *.json

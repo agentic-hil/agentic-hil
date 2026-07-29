@@ -23,8 +23,13 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - MCP registration stores only a verified absolute persistent console-script path and rejects bare PATH commands, transient runners, workspace virtual environments, unsafe symlink chains, and unsafe ownership or permissions. Stable user-owned pipx/uv-tool links remain supported after their link and resolved target chains pass validation.
 - `AI_AGENT_QUICKSTART.md` leads with `agentic-hil setup`, documents the MCP registration as user-level per agent, and adds guidance for pip-less environments (Ubuntu 24.04+/PEP-668).
 
+### Removed
+
+- `llms.txt`. Nothing linked to it, nothing served it, and its own onward references were bare filenames an external fetcher could not resolve — so it was a third copy of the installation instructions with no reader to justify it, and its tool list had silently fallen to 15 of 36 tools.
+
 ### Fixed
 
+- `doctor` reports the command a registration would accept — the verified persistent executable — instead of the bare name `agentic-hil`, which is the one form registration refuses because `PATH` decides it afresh every session. When no trusted executable exists yet it says so rather than printing something that would be rejected.
 - A forbidden root is matched in both of its shapes. macOS reports its temporary directory as `/var/folders` while a path under it resolves to `/private/var/folders`, so a command placed there was compared against a root it could never match and passed a check meant to reject it.
 - The refusal of an untrusted MCP command names the offending directory, its mode, and its owner. One bad ancestor of a shared prefix condemns every launcher below it, and a caller cannot fix a directory the message does not identify.
 - The Windows environment setup no longer reports "no untrusted writers" when `Get-Acl` is unavailable; it reads the same access rules through the .NET accessor instead of turning the preflight into a silent no-op.

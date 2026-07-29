@@ -299,6 +299,48 @@ def test_test_schema_exports_bundled_testconfig_schema(tmp_path: Path) -> None:
     assert test_schema(str(schema_path), force=True)["ok"] is True
 
 
+def test_doctor_reports_the_command_registration_would_accept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Printing the bare name would name the one form registration refuses, so an
+    # operator who copies what doctor prints would be sent to a dead end.
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    monkeypatch.chdir(workspace)
+    launcher = str(trusted_launcher())
+    monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: launcher)
+
+    report = doctor()["mcp"]
+
+    assert report["command"] == launcher
+    assert report["persistent"] is True
+    assert report["args"] == ["mcp-stdio"]
+
+
+def test_doctor_says_when_there_is_nothing_trustworthy_to_register(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    monkeypatch.chdir(workspace)
+
+    def no_trusted_executable() -> str:
+        raise ConfigError("mcp_command_untrusted", "No stable trusted Agentic HIL executable was found.")
+
+    monkeypatch.setattr("agentic_hil.cli.mcp_server_command", no_trusted_executable)
+
+    result = doctor()
+
+    assert result["mcp"]["command"] is None
+    assert result["mcp"]["persistent"] is False
+    assert "No stable trusted" in result["mcp"]["summary"]
+    # Reporting it is not the same as failing: an install may simply not have
+    # happened yet, and doctor's verdict is about the hardware configuration.
+    assert result["ok"] is True
+
+
 def test_doctor_reports_named_debugger_selectors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     write_authoritative_config(

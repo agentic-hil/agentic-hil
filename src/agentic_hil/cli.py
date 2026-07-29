@@ -939,12 +939,39 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "tool": "agentic_hil_doctor",
         "summary": "Agentic HIL authoritative configuration loaded; debugger check skipped." if debugger_info.get("skipped") else ("Agentic HIL configuration loaded and debugger checked." if debugger_info.get("ok") else "Agentic HIL configuration loaded, but debugger check failed."),
         "config_path": config.config_path,
-        "mcp": {"transport": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]},
+        "mcp": _doctor_mcp_report(),
         "target": {"name": config.target.name, "controller": config.target.controller},
         "devices": {device_id: {"debugger": device.debugger, "uart": device.uart} for device_id, device in config.devices.items()},
         "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding} for port_id, port in config.com_ports.items()},
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
+    }
+
+
+def _doctor_mcp_report() -> JsonObject:
+    """What to register as the MCP server, or why nothing may be registered yet.
+
+    Reporting the bare name would name the one form registration refuses. `PATH`
+    decides it afresh every session, so the program behind the hardware gate
+    could change without anyone editing the registration. An operator who copies
+    what doctor prints must get something registration accepts.
+    """
+    report: JsonObject = {"transport": "stdio", "args": ["mcp-stdio"]}
+    try:
+        command = mcp_server_command()
+    except (ConfigError, OSError) as error:
+        summary = error.summary if isinstance(error, ConfigError) else str(error)
+        return {
+            **report,
+            "command": None,
+            "persistent": False,
+            "summary": f"No trusted persistent executable to register yet: {summary}",
+        }
+    return {
+        **report,
+        "command": command,
+        "persistent": True,
+        "summary": "Register this exact path with 'agentic-hil setup --agent <agent>'; a transient runner or a bare PATH name is not a registration.",
     }
 
 
