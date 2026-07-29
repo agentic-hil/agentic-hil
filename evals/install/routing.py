@@ -243,7 +243,7 @@ def route_of(entry: dict[str, Any]) -> str:
 def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | str) -> str:
     lines = [f"Firmware routing report: {Path(output_root)}", ""]
     for entry in analysed:
-        case_id, cli, model = entry["group"]
+        case_id, cli, model, effort = entry["group"]
         # In the control arm the skill is verified absent, so a reference to it
         # is the agent going to look, not the agent loading it.
         skill = "no" if not entry["skill_referenced"] else "looked-for" if is_control(entry) else "yes"
@@ -256,7 +256,8 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
             raw += " (named, never executed)"
         if not raw and entry.get("guard_triggered"):
             raw = " raw=recorded by the PATH guard, absent from the transcript"
-        lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {cli} {model} — {detail}{raw}")
+        label = f"{cli} {model}" if effort == "default" else f"{cli} {model} ({effort})"
+        lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {label} — {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]
     gated = [entry for entry in measured if not is_control(entry)]

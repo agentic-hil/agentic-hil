@@ -155,6 +155,7 @@ def job_payload(
         "executor": "docker",
         "agent": job.agent,
         "model": job.model,
+        "reasoning_effort": job.reasoning_effort,
         "repetition": job.repetition,
         "timeout_seconds": job.timeout_seconds,
         "credential_file_kinds": [credential.kind for credential in job.credential_files],
@@ -441,6 +442,29 @@ def extract_start_metadata(log_path: Path) -> dict[str, Any]:
     return {}
 
 
+# Claude Code accepts an unknown --effort, warns on stderr, and continues with
+# exit 0. run_logged merges stderr into agent.log, so this warning is the one
+# hard piece of evidence that a requested effort never reached the model.
+EFFORT_IGNORED = "Unknown --effort value"
+
+
+def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bool, str]:
+    """Whether the transcript contradicts the effort this run claims to have used.
+
+    A CLI that accepts the flag and silently ignores it would otherwise produce
+    a default-effort measurement wearing the requested label. Absence of a
+    contradiction is not confirmation, and the detail says which of the two it is.
+    """
+    if requested is None:
+        return True, "no reasoning effort requested"
+    if not log_path.is_file():
+        return False, "no transcript to check the requested effort against"
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    if EFFORT_IGNORED in text:
+        return False, f"the agent CLI reported it ignored the requested effort {requested}"
+    return True, f"requested {requested}; the transcript does not contradict it"
+
+
 def create_volume(docker: str, name: str) -> None:
     result = run_capture([docker, "volume", "create", "--label", "agentic-hil.eval=true", name], 30)
     if result.returncode != 0:
@@ -582,7 +606,10 @@ def run_one(
     image_id: str | None,
     refresh_login: bool = False,
 ) -> dict[str, Any]:
-    run_id = slug(f"{case.id}-{job.agent}-{job.model}-r{job.repetition}")
+    # Only inserted when there is one, so runs without an effort keep the run
+    # ids earlier artifacts already carry.
+    effort_segment = f"-{job.reasoning_effort}" if job.reasoning_effort else ""
+    run_id = slug(f"{case.id}-{job.agent}-{job.model}{effort_segment}-r{job.repetition}")
     run_directory = output_root / run_id
     if run_directory.exists():
         raise FileExistsError(f"run output already exists: {run_directory}")
@@ -611,6 +638,8 @@ def run_one(
     started = time.monotonic()
     status = "error"
     failure: str | None = None
+    effort_ok = True
+    effort_detail = "not evaluated"
     agent_exit_code: int | None = None
     verifier_exit_code: int | None = None
     verification: dict[str, Any] | None = None
@@ -707,9 +736,10 @@ def run_one(
             json.dumps(verification_for_report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        effort_ok, effort_detail = reasoning_effort_evidence(run_directory / "agent.log", job.reasoning_effort)
         expected_safe_failure = case.expected_outcome == "safe-failure"
         agent_ok = agent_exit_code == 0 or expected_safe_failure
-        if not timed_out and agent_ok and verifier_exit_code == 0 and verification.get("ok") is True:
+        if not timed_out and agent_ok and effort_ok and verifier_exit_code == 0 and verification.get("ok") is True:
             status = "passed"
         elif agent_exit_code != 0 and (phrase := agent_authentication_failure(run_directory)):
             # A dead login is not a result about the installation guide.
@@ -717,6 +747,8 @@ def run_one(
             failure = f"agent could not authenticate ({phrase}); the stored login needs to be renewed"
         else:
             status = "failed"
+            if not effort_ok:
+                failure = failure or f"reasoning effort not applied: {effort_detail}"
             failure = failure or "agent or independent verification failed"
     except Exception as error:
         failure = redact(f"{type(error).__name__}: {error}", redaction_secrets)
@@ -784,6 +816,7 @@ def run_one(
         "agent": {
             "cli": job.agent,
             "model": job.model,
+            "reasoning_effort": job.reasoning_effort,
             "cli_version": extract_start_metadata(run_directory / "agent.log").get("agent_cli_version")
             if (run_directory / "agent.log").is_file()
             else None,
@@ -810,7 +843,16 @@ def run_one(
         "agent_exit_code": agent_exit_code,
         "verifier_exit_code": verifier_exit_code,
         "failure": failure,
-        "checks": verification.get("checks", []) if verification else [],
+        # The verifier has no access to agent.log, so the effort check is made
+        # here and reported beside the verifier's own checks.
+        "checks": [
+            *(verification.get("checks", []) if verification else []),
+            *(
+                []
+                if job.reasoning_effort is None
+                else [{"name": "requested reasoning effort reached the model", "ok": effort_ok, "detail": effort_detail}]
+            ),
+        ],
         "artifacts": {
             "agent_log": "agent.log",
             "job": "job.json",
@@ -949,9 +991,12 @@ def run_matrix(args: argparse.Namespace) -> int:
         # Every run gets its own container and its own pair of volumes, so a
         # repetition never inherits state from the one before it.
         cases_by_id = {case.id: case for case in matrix.cases}
-        templates: dict[tuple[str, str], Job] = {}
+        # Keyed by effort too: an escalation re-run must repeat the level the
+        # disagreeing repetitions actually ran at, not another level of the
+        # same model.
+        templates: dict[tuple[str, str, str | None], Job] = {}
         for job in matrix.jobs:
-            templates.setdefault((job.agent, job.model), job)
+            templates.setdefault((job.agent, job.model, job.reasoning_effort), job)
         while not aborted:
             pending = [
                 group
@@ -961,16 +1006,19 @@ def run_matrix(args: argparse.Namespace) -> int:
             if not pending:
                 break
             for group in pending:
-                case_id, agent, model = group
+                case_id, agent, model, effort = group
                 done = sum(1 for result in results if result_group(result) == group)
                 print(
-                    f"repetitions disagreed for {case_id} | {agent} {model} after {done}; running another",
+                    f"repetitions disagreed for {case_id} | {agent} {model} ({effort}) after {done}; running another",
                     file=sys.stderr,
                 )
                 results.append(
                     execute(
                         cases_by_id[case_id],
-                        dataclasses.replace(templates[(agent, model)], repetition=done + 1),
+                        dataclasses.replace(
+                            templates[(agent, model, None if effort == "default" else effort)],
+                            repetition=done + 1,
+                        ),
                     )
                 )
         summary = {
@@ -984,8 +1032,8 @@ def run_matrix(args: argparse.Namespace) -> int:
             "errors": sum(result["status"] == "error" for result in results),
             "aborted": aborted,
             "unstable": [
-                {"case": case_id, "agent": agent, "model": model}
-                for case_id, agent, model in unstable_groups(results)
+                {"case": case_id, "agent": agent, "model": model, "reasoning_effort": effort}
+                for case_id, agent, model, effort in unstable_groups(results)
             ],
             "results": [{"id": result["id"], "status": result["status"]} for result in results],
         }

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .adapters import adapter_for
+from .adapters import REASONING_EFFORTS, adapter_for
 
 ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 OFFICIAL_GIT_SPEC = re.compile(
@@ -75,6 +75,9 @@ class Job:
     timeout_seconds: int
     credentials: tuple[str, ...]
     credential_files: tuple[CredentialFile, ...]
+    # None means the axis is not exercised: no flag is passed and the CLI's own
+    # default applies. It is never a synonym for any named level.
+    reasoning_effort: str | None = None
 
 
 MINIMUM_REPETITIONS = 2
@@ -112,6 +115,17 @@ def _boolean(value: Any, label: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{label} must be true or false")
     return value
+
+
+def _reasoning_effort(value: Any, label: str) -> str | None:
+    """The level to demand of the model, or None to leave the CLI's default."""
+    if value is None:
+        return None
+    effort = _string(value, label)
+    if effort not in REASONING_EFFORTS:
+        allowed = ", ".join(REASONING_EFFORTS)
+        raise ValueError(f"{label} must be one of: {allowed}")
+    return effort
 
 
 def _repetitions(value: Any, label: str) -> int:
@@ -248,6 +262,7 @@ def load_matrix(path: str | Path) -> Matrix:
     image = _string(raw.get("image", "agentic-hil-install-eval:local"), "image")
     default_repetitions = _repetitions(raw.get("repetitions", MINIMUM_REPETITIONS), "repetitions")
     default_timeout = _positive_integer(raw.get("timeout_seconds", 1800), "timeout_seconds")
+    default_effort = _reasoning_effort(raw.get("reasoning_effort"), "reasoning_effort")
     if "pass_environment" in raw:
         raise ValueError("matrix.pass_environment is unsupported; declare jobs[].credentials explicitly")
 
@@ -262,6 +277,7 @@ def load_matrix(path: str | Path) -> Matrix:
         model = _string(item.get("model"), f"jobs[{index}].model")
         repetitions = _repetitions(item.get("repetitions", default_repetitions), f"jobs[{index}].repetitions")
         timeout = _positive_integer(item.get("timeout_seconds", default_timeout), f"jobs[{index}].timeout_seconds")
+        effort = _reasoning_effort(item.get("reasoning_effort", default_effort), f"jobs[{index}].reasoning_effort")
         if "pass_environment" in item:
             raise ValueError(f"jobs[{index}].pass_environment is unsupported; use jobs[{index}].credentials")
         credentials = _credentials(item.get("credentials"), f"jobs[{index}].credentials")
@@ -272,12 +288,14 @@ def load_matrix(path: str | Path) -> Matrix:
         )
         if not credentials and not credential_files:
             raise ValueError(f"jobs[{index}] must declare credentials and/or credential_files")
-        if adapter.id != "opencode":
-            unsupported = sorted(set(credentials) - set(adapter.auth_environment))
-            if unsupported:
-                raise ValueError(
-                    f"jobs[{index}].credentials contains unsupported names for {adapter.id}: {unsupported}"
-                )
+        # Every agent, opencode included: the runner forwards each declared name
+        # from the host into a container that has network access, so an
+        # unchecked name is a way to hand host secrets to a model.
+        unsupported = sorted(set(credentials) - set(adapter.auth_environment))
+        if unsupported:
+            raise ValueError(
+                f"jobs[{index}].credentials contains unsupported names for {adapter.id}: {unsupported}"
+            )
         jobs.extend(
             Job(
                 agent=adapter.id,
@@ -286,13 +304,16 @@ def load_matrix(path: str | Path) -> Matrix:
                 timeout_seconds=timeout,
                 credentials=credentials,
                 credential_files=credential_files,
+                reasoning_effort=effort,
             )
             for repetition in range(1, repetitions + 1)
         )
 
-    job_ids = [(job.agent, job.model, job.repetition) for job in jobs]
+    # The effort belongs in the key: without it, the same model at two levels is
+    # one job, and the loader would not even notice the collision.
+    job_ids = [(job.agent, job.model, job.reasoning_effort, job.repetition) for job in jobs]
     if len(job_ids) != len(set(job_ids)):
-        raise ValueError("agent, model, and repetition combinations must be unique")
+        raise ValueError("agent, model, reasoning effort, and repetition combinations must be unique")
 
     planned = max(job.repetition for job in jobs)
     max_repetitions = _repetitions(

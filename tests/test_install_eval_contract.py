@@ -53,6 +53,29 @@ def test_container_entrypoint_reads_only_keys_the_runner_writes() -> None:
     assert "prompt_template" in case, "the prompt key must stay bound to the runner payload"
     assert top_level <= set(payload), sorted(top_level - set(payload))
     assert case <= set(payload["case"]), sorted(case - set(payload["case"]))
+    # Pinned in both directions: the runner must write the effort and the
+    # entrypoint must read it, or a level is requested and never applied.
+    assert "reasoning_effort" in payload
+    assert "reasoning_effort" in top_level
+
+
+def test_every_agent_session_receives_the_reasoning_effort() -> None:
+    """The measured session is the one the routing report reads.
+
+    An effort that reached only the installing session would leave the
+    follow-up answering at the CLI's default while the result claims the level
+    that was asked for.
+    """
+    tree = ast.parse(CONTAINER_ENTRYPOINT.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_agent_command"
+    ]
+
+    assert len(calls) == 2, "one call per agent session"
+    for call in calls:
+        assert any(keyword.arg == "reasoning_effort" for keyword in call.keywords)
 
 
 def test_job_binds_mcp_contract_from_target_source() -> None:

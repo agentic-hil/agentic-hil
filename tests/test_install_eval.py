@@ -62,6 +62,49 @@ def test_only_the_isolated_session_ignores_the_agent_user_config(agent: str, iso
     assert isolating_flag not in connected
 
 
+@pytest.mark.parametrize(
+    ("agent", "expected"),
+    [
+        ("codex", ["--config", "model_reasoning_effort=medium"]),
+        ("claude-code", ["--effort", "medium"]),
+        ("opencode", ["--variant", "medium"]),
+    ],
+)
+def test_agent_command_carries_the_reasoning_effort(agent: str, expected: list[str]) -> None:
+    command = build_agent_command(agent, "model", "prompt", reasoning_effort="medium")
+
+    # Adjacent: a flag separated from its value is a different command.
+    assert any(command[index : index + 2] == expected for index in range(len(command) - 1))
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_reasoning_effort_reaches_both_sessions(agent: str) -> None:
+    # The installing session is deliberately isolated and the measured session
+    # deliberately is not. An effort that reached only one of them would have
+    # the follow-up answer as a different model than the one that installed.
+    isolated = build_agent_command(agent, "model", "prompt", reasoning_effort="high")
+    connected = build_agent_command(agent, "model", "prompt", isolated=False, reasoning_effort="high")
+
+    assert "high" in " ".join(isolated)
+    assert "high" in " ".join(connected)
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_agent_command_says_nothing_about_effort_when_none_was_asked(agent: str) -> None:
+    command = " ".join(build_agent_command(agent, "model", "prompt"))
+
+    for flag in ("--effort", "--variant", "model_reasoning_effort"):
+        assert flag not in command
+
+
+@pytest.mark.parametrize("effort", ["ultrathink", "ultra", "none", ""])
+def test_agent_command_refuses_an_effort_the_agents_do_not_share(effort: str) -> None:
+    # "ultra" is codex-only and "none" is opencode-only: accepting either would
+    # hand the other CLIs a silent default and the comparison would be a fiction.
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        build_agent_command("codex", "model", "prompt", reasoning_effort=effort)
+
+
 def test_adapter_aliases_resolve_to_setup_agent_names() -> None:
     assert adapter_for("codex-cli").id == "codex"
     assert adapter_for("claude").id == "claude-code"
@@ -603,7 +646,7 @@ def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
 def test_routing_gate_covers_the_treatment_arm_only() -> None:
     def entry(case_id: str, mcp_calls: int) -> dict:
         return {
-            "group": (case_id, "codex", "model"),
+            "group": (case_id, "codex", "model", "default"),
             "status": "passed",
             "followup": True,
             "mcp_calls": mcp_calls,
@@ -619,6 +662,89 @@ def test_routing_gate_covers_the_treatment_arm_only() -> None:
     # A control run that skips MCP is the measurement, not a regression.
     assert routing_results(args, analysed) == 0
     assert routing_results(args, [entry("firmware-routing", 0)]) == 1
+
+
+def _matrix_with_jobs(tmp_path: Path, jobs: list[dict], name: str = "matrix.json") -> Path:
+    case = tmp_path / "case.json"
+    case.write_text(
+        json.dumps({"schema_version": 1, "id": "case", "prompt": "{workspace} {guide} {install_spec} {agent}"}),
+        encoding="utf-8",
+    )
+    matrix = tmp_path / name
+    matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case": "case.json",
+                "target": {"mode": "local", "expected_version": "0.4.0"},
+                "jobs": jobs,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return matrix
+
+
+def test_matrix_rejects_an_unknown_reasoning_effort(tmp_path: Path) -> None:
+    matrix = _matrix_with_jobs(tmp_path, [{"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "reasoning_effort": "bogus"}])
+
+    with pytest.raises(ValueError, match="low, medium, high, xhigh, max"):
+        load_matrix(matrix)
+
+
+def test_the_same_model_at_two_efforts_is_not_a_duplicate(tmp_path: Path) -> None:
+    # Two levels of one model are two measurements, not a collision — and two
+    # jobs at the same level still are one.
+    matrix = _matrix_with_jobs(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "reasoning_effort": "low"},
+            {"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "reasoning_effort": "high"},
+        ],
+    )
+
+    loaded = load_matrix(matrix)
+    assert {job.reasoning_effort for job in loaded.jobs} == {"low", "high"}
+
+    duplicate = _matrix_with_jobs(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "reasoning_effort": "low"},
+            {"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "reasoning_effort": "low"},
+        ],
+        name="duplicate.json",
+    )
+    with pytest.raises(ValueError, match="reasoning effort"):
+        load_matrix(duplicate)
+
+
+def test_two_efforts_of_one_model_are_not_disagreeing_repetitions() -> None:
+    # Without the effort in the group, a passing high-effort run and a failing
+    # low-effort run look unstable, and the matrix spends its escalation budget
+    # chasing the difference it was built to measure.
+    high = _result("quickstart", "codex", "m", "passed")
+    high["agent"]["reasoning_effort"] = "high"
+    low = _result("quickstart", "codex", "m", "failed")
+    low["agent"]["reasoning_effort"] = "low"
+
+    assert unstable_groups([high, low]) == []
+
+
+def test_an_ignored_effort_fails_the_run(tmp_path: Path) -> None:
+    from evals.install.runner import reasoning_effort_evidence
+
+    log = tmp_path / "agent.log"
+    # The literal Claude Code emits; paraphrasing it would make this test pass
+    # while the real sentinel changed under a CLI bump.
+    log.write_text(
+        "Warning: Unknown --effort value 'bogus' — ignoring it and using the default effort.\n",
+        encoding="utf-8",
+    )
+
+    assert reasoning_effort_evidence(log, "medium")[0] is False
+    # Inert when nothing was requested, so it cannot fail existing runs.
+    assert reasoning_effort_evidence(log, None)[0] is True
+    assert reasoning_effort_evidence(tmp_path / "absent.log", "medium")[0] is False
 
 
 def test_the_control_arm_removes_every_copy_of_the_rules(tmp_path: Path) -> None:
@@ -727,11 +853,11 @@ def test_disagreeing_repetitions_are_reported_as_unstable() -> None:
     ]
 
     assert unstable_groups(agreeing) == []
-    assert unstable_groups(agreeing + disagreeing) == [("quickstart", "opencode", "m")]
+    assert unstable_groups(agreeing + disagreeing) == [("quickstart", "opencode", "m", "default")]
 
     report = format_report(agreeing + disagreeing, Path("out"))
     assert "Unstable — repetitions disagreed:" in report
-    assert "quickstart | opencode m: 1x failed, 1x passed" in report
+    assert "quickstart | opencode m (default): 1x failed, 1x passed" in report
 
 
 def test_report_names_every_failed_check_and_the_transcript(tmp_path: Path) -> None:

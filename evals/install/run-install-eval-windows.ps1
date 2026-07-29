@@ -10,6 +10,9 @@ param(
     [string[]]$CodexModels = @("gpt-5.6-sol"),
     [string[]]$ClaudeModels = @("claude-sonnet-4-6"),
     [string[]]$OpencodeModels = @("openai/gpt-5.6-sol"),
+    # Empty means the axis is not exercised: no flag is passed and each CLI's
+    # own default applies. It is never a synonym for a named level.
+    [string[]]$ReasoningEfforts = @(),
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 1800,
     [switch]$SkipBuild,
@@ -112,7 +115,8 @@ function Get-FirstSetEnvironmentName {
 function New-AgentJob {
     param(
         [Parameter(Mandatory)][string]$Agent,
-        [Parameter(Mandatory)][string]$Model
+        [Parameter(Mandatory)][string]$Model,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Effort
     )
 
     # An environment credential is preferred because it needs no file mount. A
@@ -124,12 +128,14 @@ function New-AgentJob {
     }
     $environmentName = Get-FirstSetEnvironmentName -Names $environmentNames
     if ($null -ne $environmentName) {
-        Write-Host "$Agent : $Model (credential $environmentName)"
-        return @{
+        Write-Host "$Agent : $Model$(if ($Effort) { " at $Effort" }) (credential $environmentName)"
+        $job = @{
             agent = $Agent
             model = $Model
             credentials = @($environmentName)
         }
+        if ($Effort) { $job.reasoning_effort = $Effort }
+        return $job
     }
 
     $fileCredential = switch ($Agent) {
@@ -177,8 +183,8 @@ function New-AgentJob {
     # The matrix stores only the variable name; the runner reads the path from it.
     $resolved = (Resolve-Path -LiteralPath $fileCredential.Path).Path
     [Environment]::SetEnvironmentVariable($fileCredential.Variable, $resolved, "Process")
-    Write-Host "$Agent : $Model (file login $($fileCredential.Kind))"
-    return @{
+    Write-Host "$Agent : $Model$(if ($Effort) { " at $Effort" }) (file login $($fileCredential.Kind))"
+    $job = @{
         agent = $Agent
         model = $Model
         credential_files = @(
@@ -188,6 +194,8 @@ function New-AgentJob {
             }
         )
     }
+    if ($Effort) { $job.reasoning_effort = $Effort }
+    return $job
 }
 
 function Write-JsonFile {
@@ -251,13 +259,24 @@ $models = @{
     "claude-code" = (Split-Values -Values $ClaudeModels)
     "opencode" = (Split-Values -Values $OpencodeModels)
 }
+$efforts = Split-Values -Values $ReasoningEfforts
+if ($efforts.Count -gt 0) {
+    $efforts = Expand-Selection -Values $efforts -Allowed @("low", "medium", "high", "xhigh", "max") -Label "reasoning effort"
+}
+else {
+    # One job per model, with no effort flag at all.
+    $efforts = @("")
+}
+
 $jobs = @()
 foreach ($agent in $Agents) {
     if ($models[$agent].Count -eq 0) {
         throw "At least one model is required for $agent."
     }
     foreach ($model in $models[$agent]) {
-        $jobs += New-AgentJob -Agent $agent -Model $model
+        foreach ($effort in $efforts) {
+            $jobs += New-AgentJob -Agent $agent -Model $model -Effort $effort
+        }
     }
 }
 

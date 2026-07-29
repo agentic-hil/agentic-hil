@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .adapters import adapter_for, build_agent_command
+from .adapters import EFFORT_FLAGS, adapter_for, build_agent_command
 from .fixtures import (
     SKILL_NAME,
     prepare_fixture,
@@ -116,6 +116,32 @@ def cli_version(executable: str, environment: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
+EFFORT_HELP = {
+    "codex": ["codex", "exec", "--help"],
+    "claude-code": ["claude", "--help"],
+    "opencode": ["opencode", "run", "--help"],
+}
+
+
+def supports_reasoning_effort(agent: str, environment: dict[str, str]) -> bool:
+    """Whether the CLI pinned in this image still has the mechanism we rely on.
+
+    The image pins one version per CLI. A bump that renames or drops the flag
+    must stop the run, not quietly produce a default-effort measurement wearing
+    the label of the effort that was asked for.
+    """
+    result = subprocess.run(
+        EFFORT_HELP[agent],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+        check=False,
+        env=environment,
+    )
+    return EFFORT_FLAGS[agent] in result.stdout
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job", default="/job.json")
@@ -128,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("agentic-hil is already installed before eval")
 
     adapter = adapter_for(job["agent"])
+    reasoning_effort = job["reasoning_effort"]
     prepare_fixture(adapter.id, job["case"]["fixture"], HOME)
     guide, install_spec = prepare_workspace(job)
     prompt = job["case"]["prompt_template"].format(
@@ -149,16 +176,26 @@ def main(argv: list[str] | None = None) -> int:
             "claude-code": "claude",
             "opencode": "opencode",
         }[adapter.id]
+        version = cli_version(executable, environment)
+        effort_supported = supports_reasoning_effort(adapter.id, environment) if reasoning_effort else None
+        if reasoning_effort and not effort_supported:
+            raise RuntimeError(
+                f"job requests reasoning_effort={reasoning_effort!r} but this image's {adapter.id} "
+                f"({version}) has no {EFFORT_FLAGS[adapter.id]}; the run would measure the default "
+                "effort under the wrong label"
+            )
         metadata = {
             "event": "eval_start",
             "agent": adapter.id,
             "model": job["model"],
-            "agent_cli_version": cli_version(executable, environment),
+            "reasoning_effort": reasoning_effort,
+            "reasoning_effort_supported": effort_supported,
+            "agent_cli_version": version,
             "uid": os.geteuid(),
             "workspace": str(WORKSPACE),
         }
         print(json.dumps(metadata, sort_keys=True), flush=True)
-        command = build_agent_command(adapter.id, job["model"], prompt)
+        command = build_agent_command(adapter.id, job["model"], prompt, reasoning_effort=reasoning_effort)
         completed = subprocess.run(command, cwd=WORKSPACE, env=environment, check=False)
         print(json.dumps({"event": "eval_agent_exit", "exit_code": completed.returncode}), flush=True)
         if completed.returncode != 0:
@@ -202,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
         followup_environment = dict(environment)
         followup_environment.pop("OPENCODE_CONFIG", None)
         second = subprocess.run(
-            build_agent_command(adapter.id, job["model"], followup, isolated=False),
+            build_agent_command(
+                adapter.id, job["model"], followup, isolated=False, reasoning_effort=reasoning_effort
+            ),
             cwd=WORKSPACE,
             env=followup_environment,
             check=False,

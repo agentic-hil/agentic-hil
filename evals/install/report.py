@@ -26,25 +26,32 @@ def load_results(output_root: Path | str) -> list[dict[str, Any]]:
     return results
 
 
-def result_group(result: dict[str, Any]) -> tuple[str, str, str]:
-    """The case, agent CLI, and model whose repetitions must agree."""
+def result_group(result: dict[str, Any]) -> tuple[str, str, str, str]:
+    """The case, agent CLI, model, and effort whose repetitions must agree.
+
+    The effort belongs in the key. Without it, one passing high-effort run and
+    one failing low-effort run of the same model look like repetitions that
+    disagreed, and the matrix spends its escalation budget chasing a difference
+    that is the measurement itself.
+    """
     case = result.get("case") if isinstance(result.get("case"), dict) else {}
     agent = result.get("agent") if isinstance(result.get("agent"), dict) else {}
     return (
         str(case.get("id", "unknown-case")),
         str(agent.get("cli", "unknown-agent")),
         str(agent.get("model", "unknown-model")),
+        str(agent.get("reasoning_effort") or "default"),
     )
 
 
-def group_statuses(results: list[dict[str, Any]]) -> dict[tuple[str, str, str], list[str]]:
-    grouped: dict[tuple[str, str, str], list[str]] = {}
+def group_statuses(results: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], list[str]]:
+    grouped: dict[tuple[str, str, str, str], list[str]] = {}
     for result in results:
         grouped.setdefault(result_group(result), []).append(str(result.get("status", "unknown")))
     return grouped
 
 
-def unstable_groups(results: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+def unstable_groups(results: list[dict[str, Any]]) -> list[tuple[str, str, str, str]]:
     """Combinations whose repetitions disagreed with each other.
 
     One passing and one failing run of the same combination means the pass was
@@ -116,12 +123,12 @@ def format_report(results: list[dict[str, Any]], output_root: Path | str) -> str
     if unstable:
         lines.extend(["", "Unstable — repetitions disagreed:"])
         for group in unstable:
-            case_id, cli, model = group
+            case_id, cli, model, effort = group
             counted = ", ".join(
                 f"{count}x {status}"
                 for status, count in sorted(Counter(statuses[group]).items())
             )
-            lines.append(f"  {case_id} | {cli} {model}: {counted}")
+            lines.append(f"  {case_id} | {cli} {model} ({effort}): {counted}")
     return "\n".join(lines)
 
 
