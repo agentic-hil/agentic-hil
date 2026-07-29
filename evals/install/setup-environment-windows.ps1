@@ -297,7 +297,16 @@ function Get-UntrustedWriteIdentity {
             "S-1-5-18",
             "S-1-5-32-544"
         )
-        $accessRules = (Get-Acl -LiteralPath $LiteralPath).Access
+        try {
+            $accessRules = (Get-Acl -LiteralPath $LiteralPath).Access
+        }
+        catch {
+            # Get-Acl lives in Microsoft.PowerShell.Security. Where module
+            # autoloading is unavailable the same information is reachable
+            # without it, and silently reporting "no untrusted writers" would
+            # turn this preflight into a no-op exactly where it is needed.
+            $accessRules = ([IO.DirectoryInfo]::new($LiteralPath)).GetAccessControl().Access
+        }
     }
     catch {
         # A probe failure must not block a setup that is otherwise healthy.

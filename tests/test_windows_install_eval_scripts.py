@@ -229,8 +229,11 @@ def test_windows_setup_resolves_docker_cli_outside_process_path(
     docker_cli = tmp_path / "Docker" / "resources" / "bin" / "docker.exe"
     docker_cli.parent.mkdir(parents=True)
     docker_cli.write_bytes(b"placeholder")
+    empty_path_directory = tmp_path / "empty-path"
+    empty_path_directory.mkdir()
     escaped_script = str(SETUP_SCRIPT).replace("'", "''")
     escaped_docker = str(docker_cli).replace("'", "''")
+    escaped_empty = str(empty_path_directory).replace("'", "''")
     command = f"""
 $tokens = $null
 $errors = $null
@@ -247,9 +250,9 @@ $functionAst = $ast.Find({{
 if ($null -eq $functionAst) {{ throw 'Function not found.' }}
 Invoke-Expression $functionAst.Extent.Text
 
-$env:Path = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::System
-)
+# An empty directory, not the System folder: a GitHub runner ships
+# docker.exe there, which is a perfectly good CLI and would be resolved first.
+$env:Path = '{escaped_empty}'
 $resolved = Get-DockerCli -CandidatePaths @('{escaped_docker}')
 if ($resolved -ne [IO.Path]::GetFullPath('{escaped_docker}')) {{
     throw "Unexpected Docker CLI: $resolved"
@@ -295,7 +298,7 @@ Invoke-Expression $functionAst.Extent.Text
 $full = [Security.AccessControl.FileSystemRights]::FullControl
 $inherit = [Security.AccessControl.InheritanceFlags]"ObjectInherit, ContainerInherit"
 $allow = [Security.AccessControl.AccessControlType]::Allow
-$cleanAcl = Get-Acl -LiteralPath '{escaped_clean}'
+$cleanAcl = ([IO.DirectoryInfo]::new('{escaped_clean}')).GetAccessControl()
 # Runner temp directories may grant extra principals write access, so pin the
 # trusted-only case instead of inheriting whatever the host provides.
 $cleanAcl.SetAccessRuleProtection($true, $false)
@@ -312,7 +315,7 @@ foreach ($trusted in @(
         $allow
     )))
 }}
-Set-Acl -LiteralPath '{escaped_clean}' -AclObject $cleanAcl
+([IO.DirectoryInfo]::new('{escaped_clean}')).SetAccessControl($cleanAcl)
 
 $clean = @(Get-UntrustedWriteIdentity -LiteralPath '{escaped_clean}')
 if ($clean.Count -ne 0) {{
@@ -320,7 +323,7 @@ if ($clean.Count -ne 0) {{
 }}
 
 $everyone = New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'
-$acl = Get-Acl -LiteralPath '{escaped_shared}'
+$acl = ([IO.DirectoryInfo]::new('{escaped_shared}')).GetAccessControl()
 $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
     $everyone,
     [Security.AccessControl.FileSystemRights]::Modify,
@@ -328,7 +331,7 @@ $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
     [Security.AccessControl.PropagationFlags]::None,
     [Security.AccessControl.AccessControlType]::Allow
 )))
-Set-Acl -LiteralPath '{escaped_shared}' -AclObject $acl
+([IO.DirectoryInfo]::new('{escaped_shared}')).SetAccessControl($acl)
 
 $shared = @(Get-UntrustedWriteIdentity -LiteralPath '{escaped_shared}')
 if ($shared -notcontains 'S-1-1-0') {{

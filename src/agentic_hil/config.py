@@ -984,10 +984,22 @@ def trusted_persistent_executable(
         raise ConfigError("mcp_command_untrusted", "The MCP server command must resolve to an absolute path.", {"path": str(requested)})
     path = absolute_without_symlinks(requested)
     workspace_path = absolute_without_symlinks(Path(workspace))
-    forbidden = [workspace_path, *(absolute_without_symlinks(Path(root).expanduser()) for root in disallowed_roots or [])]
+    # Both shapes of every root: macOS reports its temporary directory as
+    # /var/folders while a path under it resolves to /private/var/folders, and a
+    # root that only matches in one shape is a root that can be walked around.
+    # Widening a refusal is always safe; narrowing one is not.
+    forbidden = [workspace_path]
+    for root in [Path(workspace), *(disallowed_roots or [])]:
+        expanded = Path(root).expanduser()
+        forbidden.append(absolute_without_symlinks(expanded))
+        with suppress(OSError):
+            forbidden.append(expanded.resolve())
 
     def reject_forbidden(candidate: Path) -> None:
-        if any(is_path_within_frozen(candidate, root) for root in forbidden):
+        shapes = [candidate]
+        with suppress(OSError):
+            shapes.append(candidate.resolve())
+        if any(is_path_within_frozen(shape, root) for shape in shapes for root in forbidden):
             raise ConfigError("mcp_command_untrusted", "The MCP server command must not come from the workspace or a temporary/cache directory.", {"path": str(candidate)})
 
     reject_forbidden(path)
