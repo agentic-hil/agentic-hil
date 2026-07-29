@@ -143,7 +143,8 @@ def test_run_logged_redacts_encoded_secret_and_drains_after_limit(tmp_path: Path
     result = log_path.read_text(encoding="utf-8")
 
     assert exit_code == 0
-    assert timed_out is False
+    # None, not False: the second element now says why a run was stopped.
+    assert timed_out is None
     assert cleanup_error is None
     assert secret not in result
     assert quote(secret, safe="") not in result

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import time
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -745,6 +747,59 @@ def test_an_ignored_effort_fails_the_run(tmp_path: Path) -> None:
     # Inert when nothing was requested, so it cannot fail existing runs.
     assert reasoning_effort_evidence(log, None)[0] is True
     assert reasoning_effort_evidence(tmp_path / "absent.log", "medium")[0] is False
+
+
+def test_a_silent_run_is_stopped_long_before_its_total_budget(tmp_path: Path) -> None:
+    """A provider that stops answering leaves a process alive and mute.
+
+    The total budget only notices that at its very end, so one stalled run cost
+    thirty minutes of wall clock for work that died in its first seconds.
+    """
+    from evals.install.runner import run_logged
+
+    log = tmp_path / "agent.log"
+    started = time.monotonic()
+    exit_code, timed_out, _cleanup = run_logged(
+        [sys.executable, "-c", "import sys, time; print('working', flush=True); time.sleep(30)"],
+        log,
+        timeout_seconds=600,
+        idle_timeout_seconds=1,
+        secrets=[],
+    )
+    elapsed = time.monotonic() - started
+
+    assert timed_out == "idle"
+    assert exit_code != 0
+    # Stopped on silence, nowhere near the total budget.
+    assert elapsed < 20, elapsed
+    assert "working" in log.read_text(encoding="utf-8")
+
+
+def test_a_talkative_run_is_not_mistaken_for_a_stalled_one(tmp_path: Path) -> None:
+    from evals.install.runner import run_logged
+
+    exit_code, timed_out, _cleanup = run_logged(
+        [sys.executable, "-c", "import time\nfor _ in range(6):\n    print('alive', flush=True)\n    time.sleep(0.3)"],
+        tmp_path / "agent.log",
+        timeout_seconds=600,
+        idle_timeout_seconds=2,
+        secrets=[],
+    )
+
+    assert timed_out is None
+    assert exit_code == 0
+
+
+def test_an_idle_timeout_longer_than_the_run_is_refused(tmp_path: Path) -> None:
+    # A silence budget above the total budget can never fire, which would look
+    # like protection while providing none.
+    matrix = _matrix_with_jobs(
+        tmp_path,
+        [{"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "timeout_seconds": 60, "idle_timeout_seconds": 120}],
+    )
+
+    with pytest.raises(ValueError, match="idle_timeout_seconds"):
+        load_matrix(matrix)
 
 
 def test_writing_a_refreshed_login_back_is_serialized() -> None:

@@ -15,6 +15,11 @@ param(
     [string[]]$ReasoningEfforts = @(),
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 1800,
+    # How long a run may say nothing before it is stopped. A provider that stops
+    # answering leaves a process alive and silent, and the total budget notices
+    # that only at its very end.
+    [ValidateRange(30, 3600)]
+    [int]$IdleTimeoutSeconds = 300,
     # Each run in flight holds 2 CPUs and 4 GB. Writing a refreshed login back is
     # serialized regardless, so a shared login file cannot be raced.
     [ValidateRange(1, 8)]
@@ -301,6 +306,7 @@ Write-JsonFile -Path $matrixPath -Document @{
     repetitions = $Repetitions
     max_repetitions = $MaxRepetitions
     timeout_seconds = $TimeoutSeconds
+    idle_timeout_seconds = $IdleTimeoutSeconds
     target = @{
         mode = "local"
         expected_version = $projectVersion.Trim()

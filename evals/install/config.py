@@ -78,6 +78,10 @@ class Job:
     # None means the axis is not exercised: no flag is passed and the CLI's own
     # default applies. It is never a synonym for any named level.
     reasoning_effort: str | None = None
+    # How long the agent may say nothing at all. A provider that stops answering
+    # leaves a process that is alive and silent, and the total budget only
+    # notices that at its very end.
+    idle_timeout_seconds: int = 300
 
 
 MINIMUM_REPETITIONS = 2
@@ -263,6 +267,7 @@ def load_matrix(path: str | Path) -> Matrix:
     default_repetitions = _repetitions(raw.get("repetitions", MINIMUM_REPETITIONS), "repetitions")
     default_timeout = _positive_integer(raw.get("timeout_seconds", 1800), "timeout_seconds")
     default_effort = _reasoning_effort(raw.get("reasoning_effort"), "reasoning_effort")
+    default_idle = _positive_integer(raw.get("idle_timeout_seconds", 300), "idle_timeout_seconds")
     if "pass_environment" in raw:
         raise ValueError("matrix.pass_environment is unsupported; declare jobs[].credentials explicitly")
 
@@ -278,6 +283,9 @@ def load_matrix(path: str | Path) -> Matrix:
         repetitions = _repetitions(item.get("repetitions", default_repetitions), f"jobs[{index}].repetitions")
         timeout = _positive_integer(item.get("timeout_seconds", default_timeout), f"jobs[{index}].timeout_seconds")
         effort = _reasoning_effort(item.get("reasoning_effort", default_effort), f"jobs[{index}].reasoning_effort")
+        idle = _positive_integer(item.get("idle_timeout_seconds", default_idle), f"jobs[{index}].idle_timeout_seconds")
+        if idle > timeout:
+            raise ValueError(f"jobs[{index}].idle_timeout_seconds must not exceed its timeout_seconds")
         if "pass_environment" in item:
             raise ValueError(f"jobs[{index}].pass_environment is unsupported; use jobs[{index}].credentials")
         credentials = _credentials(item.get("credentials"), f"jobs[{index}].credentials")
@@ -305,6 +313,7 @@ def load_matrix(path: str | Path) -> Matrix:
                 credentials=credentials,
                 credential_files=credential_files,
                 reasoning_effort=effort,
+                idle_timeout_seconds=idle,
             )
             for repetition in range(1, repetitions + 1)
         )

@@ -366,9 +366,17 @@ def run_logged(
     *,
     timeout_seconds: int,
     secrets: list[str],
+    idle_timeout_seconds: int | None = None,
     timeout_container: str | None = None,
     log_content_byte_limit: int = DEFAULT_LOG_CONTENT_BYTES,
-) -> tuple[int, bool, str | None]:
+) -> tuple[int, str | None, str | None]:
+    """Run a container, streaming its output, and report why it was stopped.
+
+    The second element is None, "total" or "idle". A provider that stops
+    answering leaves a process that is alive and silent, which the total budget
+    only notices at its very end — an hour of wall clock for a run that died in
+    its first seconds. The idle budget stops that in minutes.
+    """
     process = subprocess.Popen(
         command,
         text=True,
@@ -391,14 +399,18 @@ def run_logged(
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
     started = time.monotonic()
-    timed_out = False
+    last_output = started
+    timed_out: str | None = None
     timeout_cleanup_error: str | None = None
     stream_closed = False
     with log_path.open("w", encoding="utf-8") as handle:
         log_writer = RedactingLogWriter(handle, secrets, content_byte_limit=log_content_byte_limit)
         while not stream_closed or process.poll() is None:
-            if not timed_out and process.poll() is None and time.monotonic() - started > timeout_seconds:
-                timed_out = True
+            now = time.monotonic()
+            exhausted = now - started > timeout_seconds
+            stalled = idle_timeout_seconds is not None and now - last_output > idle_timeout_seconds
+            if not timed_out and process.poll() is None and (exhausted or stalled):
+                timed_out = "total" if exhausted else "idle"
                 if timeout_container:
                     try:
                         remove_container(command[0], timeout_container)
@@ -416,6 +428,7 @@ def run_logged(
             if item is None:
                 stream_closed = True
                 continue
+            last_output = time.monotonic()
             log_writer.feed(item)
         log_writer.finish()
     return process.wait(), timed_out, timeout_cleanup_error
@@ -675,6 +688,7 @@ def run_one(
             agent_command,
             run_directory / "agent.log",
             timeout_seconds=job.timeout_seconds,
+            idle_timeout_seconds=job.idle_timeout_seconds,
             secrets=redaction_secrets,
             timeout_container=agent_container,
         )
@@ -683,7 +697,12 @@ def run_one(
             cleanup_errors.append(timeout_cleanup_error)
             unresolved_containers.add(agent_container)
             raise RuntimeError(timeout_cleanup_error)
-        if timed_out:
+        if timed_out == "idle":
+            failure = (
+                f"agent produced no output for {job.idle_timeout_seconds}s and was stopped after "
+                f"{round(time.monotonic() - started)}s"
+            )
+        elif timed_out:
             failure = f"agent timed out after {job.timeout_seconds}s"
 
         if credential_files and refresh_login:
@@ -751,6 +770,11 @@ def run_one(
             # A dead login is not a result about the installation guide.
             status = "error"
             failure = f"agent could not authenticate ({phrase}); the stored login needs to be renewed"
+        elif timed_out == "idle":
+            # Neither is a provider that stopped answering. Counting it as a
+            # failure would read like a finding about the guide, and the
+            # repetition that disagrees with it will be run again anyway.
+            status = "error"
         else:
             status = "failed"
             if not effort_ok:
