@@ -262,7 +262,7 @@ Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: 
 
 ```bash
 python -m pip install -e '.[dev]'
-ruff check src tests
+ruff check src tests evals tools
 pytest
 python -m build
 twine check dist/*

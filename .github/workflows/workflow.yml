@@ -24,6 +24,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Check shipped repository references
+        run: python tools/check_shipped_references.py
+
       - name: Verify release metadata and local contracts
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -71,51 +74,6 @@ jobs:
           ]
           if any(command not in plugin_skill for command in required_plugin_guidance):
               raise SystemExit("plugin skill must pin the persistent package and delegate MCP registration to setup")
-
-          # Testing an installation flow means pinning documents at the branch
-          # under test. Such a pin installs unreviewed code for every reader who
-          # copies the command, so no shipped document may leave with one. This
-          # used to be a checklist in a file somebody had to remember to read.
-          shipped_documents = [
-              root / "AI_AGENT_QUICKSTART.md",
-              root / "README.md",
-              root / "TROUBLESHOOTING.md",
-              root / "AGENTS.md",
-              root / "SECURITY.md",
-              root / "server.json",
-              *sorted((root / "docs").rglob("*.md")),
-              *sorted((root / "src/agentic_hil/skills").rglob("*.md")),
-              *sorted((root / "plugins").rglob("*.md")),
-              *sorted((root / "plugins").rglob("*.json")),
-              *sorted((root / ".claude-plugin").rglob("*.json")),
-          ]
-          immutable_reference = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
-          # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
-          # plugin@marketplace syntax Claude Code uses, not a git reference. The
-          # reference group is optional because no pin is as bad as a mutable
-          # one: an unpinned URL installs whatever the default branch holds.
-          repository_reference = re.compile(
-              r"(?:git\+)?https://github\.com/agentic-hil/agentic-hil(?:\.git)?(@[^\s\"'`)]+)?"
-          )
-          installs_from_source = re.compile(r"git\+https://github\.com/agentic-hil/agentic-hil|--from\s+git\+")
-          for document in shipped_documents:
-              text = document.read_text(encoding="utf-8") if document.is_file() else ""
-              if not text:
-                  continue
-              for line in text.splitlines():
-                  for match in repository_reference.finditer(line):
-                      reference = match.group(1)
-                      if reference is None:
-                          if installs_from_source.search(line):
-                              raise SystemExit(f"{document} installs from the repository without pinning a reference: {line.strip()}")
-                          continue
-                      if not immutable_reference.match(reference[1:]):
-                          raise SystemExit(f"{document} pins a mutable reference: agentic-hil{reference}")
-                      # A tag pin is offered as the route to take when PyPI is
-                      # unreachable. Pinning a tag other than this release's
-                      # would close that exit during the outage it covers.
-                      if reference.startswith("@v") and reference[1:] != f"v{package_version}":
-                          raise SystemExit(f"{document} pins {reference[1:]}, but this release is v{package_version}")
 
           changelog_release = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
           if changelog_release is None:
