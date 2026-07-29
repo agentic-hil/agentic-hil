@@ -15,6 +15,10 @@ param(
     [string[]]$ReasoningEfforts = @(),
     [ValidateRange(60, 7200)]
     [int]$TimeoutSeconds = 1800,
+    # Each run in flight holds 2 CPUs and 4 GB. Writing a refreshed login back is
+    # serialized regardless, so a shared login file cannot be raced.
+    [ValidateRange(1, 8)]
+    [int]$Concurrency = 1,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
     [switch]$RefreshLogin,
@@ -325,7 +329,7 @@ try {
         $runArguments += "--dry-run"
     }
     else {
-        $runArguments += @("--docker", (Get-DockerCli))
+        $runArguments += @("--docker", (Get-DockerCli), "--concurrency", $Concurrency)
         if ($RefreshLogin) {
             $runArguments += "--refresh-login"
         }

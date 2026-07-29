@@ -747,6 +747,28 @@ def test_an_ignored_effort_fails_the_run(tmp_path: Path) -> None:
     assert reasoning_effort_evidence(tmp_path / "absent.log", "medium")[0] is False
 
 
+def test_writing_a_refreshed_login_back_is_serialized() -> None:
+    """Concurrent runs of one agent share one login file on this machine.
+
+    A provider rotates the refresh token when it issues a new one, so two
+    write-backs racing can leave the copy here rejected — which is how a stored
+    login was already lost once. Only the write-back is serialized; the runs are
+    not.
+    """
+    import threading
+
+    from evals.install.runner import _LOGIN_WRITE_BACK
+
+    assert isinstance(_LOGIN_WRITE_BACK, type(threading.Lock()))
+
+    source = (REPOSITORY_ROOT / "evals" / "install" / "runner.py").read_text(encoding="utf-8")
+    write_back = source.index("apply_refreshed_login(kind, path, content)")
+    guard = source.rindex("_LOGIN_WRITE_BACK", 0, write_back)
+
+    # The lock is entered before the write-back, not merely defined somewhere.
+    assert "with contextlib.suppress(ValueError), _LOGIN_WRITE_BACK" in source[guard - 60 : write_back]
+
+
 def test_the_control_arm_removes_every_copy_of_the_rules(tmp_path: Path) -> None:
     from evals.install.fixtures import REGISTRATION_START, registration_path, remove_registration_block
 

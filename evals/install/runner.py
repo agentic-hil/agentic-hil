@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -446,6 +447,11 @@ def extract_start_metadata(log_path: Path) -> dict[str, Any]:
 # exit 0. run_logged merges stderr into agent.log, so this warning is the one
 # hard piece of evidence that a requested effort never reached the model.
 EFFORT_IGNORED = "Unknown --effort value"
+# Two runs of one agent share one login file on this machine. A provider rotates
+# the refresh token when it hands out a new one, so a concurrent write-back can
+# leave the copy here rejected — which is how a stored login was lost once
+# already. Writing back is serialized; the runs themselves are not.
+_LOGIN_WRITE_BACK = threading.Lock()
 
 
 def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bool, str]:
@@ -694,7 +700,7 @@ def run_one(
                 60,
             )
             if export_result.returncode == 0:
-                with contextlib.suppress(ValueError):
+                with contextlib.suppress(ValueError), _LOGIN_WRITE_BACK:
                     returned = json.loads(export_result.stdout or "{}")
                     for kind, path in credential_files:
                         content = returned.get(kind)
@@ -915,6 +921,8 @@ def run_matrix(args: argparse.Namespace) -> int:
     matrix = load_matrix(args.matrix)
     if args.image:
         matrix = dataclasses.replace(matrix, image=args.image)
+    if args.concurrency < 1:
+        raise RuntimeError("concurrency must be at least 1")
     host_source_root = Path(args.source_root).resolve()
     validate_source_version(host_source_root, matrix.target.expected_version)
     if matrix.target.mode == "remote":
@@ -974,19 +982,37 @@ def run_matrix(args: argparse.Namespace) -> int:
                 refresh_login=args.refresh_login,
             )
 
+        def authentication_abort(result: dict[str, Any]) -> str | None:
+            # Every later run would fail the same way and cost the same.
+            if result["status"] == "error" and "could not authenticate" in (result.get("failure") or ""):
+                return str(result["failure"])
+            return None
+
+        planned = [(case, job) for case in matrix.cases for job in matrix.jobs]
         results = []
         aborted: str | None = None
-        for case in matrix.cases:
-            for job in matrix.jobs:
+        if args.concurrency == 1:
+            for case, job in planned:
                 result = execute(case, job)
                 results.append(result)
-                # Every later run would fail the same way and cost the same.
-                if result["status"] == "error" and "could not authenticate" in (result.get("failure") or ""):
-                    aborted = str(result["failure"])
+                if aborted := authentication_abort(result):
                     print(f"ERROR: {aborted}; stopping the matrix", file=sys.stderr)
                     break
-            if aborted:
-                break
+        else:
+            # Each run owns its containers, its volumes and its output directory,
+            # and the source snapshot is mounted read-only, so runs do not share
+            # anything a container could write.
+            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                futures = [pool.submit(execute, case, job) for case, job in planned]
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    if not aborted and (aborted := authentication_abort(result)):
+                        print(f"ERROR: {aborted}; stopping the matrix", file=sys.stderr)
+                        for pending in futures:
+                            pending.cancel()
+            # Completion order is arbitrary; the report must not be.
+            results.sort(key=lambda item: str(item.get("id", "")))
 
         # Every run gets its own container and its own pair of volumes, so a
         # repetition never inherits state from the one before it.
@@ -1091,6 +1117,12 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--source-root", default=str(REPOSITORY_ROOT))
     run_parser.add_argument("--output", required=True)
     run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="how many runs may be in flight at once; each one holds 2 CPUs and 4 GB",
+    )
     run_parser.add_argument(
         "--refresh-login",
         action="store_true",
