@@ -21,7 +21,7 @@ Names: the Python distribution/install target, CLI command, repository URL, and 
 The easiest path: copy/paste this prompt to your AI agent:
 
 ```text
-Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md. Then install Agentic HIL from https://github.com/agentic-hil/agentic-hil and set it up for this project.
+Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md to install Agentic HIL and set it up for this project.
 ```
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand.
@@ -32,8 +32,8 @@ Two commands: install the package user-locally, then set up the project from its
 root.
 
 ```bash
-python -m pip install --user --upgrade "agentic-hil>=0.4.0"
-agentic-hil setup --agent claude-code                # or: codex / opencode
+pip install --user agentic-hil
+agentic-hil setup                 # add --agent codex or --agent opencode for those
 ```
 
 `setup` creates the deny-by-default policy outside the repository, installs the
@@ -46,7 +46,7 @@ up on `PATH`, install it persistently with a tool installer instead and rerun
 `setup`:
 
 ```bash
-uv tool install --upgrade "agentic-hil>=0.4.0"      # or: pipx install "agentic-hil>=0.4.0"
+uv tool install agentic-hil       # or: pipx install agentic-hil
 ```
 
 Never use `pip install --break-system-packages`. Never persist a `uvx`
