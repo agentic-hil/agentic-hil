@@ -165,6 +165,96 @@ def test_setup_rolls_back_new_config_skill_registration_and_mcp_config_on_late_f
     assert not mcp_path.exists()
 
 
+def test_setup_keeps_a_skill_it_did_not_install_and_says_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback undoes setup's own writes, not a command that already succeeded.
+
+    Measured: a model ran the documented `skill-install` first and `setup`
+    second, setup refused the operator's config exactly as it should, and the
+    skill from the earlier command survived. Removing it would mean setup
+    undoing work it never did; saying nothing would leave a skill pointing
+    hardware work at tools no longer registered.
+    """
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_skill("codex")["ok"] is True
+    skill_path = Path.home() / ".codex" / "skills" / "agentic-hil" / "SKILL.md"
+    before = skill_path.read_bytes()
+    real_register = cli_module.register_agent_mcp
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        real_register(*args, **kwargs)
+        return {"ok": False, "error_type": "injected_failure", "summary": "late MCP failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
+
+    result = setup_project(agent="codex")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    assert skill_path.read_bytes() == before
+    assert result["left_behind"]["skill"] == str(skill_path)
+    assert str(skill_path) in result["left_behind"]["next_step"]
+    assert not initialized_config_path(workspace).exists()
+
+
+def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
+    """The block names the skill's absolute path, which on Windows has backslashes.
+
+    re.sub reads escapes in a replacement string, so rewriting a block that
+    named C:\\Users\\... died on "bad escape \\U". Only the second write takes
+    that branch, which is why skill-install followed by setup hit it.
+    """
+    from agentic_hil.cli import (
+        AGENTIC_HIL_REGISTRATION_END,
+        AGENTIC_HIL_REGISTRATION_START,
+        upsert_marked_block,
+    )
+
+    target = Path.home() / ".codex" / "AGENTS.md"
+    old = f"{AGENTIC_HIL_REGISTRATION_START}\nold\n{AGENTIC_HIL_REGISTRATION_END}"
+    new = f"{AGENTIC_HIL_REGISTRATION_START}\nSee C:\\Users\\op\\.codex\\skills\\agentic-hil\n{AGENTIC_HIL_REGISTRATION_END}"
+    assert upsert_marked_block(target, old)["updated"] is True
+
+    assert upsert_marked_block(target, new)["updated"] is True
+
+    assert "C:\\Users\\op\\.codex\\skills\\agentic-hil" in target.read_text(encoding="utf-8")
+    assert "old" not in target.read_text(encoding="utf-8")
+
+
+def test_setup_says_nothing_about_a_skill_when_it_left_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    real_register = cli_module.register_agent_mcp
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        real_register(*args, **kwargs)
+        return {"ok": False, "error_type": "injected_failure", "summary": "late MCP failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
+
+    result = setup_project(agent="codex")
+
+    assert result["ok"] is False
+    # Setup installed this skill itself, so rollback removed it and there is
+    # nothing for the operator to clean up.
+    assert not (Path.home() / ".codex" / "skills" / "agentic-hil" / "SKILL.md").exists()
+    assert "left_behind" not in result
+
+
 def test_setup_preserves_absolute_config_override_as_only_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

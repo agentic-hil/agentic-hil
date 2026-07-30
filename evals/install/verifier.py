@@ -453,6 +453,30 @@ def no_superseded_skill(agent: str) -> tuple[bool, str]:
     return True, "no earlier name of this skill is installed"
 
 
+def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
+    """Whether a skill surviving a rejected setup is one setup did not write.
+
+    Setup rolls back to the state it found, so a skill an earlier standalone
+    `skill-install` had already written stays on purpose — asking for an empty
+    home instead failed a run that did nothing wrong. What must not survive is a
+    half-written skill of setup's own, so the file that remains has to be an
+    intact copy of the packaged one. Nothing registered it: no authoritative
+    config exists and the operator's MCP entry is untouched, both checked
+    separately, which leaves it inert.
+    """
+    if not installed.exists():
+        return True, f"{installed} is absent"
+    safe, detail = safe_owned_path(installed, HOME)
+    if not safe:
+        return False, detail
+    packaged = TRUSTED_PACKAGE_ROOT / "agentic_hil" / "skills" / installed.parent.name / installed.name
+    if not packaged.is_file():
+        return False, f"cannot compare {installed}: {packaged} is missing"
+    if installed.read_bytes() != packaged.read_bytes():
+        return False, f"{installed} is not the packaged skill; a rejected setup left a partial one"
+    return True, f"{installed} is an intact earlier skill-install, which setup must not undo"
+
+
 def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
     """Whether an Agentic HIL tool actually ran for this project.
 
@@ -1044,7 +1068,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"]))
     else:
         add("setup conflict left no authoritative config", lambda: (not configs, f"count={len(configs)}"))
-        add("setup conflict left no skill", lambda: (not installed_skill.exists(), str(installed_skill)))
+        add("setup conflict left no skill of its own", lambda: rejected_setup_owns_no_skill(installed_skill))
         add("unmanaged MCP entry left untouched", lambda: unmanaged_entry_untouched(agent))
 
     ok = all(check.ok for check in checks)

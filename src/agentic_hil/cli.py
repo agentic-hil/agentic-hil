@@ -437,7 +437,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
 
         ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result, permission_result))
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
-        return {
+        result = {
             "ok": ok and not rollback_errors,
             "tool": "agentic_hil_setup",
             "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup failed; committed file changes were rolled back.",
@@ -453,6 +453,39 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
                 "agent_write_restriction": permission_result,
             },
         }
+        if not result["ok"]:
+            skill_target = _external_user_path(Path(resolved_agent.default_target_path), "Default agent skill")
+            surviving = _skill_rollback_did_not_own(snapshots, skill_target)
+            if surviving is not None:
+                result["left_behind"] = surviving
+        return result
+
+
+def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Path) -> JsonObject | None:
+    """Name a skill a failed setup restored rather than removed.
+
+    Rollback puts every file back the way setup found it, so a skill an earlier
+    `skill-install` had already written survives on purpose: setup only takes
+    back what setup wrote. That leaves the operator with a skill that routes
+    hardware work to tools no longer registered, which is inert but easy to
+    miss, so the refusal says so instead of leaving it to be discovered.
+    """
+    identity = os.path.normcase(str(absolute_without_symlinks(skill_target)))
+    for snapshot in snapshots:
+        if os.path.normcase(str(snapshot.path)) != identity or snapshot.content is None:
+            continue
+        if not _path_entry_exists(snapshot.path):
+            return None
+        return {
+            "skill": str(snapshot.path),
+            "summary": "A skill installed before this setup is still there; setup only takes back what setup wrote.",
+            "next_step": (
+                f"That skill points hardware work at Agentic HIL tools this setup did not register. "
+                f"Either resolve the conflict this refusal names and run setup again, or delete "
+                f"{snapshot.path} if you no longer want it."
+            ),
+        }
+    return None
 
 
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
@@ -1259,7 +1292,12 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
     pattern = re.compile(rf"{re.escape(AGENTIC_HIL_REGISTRATION_START)}[\s\S]*?{re.escape(AGENTIC_HIL_REGISTRATION_END)}")
     trimmed = existing.rstrip()
     separator = "\n\n" if trimmed else ""
-    next_text = pattern.sub(block, existing) if pattern.search(existing) else f"{trimmed}{separator}{block}\n"
+    # A function replacement, because the block carries the skill's absolute
+    # path and re.sub reads backslash escapes in a replacement string: on
+    # Windows a second write of a block naming C:\Users\... died on "bad escape
+    # \U". Only the second write takes this branch, so skill-install followed by
+    # setup hit it and a plain setup did not.
+    next_text = pattern.sub(lambda _: block, existing) if pattern.search(existing) else f"{trimmed}{separator}{block}\n"
     if next_text != existing:
         secure_atomic_write_text(file_path, next_text)
         return {"updated": True}
