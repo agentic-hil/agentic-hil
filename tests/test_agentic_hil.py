@@ -591,6 +591,27 @@ def test_plugin_skill_carries_the_packaged_guidance() -> None:
     assert "agentic-hil setup --agent claude" in plugin
 
 
+def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
+    """A refusal and a skill both arrive after the first decision.
+
+    Measured: a small model ran st-flash before calling a single tool here, so
+    nothing this server says at call time could have reached it. initialize is
+    the only moment that precedes the decision.
+    """
+    response = handle_mcp_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+        AgenticHILToolService(load_config(str(write_config(Path.cwd())))),
+    )
+    instructions = response["result"]["instructions"]
+
+    for raw in ("openocd", "pyocd", "st-flash", "candump", "Makefile", "/dev/tty*"):
+        assert raw in instructions, raw
+    assert "permission_denied" in instructions
+    assert "before reaching for a shell" in instructions
+    # The observed worst case: a model that granted itself the permission.
+    assert "Never edit the authoritative configuration" in instructions
+
+
 def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
     """A refusal that only states a fact reads like a door to walk around.
 
@@ -602,8 +623,12 @@ def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
 
     denied = tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.")
 
-    assert "operator" in denied["next_step"]
-    assert "Do not perform the action another way" in denied["next_step"]
+    assert "only the operator may edit it" in denied["next_step"]
+    assert "must not carry out the action another way" in denied["next_step"]
+    # No verb phrase a caller can act on: an earlier wording said "ask the
+    # operator to change the authoritative config" and a small model rewrote the
+    # config itself to grant allow_flash.
+    assert "change the authoritative config" not in denied["next_step"]
     # Only refusals carry it; an ordinary error must not grow advice it cannot honour.
     assert "next_step" not in tool_error("flash_firmware", "artifact_validation_failed", "bad image")
 
