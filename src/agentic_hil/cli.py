@@ -273,6 +273,22 @@ def _agent_mcp_config_path(agent_id: str) -> Path:
     return _external_user_path(paths[agent_id], "MCP user configuration")
 
 
+def _agent_permission_config_path(agent_id: str) -> Path | None:
+    """Where an agent CLI keeps the rules it applies to its own tools.
+
+    Codex is absent on purpose: it sandboxes model-generated shell commands and
+    leaves MCP servers outside that sandbox, so its default policy already
+    refuses a write here while the server keeps reading the config.
+    """
+    paths = {
+        "claude-code": Path.home() / ".claude" / "settings.json",
+        "opencode": Path.home() / ".config" / "opencode" / "opencode.json",
+    }
+    if agent_id not in paths:
+        return None
+    return _external_user_path(paths[agent_id], "Agent permission configuration")
+
+
 def _external_user_path(path: Path, label: str) -> Path:
     absolute = absolute_without_symlinks(path)
     workspace = absolute_without_symlinks(Path.cwd())
@@ -284,9 +300,21 @@ def _external_user_path(path: Path, label: str) -> Path:
 def _setup_mutation_paths(agent: SkillAgent, config_path: Path) -> list[Path]:
     skill_path = _external_user_path(Path(agent.default_target_path), "Default agent skill")
     paths = [config_path, skill_path, _agent_mcp_config_path(agent.id)]
+    permission_path = _agent_permission_config_path(agent.id)
+    if permission_path is not None:
+        paths.append(permission_path)
     if agent.registration == "agents-md":
         paths.append(Path(skill_install_root(str(skill_path))) / "AGENTS.md")
-    return paths
+    # opencode keeps its MCP entry and its permissions in one file. Locking a
+    # path twice deadlocks on its own sidecar, so each one appears once.
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        identity = os.path.normcase(str(absolute_without_symlinks(path)))
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(path)
+    return unique
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -371,6 +399,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     skill_result = _skipped_setup_step("Skill installation was not reached.")
     mcp_result = _skipped_setup_step("MCP registration was not reached.")
     doctor_result = _skipped_setup_step("Doctor was not reached.")
+    permission_result = _skipped_setup_step("Agent write restriction was not reached.")
 
     if config_exists:
         mutation_paths.remove(config_path)
@@ -394,13 +423,19 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
                 skill_result = install_skill(agent, None, force, _locked=True)
             if all(overall_success(result) for result in (config_result, doctor_result, skill_result)):
                 mcp_result = register_agent_mcp(agent, force=force, command=command, _locked=True)
+            if all(overall_success(result) for result in (config_result, doctor_result, skill_result, mcp_result)):
+                # Last, because it forbids writing the very files the steps
+                # above had to create.
+                permission_result = restrict_agent_write_access(
+                    resolved_agent.id, config_path, Path(load_config(str(config_path)).state_root)
+                )
         except BaseException as error:
             rollback_errors = _restore_file_snapshots(snapshots)
             if isinstance(error, ConfigError) and rollback_errors:
                 error.details["rollback_errors"] = rollback_errors
             raise
 
-        ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result))
+        ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result, permission_result))
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
         return {
             "ok": ok and not rollback_errors,
@@ -415,6 +450,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
                 "skill_install": skill_result,
                 "mcp_config": mcp_result,
                 "doctor": doctor_result,
+                "agent_write_restriction": permission_result,
             },
         }
 
@@ -692,6 +728,64 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
 
 AGENTIC_HIL_MCP_START = "# >>> agentic-hil mcp (managed) >>>"
 AGENTIC_HIL_MCP_END = "# <<< agentic-hil mcp (managed) <<<"
+
+
+def _protected_write_globs(config_path: Path, state_root: Path) -> list[str]:
+    """The two trees an agent must not write once setup has created them."""
+    return [f"{config_path.parent.as_posix()}/**", f"{state_root.as_posix()}/**"]
+
+
+def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Path) -> JsonObject:
+    """Ask the agent CLI to refuse its own write tools on the policy files.
+
+    Installation and use need opposite things: setup must be able to create the
+    authoritative config, and afterwards nothing but the operator may change it.
+    So this runs last, and it constrains the agent's file tools rather than a
+    path — a path rule would also cover `agentic-hil mcp-stdio`, which has to
+    keep reading the very file being protected.
+
+    It is a lock on the front door, not a wall. A shell can still write the file,
+    which is why SECURITY.md asks for a separate identity where that matters.
+    """
+    path = _agent_permission_config_path(agent_id)
+    if path is None:
+        return {
+            "ok": True,
+            "mode": "sandboxed-by-the-agent",
+            "summary": "Codex sandboxes model-generated shell commands and leaves MCP servers outside that sandbox, so its own policy already refuses this write.",
+        }
+    document = _load_json_object(path)
+    if document is None:
+        return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} is not a JSON object; left untouched.", "path": str(path)}
+
+    globs = _protected_write_globs(config_path, state_root)
+    if agent_id == "claude-code":
+        # Documented to merge across scopes rather than override, so adding
+        # rules never removes the operator's own.
+        permissions = document.setdefault("permissions", {})
+        if not isinstance(permissions, dict):
+            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permissions entry; left untouched.", "path": str(path)}
+        deny = permissions.setdefault("deny", [])
+        if not isinstance(deny, list):
+            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
+        added = [rule for glob in globs for rule in (f"Edit({glob})", f"Write({glob})") if rule not in deny]
+        deny.extend(added)
+    else:
+        permission = document.setdefault("permission", {})
+        if not isinstance(permission, dict):
+            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permission entry; left untouched.", "path": str(path)}
+        existing = permission.get("edit")
+        # The last matching rule wins, so an operator's own patterns are kept and
+        # the denials are appended after them.
+        rules: dict[str, object] = {"*": existing} if isinstance(existing, str) else dict(existing) if isinstance(existing, dict) else {}
+        added = [glob for glob in globs if rules.get(glob) != "deny"]
+        for glob in globs:
+            rules[glob] = "deny"
+        permission["edit"] = rules
+    if not added:
+        return {"ok": True, "mode": "tool-permissions", "summary": "The agent already refuses to write the policy files.", "path": str(path), "added": []}
+    secure_atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    return {"ok": True, "mode": "tool-permissions", "summary": f"{agent_id} will refuse its own write tools on the authoritative config and state root.", "path": str(path), "added": added}
 
 
 def register_agent_mcp(agent: str | None = None, force: bool = False, *, command: str | None = None, _locked: bool = False) -> JsonObject:

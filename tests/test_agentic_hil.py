@@ -35,6 +35,7 @@ from agentic_hil.cli import (
     is_agentic_hil_setup_skill,
     mcp_config,
     register_agent_mcp,
+    restrict_agent_write_access,
     schema,
     setup_project,
     skill_version,
@@ -589,6 +590,66 @@ def test_plugin_skill_carries_the_packaged_guidance() -> None:
     # What only the plugin can say: it registers no server command of its own.
     assert 'uv tool install --upgrade "agentic-hil==' in plugin
     assert "agentic-hil setup --agent claude" in plugin
+
+
+def test_setup_asks_the_agent_to_refuse_writing_the_policy_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installation and use need opposite things.
+
+    setup has to create the authoritative config; afterwards nothing but the
+    operator may change it. A small model rewrote it with a yaml script to grant
+    itself allow_flash, so the restriction is written last — and it constrains
+    the agent's own tools, not a path, because a path rule would also stop
+    `agentic-hil mcp-stdio` from reading the file it protects.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True
+    restriction = result["steps"]["agent_write_restriction"]
+    assert restriction["ok"] is True
+    deny = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"]["deny"]
+    config_directory = Path(result["steps"]["config"]["path"]).parent.as_posix()
+    assert f"Edit({config_directory}/**)" in deny
+    assert f"Write({config_directory}/**)" in deny
+    # Running the CLI is untouched: setup, doctor and a rerun must keep working.
+    assert not any(rule.startswith("Bash(") for rule in deny)
+
+
+def test_the_write_restriction_keeps_what_the_operator_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(b'{"permissions": {"deny": ["Bash(curl *)"], "allow": ["Read(~/notes)"]}}\n')
+
+    restriction = restrict_agent_write_access("claude-code", tmp_path / "cfg" / "config.yaml", tmp_path / "state")
+
+    assert restriction["ok"] is True
+    document = json.loads(settings.read_text(encoding="utf-8"))
+    assert "Bash(curl *)" in document["permissions"]["deny"]
+    assert document["permissions"]["allow"] == ["Read(~/notes)"]
+    # Idempotent: a second setup must not append the same rules again.
+    before = settings.read_text(encoding="utf-8")
+    assert restrict_agent_write_access("claude-code", tmp_path / "cfg" / "config.yaml", tmp_path / "state")["added"] == []
+    assert settings.read_text(encoding="utf-8") == before
+
+
+def test_the_write_restriction_is_left_to_the_sandbox_for_codex(tmp_path: Path) -> None:
+    # Codex sandboxes model-generated shell commands and leaves MCP servers
+    # outside it, so its own default already refuses this write.
+    restriction = restrict_agent_write_access("codex", tmp_path / "cfg" / "config.yaml", tmp_path / "state")
+
+    assert restriction["ok"] is True
+    assert restriction["mode"] == "sandboxed-by-the-agent"
 
 
 def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
