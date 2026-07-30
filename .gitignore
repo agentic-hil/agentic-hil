@@ -16,3 +16,6 @@ dist/
 .mcp.json
 uv.lock
 evals/install/artifacts/
+
+# Worktrees this session creates are checkouts, not content.
+.claude/worktrees/
