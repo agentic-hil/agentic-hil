@@ -24,6 +24,10 @@ param(
     # serialized regardless, so a shared login file cannot be raced.
     [ValidateRange(1, 8)]
     [int]$Concurrency = 1,
+    # An earlier artifact directory whose measured durations decide what starts
+    # first. Without it the order is as declared, and one long run started late
+    # leaves every other worker idle at the end.
+    [string]$OrderFrom,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
     [switch]$RefreshLogin,
@@ -277,6 +281,21 @@ else {
     $efforts = @("")
 }
 
+$measured = @{}
+if ($OrderFrom) {
+    if (-not (Test-Path -LiteralPath $OrderFrom)) {
+        throw "The artifact directory to order from does not exist: $OrderFrom"
+    }
+    $timings = & $virtualEnvironmentPython -m evals.install timings --output $OrderFrom
+    if ($LASTEXITCODE -ne 0) {
+        throw "Measured durations could not be read from $OrderFrom."
+    }
+    ($timings -join "`n" | ConvertFrom-Json).PSObject.Properties | ForEach-Object {
+        $measured[$_.Name] = [double]$_.Value
+    }
+    Write-Host "Order:      slowest first, from $($measured.Count) measured combination(s) in $OrderFrom"
+}
+
 $jobs = @()
 foreach ($agent in $Agents) {
     if ($models[$agent].Count -eq 0) {
@@ -284,7 +303,10 @@ foreach ($agent in $Agents) {
     }
     foreach ($model in $models[$agent]) {
         foreach ($effort in $efforts) {
-            $jobs += New-AgentJob -Agent $agent -Model $model -Effort $effort
+            $job = New-AgentJob -Agent $agent -Model $model -Effort $effort
+            $expected = $measured["$agent/$model"]
+            if ($expected) { $job.expected_seconds = $expected }
+            $jobs += $job
         }
     }
 }

@@ -82,6 +82,10 @@ class Job:
     # leaves a process that is alive and silent, and the total budget only
     # notices that at its very end.
     idle_timeout_seconds: int = 300
+    # What this combination cost last time, used only to decide what to start
+    # first. Unknown counts as slow, so an unmeasured model cannot become the
+    # tail everyone else waits on.
+    expected_seconds: float | None = None
 
 
 MINIMUM_REPETITIONS = 2
@@ -284,6 +288,9 @@ def load_matrix(path: str | Path) -> Matrix:
         timeout = _positive_integer(item.get("timeout_seconds", default_timeout), f"jobs[{index}].timeout_seconds")
         effort = _reasoning_effort(item.get("reasoning_effort", default_effort), f"jobs[{index}].reasoning_effort")
         idle = _positive_integer(item.get("idle_timeout_seconds", default_idle), f"jobs[{index}].idle_timeout_seconds")
+        expected = item.get("expected_seconds")
+        if expected is not None and (not isinstance(expected, (int, float)) or expected <= 0):
+            raise ValueError(f"jobs[{index}].expected_seconds must be a positive number")
         if idle > timeout:
             raise ValueError(f"jobs[{index}].idle_timeout_seconds must not exceed its timeout_seconds")
         if "pass_environment" in item:
@@ -314,6 +321,7 @@ def load_matrix(path: str | Path) -> Matrix:
                 credential_files=credential_files,
                 reasoning_effort=effort,
                 idle_timeout_seconds=idle,
+                expected_seconds=float(expected) if expected is not None else None,
             )
             for repetition in range(1, repetitions + 1)
         )

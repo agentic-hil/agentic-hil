@@ -749,6 +749,53 @@ def test_an_ignored_effort_fails_the_run(tmp_path: Path) -> None:
     assert reasoning_effort_evidence(tmp_path / "absent.log", "medium")[0] is False
 
 
+def test_the_slowest_combination_starts_first(tmp_path: Path) -> None:
+    """Workers take whatever is left, so a long run started late is the tail.
+
+    Measured: four workers reached 2.3x rather than 4x because one 21-minute run
+    began near the end and three workers waited it out.
+    """
+    matrix = _matrix_with_jobs(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "quick", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 60},
+            {"agent": "codex", "model": "slow", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 900},
+            {"agent": "codex", "model": "unmeasured", "credentials": ["OPENAI_API_KEY"]},
+        ],
+    )
+    jobs = {job.model: job for job in load_matrix(matrix).jobs}
+
+    order = sorted(jobs.values(), key=lambda job: job.expected_seconds or float("inf"), reverse=True)
+
+    # Unknown counts as slow: an unmeasured combination must not become the tail.
+    assert [job.model for job in order][:2] == ["unmeasured", "slow"]
+    assert order[-1].model == "quick"
+
+
+def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:
+    matrix = _matrix_with_jobs(
+        tmp_path,
+        [{"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 0}],
+    )
+
+    with pytest.raises(ValueError, match="expected_seconds"):
+        load_matrix(matrix)
+
+
+def test_measured_seconds_reports_what_each_combination_cost() -> None:
+    from evals.install.report import measured_seconds
+
+    def run(cli: str, model: str, seconds: float, status: str = "passed") -> dict:
+        return {"agent": {"cli": cli, "model": model}, "duration_seconds": seconds, "status": status}
+
+    measured = measured_seconds([run("codex", "m", 100), run("codex", "m", 200), run("opencode", "s", 50, "error")])
+
+    assert measured["codex/m"] == 150.0
+    # An errored run is included: a combination that stalls is expensive whether
+    # or not it produced a verdict, and starting it late is what makes the tail.
+    assert measured["opencode/s"] == 50.0
+
+
 def test_a_silent_run_is_stopped_long_before_its_total_budget(tmp_path: Path) -> None:
     """A provider that stops answering leaves a process alive and mute.
 

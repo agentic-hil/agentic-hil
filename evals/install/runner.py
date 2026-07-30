@@ -24,7 +24,7 @@ from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .credentials import authentication_failure, credential_health
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .refresh_login import apply_refreshed_login
-from .report import report_results, result_group, unstable_groups
+from .report import report_results, result_group, timings_results, unstable_groups
 from .routing import routing_results
 from .source import create_source_snapshot, source_digest
 
@@ -1013,6 +1013,13 @@ def run_matrix(args: argparse.Namespace) -> int:
             return None
 
         planned = [(case, job) for case in matrix.cases for job in matrix.jobs]
+        if args.concurrency > 1:
+            # Longest first. Workers pick up whatever is left, so a long run
+            # started late leaves everyone else idle at the end: measured, four
+            # workers reached 2.3x rather than 4x because one 21-minute run
+            # began near the end. Unknown counts as slow so an unmeasured
+            # combination cannot become that tail.
+            planned.sort(key=lambda pair: pair[1].expected_seconds or float("inf"), reverse=True)
         results = []
         aborted: str | None = None
         if args.concurrency == 1:
@@ -1164,6 +1171,13 @@ def parser() -> argparse.ArgumentParser:
     )
     routing_parser.add_argument("--output", required=True)
     routing_parser.set_defaults(function=routing_results)
+
+    timings_parser = subparsers.add_parser(
+        "timings",
+        help="what each agent and model cost, to start the slowest first next time",
+    )
+    timings_parser.add_argument("--output", required=True)
+    timings_parser.set_defaults(function=timings_results)
     return root
 
 
