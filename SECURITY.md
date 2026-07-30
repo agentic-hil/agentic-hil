@@ -32,3 +32,13 @@ Each project has exactly one automatically discovered authoritative config, at `
 Mutable canonical report and hardware-lease state is stored under the pinned `state_root`; `agentic-hil init` selects `%LOCALAPPDATA%/agentic-hil` on Windows or `${XDG_STATE_HOME:-~/.local/state}/agentic-hil` on POSIX as its initial value. Agentic HIL rejects relative roots, workspace overlap, unsafe POSIX ownership/modes, and path redirection. Do not delete or edit quarantine records to bypass recovery. Inspect `agentic-hil lease-status`, confirm physical safe state for its current incident, then use `agentic-hil recover --confirm-safe-state --quarantine-id <id>`.
 
 This boundary assumes the agent cannot modify the authoritative config, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an external YAML config cannot sandbox an already equivalent host principal.
+
+Treat that as an expectation, not an edge case. Agentic HIL gates the tools it
+offers; it cannot gate a shell it does not own. The installation evaluation
+measured this with a small model: in two of five runs it reached for `st-flash`
+and `pyocd` before it had called a single Agentic HIL tool, so neither the
+refusal a denied tool returns nor the bundled skill had been read at the moment
+it decided. A capable model called the tool first, was refused, and reported the
+refusal. Where an unattended agent must not be able to drive the hardware at
+all, the debugger and serial tooling must not be on its `PATH` — the permission
+model decides what Agentic HIL will do, not what the agent can do without it.
