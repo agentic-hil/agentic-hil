@@ -5,15 +5,16 @@
 **Your AI agent can develop firmware on its own — because Agentic HIL closes the loop with real hardware.**
 
 ```
-   ╭────────────────── diagnose & fix ───────────────────╮
-   ▼                                                     │
- build ──▶ flash ──▶ stimulate ──▶ observe ──────────────╯
-             ▼           ▼            ▲
-        ╭────────────────────────────────────╮
-        │      real board on your bench      │
-        ╰────────────────────────────────────╯
+   +------------------ diagnose & fix -------------------+
+   v                                                     |
+ build --> flash --> stimulate --> observe --------------+
+             |           |            ^
+             v           v            |
+        +------------------------------------+
+        |      real board on your bench      |
+        +------------------------------------+
 
-   your agent, unattended — you review the pull request
+  your agent, unattended -- you review the pull request
 ```
 
 Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs — without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository. Agentic HIL discovers it from the project root, while `AGENTIC_HIL_CONFIG` can select an explicit absolute-path override. The file defines the workspace binding, devices, actions, paths, and limits.
