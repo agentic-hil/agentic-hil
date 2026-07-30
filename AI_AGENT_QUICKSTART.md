@@ -69,7 +69,20 @@ uv tool install --upgrade "git+https://github.com/agentic-hil/agentic-hil@v0.4.0
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
+This step downloads a release archive and regularly needs longer than the sixty
+seconds many agent shell tools allow by default. If your shell reports that it
+terminated the command on a timeout, that is not a failure of the command: run
+it again with a longer timeout. Do not switch to another installation method
+because of it.
+
 Then rerun step 3. A missing installer is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+
+If none of these steps succeeds, stop and tell the user which one failed and
+what it printed. Do not invent a route the list does not contain. In particular
+do not create a virtual environment of your own: `agentic-hil` then exists only
+inside it, is on nobody's `PATH`, and the MCP registration points at a path that
+only that environment can resolve. An honest report of a blocked prerequisite is
+worth more than an installation nobody can reach.
 
 After installation, open a new shell if requested and verify both the minimum version and the setup command:
 

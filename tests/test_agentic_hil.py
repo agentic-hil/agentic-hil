@@ -591,6 +591,23 @@ def test_plugin_skill_carries_the_packaged_guidance() -> None:
     assert "agentic-hil setup --agent claude" in plugin
 
 
+def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
+    """A refusal that only states a fact reads like a door to walk around.
+
+    A weak model called flash_firmware first, was refused, diagnosed correctly
+    through the other tools, and then flashed the board with st-flash. The
+    instruction has to travel with the refusal, where the caller is looking.
+    """
+    from agentic_hil.tools import tool_error
+
+    denied = tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.")
+
+    assert "operator" in denied["next_step"]
+    assert "Do not perform the action another way" in denied["next_step"]
+    # Only refusals carry it; an ordinary error must not grow advice it cannot honour.
+    assert "next_step" not in tool_error("flash_firmware", "artifact_validation_failed", "bad image")
+
+
 def test_gateway_tool_descriptions_name_what_they_replace() -> None:
     # A tool description is the only routing hint every session sees; a skill
     # has to be discovered and loaded first.
