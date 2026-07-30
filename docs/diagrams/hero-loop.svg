@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="300" viewBox="0 0 880 300" role="img" aria-label="A closed loop: build, flash, stimulate, observe, then diagnose and fix back to build. Flash and stimulate write to the real board on your bench; observe reads back from it.">
+  <title>The Agentic HIL loop</title>
+  <style>
+    .node  { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .board { fill: #ddf4ff; stroke: #0969da; stroke-width: 1.75; }
+    .label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+             font-size: 17px; fill: #1f2328; text-anchor: middle; }
+    .board-label { fill: #0a3069; font-weight: 600; }
+    .edge  { fill: none; stroke: #656d76; stroke-width: 1.75; marker-end: url(#head); }
+    .wire  { fill: none; stroke: #0969da; stroke-width: 1.75; marker-end: url(#head-accent); }
+    .note  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+             font-size: 15px; fill: #656d76; text-anchor: middle; }
+    .caption { font-size: 14px; }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#656d76"/>
+    </marker>
+    <marker id="head-accent" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#0969da"/>
+    </marker>
+  </defs>
+
+  <!-- the return path, closing the loop back onto build -->
+  <path class="edge" d="M845 86 H848 Q864 86 864 70 V40 Q864 24 848 24 H566" style="marker-end: none"/>
+  <path class="edge" d="M414 24 H132 Q116 24 116 40 V54"/>
+  <text class="note" x="490" y="29">diagnose &amp; fix</text>
+
+  <!-- the four steps -->
+  <rect class="node" x="41"  y="60" width="150" height="52" rx="8"/>
+  <rect class="node" x="257" y="60" width="150" height="52" rx="8"/>
+  <rect class="node" x="473" y="60" width="150" height="52" rx="8"/>
+  <rect class="node" x="689" y="60" width="150" height="52" rx="8"/>
+  <text class="label" x="116" y="92">build</text>
+  <text class="label" x="332" y="92">flash</text>
+  <text class="label" x="548" y="92">stimulate</text>
+  <text class="label" x="764" y="92">observe</text>
+
+  <path class="edge" d="M197 86 H251"/>
+  <path class="edge" d="M413 86 H467"/>
+  <path class="edge" d="M629 86 H683"/>
+
+  <!-- the two writes down into the hardware, and the read back up out of it -->
+  <path class="wire" d="M332 118 V194"/>
+  <path class="wire" d="M548 118 V194"/>
+  <path class="wire" d="M764 194 V118"/>
+
+  <rect class="board" x="290" y="200" width="500" height="56" rx="8"/>
+  <text class="label board-label" x="540" y="234">real board on your bench</text>
+
+  <text class="note caption" x="440" y="288">your agent, unattended — you review the pull request</text>
+</svg>
