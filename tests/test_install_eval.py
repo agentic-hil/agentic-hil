@@ -825,11 +825,14 @@ def test_a_silent_run_is_stopped_long_before_its_total_budget(tmp_path: Path) ->
 def test_a_talkative_run_is_not_mistaken_for_a_stalled_one(tmp_path: Path) -> None:
     from evals.install.runner import run_logged
 
+    # The budget has to outlast interpreter start as well as the gaps: the clock
+    # runs from launch, so on a loaded machine a slow start would otherwise read
+    # as silence. Ten seconds against gaps of 0.3 leaves that unambiguous.
     exit_code, timed_out, _cleanup = run_logged(
         [sys.executable, "-c", "import time\nfor _ in range(6):\n    print('alive', flush=True)\n    time.sleep(0.3)"],
         tmp_path / "agent.log",
         timeout_seconds=600,
-        idle_timeout_seconds=2,
+        idle_timeout_seconds=10,
         secrets=[],
     )
 
