@@ -24,34 +24,47 @@ The easiest path: copy/paste this prompt to your AI agent:
 Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md. Then install Agentic HIL from https://github.com/agentic-hil/agentic-hil and set it up for this project.
 ```
 
-Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
+Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand.
 
-If you want to install it yourself anyway, install the Python package user-locally and verify the minimum setup-capable version:
+### Installing it yourself
+
+Two commands: install the package user-locally, then set up the project from its
+root.
 
 ```bash
 python -m pip install --user --upgrade "agentic-hil>=0.4.0"
-agentic-hil --version
-agentic-hil setup --help
-```
-
-If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, use the `uv`/`pipx` paths below instead. Never use `pip install --break-system-packages`.
-
-For a transient version check only (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
-
-```bash
-uvx --from agentic-hil agentic-hil --version
-```
-
-For project setup, install 0.4.0 or newer persistently and let `setup` create the external policy, install the skill, and register the selected host with a verified absolute executable path:
-
-```bash
-uv tool install --upgrade "agentic-hil>=0.4.0"      # or: pipx install "agentic-hil>=0.4.0"
 agentic-hil setup --agent claude-code                # or: codex / opencode
 ```
 
-Do not persist an `uvx`, workspace-virtualenv, or bare `PATH` command as the MCP launcher. See the agent quickstart for the complete fallback chain.
+`setup` creates the deny-by-default policy outside the repository, installs the
+agent skill, registers the MCP server with a verified absolute executable path,
+and runs `doctor`. It prints where the policy file landed — review it before
+enabling anything.
 
-For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
+If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
+up on `PATH`, install it persistently with a tool installer instead and rerun
+`setup`:
+
+```bash
+uv tool install --upgrade "agentic-hil>=0.4.0"      # or: pipx install "agentic-hil>=0.4.0"
+```
+
+Never use `pip install --break-system-packages`. Never persist a `uvx`
+invocation, a workspace virtual environment, or a bare `PATH` name as the MCP
+launcher: each resolves anew later, so the program behind the hardware gate
+could change without anyone editing anything.
+[AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) has the complete fallback chain,
+and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something
+does not start.
+
+For direct PEAK/SocketCAN adapters add the CAN extra — `uv tool install
+'agentic-hil[can]'` — and for the pyOCD backend `agentic-hil[pyocd]`. Both are
+optional because they carry platform-specific drivers that flashing and UART do
+not need; without them those tools refuse with `can_backend_not_available`
+rather than failing at import.
+
+To check a version without installing anything, `uvx --from agentic-hil
+agentic-hil --version` is a diagnostic only.
 
 ## Why
 
@@ -81,7 +94,7 @@ Host configuration schemas are not portable: VS Code uses `servers`, Claude Code
 
 ## Configuration
 
-Run `agentic-hil init` from the project root. It creates the automatically discovered deny-by-default authoritative file outside the repository and binds `workspace_root` to the current absolute project path. The file defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
+`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
