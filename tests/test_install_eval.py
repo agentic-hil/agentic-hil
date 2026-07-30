@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from collections import Counter
 from dataclasses import replace
@@ -749,13 +750,24 @@ def test_an_ignored_effort_fails_the_run(tmp_path: Path) -> None:
     assert reasoning_effort_evidence(tmp_path / "absent.log", "medium")[0] is False
 
 
+def _planned(tmp_path: Path, jobs: list[dict], cases: int = 1) -> list[tuple]:
+    from evals.install.config import Case
+
+    matrix = load_matrix(_matrix_with_jobs(tmp_path, jobs))
+    made = [replace(matrix.cases[0], id=f"case{index}") for index in range(cases)]
+    assert all(isinstance(case, Case) for case in made)
+    return [(case, job) for case in made for job in matrix.jobs]
+
+
 def test_the_slowest_combination_starts_first(tmp_path: Path) -> None:
     """Workers take whatever is left, so a long run started late is the tail.
 
     Measured: four workers reached 2.3x rather than 4x because one 21-minute run
     began near the end and three workers waited it out.
     """
-    matrix = _matrix_with_jobs(
+    from evals.install.runner import interleaved_plan
+
+    planned = _planned(
         tmp_path,
         [
             {"agent": "codex", "model": "quick", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 60},
@@ -763,13 +775,128 @@ def test_the_slowest_combination_starts_first(tmp_path: Path) -> None:
             {"agent": "codex", "model": "unmeasured", "credentials": ["OPENAI_API_KEY"]},
         ],
     )
-    jobs = {job.model: job for job in load_matrix(matrix).jobs}
 
-    order = sorted(jobs.values(), key=lambda job: job.expected_seconds or float("inf"), reverse=True)
+    order = [job.model for _, job in interleaved_plan(planned)]
 
     # Unknown counts as slow: an unmeasured combination must not become the tail.
-    assert [job.model for job in order][:2] == ["unmeasured", "slow"]
-    assert order[-1].model == "quick"
+    assert order[:2] == ["unmeasured", "slow"]
+    assert order[-1] == "quick"
+
+
+def test_neighbouring_slots_hold_different_models(tmp_path: Path) -> None:
+    """Longest-first alone hands every worker the same model at once.
+
+    Measured with six workers: four claude-sonnet-4-6 runs started inside 21
+    seconds and all four then produced nothing for 300 s, though that model
+    finishes a run in under a minute when it goes alone.
+    """
+    from evals.install.runner import interleaved_plan
+
+    planned = _planned(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "a", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 100},
+            {"agent": "codex", "model": "b", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 90},
+            {"agent": "codex", "model": "c", "credentials": ["OPENAI_API_KEY"], "expected_seconds": 80},
+        ],
+        cases=4,
+    )
+
+    order = [job.model for _, job in interleaved_plan(planned)]
+
+    assert len(order) == len(planned)
+    # The first three slots, the ones a pool starts together, are three models.
+    assert sorted(order[:3]) == ["a", "b", "c"]
+    assert all(first != second for first, second in zip(order, order[1:], strict=False))
+
+
+def test_one_model_never_holds_more_slots_than_it_may(tmp_path: Path) -> None:
+    """Ordering spreads the start; only the gate keeps it spread under way."""
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "a", "credentials": ["OPENAI_API_KEY"]},
+            {"agent": "codex", "model": "b", "credentials": ["OPENAI_API_KEY"]},
+        ],
+        cases=6,
+    )
+    lock = threading.Lock()
+    live: dict[str, int] = {}
+    peak: dict[str, int] = {}
+
+    def execute(case, job) -> dict:
+        with lock:
+            live[job.model] = live.get(job.model, 0) + 1
+            peak[job.model] = max(peak.get(job.model, 0), live[job.model])
+        time.sleep(0.02)
+        with lock:
+            live[job.model] -= 1
+        return {"id": f"{job.model}-{case.id}", "status": "passed"}
+
+    results, aborted = run_concurrently(planned, execute, concurrency=8, per_model=2, abort_reason=lambda _: None)
+
+    assert aborted is None
+    assert len(results) == len(planned)
+    assert peak == {"a": 2, "b": 2}
+
+
+def test_a_run_of_a_busy_model_waits_while_other_models_keep_going(tmp_path: Path) -> None:
+    """A throttled model must delay its own queue, not occupy the whole pool."""
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "slow", "credentials": ["OPENAI_API_KEY"]},
+            {"agent": "codex", "model": "fast", "credentials": ["OPENAI_API_KEY"]},
+        ],
+        cases=4,
+    )
+    lock = threading.Lock()
+    finished: list[str] = []
+
+    def execute(case, job) -> dict:
+        time.sleep(0.3 if job.model == "slow" else 0.01)
+        with lock:
+            finished.append(job.model)
+        return {"id": f"{job.model}-{case.id}", "status": "passed"}
+
+    results, _ = run_concurrently(planned, execute, concurrency=2, per_model=1, abort_reason=lambda _: None)
+
+    fast = sum(1 for _, job in planned if job.model == "fast")
+    assert len(results) == len(planned)
+    # Two workers, one slot for each model: the fast queue drains while the
+    # first slow run is still going, instead of queueing behind a stuck model.
+    assert finished.count("fast") == fast
+    assert finished.index("slow") >= fast - 2
+
+
+def test_an_authentication_failure_stops_the_remaining_runs(tmp_path: Path) -> None:
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [
+            {"agent": "codex", "model": "a", "credentials": ["OPENAI_API_KEY"]},
+            {"agent": "codex", "model": "b", "credentials": ["OPENAI_API_KEY"]},
+        ],
+        cases=8,
+    )
+
+    def execute(case, job) -> dict:
+        time.sleep(0.01)
+        return {"id": f"{job.model}-{case.id}", "status": "error", "failure": "could not authenticate"}
+
+    def abort_reason(result: dict) -> str | None:
+        return result["failure"] if "could not authenticate" in result["failure"] else None
+
+    results, aborted = run_concurrently(planned, execute, concurrency=4, per_model=2, abort_reason=abort_reason)
+
+    assert aborted == "could not authenticate"
+    # Every later run would fail the same way and cost the same.
+    assert len(results) < len(planned)
 
 
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:

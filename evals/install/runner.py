@@ -15,7 +15,8 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -174,8 +175,12 @@ def docker_security_options() -> list[str]:
         "no-new-privileges",
         "--pids-limit",
         "512",
+        # Sampled across 105 containers of a full matrix: the busiest one peaked
+        # at 654 MiB, nine in ten stayed under 568 MiB. The old 4g was six times
+        # what any run used, and a cap that large stops being a guard against a
+        # runaway container once a dozen of them share one host.
         "--memory",
-        "4g",
+        "2g",
         "--cpus",
         "2",
         "--tmpfs",
@@ -941,12 +946,108 @@ def dry_run_plan(
     return {"schema_version": 1, "image": matrix.image, "runs": plans}
 
 
+def model_key(job: Job) -> tuple[str, str, str | None]:
+    return (job.agent, job.model, job.reasoning_effort)
+
+
+def interleaved_plan(planned: list[tuple[Case, Job]]) -> list[tuple[Case, Job]]:
+    """Order runs so neighbouring slots hold different models.
+
+    Longest-first alone puts the same model into every worker at once, because
+    equal expected time is mostly a sign of the same model. Measured with six
+    workers: four claude-sonnet-4-6 runs started inside 21 seconds and all four
+    then produced nothing for 300 s, though that model finishes a run in under
+    a minute when it goes alone. Rotating between models keeps the slow work
+    early without pointing the whole pool at one provider.
+    """
+    groups: dict[tuple[str, str, str | None], list[tuple[Case, Job]]] = {}
+    for pair in planned:
+        groups.setdefault(model_key(pair[1]), []).append(pair)
+
+    def expected(pair: tuple[Case, Job]) -> float:
+        # Unknown counts as slow so an unmeasured combination cannot become the
+        # tail that leaves every other worker idle at the end.
+        return pair[1].expected_seconds or float("inf")
+
+    for members in groups.values():
+        members.sort(key=expected, reverse=True)
+    rotation = sorted(groups.values(), key=lambda members: max(map(expected, members)), reverse=True)
+    ordered: list[tuple[Case, Job]] = []
+    for index in range(max((len(members) for members in rotation), default=0)):
+        ordered.extend(members[index] for members in rotation if index < len(members))
+    return ordered
+
+
+def run_concurrently(
+    planned: list[tuple[Case, Job]],
+    execute: Callable[[Case, Job], dict[str, Any]],
+    *,
+    concurrency: int,
+    per_model: int,
+    abort_reason: Callable[[dict[str, Any]], str | None],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Run the plan, never holding more than `per_model` runs of one model.
+
+    A worker takes the first waiting run whose model still has room rather than
+    a fixed share of the plan, so a model the provider is throttling delays
+    only its own remaining runs and the pool keeps working on the others.
+    """
+    waiting = list(planned)
+    results: list[dict[str, Any]] = []
+    in_flight: dict[tuple[str, str, str | None], int] = {}
+    aborted: str | None = None
+    condition = threading.Condition()
+
+    def take() -> tuple[Case, Job] | None:
+        with condition:
+            while True:
+                if aborted is not None or not waiting:
+                    return None
+                for index, pair in enumerate(waiting):
+                    key = model_key(pair[1])
+                    if in_flight.get(key, 0) < per_model:
+                        in_flight[key] = in_flight.get(key, 0) + 1
+                        del waiting[index]
+                        return pair
+                # Everything left belongs to a model that is already at its
+                # limit, so wait for one of those to finish rather than start it.
+                condition.wait()
+
+    def worker() -> None:
+        nonlocal aborted
+        while True:
+            pair = take()
+            if pair is None:
+                return
+            case, job = pair
+            try:
+                result = execute(case, job)
+            finally:
+                with condition:
+                    in_flight[model_key(job)] -= 1
+                    condition.notify_all()
+            with condition:
+                results.append(result)
+                if aborted is None and (reason := abort_reason(result)) is not None:
+                    aborted = reason
+                    print(f"ERROR: {reason}; stopping the matrix", file=sys.stderr)
+                condition.notify_all()
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        workers = [pool.submit(worker) for _ in range(min(concurrency, len(planned)))]
+    for finished in workers:
+        finished.result()
+    return results, aborted
+
+
 def run_matrix(args: argparse.Namespace) -> int:
     matrix = load_matrix(args.matrix)
     if args.image:
         matrix = dataclasses.replace(matrix, image=args.image)
     if args.concurrency < 1:
         raise RuntimeError("concurrency must be at least 1")
+    if args.per_model_concurrency < 1:
+        raise RuntimeError("per-model concurrency must be at least 1")
     host_source_root = Path(args.source_root).resolve()
     validate_source_version(host_source_root, matrix.target.expected_version)
     if matrix.target.mode == "remote":
@@ -1013,13 +1114,6 @@ def run_matrix(args: argparse.Namespace) -> int:
             return None
 
         planned = [(case, job) for case in matrix.cases for job in matrix.jobs]
-        if args.concurrency > 1:
-            # Longest first. Workers pick up whatever is left, so a long run
-            # started late leaves everyone else idle at the end: measured, four
-            # workers reached 2.3x rather than 4x because one 21-minute run
-            # began near the end. Unknown counts as slow so an unmeasured
-            # combination cannot become that tail.
-            planned.sort(key=lambda pair: pair[1].expected_seconds or float("inf"), reverse=True)
         results = []
         aborted: str | None = None
         if args.concurrency == 1:
@@ -1033,15 +1127,13 @@ def run_matrix(args: argparse.Namespace) -> int:
             # Each run owns its containers, its volumes and its output directory,
             # and the source snapshot is mounted read-only, so runs do not share
             # anything a container could write.
-            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-                futures = [pool.submit(execute, case, job) for case, job in planned]
-                for future in as_completed(futures):
-                    result = future.result()
-                    results.append(result)
-                    if not aborted and (aborted := authentication_abort(result)):
-                        print(f"ERROR: {aborted}; stopping the matrix", file=sys.stderr)
-                        for pending in futures:
-                            pending.cancel()
+            results, aborted = run_concurrently(
+                interleaved_plan(planned),
+                execute,
+                concurrency=args.concurrency,
+                per_model=args.per_model_concurrency,
+                abort_reason=authentication_abort,
+            )
             # Completion order is arbitrary; the report must not be.
             results.sort(key=lambda item: str(item.get("id", "")))
 
@@ -1152,7 +1244,13 @@ def parser() -> argparse.ArgumentParser:
         "--concurrency",
         type=int,
         default=1,
-        help="how many runs may be in flight at once; each one holds 2 CPUs and 4 GB",
+        help="how many runs may be in flight at once; each one is capped at 2 CPUs and 2 GB",
+    )
+    run_parser.add_argument(
+        "--per-model-concurrency",
+        type=int,
+        default=2,
+        help="how many runs of one model may be in flight at once; providers throttle a burst",
     )
     run_parser.add_argument(
         "--refresh-login",

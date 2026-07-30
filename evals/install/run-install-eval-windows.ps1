@@ -24,10 +24,17 @@ param(
     # that only at its very end.
     [ValidateRange(30, 3600)]
     [int]$IdleTimeoutSeconds = 300,
-    # Each run in flight holds 2 CPUs and 4 GB. Writing a refreshed login back is
-    # serialized regardless, so a shared login file cannot be raced.
-    [ValidateRange(1, 8)]
+    # Each run in flight is capped at 2 CPUs and 2 GB, and the busiest container
+    # of a measured matrix peaked at 654 MiB, so memory is not what limits this.
+    # Writing a refreshed login back is serialized regardless, so a shared login
+    # file cannot be raced.
+    [ValidateRange(1, 16)]
     [int]$Concurrency = 1,
+    # What actually limits it is the provider. Six workers plus a longest-first
+    # order sent four runs of one model off within 21 seconds and every one went
+    # silent for 300 s, though that model needs under a minute on its own.
+    [ValidateRange(1, 8)]
+    [int]$PerModelConcurrency = 2,
     # An earlier artifact directory whose measured durations decide what starts
     # first. Without it the order is as declared, and one long run started late
     # leaves every other worker idle at the end.
@@ -317,7 +324,7 @@ if ($OrderFrom) {
     ($timings -join "`n" | ConvertFrom-Json).PSObject.Properties | ForEach-Object {
         $measured[$_.Name] = [double]$_.Value
     }
-    Write-Host "Order:      slowest first, from $($measured.Count) measured combination(s) in $OrderFrom"
+    Write-Host "Order:      slowest first, rotating between models, from $($measured.Count) measured combination(s) in $OrderFrom"
 }
 
 $jobs = @()
@@ -381,7 +388,7 @@ try {
         $runArguments += "--dry-run"
     }
     else {
-        $runArguments += @("--docker", (Get-DockerCli), "--concurrency", $Concurrency)
+        $runArguments += @("--docker", (Get-DockerCli), "--concurrency", $Concurrency, "--per-model-concurrency", $PerModelConcurrency)
         if ($RefreshLogin) {
             $runArguments += "--refresh-login"
         }
