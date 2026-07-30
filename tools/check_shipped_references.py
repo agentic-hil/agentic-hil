@@ -13,11 +13,10 @@ merging. It runs in CI on every push and pull request, and again at release.
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
-
-import tomllib
 
 IMMUTABLE_REFERENCE = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
 # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
@@ -27,6 +26,22 @@ REPOSITORY_REFERENCE = re.compile(
     r"(?:git\+)?https://github\.com/agentic-hil/agentic-hil(?:\.git)?(@[^\s\"'`)]+)?"
 )
 INSTALLS_FROM_SOURCE = re.compile(r"git\+https://github\.com/agentic-hil/agentic-hil|--from\s+git\+")
+
+
+def package_version(root: Path) -> str:
+    """Read __version__ rather than pyproject.
+
+    tomllib is stdlib only from 3.11 and this project still supports 3.10, so a
+    TOML parse would make the gate itself the thing that fails. The release job
+    already refuses a build where the two disagree.
+    """
+    tree = ast.parse((root / "src" / "agentic_hil" / "__init__.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
+        ):
+            return str(ast.literal_eval(node.value))
+    raise SystemExit("src/agentic_hil/__init__.py declares no __version__")
 
 
 def shipped_documents(root: Path) -> list[Path]:
@@ -69,7 +84,7 @@ def violations(document: Path, text: str, version: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     root = Path(argv[0]) if argv else Path(__file__).resolve().parents[1]
-    version = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    version = package_version(root)
     found = []
     for document in shipped_documents(root):
         found.extend(violations(document, document.read_text(encoding="utf-8"), version))

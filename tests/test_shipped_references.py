@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -10,6 +11,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from check_shipped_references import main, shipped_documents, violations  # noqa: E402
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_the_gate_runs_on_every_python_this_project_supports() -> None:
+    """tomllib is stdlib only from 3.11 and this project still supports 3.10.
+
+    Importing it made the gate itself the thing that failed, on a matrix leg the
+    developer machine never runs.
+    """
+    source = (REPOSITORY_ROOT / "tools" / "check_shipped_references.py").read_text(encoding="utf-8")
+    modules = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            # The module, not the names it brings in: "from pathlib import Path"
+            # imports pathlib, and asserting on Path would prove nothing.
+            modules.add(node.module.split(".")[0])
+
+    assert "tomllib" not in modules
+    assert modules <= {"__future__", "ast", "re", "sys", "pathlib"}, sorted(modules)
 
 
 def test_the_repository_ships_no_reference_a_reader_must_not_copy() -> None:
