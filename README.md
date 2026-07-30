@@ -6,8 +6,12 @@
 
 ```
 +--> build --> flash --> stimulate --> observe --+
-|                                                |
-+<-------------- diagnose & fix -----------------+
+|                 |          |            ^      |
+|                 v          v            |      |
+|            +----------------------------+      |
+|            |  real board on your bench  |      |
+|            +----------------------------+      |
++<------------- diagnose & fix ------------------+
 
   your agent, unattended -- you review the pull request
 ```

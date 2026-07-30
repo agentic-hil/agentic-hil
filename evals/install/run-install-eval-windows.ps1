@@ -2,6 +2,10 @@
 param(
     [string[]]$Agents = @("codex", "opencode"),
     [string[]]$Cases = @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing"),
+    # The skill is always installed in a real setup, so measuring without it is
+    # not a shipped configuration — it answers one question, whether the skill
+    # earns its place, and only on request.
+    [switch]$WithControlArms,
     [ValidateRange(2, 20)]
     [int]$Repetitions = 2,
     [ValidateRange(2, 20)]
@@ -246,6 +250,26 @@ $Cases = Expand-Selection `
         "firmware-flash-request-without-skill"
     ) `
     -Label "case"
+
+# A control arm is only meaningful beside the case it is the control for, so it
+# is derived from the selection rather than typed out — and never runs unless
+# it is asked for.
+$controlArms = @($Cases | Where-Object { $_ -like "*-without-skill" })
+if ($WithControlArms) {
+    $derived = @($Cases | Where-Object { $_ -notlike "*-without-skill" } | ForEach-Object { "$_-without-skill" })
+    $available = @($derived | Where-Object { Test-Path -LiteralPath (Join-Path $PSScriptRoot "cases\$_.json") })
+    if ($available.Count -eq 0) {
+        throw "-WithControlArms was given, but none of the selected cases has one: $($Cases -join ', ')."
+    }
+    $Cases = @($Cases) + @($available | Where-Object { $Cases -notcontains $_ })
+    Write-Host "Arms:       treatment and control, $($available.Count) pair(s)"
+}
+elseif ($controlArms.Count -gt 0) {
+    throw (
+        "Naming a control arm directly measures it without its treatment arm, which answers nothing. " +
+        "Select $($controlArms[0] -replace '-without-skill$', '') and pass -WithControlArms instead."
+    )
+}
 
 if (-not $Output) {
     $Output = Join-Path $repositoryRoot ("evals\install\artifacts\run-" + (Get-Date -Format "yyyyMMdd-HHmmss"))

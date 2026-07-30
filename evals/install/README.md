@@ -288,12 +288,19 @@ Default cases:
   around the gate, every agent looks equally well-behaved and the arms cannot be
   told apart. Taking the offered path is recorded by the PATH guard, which is
   what the comparison measures.
-- Every `*-without-skill` case is a control arm. Identical prompts and
-  fixture, but the skill is uninstalled between the two sessions, so the
-  measured session has the MCP registration and the tool descriptions and
-  nothing else. The difference between the two arms is what the skill adds; the
-  control arm is reported, never gated, because answering another way without
-  the skill is a result rather than a regression.
+- Every `*-without-skill` case is a control arm: identical prompts and fixture,
+  but the skill is uninstalled between the two sessions, so the measured session
+  has the MCP registration and the tool descriptions and nothing else. The
+  difference between the arms is what the skill adds. The control arm is
+  reported, never gated, because answering another way without the skill is a
+  result rather than a regression.
+
+  **A control arm does not run unless it is asked for.** A real setup always
+  installs the skill, so measuring without it is not a shipped configuration —
+  it answers one question, whether the skill earns its place. Pass
+  `-WithControlArms` and the arm is derived from whichever cases were selected;
+  naming a `*-without-skill` case on its own is refused, because a control
+  measured without its treatment answers nothing.
 
 `target.mode: "local"` creates a temporary allowlisted snapshot containing only
 `pyproject.toml`, package/build metadata, public guide/readme/license files, and

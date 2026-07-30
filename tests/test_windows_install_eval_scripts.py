@@ -223,6 +223,21 @@ throw "Docker helper must not execute before a required restart."
 
 
 @WINDOWS_ONLY
+def test_a_control_arm_runs_only_when_it_is_asked_for() -> None:
+    """A real setup always installs the skill.
+
+    Measuring without it is not a shipped configuration, so it answers one
+    question on request rather than doubling every run — and a control named on
+    its own, without the treatment it is the control for, answers nothing.
+    """
+    source = LOOP_SCRIPT.read_text(encoding="utf-8")
+    defaults = source[source.index("[string[]]$Cases = @(") : source.index("[switch]$WithControlArms")]
+
+    assert "-without-skill" not in defaults
+    assert "[switch]$WithControlArms" in source
+    assert "Naming a control arm directly" in source
+
+
 def test_windows_setup_resolves_docker_cli_outside_process_path(
     tmp_path: Path,
 ) -> None:
