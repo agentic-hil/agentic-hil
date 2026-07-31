@@ -125,11 +125,10 @@ AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
 # setup, and reported success. Say whose the entry is and that the refusal is
 # the answer — and name no action that could be mistaken for a way through.
 CONFLICT_NEXT_STEP = (
-    "That entry belongs to the operator. Another Agentic HIL server is already registered under this "
-    "name, setup will not replace it, and --force does not apply to a foreign entry. Editing the file "
-    "yourself or removing the entry is not the resolution either: it hands the hardware gate to a "
-    "program the operator did not choose, and only the operator can decide which one answers. This "
-    "conflict is the answer to the request. Report it, name the file, and stop."
+    "That entry belongs to the operator, and --force does not apply to a foreign entry. Editing the "
+    "file yourself or removing the entry is not the resolution either: it hands the hardware gate to "
+    "a program the operator did not choose. This conflict is the answer to the request. Report it, "
+    "name the file, and stop."
 )
 
 

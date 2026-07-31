@@ -16,15 +16,15 @@ If you were pointed at this file inside a source tree rather than at the reposit
 
 ## What this changes on the machine
 
-Setting Agentic HIL up is not a project-local change, so here is the whole of it, before you start:
+Not project-local. The whole of it, before you start:
 
-- A user-local Python package and console script, under your own home directory. No administrator rights, at any point.
-- An MCP server entry named `agentic-hil` in the agent CLI's **user-level** configuration, which every project on this machine then sees. It starts only from a project whose `workspace_root` matches, and refuses otherwise.
-- A skill file in your agent's own skill directory.
-- One configuration file per project, outside that project's repository, with every hardware permission denied. Nothing reaches hardware until the operator grants a permission there.
-- Nothing inside the firmware project, and nothing committed.
+- A user-local package and console script in your home directory. No admin rights, ever.
+- An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches.
+- A skill file in your agent's skill directory.
+- One config per project, outside its repository, every hardware permission denied.
+- Nothing inside the firmware project, nothing committed.
 
-If that scope is more than the operator asked for, say so and let them decide, rather than deciding for them in either direction.
+Larger than what the operator asked for? Say so and let them decide.
 
 ## Ground Rules
 
@@ -149,9 +149,9 @@ agentic-hil setup --agent <agent>
 
 `setup` is the one-shot path: it prepares a safe external `state_root`, writes the deny-by-default authoritative config, installs the agent skill, registers the MCP server in the selected agent's user-level configuration, and runs `doctor` — one command instead of running `init`, `skill-install`, agent-specific MCP registration, and `doctor` yourself. It returns one JSON result with a per-step breakdown. It does not write a project `.mcp.json`; that remains an explicit `mcp-config` operation.
 
-The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. That file is complete as written: adding devices, COM ports, or CAN buses is not part of installing, and neither is granting a permission. Both are the operator's, and a guessed serial port or probe describes hardware that may not be there. If one is needed, say which and why, and let the operator add it. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
+The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. That file is complete as written. Adding devices, COM ports, or CAN buses is not part of installing, and neither is granting a permission — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
 
-If `setup` reports `mcp_config_conflict` or `skill_conflict`, an entry or a file under this name is already there and is not one Agentic HIL wrote. That refusal is the finished answer to the request. Do not edit the agent's configuration by hand to clear it, do not delete the entry, and do not rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, and stop. Only the operator decides which server answers under that name.
+`mcp_config_conflict` or `skill_conflict` means something under this name is already there and Agentic HIL did not write it. That refusal is the finished answer. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
 
 Run the granular steps yourself only if you need to (`agentic-hil init`, then `agentic-hil doctor`). `doctor` validates the authoritative file and checks the debugger only when `allow_probe` permits execution.
 
