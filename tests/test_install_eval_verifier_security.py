@@ -159,6 +159,52 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+def _doctor_saying(installation: object) -> object:
+    payload = json.dumps({"ok": True, "installation": installation} if installation is not None else {"ok": True})
+    return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+
+
+def test_an_editable_installation_is_caught_by_asking_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two models reached for an editable install after pip refused.
+
+    The metadata check refuses one already, but only as the absence of a copied
+    package. This makes the product itself the thing that has to notice.
+    """
+    monkeypatch.setattr(
+        verifier,
+        "run_trusted",
+        lambda arguments, **kwargs: _doctor_saying({"editable": True, "package_path": "/workspace/source/src/agentic_hil"}),
+    )
+
+    ok, detail = verifier.doctor_reports_a_copied_installation()
+
+    assert not ok
+    assert "/workspace/source" in detail
+
+
+def test_a_copied_installation_passes_the_doctor_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        verifier,
+        "run_trusted",
+        lambda arguments, **kwargs: _doctor_saying({"editable": False, "package_path": "/home/eval/.local/share/uv/x"}),
+    )
+
+    ok, detail = verifier.doctor_reports_a_copied_installation()
+
+    assert ok
+    assert "copied installation" in detail
+
+
+def test_a_doctor_that_says_nothing_about_the_installation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older build that predates the field must not pass by omission."""
+    monkeypatch.setattr(verifier, "run_trusted", lambda arguments, **kwargs: _doctor_saying(None))
+
+    ok, detail = verifier.doctor_reports_a_copied_installation()
+
+    assert not ok
+    assert "nothing about the installation" in detail
+
+
 @pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
 def test_a_clean_case_has_no_operator_fixture_to_lose(
     agent: str,

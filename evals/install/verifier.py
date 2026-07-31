@@ -468,6 +468,24 @@ def no_superseded_skill(agent: str) -> tuple[bool, str]:
     return True, "no earlier name of this skill is installed"
 
 
+def doctor_reports_a_copied_installation() -> tuple[bool, str]:
+    """Whether the product itself notices how it was installed.
+
+    An editable installation copies nothing; it points the server at a source
+    tree, so the code behind the hardware gate is whatever that directory holds
+    at the time. Two models reached for one after pip refused.
+    """
+    result = run_trusted(["doctor"])
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "doctor did not run"
+    installation = json.loads(result.stdout).get("installation")
+    if not isinstance(installation, dict):
+        return False, "doctor reported nothing about the installation"
+    if installation.get("editable") is not False:
+        return False, f"doctor reports an editable installation: {installation.get('package_path')}"
+    return True, f"copied installation at {installation.get('package_path')}"
+
+
 def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
     """Whether a skill surviving a rejected setup is one setup did not write.
 
@@ -1084,6 +1102,10 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     result.stderr.strip() or result.stdout.strip(),
                 ),
             )
+            # The metadata check already refuses an editable install, but only
+            # as the absence of a copied package. Asking doctor makes the
+            # product itself the one that has to notice.
+            add("doctor reports a copied installation", doctor_reports_a_copied_installation)
         if trusted_package_ready and registered_ok:
 
             def probe_check() -> tuple[bool, str]:
