@@ -44,6 +44,8 @@ agentic-hil setup --help
 
 An older version must be upgraded; a successful `--version` call by itself is not sufficient.
 
+Never install editable (`pip install -e`, `uv tool install --editable`, `pipx install --editable`). An editable installation does not copy the package; it points the MCP server at whatever a source tree happens to contain right now, so the code enforcing the hardware policy can change under the operator without anyone reinstalling. Install from a source — a release, a tag, or a directory — and let it be copied.
+
 2. Try the normal user-local pip installation first, never into a virtual environment inside the firmware project:
 
 ```bash

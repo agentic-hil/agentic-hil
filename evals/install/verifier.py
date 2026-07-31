@@ -154,6 +154,21 @@ def installed_distribution() -> dict[str, Any]:
             if "__init__.py" in file_names:
                 package_candidates.append(path)
             directory_names[:] = []
+    if not package_candidates:
+        # An editable install copies nothing into site-packages; it leaves a
+        # finder pointing at a source tree. Measured: two models fell back to
+        # `uv tool install --editable /workspace/source` after pip refused, and
+        # "found 0" read like a broken check rather than what it was — a server
+        # whose policy code still lives in a directory that can change.
+        editable = sorted(
+            str(path)
+            for parent in HOME.rglob("*.dist-info")
+            for path in [parent / "direct_url.json"]
+            if path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("dir_info", {}).get("editable")
+        )
+        if editable:
+            raise ValueError(f"agentic_hil is installed editable, so no package was copied: {editable[0]}")
+        raise ValueError("no installed agentic_hil package found under the home directory")
     if len(package_candidates) != 1:
         raise ValueError(f"expected one installed agentic_hil package, found {len(package_candidates)}")
 
@@ -496,7 +511,11 @@ def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
 
     recorded = sorted(Path(state_root).glob("projects/*/reports/report-state.json"))
     if not recorded:
-        return False, f"no Agentic HIL tool dispatch recorded under {state_root}"
+        # Only a tool that reaches the target writes this. Read-only tools such
+        # as debugger_info or adapters_list leave nothing here, so a run that
+        # merely looked around lands in this branch, and the wording has to say
+        # that rather than imply no tool ran at all.
+        return False, f"no Agentic HIL tool reached the target: nothing recorded under {state_root}"
     return True, f"dispatch recorded: {recorded[0]}"
 
 
@@ -506,9 +525,19 @@ def skill_registered(agent: str, installed_skill: Path) -> tuple[bool, str]:
     Codex loads skills through an AGENTS.md entry; the other CLIs discover them
     by their location, so the installed path is the registration.
     """
+    expected_parent = skill_path(agent).parent
+    if installed_skill.parent != expected_parent:
+        return False, f"{installed_skill} is not where {agent} looks: {expected_parent}"
     if agent != "codex":
-        expected_parent = skill_path(agent).parent
-        return installed_skill.parent == expected_parent, f"discovered from {expected_parent}"
+        # Location is the registration for these CLIs, so the file has to be
+        # there. Comparing the path against itself was the whole check before,
+        # which passed for every run that installed nothing at all.
+        safe, detail = safe_owned_path(installed_skill, HOME)
+        if not safe:
+            return False, detail
+        if not installed_skill.is_file():
+            return False, f"nothing installed where {agent} looks: {installed_skill}"
+        return True, f"discovered from {expected_parent}"
 
     agents_md = HOME / ".codex" / "AGENTS.md"
     safe, detail = safe_owned_path(agents_md, HOME)

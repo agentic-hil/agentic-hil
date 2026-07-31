@@ -204,6 +204,46 @@ def test_setup_keeps_a_skill_it_did_not_install_and_says_so(
     assert not initialized_config_path(workspace).exists()
 
 
+def test_doctor_reports_an_editable_installation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An editable install points the gate at a tree that can change under it.
+
+    Measured: two models fell back to `uv tool install --editable` after pip
+    refused, and nothing in the product said a word about it.
+    """
+    from agentic_hil.cli import _doctor_installation_report
+
+    class Editable:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return json.dumps({"url": "file:///workspace/source", "dir_info": {"editable": True}})
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: Editable())
+
+    report = _doctor_installation_report()
+
+    assert report["editable"] is True
+    assert "reinstall it" in report["summary"]
+    assert report["package_path"].endswith("agentic_hil")
+
+
+def test_doctor_calls_a_copied_installation_what_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.cli import _doctor_installation_report
+
+    class Copied:
+        def read_text(self, name: str) -> str:
+            return json.dumps({"url": "file:///tmp/agentic_hil-0.4.0.tar.gz"})
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: Copied())
+
+    report = _doctor_installation_report()
+
+    assert report["editable"] is False
+    assert "summary" not in report
+
+
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
     """The block names the skill's absolute path, which on Windows has backslashes.
 

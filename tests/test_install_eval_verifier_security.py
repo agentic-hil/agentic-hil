@@ -159,6 +159,45 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_skill_is_not_discoverable_when_nothing_was_installed(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """These CLIs discover a skill by its location, so the file has to be there.
+
+    The check compared the expected path against itself, which is true whatever
+    the disk holds. Measured: fourteen runs whose install never produced a
+    launcher were still reported as having a discoverable skill.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, root, **kwargs: (True, str(path)))
+    installed = verifier.skill_path(agent)
+
+    ok, detail = verifier.skill_registered(agent, installed)
+
+    assert not ok
+    assert "nothing installed" in detail
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_skill_is_discoverable_once_it_is_where_the_cli_looks(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, root, **kwargs: (True, str(path)))
+    installed = verifier.skill_path(agent)
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text("skill", encoding="utf-8")
+
+    ok, detail = verifier.skill_registered(agent, installed)
+
+    assert ok, detail
+
+
 @pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
 def test_unmanaged_entry_check_rejects_a_rewritten_operator_entry(
     agent: str,

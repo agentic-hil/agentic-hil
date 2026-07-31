@@ -1066,6 +1066,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "tool": "agentic_hil_doctor",
         "summary": "Agentic HIL authoritative configuration loaded; debugger check skipped." if debugger_info.get("skipped") else ("Agentic HIL configuration loaded and debugger checked." if debugger_info.get("ok") else "Agentic HIL configuration loaded, but debugger check failed."),
         "config_path": config.config_path,
+        "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
         "target": {"name": config.target.name, "controller": config.target.controller},
         "devices": {device_id: {"debugger": device.debugger, "uart": device.uart} for device_id, device in config.devices.items()},
@@ -1073,6 +1074,35 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }
+
+
+def _doctor_installation_report() -> JsonObject:
+    """Where the code behind the hardware gate is actually loaded from.
+
+    An editable installation copies nothing: it points at a source tree, so the
+    code enforcing the policy can change without anyone reinstalling, and the
+    operator has no version to hold on to. That is normal while developing this
+    package and wrong for a bench, so it is reported rather than refused.
+    """
+    package_root = str(Path(__file__).resolve().parent)
+    report: JsonObject = {"version": __version__, "package_path": package_root, "editable": False}
+    try:
+        from importlib.metadata import distribution
+
+        origin = distribution("agentic-hil").read_text("direct_url.json")
+    except Exception:
+        return report
+    if not origin:
+        return report
+    with suppress(ValueError):
+        report["editable"] = bool(json.loads(origin).get("dir_info", {}).get("editable"))
+    if report["editable"]:
+        report["summary"] = (
+            f"Agentic HIL runs editable from {package_root}. The code behind the hardware gate is whatever "
+            "that directory holds at the time, so reinstall it from a release, a tag or a copied directory "
+            "before anyone relies on this bench."
+        )
+    return report
 
 
 def _doctor_mcp_report() -> JsonObject:
