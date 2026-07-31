@@ -6,7 +6,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-21
+## [0.4.0] - 2026-07-31
 
 ### Added
 
@@ -21,6 +21,9 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - MCP tool descriptions name the raw commands they replace, which is the one routing surface every session sees without a skill being discovered first, and the only one available to an agent with no skill mechanism.
 - The VMware install-loop harness is retired in favour of the container evaluation. The hardware test plans, per-backend configuration templates, and MCP probe move to `evals/hil/`, together with what a containerized hardware executor needs: device passthrough and one run at a time.
 - MCP registration stores only a verified absolute persistent console-script path and rejects bare PATH commands, transient runners, workspace virtual environments, unsafe symlink chains, and unsafe ownership or permissions. Stable user-owned pipx/uv-tool links remain supported after their link and resolved target chains pass validation.
+- A refusal says that it is the answer. `initialize` returns server instructions, so a session knows before its first decision that hardware requests are answered by these tools; a permission refusal, an MCP entry conflict, and a skill conflict each carry a `next_step` naming whose the file is and that editing it, deleting the entry, or rerunning with `--force` is not a resolution. Measured: with wording that only named the obstacle, ten evaluation runs rewrote the operator's MCP entry by hand and reported success.
+- `doctor` reports how the running package was installed. An editable installation copies nothing, so the code enforcing the hardware policy is whatever a source tree holds at the time.
+- Setup restricts the agent CLI's own write tools on the policy files as its last step, rather than using a path rule that would also stop `mcp-stdio` from reading the file it must read.
 - `AI_AGENT_QUICKSTART.md` leads with `agentic-hil setup`, documents the MCP registration as user-level per agent, and adds guidance for pip-less environments (Ubuntu 24.04+/PEP-668).
 
 ### Removed
@@ -35,6 +38,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - The Windows environment setup no longer reports "no untrusted writers" when `Get-Acl` is unavailable; it reads the same access rules through the .NET accessor instead of turning the preflight into a silent no-op.
 - The packaged skill is recognized on a Windows checkout. git converts it to CRLF there and the frontmatter is matched line by line, so the installer read its own skill as a foreign one and refused to update it.
 - A world-writable coordination lock directory is refused when hardware is acquired, which is where coordination state is created since it became lazy, rather than at construction where nothing was built yet.
+- Rewriting the skill registration block no longer fails on Windows. The block names the skill's absolute path and `re.sub` reads escapes in a replacement string, so a second write of a path under `C:\Users\...` died on a bad escape. Only `skill-install` followed by `setup` took that branch, which is why a plain `setup` never hit it.
+- A rejected setup keeps what an earlier command installed. Rollback restores the state setup found, so a skill from a standalone `skill-install` or a config from a standalone `init` survives on purpose, and the refusal now names a skill left behind without a registration to go with it.
 
 ## [0.3.0] - 2026-07-20
 
