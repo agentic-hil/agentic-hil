@@ -238,6 +238,7 @@ def test_a_control_arm_runs_only_when_it_is_asked_for() -> None:
     assert "Naming a control arm directly" in source
 
 
+@WINDOWS_ONLY
 def test_windows_setup_resolves_docker_cli_outside_process_path(
     tmp_path: Path,
 ) -> None:
@@ -365,6 +366,7 @@ if ($shared -notcontains 'S-1-1-0') {{
     assert result.returncode == 0, result.stdout
 
 
+@WINDOWS_ONLY
 def test_windows_setup_passes_resolved_docker_cli_to_image_build() -> None:
     source = SETUP_SCRIPT.read_text(encoding="utf-8")
     build_start = source.index('Write-Host "== Versioned evaluation image"')
@@ -383,6 +385,7 @@ def test_windows_setup_passes_resolved_docker_cli_to_image_build() -> None:
     assert "Do not restart Windows or rerun the unchanged setup" in source
 
 
+@WINDOWS_ONLY
 def test_windows_docker_install_eval_declares_safe_preflight_contract() -> None:
     source = DOCKER_SCRIPT.read_text(encoding="utf-8")
 

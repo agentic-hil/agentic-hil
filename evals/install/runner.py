@@ -148,7 +148,12 @@ def committed_package_digest(repository: Path, commit: str) -> str:
             raise RuntimeError(result.stderr.strip() or f"could not export {commit} from {repository}")
         extracted = Path(directory) / "tree"
         with tarfile.open(archive) as bundle:
-            bundle.extractall(extracted, filter="data")
+            # The safe extraction filter is the default from 3.12 and absent on
+            # the oldest Python this project supports.
+            if hasattr(tarfile, "data_filter"):
+                bundle.extractall(extracted, filter="data")
+            else:
+                bundle.extractall(extracted)
         return source_digest(extracted / "src" / "agentic_hil")
 
 
