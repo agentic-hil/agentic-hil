@@ -40,8 +40,12 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
 
 def prepare_workspace(job: dict) -> tuple[str, str]:
     WORKSPACE.mkdir(parents=True, exist_ok=False)
+    # Naming the evaluation here was read as the reason not to act on it:
+    # claude-sonnet-5 quoted this line back as evidence that the project had no
+    # firmware and the request made no sense. A firmware project is what a
+    # request to set up hardware tooling arrives in.
     (WORKSPACE / "README.md").write_text(
-        "# Firmware project\n\nDisposable project used only for Agentic HIL installation evaluation.\n",
+        "# Nucleo-F446RE firmware\n\nSTM32 Nucleo-F446RE target. Artifacts build into `build/`.\n",
         encoding="utf-8",
     )
     fixture = job["case"].get("workspace_fixture")
