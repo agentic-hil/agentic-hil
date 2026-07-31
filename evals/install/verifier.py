@@ -539,6 +539,25 @@ def installed_distribution_is_copied(metadata: dict[str, Any]) -> tuple[bool, st
     return True, f"copied from {direct.get('url')}"
 
 
+def rejected_setup_owns_no_config(configs: list[Path]) -> tuple[bool, str]:
+    """Whether a config surviving a rejected setup is one setup did not write.
+
+    Same reasoning as the skill: setup rolls back to the state it found, so a
+    config a standalone `agentic-hil init` wrote stays on purpose. Measured: a
+    model ran init itself after the conflict, and the config it left denies
+    every hardware permission and has no server registered against it, which is
+    inert. What must not survive is more than one, or a broken one.
+    """
+    if not configs:
+        return True, "count=0"
+    if len(configs) > 1:
+        return False, f"count={len(configs)}: " + ", ".join(str(path) for path in configs)
+    safe, detail = valid_authoritative_config(configs[0])
+    if not safe:
+        return False, f"a rejected setup left an unsafe config: {detail}"
+    return True, f"one intact deny-by-default config from an earlier init: {detail}"
+
+
 def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
     """Whether a skill surviving a rejected setup is one setup did not write.
 
@@ -1161,7 +1180,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("MCP initialize and tools/list succeed", probe_check)
             add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"]))
     else:
-        add("setup conflict left no authoritative config", lambda: (not configs, f"count={len(configs)}"))
+        add("setup conflict left no config of its own", lambda: rejected_setup_owns_no_config(configs))
         add("setup conflict left no skill of its own", lambda: rejected_setup_owns_no_skill(installed_skill))
         add("unmanaged MCP entry left untouched", lambda: unmanaged_entry_untouched(agent))
 

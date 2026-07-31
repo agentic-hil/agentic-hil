@@ -159,6 +159,38 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+def test_a_config_an_earlier_init_wrote_survives_a_rejected_setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Setup rolls back its own writes, not a command that already succeeded.
+
+    Measured: a model ran `agentic-hil init` itself after the conflict. What it
+    left denies every hardware permission and has no server registered against
+    it, so demanding an empty state failed a run that did nothing wrong.
+    """
+    monkeypatch.setattr(verifier, "valid_authoritative_config", lambda path: (True, f"config={path}"))
+    config = tmp_path / "config.yaml"
+
+    ok, detail = verifier.rejected_setup_owns_no_config([config])
+
+    assert ok
+    assert "deny-by-default" in detail
+
+
+def test_a_second_config_after_a_rejected_setup_still_fails(tmp_path: Path) -> None:
+    ok, detail = verifier.rejected_setup_owns_no_config([tmp_path / "a.yaml", tmp_path / "b.yaml"])
+
+    assert not ok
+    assert "count=2" in detail
+
+
+def test_an_unsafe_config_after_a_rejected_setup_still_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(verifier, "valid_authoritative_config", lambda path: (False, "allow_flash is enabled"))
+
+    ok, detail = verifier.rejected_setup_owns_no_config([tmp_path / "config.yaml"])
+
+    assert not ok
+    assert "allow_flash" in detail
+
+
 def test_the_guard_check_names_the_command_that_breached_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
