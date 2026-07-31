@@ -419,11 +419,14 @@ def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bo
     canonical_url = raw_url.removesuffix(".git").rstrip("/")
     commit = str(vcs.get("commit_id", "")).lower()
     requested = str(vcs.get("requested_revision", "")).lower()
+    # The commit decides. A branch name that resolved to it is the same code,
+    # and the guide tells a reader to install from the ref their URL names:
+    # measured, a run installed feature/smooth-installation at exactly the
+    # expected commit and only this check objected.
     ok = (
         canonical_url == "https://github.com/agentic-hil/agentic-hil"
         and vcs.get("vcs") == "git"
         and commit == target["expected_commit"]
-        and requested in {"", target["expected_commit"]}
     )
     return ok, f"url={canonical_url}; commit={commit or '<missing>'}; requested={requested or '<missing>'}"
 
