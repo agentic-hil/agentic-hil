@@ -306,11 +306,23 @@ def test_a_copied_installation_is_accepted() -> None:
     assert "copied from" in detail
 
 
-def test_a_distribution_without_an_origin_record_fails() -> None:
-    ok, detail = verifier.installed_distribution_is_copied({})
+def test_an_index_install_is_never_editable() -> None:
+    """No direct_url.json means no direct reference, so nothing to be editable.
+
+    Measured: this read the file's absence as a failure and sank 32 runs whose
+    install had worked, on the first matrix that used the published path.
+    """
+    ok, detail = verifier.installed_distribution_is_copied({"direct_url": None})
+
+    assert ok
+    assert "package index" in detail
+
+
+def test_a_malformed_origin_record_still_fails() -> None:
+    ok, detail = verifier.installed_distribution_is_copied({"direct_url": "not-an-object"})
 
     assert not ok
-    assert "direct_url.json missing" in detail
+    assert "not an object" in detail
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])

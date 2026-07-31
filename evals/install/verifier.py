@@ -543,8 +543,13 @@ def installed_distribution_is_copied(metadata: dict[str, Any]) -> tuple[bool, st
     agent installed it.
     """
     direct = metadata.get("direct_url")
+    if direct is None:
+        # No direct reference at all: an index install, which cannot be
+        # editable. origin_matches is what decides whether that was the
+        # expected source.
+        return True, "installed from a package index, which is never editable"
     if not isinstance(direct, dict):
-        return False, "direct_url.json missing"
+        return False, "direct_url.json is not an object"
     directory = direct.get("dir_info")
     if isinstance(directory, dict) and directory.get("editable"):
         return False, f"the agent installed editable from {direct.get('url')}"
