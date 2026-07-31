@@ -14,6 +14,18 @@ If you were given only the Agentic HIL repository URL and asked to set it up: ru
 
 If you were pointed at this file inside a source tree rather than at the repository URL, that tree is the version this guide describes and a published release would be a different one. Install from it: step 0 below. Never editable from it, and never by copying it into the firmware project.
 
+## What this changes on the machine
+
+Setting Agentic HIL up is not a project-local change, so here is the whole of it, before you start:
+
+- A user-local Python package and console script, under your own home directory. No administrator rights, at any point.
+- An MCP server entry named `agentic-hil` in the agent CLI's **user-level** configuration, which every project on this machine then sees. It starts only from a project whose `workspace_root` matches, and refuses otherwise.
+- A skill file in your agent's own skill directory.
+- One configuration file per project, outside that project's repository, with every hardware permission denied. Nothing reaches hardware until the operator grants a permission there.
+- Nothing inside the firmware project, and nothing committed.
+
+If that scope is more than the operator asked for, say so and let them decide, rather than deciding for them in either direction.
+
 ## Ground Rules
 
 - Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
