@@ -73,7 +73,7 @@ def test_every_agent_session_receives_the_reasoning_effort() -> None:
         if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_agent_command"
     ]
 
-    assert len(calls) == 2, "one call per agent session"
+    assert len(calls) == 3, "one call per agent session: install, confirmation, follow-up"
     for call in calls:
         assert any(keyword.arg == "reasoning_effort" for keyword in call.keywords)
 

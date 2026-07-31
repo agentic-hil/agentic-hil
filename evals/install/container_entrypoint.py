@@ -38,6 +38,16 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if name in IGNORED_DIRECTORY_NAMES or Path(name).suffix in IGNORED_FILE_SUFFIXES}
 
 
+CONFIRMATION = (
+    "Yes — go ahead and install Agentic HIL and set it up for this project, as the guide describes. "
+    "The user-level MCP registration and the skill file are expected and wanted."
+)
+
+
+def installed() -> bool:
+    return shutil.which("agentic-hil", path=f"{HOME}/.local/bin:{os.environ.get('PATH', '')}") is not None
+
+
 def prepare_workspace(job: dict) -> tuple[str, str]:
     WORKSPACE.mkdir(parents=True, exist_ok=False)
     # Naming the evaluation here was read as the reason not to act on it:
@@ -205,10 +215,29 @@ def main(argv: list[str] | None = None) -> int:
         if completed.returncode != 0:
             return completed.returncode
 
+        if not installed():
+            # Asking before touching user-level state is right, and a one-shot
+            # prompt scored it as a failure to install. A real operator answers,
+            # so answer: claude-sonnet-5 stopped to ask in every run of one round.
+            print(json.dumps({"event": "eval_confirmation_start"}), flush=True)
+            completed = subprocess.run(
+                build_agent_command(adapter.id, job["model"], CONFIRMATION, reasoning_effort=reasoning_effort),
+                cwd=WORKSPACE,
+                env=environment,
+                check=False,
+            )
+            print(json.dumps({"event": "eval_confirmation_exit", "exit_code": completed.returncode}), flush=True)
+
         # An agent CLI discovers skills when it starts, so the skill installed
         # during the session above is only in context for a fresh session.
         followup_template = job["case"].get("followup_prompt")
         if not followup_template:
+            return completed.returncode
+        if not installed():
+            # The follow-up measures how a hardware request is routed. Without an
+            # installation there is nothing to route it through, so asking costs
+            # a session and answers nothing.
+            print(json.dumps({"event": "eval_followup_skipped", "reason": "nothing was installed"}), flush=True)
             return completed.returncode
         followup = followup_template.format(
             workspace=WORKSPACE,
