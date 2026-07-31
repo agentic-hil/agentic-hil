@@ -10,5 +10,12 @@ build/
 dist/
 .venv/
 .agentic-hil/
+# Never committed anywhere, including the plugin: a portable plugin cannot embed
+# the verified absolute path of a persistent executable, and the release job
+# refuses a build that ships one.
 .mcp.json
 uv.lock
+evals/install/artifacts/
+
+# Worktrees this session creates are checkouts, not content.
+.claude/worktrees/

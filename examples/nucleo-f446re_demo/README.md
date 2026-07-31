@@ -21,15 +21,18 @@ This produces `build/Debug/nucleo-f446re_demo.elf` (plus `.hex`/`.bin`) — insi
 
 ## Configure Agentic HIL
 
-Names: the Python distribution/install target and CLI command use `agentic-hil`. Python-facing identifiers such as pytest fixtures and Python examples use `agentic_hil`.
+Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
+
+Install Agentic HIL as [AI_AGENT_QUICKSTART.md](../../AI_AGENT_QUICKSTART.md)
+describes, then from this directory:
 
 ```bash
-pipx install agentic-hil
-agentic-hil init
-# Copy agentic-hil.config.example.yaml's contents into that external file.
-# Replace workspace_root with this directory's absolute path, keep state_root
-# absolute and outside this workspace, and adjust com_ports.dut_uart.device
-# (for example /dev/ttyACM0 or COM5), then:
+agentic-hil setup --agent claude-code   # or: codex / opencode
+# setup writes the external deny-by-default config and prints its path. This
+# demo needs the probe, flash, reset, and UART-read permissions enabled there,
+# and com_ports.dut_uart.device set to your port (/dev/ttyACM0, COM5, ...).
+# agentic-hil.config.example.yaml shows the shape; review every permission
+# before enabling it, then:
 agentic-hil doctor
 ```
 

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "quickstart",
+  "fixture": "clean",
+  "expected_outcome": "success",
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project."
+}

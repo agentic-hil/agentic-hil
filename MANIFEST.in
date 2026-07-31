@@ -3,13 +3,16 @@ include AGENTS.md
 include AI_AGENT_QUICKSTART.md
 include TROUBLESHOOTING.md
 include SECURITY.md
-include llms.txt
 include LICENSE
 include docs/mcp-hosts.md
 recursive-include src/agentic_hil/schemas *.json
 recursive-include src/agentic_hil/templates *.json
 recursive-include src/agentic_hil/skills *.md
 recursive-include tests *.py
+# The evaluation harness is repository tooling, not package content, so the
+# tests that import it would fail to collect in a source distribution.
+exclude tests/test_install_eval*.py
+exclude tests/test_windows_install_eval_scripts.py
 recursive-include examples *.py *.md *.yaml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

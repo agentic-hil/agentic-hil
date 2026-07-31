@@ -48,7 +48,10 @@ jobs:
         run: python -m pip install -e '.[dev,can]'
 
       - name: Lint
-        run: ruff check src tests
+        run: ruff check src tests evals tools
+
+      - name: Check shipped repository references
+        run: python tools/check_shipped_references.py
 
       - name: Run tests
         run: pytest

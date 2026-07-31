@@ -15,7 +15,7 @@ Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Python 3.10 or newer as the suppor
 ## Development
 
 - Install: `python -m pip install -e '.[dev,can]'`
-- Lint: `ruff check src tests`
+- Lint: `ruff check src tests evals tools`
 - Test: `pytest`
 - Package check: `python -m build` and `twine check dist/*`
 

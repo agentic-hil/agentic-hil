@@ -617,7 +617,23 @@ def adapter_payload(args: JsonObject) -> JsonObject:
 
 
 def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
-    return {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
+    result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
+    if error_type == "permission_denied":
+        # A refusal that only states a fact reads to a caller like a closed door
+        # to walk around. One weak model called this tool first, was refused,
+        # diagnosed correctly through the other tools, and then flashed the board
+        # with st-flash. The instruction belongs where the caller is looking.
+        # Deliberately no verb phrase a caller could act on. An earlier wording
+        # said "ask the operator to change the authoritative config" and a small
+        # model rewrote the config itself to grant allow_flash.
+        result["next_step"] = (
+            "This refusal is the answer to the request. Report it and name the permission that is "
+            "denied, then stop. You must not enable it: the authoritative configuration belongs to the "
+            "operator and only the operator may edit it. You must not carry out the action another way "
+            "either — a debugger, serial device or CAN adapter driven outside Agentic HIL defeats the "
+            "policy this refusal enforces."
+        )
+    return result
 
 
 def audited_hardware_tools() -> set[str]:

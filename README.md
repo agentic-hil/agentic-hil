@@ -6,8 +6,12 @@
 
 ```
 +--> build --> flash --> stimulate --> observe --+
-|                                                |
-+<-------------- diagnose & fix -----------------+
+|                 |          |            ^      |
+|                 v          v            |      |
+|            +----------------------------+      |
+|            |  real board on your bench  |      |
+|            +----------------------------+      |
++<------------- diagnose & fix ------------------+
 
   your agent, unattended -- you review the pull request
 ```
@@ -21,37 +25,50 @@ Names: the Python distribution/install target, CLI command, repository URL, and 
 The easiest path: copy/paste this prompt to your AI agent:
 
 ```text
-Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.
+Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md to install Agentic HIL and set it up for this project.
 ```
 
-Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**.
+Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand.
 
-If you want to install it yourself anyway, install the Python package with pip and then use the `agentic-hil` command:
+### Installing it yourself
+
+Two commands: install the package user-locally, then set up the project from its
+root.
 
 ```bash
-pip install agentic-hil
-agentic-hil --version
+pip install --user agentic-hil
+agentic-hil setup                 # add --agent codex or --agent opencode for those
 ```
 
-If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, use the `uv`/`pipx` paths below instead. Never use `pip install --break-system-packages`.
+`setup` creates the deny-by-default policy outside the repository, installs the
+agent skill, registers the MCP server with a verified absolute executable path,
+and runs `doctor`. It prints where the policy file landed — review it before
+enabling anything.
 
-Without installing anything (no `PATH` changes; needs [uv](https://docs.astral.sh/uv/) or pipx):
+If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
+up on `PATH`, install it persistently with a tool installer instead and rerun
+`setup`:
 
 ```bash
-uvx --from agentic-hil agentic-hil --version
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uv tool install agentic-hil       # or: pipx install agentic-hil
 ```
 
-Alternative isolated user-local install (recommended when the MCP client needs a stable command on `PATH`):
+Never use `pip install --break-system-packages`. Never persist a `uvx`
+invocation, a workspace virtual environment, or a bare `PATH` name as the MCP
+launcher: each resolves anew later, so the program behind the hardware gate
+could change without anyone editing anything.
+[AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) has the complete fallback chain,
+and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something
+does not start.
 
-```bash
-uv tool install agentic-hil      # or: pipx install agentic-hil
-agentic-hil init
-agentic-hil mcp-config --output .mcp.json
-agentic-hil doctor
-```
+For direct PEAK/SocketCAN adapters add the CAN extra — `uv tool install
+'agentic-hil[can]'` — and for the pyOCD backend `agentic-hil[pyocd]`. Both are
+optional because they carry platform-specific drivers that flashing and UART do
+not need; without them those tools refuse with `can_backend_not_available`
+rather than failing at import.
 
-For direct PEAK/SocketCAN access install the CAN extra: `uv tool install 'agentic-hil[can]'`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) when something does not start.
+To check a version without installing anything, `uvx --from agentic-hil
+agentic-hil --version` is a diagnostic only.
 
 ## Why
 
@@ -69,19 +86,19 @@ Every hardware action is validated against the selected authoritative configurat
 
 ## MCP Entry
 
-Every MCP host starts the same local stdio server from the firmware project root:
+Every MCP host starts the same local stdio server from the firmware project root, using the reviewed absolute path of its persistent installation:
 
 ```text
-agentic-hil mcp-stdio
+/absolute/path/to/persistent/agentic-hil mcp-stdio
 ```
 
-Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. See [MCP host configuration](docs/mcp-hosts.md) for copy/paste setup for VS Code/GitHub Copilot, JetBrains/CLion, Codex, Claude Code, OpenCode, and generic MCP hosts. `agentic-hil mcp-config --output .mcp.json` generates only the Claude-compatible `mcpServers` form.
+Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil setup --agent <agent>` performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
 `mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` only when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
 
 ## Configuration
 
-Run `agentic-hil init` from the project root. It creates the automatically discovered deny-by-default authoritative file outside the repository and binds `workspace_root` to the current absolute project path. The file defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
+`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
@@ -240,6 +257,7 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 ## Common Commands
 
 ```text
+agentic-hil setup --agent <claude-code|codex|opencode>
 agentic-hil init
 agentic-hil doctor
 agentic-hil debugger-probes
@@ -261,7 +279,7 @@ Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: 
 
 ```bash
 python -m pip install -e '.[dev]'
-ruff check src tests
+ruff check src tests evals tools
 pytest
 python -m build
 twine check dist/*

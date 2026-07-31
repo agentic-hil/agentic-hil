@@ -14,6 +14,24 @@ from agentic_hil.types import JsonObject
 MCP_PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
+# Delivered with initialize, which is the only thing this server can say before
+# the agent decides anything. A refusal and a skill both arrive too late for a
+# caller that reaches for a shell first: measured, a small model ran st-flash
+# before it had called a single tool here.
+SERVER_INSTRUCTIONS = (
+    "This project's hardware is reachable only through these tools. Every request that would touch the "
+    "target board — flashing, resetting, probing, debugging, UART or CAN traffic, bench adapters, "
+    "firmware artifacts, test reports — is answered by calling one of them, before reaching for a "
+    "shell.\n"
+    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, "
+    "picocom, cansend or candump, a Makefile target that runs one of them, or direct access to "
+    "/dev/tty*, COM* or a SocketCAN interface. Those bypass the policy these tools enforce, and the "
+    "operator cannot see or audit what they did.\n"
+    "A permission_denied result is the answer to the request, not an obstacle: report it, name the "
+    "permission that is denied, and stop. Never edit the authoritative configuration to grant "
+    "yourself a permission — it belongs to the operator — and never carry out the action another way."
+)
+
 JSONRPC_PARSE_ERROR = -32700
 JSONRPC_INVALID_REQUEST = -32600
 JSONRPC_METHOD_NOT_FOUND = -32601
@@ -84,7 +102,7 @@ def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILTo
         params_object = params_object_or_throw(params)
         requested_version = params_object.get("protocolVersion")
         negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
-        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}})
+        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": SERVER_INSTRUCTIONS})
     if method == "ping":
         return result_response(request_id, {})
     if method == "tools/list":

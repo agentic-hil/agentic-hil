@@ -13,6 +13,12 @@ from agentic_hil.tools import AgenticHILToolService
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
 START_TIMEOUT_S = 10.0
+# The fake gdb answers a hang by never replying, so any cap detects it. What the
+# cap must not do is mistake a healthy reply for one, and at 0.1 s it did: on a
+# loaded machine the pipe round-trip to the fake exceeded that, an earlier
+# command timed out instead of the hanging one, and the run reported the wrong
+# phase. These two tests then failed in a full suite run and passed alone.
+TIMEOUT_TEST_CAP_S = 2.0
 
 
 def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, **config_kwargs) -> AgenticHILToolService:
@@ -234,7 +240,7 @@ def test_debug_load_failure_retains_quarantined_lease(
 ) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior=behavior)
     if timed_out:
-        monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", 0.1)
+        monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", TIMEOUT_TEST_CAP_S)
     try:
         result = start_debug_session(service)
 
@@ -259,7 +265,7 @@ def test_debug_load_failure_retains_quarantined_lease(
 
 def test_attach_target_connect_timeout_retains_quarantined_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="target_select_timeout")
-    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", 0.1)
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", TIMEOUT_TEST_CAP_S)
     try:
         result = start_debug_session(service, mode="attach")
 

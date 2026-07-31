@@ -164,7 +164,10 @@ def test_world_writable_derived_state_dir_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode semantics")
-def test_world_writable_lock_dir_blocks_coordinator_construction(tmp_path: Path) -> None:
+def test_world_writable_lock_dir_blocks_hardware_coordination(tmp_path: Path) -> None:
+    # Coordination state is created when hardware is actually coordinated, not
+    # when the coordinator is constructed, so acquiring is where the directory
+    # has to be refused — the last moment before a lock could be taken.
     from agentic_hil.coordination import HardwareCoordinator
 
     config = load_config(str(write_config(tmp_path)))
@@ -172,8 +175,10 @@ def test_world_writable_lock_dir_blocks_coordinator_construction(tmp_path: Path)
     locks.mkdir(parents=True)
     locks.chmod(0o777)
     try:
+        coordinator = HardwareCoordinator(config, "owner")
+        assert not (Path(config.state_root) / "coordination" / "records").exists()
         with pytest.raises(ConfigError) as excinfo:
-            HardwareCoordinator(config, "owner")
+            coordinator.acquire("physical:test")
         assert excinfo.value.error_type == "unsafe_configured_path"
     finally:
         locks.chmod(0o700)

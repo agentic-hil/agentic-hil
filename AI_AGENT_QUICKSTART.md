@@ -7,14 +7,29 @@ This file is for agents. Humans should start with `README.md` and use `TROUBLESH
 Canonical copy/paste user request:
 
 ```text
-Install from https://github.com/agentic-hil/agentic-hil and set it up for this project.
+Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md to install Agentic HIL and set it up for this project.
 ```
 
 If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
 
+If you were pointed at this file inside a source tree rather than at the repository URL, that tree is the version this guide describes and a published release would be a different one. Install from it: step 0 below. Never editable from it, and never by copying it into the firmware project.
+
+## What this changes on the machine
+
+Not project-local. The whole of it, before you start:
+
+- A user-local package and console script in your home directory. No admin rights, ever.
+- An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches.
+- A skill file in your agent's skill directory.
+- One config per project, outside its repository, every hardware permission denied.
+- Nothing inside the firmware project, nothing committed.
+
+Larger than what the operator asked for? Say so and let them decide.
+
 ## Ground Rules
 
 - Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
+- Install Agentic HIL outside the firmware project. `setup` stores the absolute path of a persistent user-local executable as the MCP server command and rejects every candidate inside the project, so a project-local virtual environment fails with `mcp_command_untrusted`. This still holds when you were told to work only inside the project: the installation is user-local, only the configuration is bound to that project.
 - Never use `pip install --break-system-packages`, and do not install into the system Python (PEP 668 environments will refuse, and they are right).
 - Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 - If the board, debugger, COM port, or artifact path cannot be inferred, ask one concise question instead of guessing.
@@ -30,86 +45,139 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 ## Start Agentic HIL
 
-Fast path, in order — stop at the first step that works:
+Fast path, in order — stop at the first persistent installation that works. Were you handed a source tree or a URL naming a ref? Then step 0 is your path and steps 2 to 4 are not: they fetch a published release, which is a different thing.
 
-1. If `agentic-hil --version` works, do not reinstall.
-2. Try the normal user-local pip install first:
+Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. **Never lower it, and dropping the constraint is lowering it** — `install agentic-hil` after `install "agentic-hil>=0.4.0"` failed takes whatever the index has, which is the release you just established is too old. If no installable version satisfies the floor, stop and report that, naming what you tried — an older release gives you a server without `setup`, and every step after that fails in a way that looks like your mistake. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
+
+0. If you were pointed at this guide inside a source tree, that tree is the version this guide describes, and it is what you install. Install from it and skip steps 2 to 4, which fetch a published release instead:
 
 ```bash
-python -m pip install --user agentic-hil
+uv tool install --upgrade /path/to/that/tree     # or: python -m pip install --user --upgrade /path/to/that/tree
+```
+
+Same if you were given this guide as a URL naming a commit or a branch. Install from that same ref, so the code matches the guide you are reading:
+
+```bash
+uv tool install --upgrade "git+<the repository URL you were given>@<the ref in it>"
+```
+
+Do this before the steps below, not after they fail. A released version may not exist yet for what you were handed.
+
+Such a tree or ref may be a pre-release that no package index carries yet. Not finding the name on PyPI is not a reason to distrust it — you are installing a directory the operator handed you, not a name you looked up — but it is a reason not to substitute a published package of the same name, which is a different thing by a different author. If neither is available, say so and stop.
+
+1. Otherwise, reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
+
+```bash
 agentic-hil --version
+agentic-hil setup --help
 ```
 
-If that fails because Python is externally managed, `agentic-hil` is not on `PATH`, or the package is unavailable through that interpreter, continue with the runner paths below.
+An older version must be upgraded; a successful `--version` call by itself is not sufficient.
 
-3. If `uv` is available, run Agentic HIL without installing anything (no admin rights, no `PATH` changes):
+Never install editable (`pip install -e`, `uv tool install --editable`, `pipx install --editable`). An editable installation does not copy the package; it points the MCP server at whatever a source tree happens to contain right now, so the code enforcing the hardware policy can change under the operator without anyone reinstalling. Install from a source — a release, a tag, or a directory — and let it be copied.
+
+2. Try the normal user-local pip installation first, never into a virtual environment inside the firmware project:
 
 ```bash
-uvx --from agentic-hil agentic-hil --version
+python -m pip install --user --upgrade "agentic-hil>=0.4.0"
 ```
 
-4. If the PyPI package lookup fails, use the repository as the package source (this is a package source only — it does not create a checkout):
+3. If Python is externally managed, the console script is not reliably on `PATH`, or `pip` is unavailable, use an isolated persistent tool installation:
 
 ```bash
-uvx --from git+https://github.com/agentic-hil/agentic-hil agentic-hil --version
+uv tool install --upgrade "agentic-hil>=0.4.0"
 ```
 
-5. If `uv` is missing but `pipx` is available, the equivalents are `pipx run --spec agentic-hil agentic-hil --version` and `pipx run --spec git+https://github.com/agentic-hil/agentic-hil agentic-hil --version`.
-6. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
+If PyPI lookup is unavailable but the release tag is reachable, use the repository as the persistent package source (this does not create a checkout):
+
+```bash
+uv tool install --upgrade "git+https://github.com/agentic-hil/agentic-hil@v0.4.0"
+```
+
+4. If `uv` is missing but `pipx` is available, use `pipx install "agentic-hil>=0.4.0"` (or `pipx upgrade agentic-hil` for an older pipx-managed installation). The repository-source equivalent is `pipx install "git+https://github.com/agentic-hil/agentic-hil@v0.4.0"`.
+5. If neither `uv` nor `pipx` is available, install `uv` user-locally (no admin rights; installs to `~/.local/bin`):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-then rerun step 3. A missing runner is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+This step downloads a release archive and regularly needs longer than the sixty
+seconds many agent shell tools allow by default. If your shell reports that it
+terminated the command on a timeout, that is not a failure of the command: run
+it again with a longer timeout. Do not switch to another installation method
+because of it.
 
-If the `pip --user` command is not reliably on `PATH`, use an isolated persistent install for the MCP server entry (still user-local, still no admin rights):
+Then rerun step 3. A missing installer is a remediable setup prerequisite, not a reason to refuse the Agentic HIL setup.
+
+If none of these steps succeeds, stop and tell the user which one failed and
+what it printed. Do not invent a route the list does not contain. In particular
+do not create a virtual environment of your own: `agentic-hil` then exists only
+inside it, is on nobody's `PATH`, and the MCP registration points at a path that
+only that environment can resolve. An honest report of a blocked prerequisite is
+worth more than an installation nobody can reach.
+
+After installation, open a new shell if requested and verify both the minimum version and the setup command:
 
 ```bash
-uv tool install agentic-hil        # or from the repository: uv tool install git+https://github.com/agentic-hil/agentic-hil
+agentic-hil --version
+agentic-hil setup --help
 ```
 
-`pipx install agentic-hil` is the equivalent. Both place `agentic-hil` into `~/.local/bin`; if that is not on `PATH`, fix it with `uv tool update-shell` or `pipx ensurepath` — never with admin rights.
+`uv tool` and `pipx` place `agentic-hil` into their user-level executable directory. If it is not on `PATH`, use `uv tool update-shell` or `pipx ensurepath` and start a new shell — never use administrator rights.
 
 ## Install Agent Skill
 
-Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil-config-setup` skill into the active agent's user-level skill directory after the CLI is available:
+Agent-driven Agentic HIL installation includes installing the bundled `agentic-hil` skill into the active agent's user-level skill directory after the CLI is available:
 
 ```bash
-agentic-hil skill-install --agent <agent>          # or: uvx --from agentic-hil agentic-hil skill-install --agent <agent>
+agentic-hil skill-install --agent <agent>
 ```
 
 Supported agent names and aliases: `opencode`/`open-code`, `claude-code`/`claude`, `codex`/`codex-cli`/`openai-codex`. For other skill-capable agents use `--agent <name> --target <path>` with that agent's documented user-level skill directory. The installed `agentic-hil` distribution is authoritative: if the installed skill's front-matter version differs from `agentic-hil --version`, rerun `skill-install`.
+
+`agentic-hil setup --agent <agent>` (see below) already installs this skill as part of one-shot project setup; run `skill-install` on its own only for a skill-only reinstall or version bump.
+
+**Cross-agent alternative (no Python pre-install):** this repo is also discoverable by the Vercel [`skills`](https://github.com/vercel-labs/skills) CLI, so the skill can be dropped into every agent at once without installing `agentic-hil` first:
+
+```bash
+npx skills add -g https://github.com/agentic-hil/agentic-hil --skill agentic-hil --copy -a claude-code -a codex -a opencode
+```
+
+It installs into `~/.agents/skills/` (read by Codex and OpenCode, symlinked for Claude Code). This distributes only the guidance skill — the MCP server and the deny-by-default project config still come from `agentic-hil setup --agent <agent>`.
+
+`--copy` is in that command on purpose: without it the CLI symlinks the Claude Code skill directory, and Agentic HIL refuses to write through a symlinked directory component, because a link in the chain can be repointed between the check and the write. `setup` would stop with `unsafe_configured_path` and name the linked component. The same applies to a `~/.claude` or `~/.config/opencode` managed by a dotfile tool that symlinks directories: replace the link with a real directory before running `setup`.
 
 ## Configure Each Project
 
 In every firmware project that should use Agentic HIL:
 
 ```bash
-agentic-hil init
-# Review the deny-by-default external config path printed by init, then:
-agentic-hil doctor
+agentic-hil setup --agent <agent>
 ```
 
-`init` creates exactly one automatically discovered authoritative configuration outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. Ask the human operator to review resource and permission changes. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
+`setup` is the one-shot path: it prepares a safe external `state_root`, writes the deny-by-default authoritative config, installs the agent skill, registers the MCP server in the selected agent's user-level configuration, and runs `doctor` — one command instead of running `init`, `skill-install`, agent-specific MCP registration, and `doctor` yourself. It returns one JSON result with a per-step breakdown. It does not write a project `.mcp.json`; that remains an explicit `mcp-config` operation.
 
-`agentic-hil doctor` validates that same file and checks the debugger only when `allow_probe` permits execution.
+The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. That file is complete as written. Adding devices, COM ports, or CAN buses is not part of installing, and neither is granting a permission — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
 
-Expected healthy `agentic-hil doctor` result: `ok: true`, `summary: "Agentic HIL configuration loaded and debugger checked."`, and a nested debugger result with `ok: true`.
+`mcp_config_conflict` or `skill_conflict` means something under this name is already there and Agentic HIL did not write it. That refusal is the finished answer. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
+
+Run the granular steps yourself only if you need to (`agentic-hil init`, then `agentic-hil doctor`). `doctor` validates the authoritative file and checks the debugger only when `allow_probe` permits execution.
+
+Expected healthy result: `ok: true` overall with each step ok, and — once `allow_probe` is enabled — a nested debugger result with `ok: true`.
 
 ## Configure MCP
 
-Every MCP host starts the same server from the firmware project root:
+`agentic-hil setup --agent <agent>` (above) already registers the server for that agent in the agent's **user-level** config — outside the firmware repo, so the untrusted repo cannot control how the agent launches tools (the same trust boundary as the authoritative config):
 
-```text
-agentic-hil mcp-stdio
-```
+- Claude Code → `~/.claude.json` user scope (secure direct merge)
+- Codex → `~/.codex/config.toml` (`[mcp_servers.agentic-hil]`)
+- opencode → `~/.config/opencode/opencode.json` (`mcp.agentic-hil`)
 
-Use the active client's copy/paste block in [MCP host configuration](docs/mcp-hosts.md). Do not translate host syntax into new server or tool semantics. `agentic-hil mcp-config --output .mcp.json` is available only for clients that explicitly support the Claude-compatible `mcpServers` format; it is not valid as `.vscode/mcp.json`, `.codex/config.toml`, or `opencode.json`.
+No `cwd` is baked in. `setup` resolves the installed console script, rejects transient, workspace-local, unsafe-symlink, or otherwise untrusted candidates, and stores its verified absolute persistent user-bin path. A user-owned pipx/uv-tool link is accepted only when both the link path and its fully resolved target chain pass the ownership, permission, and location checks. The host starts that executable with `mcp-stdio` from the firmware project root; config discovery then refuses to start unless `workspace_root` matches. See [MCP host configuration](docs/mcp-hosts.md) for the exact per-host rendering and for hosts `setup` does not cover.
 
-If `agentic-hil` is not on `PATH`, use the `uvx` runner form documented in the host guide.
+If the operator explicitly asks for a **project-scoped, machine-local** entry instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form with the same verified absolute executable. Do not write it on your own initiative: `setup` has already registered the server at user level, and a second registration inside the firmware project names the program that answers as the hardware gate in a file everyone who can write the repository can change. That file is not portable or team-shared: keep it uncommitted. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
 
-`mcp-stdio` discovers the external config from its project working directory and refuses to start unless `workspace_root` matches that project. An inherited `AGENTIC_HIL_CONFIG` may override discovery only with an absolute path. Do not commit a machine-specific override.
+**Claude Code, optional:** a native plugin under `plugins/agentic-hil/` distributes the setup skill but deliberately stores no MCP server command. A portable plugin cannot know the verified absolute path of a persistent user-local executable, and `uvx` is not a durable installation boundary. Install the plugin with `/plugin marketplace add https://github.com/agentic-hil/agentic-hil` then `/plugin install agentic-hil@agentic-hil` (or `claude --plugin-dir ./plugins/agentic-hil` to test), install the exact package version required by its skill, and run `agentic-hil setup --agent claude`. `setup` performs the trusted user-level registration; the plugin does not replace that step.
 
 `mcp-stdio` is project-scoped and JSON-RPC only. COM tool calls pass `port_id`, and CAN tool calls pass `bus_id` as tool arguments. For a continuous plain-text serial channel use a separate `agentic-hil com-stdio --port <port_id>` process from the same project root; never mix plain text into `mcp-stdio`.
 

@@ -1,0 +1,10 @@
+{
+  "name": "agentic-hil",
+  "displayName": "Agentic Hardware-in-the-Loop",
+  "version": "0.4.0",
+  "description": "Safe embedded firmware development with local hardware-in-the-loop targets, exposed as policy-gated MCP tools (probe, flash, reset, serial, CAN, test adapters).",
+  "author": { "name": "Hannes Pauli" },
+  "repository": "https://github.com/agentic-hil/agentic-hil",
+  "license": "Apache-2.0",
+  "keywords": ["embedded", "firmware", "hardware-in-the-loop", "mcp", "stm32", "openocd"]
+}
