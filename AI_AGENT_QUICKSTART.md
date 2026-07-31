@@ -139,6 +139,8 @@ agentic-hil setup --agent <agent>
 
 The config it writes is exactly one automatically discovered authoritative file outside the repository, at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. It sets mandatory `workspace_root` to the current absolute project root and leaves hardware permissions denied. Ask the human operator to review resource and permission changes. Use `AGENTIC_HIL_CONFIG` only for an explicit operator-controlled absolute-path override. Do not create a repository hardware config.
 
+If `setup` reports `mcp_config_conflict` or `skill_conflict`, an entry or a file under this name is already there and is not one Agentic HIL wrote. That refusal is the finished answer to the request. Do not edit the agent's configuration by hand to clear it, do not delete the entry, and do not rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, and stop. Only the operator decides which server answers under that name.
+
 Run the granular steps yourself only if you need to (`agentic-hil init`, then `agentic-hil doctor`). `doctor` validates the authoritative file and checks the debugger only when `allow_probe` permits execution.
 
 Expected healthy result: `ok: true` overall with each step ok, and — once `allow_probe` is enabled — a nested debugger result with `ok: true`.

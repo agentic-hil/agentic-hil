@@ -120,6 +120,17 @@ LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
 SKILL_FILE = "SKILL.md"
 AGENTIC_HIL_REGISTRATION_START = "<!-- Agentic HIL skill registration start -->"
 AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
+# Measured: a refusal that only said an unmanaged entry exists was read as an
+# obstacle to clear. Ten runs rewrote the operator's entry by hand and reran
+# setup, and reported success. Say whose the entry is and that the refusal is
+# the answer — and name no action that could be mistaken for a way through.
+CONFLICT_NEXT_STEP = (
+    "That entry belongs to the operator. Another Agentic HIL server is already registered under this "
+    "name, setup will not replace it, and --force does not apply to a foreign entry. Editing the file "
+    "yourself or removing the entry is not the resolution either: it hands the hardware gate to a "
+    "program the operator did not choose, and only the operator can decide which one answers. This "
+    "conflict is the answer to the request. Report it, name the file, and stop."
+)
 
 
 @dataclass(frozen=True)
@@ -887,7 +898,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
     desired_entry = {"command": command, "args": ["mcp-stdio"], "enabled": True}
     if not has_managed and entry is not None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched."}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if has_managed and not isinstance(entry, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
     if has_managed and entry == desired_entry:
@@ -979,7 +990,7 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched."}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
     data.setdefault("$schema", "https://opencode.ai/config.json")
@@ -1000,7 +1011,7 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched."}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
     servers["agentic-hil"] = desired_entry
@@ -1207,7 +1218,7 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
         existing_version = skill_version(existing_text)
         managed_skill = is_agentic_hil_setup_skill(existing_text)
         if not managed_skill:
-            return {"ok": False, "error_type": "skill_conflict", "summary": "Target skill file contains unmanaged content and was left untouched; --force never replaces foreign skills.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
+            return {"ok": False, "error_type": "skill_conflict", "summary": "Target skill file contains unmanaged content and was left untouched; --force never replaces foreign skills.", "next_step": CONFLICT_NEXT_STEP, "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
         if existing_version != source_version:
             secure_atomic_write_text(target_path, source_text)
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)

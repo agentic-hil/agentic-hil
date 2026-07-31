@@ -568,6 +568,40 @@ def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(
     assert path.read_text(encoding="utf-8") == existing
 
 
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
+    agent: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal that only named the obstacle was read as a task to clear it.
+
+    Measured: ten runs hand-edited the operator's entry to the path setup had
+    reported, reran setup with --force, and reported success.
+    """
+    from evals.install.fixtures import agent_config_path, fixture_content
+
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = agent_config_path(agent, home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seeded = fixture_content(agent, "unsafe-existing-config")
+    assert seeded is not None
+    path.write_text(seeded, encoding="utf-8")
+
+    result = register_agent_mcp(agent, force=True)
+
+    assert result["error_type"] == "mcp_config_conflict"
+    assert path.read_text(encoding="utf-8") == seeded
+    step = result["next_step"]
+    assert "belongs to the operator" in step
+    assert "--force does not apply" in step
+    assert "Report it" in step
+    # The wording that once taught a model to rewrite the file must not return.
+    assert "ask the operator to change" not in step.lower()
+
+
 def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

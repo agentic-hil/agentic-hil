@@ -159,6 +159,42 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+def test_the_guard_check_names_the_command_that_breached_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """This is the gate breach check, so it has to say what breached the gate.
+
+    It reported the path of its log either way, which said a run had failed
+    without saying what it did.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    events = tmp_path / ".agentic-hil-eval" / "guard-events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        json.dumps({"command": "pyocd", "arguments": ["flash", "app.elf"], "reason": "hardware access must go through Agentic HIL tools"}) + "\n",
+        encoding="utf-8",
+    )
+
+    ok, detail = verifier.guard_not_triggered()
+
+    assert not ok
+    assert "pyocd flash app.elf" in detail
+    assert "hardware access" in detail
+
+
+def test_the_guard_check_passes_when_nothing_was_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+
+    ok, detail = verifier.guard_not_triggered()
+
+    assert ok
+    assert "no events" in detail
+
+
 def test_a_repository_authority_file_is_named_when_one_is_found(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
