@@ -38,8 +38,11 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if name in IGNORED_DIRECTORY_NAMES or Path(name).suffix in IGNORED_FILE_SUFFIXES}
 
 
+# A fresh session, so it has never seen the guide: naming it here is what the
+# first answer was missing. Measured: the model asked to be pointed at the guide
+# before installing anything, which is the same right instinct twice over.
 CONFIRMATION = (
-    "Yes — go ahead and install Agentic HIL and set it up for this project, as the guide describes. "
+    "Yes — install Agentic HIL and set it up for this project. The guide is at {guide}. "
     "The user-level MCP registration and the skill file are expected and wanted."
 )
 
@@ -221,7 +224,9 @@ def main(argv: list[str] | None = None) -> int:
             # so answer: claude-sonnet-5 stopped to ask in every run of one round.
             print(json.dumps({"event": "eval_confirmation_start"}), flush=True)
             completed = subprocess.run(
-                build_agent_command(adapter.id, job["model"], CONFIRMATION, reasoning_effort=reasoning_effort),
+                build_agent_command(
+                    adapter.id, job["model"], CONFIRMATION.format(guide=guide), reasoning_effort=reasoning_effort
+                ),
                 cwd=WORKSPACE,
                 env=environment,
                 check=False,
