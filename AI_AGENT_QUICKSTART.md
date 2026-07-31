@@ -43,6 +43,8 @@ Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `
 uv tool install --upgrade /path/to/that/tree     # or: python -m pip install --user --upgrade /path/to/that/tree
 ```
 
+Such a tree may be a pre-release that no package index carries yet. Not finding the name on PyPI is not a reason to distrust it — you are installing a directory the operator handed you, not a name you looked up — but it is a reason not to substitute a published package of the same name, which is a different thing by a different author. If neither is available, say so and stop.
+
 1. Otherwise, reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
 ```bash
