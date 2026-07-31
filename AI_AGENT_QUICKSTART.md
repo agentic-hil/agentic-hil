@@ -55,11 +55,7 @@ Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `
 uv tool install --upgrade /path/to/that/tree     # or: python -m pip install --user --upgrade /path/to/that/tree
 ```
 
-Same if you were given this guide as a URL that names a commit or a branch: install from that same ref, so the code matches the guide you are reading.
-
-```bash
-uv tool install --upgrade "git+https://github.com/agentic-hil/agentic-hil@<the ref in that URL>"
-```
+Same if you were given this guide as a URL naming a commit or a branch: install from that same ref, using the repository-source command in step 3 with the ref out of your URL in place of its tag. Then the code matches the guide you are reading.
 
 Such a tree or ref may be a pre-release that no package index carries yet. Not finding the name on PyPI is not a reason to distrust it — you are installing a directory the operator handed you, not a name you looked up — but it is a reason not to substitute a published package of the same name, which is a different thing by a different author. If neither is available, say so and stop.
 
