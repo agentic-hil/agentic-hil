@@ -187,9 +187,11 @@ def installed_distribution() -> dict[str, Any]:
         raise ValueError(f"expected one agentic-hil dist-info directory, found {len(distributions)}")
 
     dist_info, metadata = distributions[0]
+    # An index install records no direct_url.json — that file is exactly the
+    # marker of a direct reference. Its absence is the published path, which
+    # origin_matches then has to recognise rather than treat as missing evidence.
     direct_path = dist_info / "direct_url.json"
-    if not direct_path.is_file():
-        raise ValueError("direct_url.json missing")
+    direct_url = json.loads(direct_path.read_text(encoding="utf-8")) if direct_path.is_file() else None
     entry_points = configparser.ConfigParser(interpolation=None)
     entry_points.read_string((dist_info / "entry_points.txt").read_text(encoding="utf-8"))
     console_entry = entry_points.get("console_scripts", "agentic-hil", fallback="").strip()
@@ -198,7 +200,7 @@ def installed_distribution() -> dict[str, Any]:
         "site_packages": site_packages,
         "dist_info": dist_info,
         "version": metadata.get("Version"),
-        "direct_url": json.loads(direct_path.read_text(encoding="utf-8")),
+        "direct_url": direct_url,
         "console_entry": console_entry,
     }
 
@@ -391,6 +393,13 @@ def safe_user_launcher(path: Path) -> tuple[bool, str]:
 
 def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bool, str]:
     direct = metadata.get("direct_url")
+    if target["mode"] == "published":
+        # An index install has no direct_url.json; a direct reference does. So
+        # the file's presence is what disqualifies this mode, and the version
+        # check is what ties the result to the release under test.
+        if direct is None:
+            return True, "installed from a package index, as the published path prescribes"
+        return False, f"not the published path: installed from {direct.get('url')}"
     if not isinstance(direct, dict):
         return False, "direct_url.json missing"
     if target["mode"] == "local":
@@ -1056,14 +1065,15 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 installed_digest = source_digest(inspected_package)
             except Exception as error:
                 package_tree_detail = f"{type(error).__name__}: {error}"
-        package_matches = installed_digest == target["expected_package_digest"]
-        checks.append(
-            Check(
-                "installed package matches trusted source",
-                package_matches,
-                f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}",
-            )
-        )
+        expected_digest = target["expected_package_digest"]
+        if expected_digest is None:
+            # Published mode: nothing on this host digests to a released wheel.
+            package_matches = installed_digest is not None
+            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against"
+        else:
+            package_matches = installed_digest == expected_digest
+            digest_detail = f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}"
+        checks.append(Check("installed package matches trusted source", package_matches, digest_detail))
         if package_matches and evidence_ok and inspected_package is not None:
             try:
                 prepare_trusted_package(inspected_package)

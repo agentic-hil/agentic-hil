@@ -169,6 +169,11 @@ def job_payload(
         if source_root is None:
             raise ValueError("target requires trusted source evidence")
         target["expected_package_digest"] = source_digest(source_root / "src" / "agentic_hil")
+    elif matrix.target.mode == "published":
+        # A released wheel is built, not checked out, so no tree here digests to
+        # it. What ties the install to this release is the recorded version and
+        # the absence of a direct reference, both checked separately.
+        target["expected_package_digest"] = None
     else:
         target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
     target["source_git"] = git_metadata(host_source_root)

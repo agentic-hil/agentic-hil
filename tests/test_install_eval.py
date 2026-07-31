@@ -978,6 +978,35 @@ def test_the_expected_digest_comes_from_the_commit_not_the_working_tree(tmp_path
     assert source_digest(package) != committed
 
 
+def test_the_guide_link_is_handed_through_verbatim(tmp_path: Path) -> None:
+    """What an engineer pastes is a link, and the guide's own path takes it from there."""
+    link = "https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md"
+    matrix = _matrix_with_jobs(tmp_path, [{"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"]}])
+    document = json.loads(matrix.read_text(encoding="utf-8"))
+    document["target"] = {"mode": "published", "expected_version": "0.4.0", "guide_url": link}
+    matrix.write_text(json.dumps(document), encoding="utf-8")
+
+    target = load_matrix(matrix).target
+
+    assert target.guide_url == link
+    assert target.install_spec is None
+
+
+def test_an_index_install_is_the_published_path_and_a_direct_reference_is_not() -> None:
+    """pip records direct_url.json only for a direct reference, never for an index."""
+    from evals.install.verifier import origin_matches
+
+    published = {"mode": "published", "expected_version": "0.4.0"}
+
+    ok, detail = origin_matches(published, {"direct_url": None})
+    assert ok
+    assert "package index" in detail
+
+    ok, detail = origin_matches(published, {"direct_url": {"url": "file:///workspace/source"}})
+    assert not ok
+    assert "/workspace/source" in detail
+
+
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:
     matrix = _matrix_with_jobs(
         tmp_path,
