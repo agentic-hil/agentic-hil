@@ -1208,6 +1208,11 @@ def run_matrix(args: argparse.Namespace) -> int:
             ]
             if not pending:
                 break
+            # One extra run per disagreeing group, and the whole round together:
+            # running these one at a time ignored --concurrency entirely, and a
+            # measured matrix spent 124 minutes on 6.6 hours of container work
+            # that twelve workers should have finished in about 35.
+            round_plan: list[tuple[Case, Job]] = []
             for group in pending:
                 case_id, agent, model, effort = group
                 done = sum(1 for result in results if result_group(result) == group)
@@ -1215,8 +1220,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                     f"repetitions disagreed for {case_id} | {agent} {model} ({effort}) after {done}; running another",
                     file=sys.stderr,
                 )
-                results.append(
-                    execute(
+                round_plan.append(
+                    (
                         cases_by_id[case_id],
                         dataclasses.replace(
                             templates[(agent, model, None if effort == "default" else effort)],
@@ -1224,6 +1229,21 @@ def run_matrix(args: argparse.Namespace) -> int:
                         ),
                     )
                 )
+            if args.concurrency == 1:
+                for case, job in round_plan:
+                    results.append(execute(case, job))
+                    if aborted := authentication_abort(results[-1]):
+                        print(f"ERROR: {aborted}; stopping the matrix", file=sys.stderr)
+                        break
+            else:
+                extra, aborted = run_concurrently(
+                    interleaved_plan(round_plan),
+                    execute,
+                    concurrency=args.concurrency,
+                    per_model=args.per_model_concurrency,
+                    abort_reason=authentication_abort,
+                )
+                results.extend(sorted(extra, key=lambda item: str(item.get("id", ""))))
         summary = {
             "schema_version": 1,
             "kind": "install-matrix",
