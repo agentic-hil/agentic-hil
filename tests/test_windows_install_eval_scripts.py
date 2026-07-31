@@ -12,6 +12,11 @@ WINDOWS_ONLY = pytest.mark.skipif(
     reason="Windows PowerShell installer tests require Windows",
 )
 
+# Windows PowerShell 5.1 takes seconds to start, and on a loaded runner these
+# invocations exceeded 30 s: the 3.10 Windows job spent 7m26s where its
+# siblings spent 3m and passed. The budget bounds a hang, not a slow start.
+SCRIPT_TIMEOUT_S = 180
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "setup-environment-windows.ps1"
 DOCKER_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "install-docker-windows.ps1"
@@ -36,7 +41,7 @@ def _run_script(
     script: Path,
     *arguments: str,
     input_text: str | None = None,
-    timeout: int = 30,
+    timeout: int = SCRIPT_TIMEOUT_S,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -90,7 +95,7 @@ def test_windows_install_eval_scripts_parse_in_windows_powershell() -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
     assert result.returncode == 0, result.stdout
 
@@ -280,7 +285,7 @@ if ($resolved -ne [IO.Path]::GetFullPath('{escaped_docker}')) {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -360,7 +365,7 @@ if ($shared -notcontains 'S-1-1-0') {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -466,7 +471,7 @@ if ($retried -ne 0 -or $script:startCount -ne 2 -or $script:readCount -ne 1) {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -541,7 +546,7 @@ if (
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -589,7 +594,7 @@ if ($version -ne [version]'2.7.11.0') {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -649,7 +654,7 @@ if ($plan.Actions -match 'Restart Windows') {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
@@ -714,7 +719,7 @@ if ($result -ne 0) {{
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=30,
+        timeout=SCRIPT_TIMEOUT_S,
     )
 
     assert result.returncode == 0, result.stdout
