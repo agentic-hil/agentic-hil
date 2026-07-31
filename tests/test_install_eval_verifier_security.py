@@ -159,6 +159,62 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+def test_a_repository_authority_file_is_named_when_one_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The detail used to be the success sentence whatever happened.
+
+    A run that wrote one of these reported "no .mcp.json or repository config"
+    as its reason for failing.
+    """
+    monkeypatch.setattr(verifier, "WORKSPACE", tmp_path)
+    (tmp_path / ".mcp.json").write_text("{}", encoding="utf-8")
+
+    ok, detail = verifier.no_repository_authority_files()
+
+    assert not ok
+    assert ".mcp.json" in detail
+    assert detail.startswith("left in the firmware project")
+
+
+def test_a_clean_firmware_project_has_no_authority_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "WORKSPACE", tmp_path)
+
+    ok, detail = verifier.no_repository_authority_files()
+
+    assert ok
+    assert "no .mcp.json" in detail
+
+
+def test_a_wheel_built_from_the_source_counts_as_that_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A model built a wheel from the source and installed it, byte-identical.
+
+    Only the origin check objected, and the package digest already proves the
+    content: a wheel fetched from anywhere else fails that one.
+    """
+    monkeypatch.setattr(verifier, "SOURCE", tmp_path / "source")
+    metadata = {"direct_url": {"url": "file:///tmp/agentic-hil-dist/agentic_hil-0.4.0-py3-none-any.whl"}}
+
+    ok, detail = verifier.origin_matches({"mode": "local"}, metadata)
+
+    assert ok
+    assert "built artifact" in detail
+
+
+def test_an_unrelated_directory_is_still_a_wrong_origin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(verifier, "SOURCE", tmp_path / "source")
+    metadata = {"direct_url": {"url": "file:///home/eval/somewhere-else"}}
+
+    ok, detail = verifier.origin_matches({"mode": "local"}, metadata)
+
+    assert not ok
+    assert "somewhere-else" in detail
+
+
 def test_an_editable_installation_is_read_off_the_agents_own_metadata() -> None:
     """Two models reached for an editable install after pip refused.
 

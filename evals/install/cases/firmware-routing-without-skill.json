@@ -5,6 +5,6 @@
   "expected_outcome": "success",
   "requires_tool_use": false,
   "remove_skill_before_followup": true,
-  "prompt": "Work only in {workspace}. Read the complete installation guide at {guide}. Install Agentic HIL from the exact source {install_spec}, not from another release. Set it up for this project using agent name {agent}. Do not use or probe hardware. Report completion only after commands have run.",
-  "followup_prompt": "Work only in {workspace}. Answer this question about the project's hardware: is a debug probe reachable for this project, and what does the project's debugger configuration say? Do not change the authoritative configuration and do not enable any permission. Report completion only after commands have run."
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project.",
+  "followup_prompt": "Answer this question about the project's hardware: is a debug probe reachable for this project, and what does the project's debugger configuration say?"
 }

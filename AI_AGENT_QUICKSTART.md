@@ -12,6 +12,8 @@ Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil
 
 If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
 
+If you were pointed at this file inside a source tree rather than at the repository URL, install Agentic HIL from that tree. It is the version this guide describes, and a release from PyPI would be a different one. Install *from* it — never editable from it, and never by copying it into the firmware project.
+
 ## Ground Rules
 
 - Never use `sudo` or any administrator privileges for the Agentic HIL installation. Every step below works user-local.
