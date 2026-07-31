@@ -39,6 +39,9 @@ param(
     # first. Without it the order is as declared, and one long run started late
     # leaves every other worker idle at the end.
     [string]$OrderFrom,
+    # Read the guide from the remote at this commit and install from it, instead
+    # of from the mounted working tree.
+    [switch]$FromBranch,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
     [switch]$RefreshLogin,
@@ -351,6 +354,23 @@ foreach ($case in $Cases) {
     $casePaths += ((Resolve-Path -LiteralPath $casePath).Path -replace "\\", "/")
 }
 
+# Point the models at the branch, not at a copy of it: the guide they read is
+# the one on the remote at this commit, so a change measured here is a change
+# anyone else pulling this branch gets. Requires the commit to be pushed.
+$target = @{ mode = "local"; expected_version = $projectVersion.Trim() }
+if ($FromBranch) {
+    $head = (git rev-parse HEAD).Trim()
+    $onRemote = (git branch -r --contains $head 2>$null | Measure-Object).Count
+    if ($onRemote -eq 0) { throw "HEAD $head is not on any remote branch. Push it, then run again." }
+    $target = @{
+        mode = "remote"
+        expected_version = $projectVersion.Trim()
+        install_spec = "git+https://github.com/agentic-hil/agentic-hil@$head"
+        expected_commit = $head
+    }
+    Write-Host "Source:     the remote at $head"
+}
+
 $matrixPath = Join-Path ([IO.Path]::GetTempPath()) ("agentic-hil-eval-matrix-" + [Guid]::NewGuid().ToString("N") + ".json")
 Write-JsonFile -Path $matrixPath -Document @{
     schema_version = 1
@@ -360,10 +380,7 @@ Write-JsonFile -Path $matrixPath -Document @{
     max_repetitions = $MaxRepetitions
     timeout_seconds = $TimeoutSeconds
     idle_timeout_seconds = $IdleTimeoutSeconds
-    target = @{
-        mode = "local"
-        expected_version = $projectVersion.Trim()
-    }
+    target = $target
     jobs = $jobs
 }
 Write-Host "Jobs:       $($jobs.Count) agent/model combination(s)"
