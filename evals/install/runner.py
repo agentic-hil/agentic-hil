@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import dataclasses
 import hashlib
@@ -502,6 +503,8 @@ EFFORT_IGNORED = "Unknown --effort value"
 # What each CLI calls the reasoning tokens it counted. Only integers match, so a
 # field carrying reasoning text cannot be mistaken for a count.
 REASONING_TOKEN_PATTERN = re.compile(r'"(reasoning_output_tokens|reasoning_tokens|reasoning)"\s*:\s*(\d+)')
+# Two silences are a provider that is down, not a run that was unlucky.
+STALLS_BEFORE_UNCAPPED = 2
 # Two runs of one agent share one login file on this machine. A provider rotates
 # the refresh token when it hands out a new one, so a concurrent write-back can
 # leave the copy here rejected — which is how a stored login was lost once
@@ -1054,8 +1057,17 @@ def run_concurrently(
     waiting = list(planned)
     results: list[dict[str, Any]] = []
     in_flight: dict[tuple[str, str, str | None], int] = {}
+    stalled: collections.Counter[tuple[str, str, str | None]] = collections.Counter()
     aborted: str | None = None
     condition = threading.Condition()
+
+    def limit_for(key: tuple[str, str, str | None]) -> int:
+        # The per-model cap exists so we do not throttle a provider that is
+        # answering. A provider that answers nothing is not being throttled by
+        # us, and its runs only sit out the silence budget, so let them sit it
+        # out together. Measured: 20 dead runs held 56% of the container time of
+        # a matrix whose real work took 1.2 of 3.0 hours.
+        return len(planned) if stalled[key] >= STALLS_BEFORE_UNCAPPED else per_model
 
     def take() -> tuple[Case, Job] | None:
         with condition:
@@ -1064,7 +1076,7 @@ def run_concurrently(
                     return None
                 for index, pair in enumerate(waiting):
                     key = model_key(pair[1])
-                    if in_flight.get(key, 0) < per_model:
+                    if in_flight.get(key, 0) < limit_for(key):
                         in_flight[key] = in_flight.get(key, 0) + 1
                         del waiting[index]
                         return pair
@@ -1079,11 +1091,15 @@ def run_concurrently(
             if pair is None:
                 return
             case, job = pair
+            result = None
             try:
                 result = execute(case, job)
             finally:
                 with condition:
-                    in_flight[model_key(job)] -= 1
+                    key = model_key(job)
+                    in_flight[key] -= 1
+                    if result is not None and result.get("status") == "error" and "no output" in str(result.get("failure") or ""):
+                        stalled[key] += 1
                     condition.notify_all()
             with condition:
                 results.append(result)

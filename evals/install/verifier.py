@@ -363,7 +363,11 @@ def safe_launcher_script(path: Path) -> tuple[bool, str]:
             entrypoint_imported = True
         elif isinstance(node, ast.Name) and node.id not in {"__name__", "entrypoint", "re", "sys"}:
             return False, f"launcher references unsupported name: {node.id}"
-        elif isinstance(node, ast.Attribute) and node.attr not in {"argv", "endswith", "exit", "sub"}:
+        # removesuffix is what a newer console-script shim uses where an older
+        # one called re.sub, and it is the same kind of thing: a pure string
+        # operation with no side effect. Measured: a launcher pip wrote itself
+        # was rejected as untrusted, and the MCP registration fell over behind it.
+        elif isinstance(node, ast.Attribute) and node.attr not in {"argv", "endswith", "exit", "removesuffix", "sub"}:
             return False, f"launcher references unsupported attribute: {node.attr}"
 
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]

@@ -875,6 +875,67 @@ def test_a_run_of_a_busy_model_waits_while_other_models_keep_going(tmp_path: Pat
     assert finished.index("slow") >= 1
 
 
+def test_a_model_that_only_stalls_stops_holding_its_runs_back(tmp_path: Path) -> None:
+    """The cap protects a provider that answers. A dead one needs no protection.
+
+    Measured: 20 runs that produced nothing held 56% of a matrix's container
+    time, queueing two at a time through a five-minute silence budget each.
+    """
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [{"agent": "codex", "model": "dead", "credentials": ["OPENAI_API_KEY"]}],
+        cases=8,
+    )
+    lock = threading.Lock()
+    live = 0
+    peak = 0
+
+    def execute(case, job) -> dict:
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        return {"id": case.id, "status": "error", "failure": "agent produced no output for 300s"}
+
+    results, _ = run_concurrently(planned, execute, concurrency=8, per_model=2, abort_reason=lambda _: None)
+
+    assert len(results) == len(planned)
+    # Capped at two while it might still be healthy, uncapped once it is not.
+    assert peak > 2
+
+
+def test_a_model_that_answers_stays_capped(tmp_path: Path) -> None:
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [{"agent": "codex", "model": "alive", "credentials": ["OPENAI_API_KEY"]}],
+        cases=8,
+    )
+    lock = threading.Lock()
+    live = 0
+    peak = 0
+
+    def execute(case, job) -> dict:
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        return {"id": case.id, "status": "passed"}
+
+    run_concurrently(planned, execute, concurrency=8, per_model=2, abort_reason=lambda _: None)
+
+    assert peak == 2
+
+
 def test_an_authentication_failure_stops_the_remaining_runs(tmp_path: Path) -> None:
     from evals.install.runner import run_concurrently
 
