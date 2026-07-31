@@ -12,7 +12,7 @@ Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil
 
 If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
 
-If you were pointed at this file inside a source tree rather than at the repository URL, that tree is the version this guide describes and a published release would be a different one. Install from it: step 0 below. Never editable from it, and never by copying it into the firmware project.
+Were you handed a source tree, a tag, or a commit rather than a link? Then install from that (`uv tool install --upgrade <path or git+URL@ref>`) instead of the release, and skip steps 2 to 4 — what you were given may have no release yet. A link to this guide is not that case; it means the current release.
 
 ## What this changes on the machine
 
@@ -45,22 +45,11 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 ## Start Agentic HIL
 
-Fast path, in order — stop at the first persistent installation that works. Were you handed a source tree or a URL naming a ref? Then step 0 is your path and steps 2 to 4 are not: they fetch a published release, which is a different thing.
+Fast path, in order — stop at the first persistent installation that works.
 
 Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. **Never lower it, and dropping the constraint is lowering it** — `install agentic-hil` after `install "agentic-hil>=0.4.0"` failed takes whatever the index has, which is the release you just established is too old. If no installable version satisfies the floor, stop and report that, naming what you tried — an older release gives you a server without `setup`, and every step after that fails in a way that looks like your mistake. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
 
-0. **Were you given a source tree, a tag, or a specific commit?** Then install from it, and skip steps 2 to 4 — those fetch a release, and you were handed something else:
-
-```bash
-uv tool install --upgrade /path/to/that/tree
-uv tool install --upgrade "git+<repository URL>@<tag or commit>"
-```
-
-Do this first, not after the steps below fail: what you were handed may have no release yet. Not finding it on PyPI is no reason to distrust it, but it is a reason never to substitute a published package of the same name — that is someone else's code.
-
-A plain link to this guide is **not** that case. It is how the guide is normally shared, it means the current release, and the numbered steps below are your path.
-
-1. Otherwise, reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
+1. Reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
 ```bash
 agentic-hil --version
