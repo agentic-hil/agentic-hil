@@ -12,7 +12,7 @@ Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil
 
 If you were given only the Agentic HIL repository URL and asked to set it up: run the fast path below, install the Agentic HIL skill into your own skill directory, configure the firmware project, then return to the firmware project. Do not clone, checkout, or vendor the Agentic HIL source tree into the firmware project for normal setup.
 
-If you were pointed at this file inside a source tree rather than at the repository URL, install Agentic HIL from that tree. It is the version this guide describes, and a release from PyPI would be a different one. Install *from* it — never editable from it, and never by copying it into the firmware project.
+If you were pointed at this file inside a source tree rather than at the repository URL, that tree is the version this guide describes and a published release would be a different one. Install from it: step 0 below. Never editable from it, and never by copying it into the firmware project.
 
 ## Ground Rules
 
@@ -35,9 +35,15 @@ Prefer the supported first path unless the firmware project or user clearly says
 
 Fast path, in order — stop at the first persistent installation that works:
 
-Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
+Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. **Never lower it.** If no installable version satisfies it, stop and report that, naming what you tried — an older release gives you a server without `setup`, and every step after that fails in a way that looks like your mistake. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
 
-1. Reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
+0. If you were pointed at this guide inside a source tree, that tree is the version this guide describes, and it is what you install. Install from it and skip steps 2 to 4, which fetch a published release instead:
+
+```bash
+uv tool install --upgrade /path/to/that/tree     # or: python -m pip install --user --upgrade /path/to/that/tree
+```
+
+1. Otherwise, reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
 ```bash
 agentic-hil --version
@@ -145,7 +151,7 @@ Expected healthy result: `ok: true` overall with each step ok, and — once `all
 
 No `cwd` is baked in. `setup` resolves the installed console script, rejects transient, workspace-local, unsafe-symlink, or otherwise untrusted candidates, and stores its verified absolute persistent user-bin path. A user-owned pipx/uv-tool link is accepted only when both the link path and its fully resolved target chain pass the ownership, permission, and location checks. The host starts that executable with `mcp-stdio` from the firmware project root; config discovery then refuses to start unless `workspace_root` matches. See [MCP host configuration](docs/mcp-hosts.md) for the exact per-host rendering and for hosts `setup` does not cover.
 
-If you deliberately want a **project-scoped, machine-local** entry instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form with the same verified absolute executable. That file is not portable or team-shared: keep it uncommitted. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
+If the operator explicitly asks for a **project-scoped, machine-local** entry instead, `agentic-hil mcp-config --output .mcp.json` writes the Claude-compatible `mcpServers` form with the same verified absolute executable. Do not write it on your own initiative: `setup` has already registered the server at user level, and a second registration inside the firmware project names the program that answers as the hardware gate in a file everyone who can write the repository can change. That file is not portable or team-shared: keep it uncommitted. Do not translate host syntax into new server or tool semantics, and never commit a machine-specific `AGENTIC_HIL_CONFIG` override.
 
 **Claude Code, optional:** a native plugin under `plugins/agentic-hil/` distributes the setup skill but deliberately stores no MCP server command. A portable plugin cannot know the verified absolute path of a persistent user-local executable, and `uvx` is not a durable installation boundary. Install the plugin with `/plugin marketplace add https://github.com/agentic-hil/agentic-hil` then `/plugin install agentic-hil@agentic-hil` (or `claude --plugin-dir ./plugins/agentic-hil` to test), install the exact package version required by its skill, and run `agentic-hil setup --agent claude`. `setup` performs the trusted user-level registration; the plugin does not replace that step.
 
