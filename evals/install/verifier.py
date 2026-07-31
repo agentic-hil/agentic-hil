@@ -468,22 +468,26 @@ def no_superseded_skill(agent: str) -> tuple[bool, str]:
     return True, "no earlier name of this skill is installed"
 
 
-def doctor_reports_a_copied_installation() -> tuple[bool, str]:
-    """Whether the product itself notices how it was installed.
+def installed_distribution_is_copied(metadata: dict[str, Any]) -> tuple[bool, str]:
+    """Whether the agent's installation copied the package or points at a tree.
 
     An editable installation copies nothing; it points the server at a source
     tree, so the code behind the hardware gate is whatever that directory holds
     at the time. Two models reached for one after pip refused.
+
+    Asking doctor through the trusted runtime cannot answer this, and a first
+    attempt at this check did exactly that: the trusted runtime is a copy the
+    verifier staged, so it reports a copied installation whatever the agent did.
+    The installed distribution's own direct_url.json is the record of how the
+    agent installed it.
     """
-    result = run_trusted(["doctor"])
-    if result.returncode != 0:
-        return False, result.stderr.strip() or "doctor did not run"
-    installation = json.loads(result.stdout).get("installation")
-    if not isinstance(installation, dict):
-        return False, "doctor reported nothing about the installation"
-    if installation.get("editable") is not False:
-        return False, f"doctor reports an editable installation: {installation.get('package_path')}"
-    return True, f"copied installation at {installation.get('package_path')}"
+    direct = metadata.get("direct_url")
+    if not isinstance(direct, dict):
+        return False, "direct_url.json missing"
+    directory = direct.get("dir_info")
+    if isinstance(directory, dict) and directory.get("editable"):
+        return False, f"the agent installed editable from {direct.get('url')}"
+    return True, f"copied from {direct.get('url')}"
 
 
 def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
@@ -957,6 +961,8 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
         )
         origin_ok, origin_detail = origin_matches(target, distribution)
         checks.append(Check("installed origin matches", origin_ok, origin_detail))
+        copied_ok, copied_reason = installed_distribution_is_copied(distribution)
+        checks.append(Check("installed distribution is not editable", copied_ok, copied_reason))
         try:
             inspected_package = require_symlink_free_tree(distribution["package"])
             package_tree_safe = True
@@ -1102,10 +1108,6 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     result.stderr.strip() or result.stdout.strip(),
                 ),
             )
-            # The metadata check already refuses an editable install, but only
-            # as the absence of a copied package. Asking doctor makes the
-            # product itself the one that has to notice.
-            add("doctor reports a copied installation", doctor_reports_a_copied_installation)
         if trusted_package_ready and registered_ok:
 
             def probe_check() -> tuple[bool, str]:

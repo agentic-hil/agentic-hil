@@ -159,50 +159,34 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
-def _doctor_saying(installation: object) -> object:
-    payload = json.dumps({"ok": True, "installation": installation} if installation is not None else {"ok": True})
-    return SimpleNamespace(returncode=0, stdout=payload, stderr="")
-
-
-def test_an_editable_installation_is_caught_by_asking_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_editable_installation_is_read_off_the_agents_own_metadata() -> None:
     """Two models reached for an editable install after pip refused.
 
-    The metadata check refuses one already, but only as the absence of a copied
-    package. This makes the product itself the thing that has to notice.
+    The trusted runtime cannot answer this: it is a copy the verifier staged,
+    so it reports a copied installation whatever the agent did.
     """
-    monkeypatch.setattr(
-        verifier,
-        "run_trusted",
-        lambda arguments, **kwargs: _doctor_saying({"editable": True, "package_path": "/workspace/source/src/agentic_hil"}),
-    )
+    metadata = {"direct_url": {"url": "file:///workspace/source", "dir_info": {"editable": True}}}
 
-    ok, detail = verifier.doctor_reports_a_copied_installation()
+    ok, detail = verifier.installed_distribution_is_copied(metadata)
 
     assert not ok
     assert "/workspace/source" in detail
 
 
-def test_a_copied_installation_passes_the_doctor_question(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        verifier,
-        "run_trusted",
-        lambda arguments, **kwargs: _doctor_saying({"editable": False, "package_path": "/home/eval/.local/share/uv/x"}),
-    )
+def test_a_copied_installation_is_accepted() -> None:
+    metadata = {"direct_url": {"url": "file:///workspace/source", "dir_info": {}}}
 
-    ok, detail = verifier.doctor_reports_a_copied_installation()
+    ok, detail = verifier.installed_distribution_is_copied(metadata)
 
     assert ok
-    assert "copied installation" in detail
+    assert "copied from" in detail
 
 
-def test_a_doctor_that_says_nothing_about_the_installation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An older build that predates the field must not pass by omission."""
-    monkeypatch.setattr(verifier, "run_trusted", lambda arguments, **kwargs: _doctor_saying(None))
-
-    ok, detail = verifier.doctor_reports_a_copied_installation()
+def test_a_distribution_without_an_origin_record_fails() -> None:
+    ok, detail = verifier.installed_distribution_is_copied({})
 
     assert not ok
-    assert "nothing about the installation" in detail
+    assert "direct_url.json missing" in detail
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
