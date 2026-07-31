@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -130,6 +131,27 @@ def expected_mcp_tools(source_root: Path) -> list[str]:
     return names
 
 
+def committed_package_digest(repository: Path, commit: str) -> str:
+    """Digest the committed package, not the working tree beside it.
+
+    A tree checked out with CRLF hashes differently from what pip fetches from
+    the remote, and the first branch-mode matrix failed all 72 reachable runs on
+    that alone.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Path(directory) / "package.tar"
+        result = run_capture(
+            ["git", "-C", str(repository), "archive", "--format=tar", "-o", str(archive), commit, "src/agentic_hil"],
+            120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"could not export {commit} from {repository}")
+        extracted = Path(directory) / "tree"
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(extracted, filter="data")
+        return source_digest(extracted / "src" / "agentic_hil")
+
+
 def job_payload(
     matrix: Matrix,
     case: Case,
@@ -138,10 +160,12 @@ def job_payload(
     host_source_root: Path,
 ) -> dict[str, Any]:
     target = dataclasses.asdict(matrix.target)
-    evidence_root = source_root if matrix.target.mode == "local" else host_source_root
-    if evidence_root is None:
-        raise ValueError("target requires trusted source evidence")
-    target["expected_package_digest"] = source_digest(evidence_root / "src" / "agentic_hil")
+    if matrix.target.mode == "local":
+        if source_root is None:
+            raise ValueError("target requires trusted source evidence")
+        target["expected_package_digest"] = source_digest(source_root / "src" / "agentic_hil")
+    else:
+        target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
     target["source_git"] = git_metadata(host_source_root)
     tool_names = expected_mcp_tools(host_source_root)
     target["expected_mcp_tools"] = tool_names

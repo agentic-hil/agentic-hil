@@ -954,6 +954,28 @@ def test_reasoning_text_is_not_mistaken_for_a_token_count(tmp_path: Path) -> Non
     assert "reports no reasoning count" in detail
 
 
+def test_the_expected_digest_comes_from_the_commit_not_the_working_tree(tmp_path: Path) -> None:
+    """A tree checked out with CRLF hashes differently from what pip fetches.
+
+    The first branch-mode matrix failed all 72 reachable runs on that alone.
+    """
+    import subprocess
+
+    from evals.install.runner import committed_package_digest, source_digest
+
+    package = tmp_path / "src" / "agentic_hil"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"version = 1\n")
+    for command in (["init"], ["add", "-A"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x"]):
+        assert subprocess.run(["git", "-C", str(tmp_path), *command], capture_output=True).returncode == 0
+    head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    committed = committed_package_digest(tmp_path, head)
+    (package / "__init__.py").write_bytes(b"version = 2\n")
+
+    assert committed_package_digest(tmp_path, head) == committed
+    assert source_digest(package) != committed
+
+
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:
     matrix = _matrix_with_jobs(
         tmp_path,
