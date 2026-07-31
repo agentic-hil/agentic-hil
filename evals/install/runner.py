@@ -270,7 +270,7 @@ def agent_container_command(
                 docker_mount(
                     "bind",
                     str(path),
-                    f"/run/agentic-hil-secrets/{kind}",
+                    f"/run/eval-agent-logins/{kind}",
                     readonly=True,
                 ),
             ]

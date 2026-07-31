@@ -25,7 +25,7 @@ HOME = Path("/home/eval")
 WORKSPACE = Path("/workspace/project")
 SOURCE = Path("/workspace/source")
 MOUNTED_SOURCE = Path("/mnt/source")
-MOUNTED_CREDENTIALS = Path("/run/agentic-hil-secrets")
+MOUNTED_CREDENTIALS = Path("/run/eval-agent-logins")
 TEMPORARY_CREDENTIALS = Path("/tmp/agentic-hil-credentials")
 CREDENTIAL_KINDS = {
     "codex": {"codex-auth"},
