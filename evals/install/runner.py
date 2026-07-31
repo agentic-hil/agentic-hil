@@ -465,6 +465,9 @@ def extract_start_metadata(log_path: Path) -> dict[str, Any]:
 # exit 0. run_logged merges stderr into agent.log, so this warning is the one
 # hard piece of evidence that a requested effort never reached the model.
 EFFORT_IGNORED = "Unknown --effort value"
+# What each CLI calls the reasoning tokens it counted. Only integers match, so a
+# field carrying reasoning text cannot be mistaken for a count.
+REASONING_TOKEN_PATTERN = re.compile(r'"(reasoning_output_tokens|reasoning_tokens|reasoning)"\s*:\s*(\d+)')
 # Two runs of one agent share one login file on this machine. A provider rotates
 # the refresh token when it hands out a new one, so a concurrent write-back can
 # leave the copy here rejected — which is how a stored login was lost once
@@ -472,12 +475,29 @@ EFFORT_IGNORED = "Unknown --effort value"
 _LOGIN_WRITE_BACK = threading.Lock()
 
 
+def reasoning_tokens_reported(text: str) -> int | None:
+    """How many reasoning tokens the CLI itself counted, if it counts them.
+
+    codex writes reasoning_output_tokens and opencode writes reasoning; Claude
+    Code folds thinking into output_tokens and reports no separate number, so
+    None means the CLI cannot answer rather than that nothing was reasoned.
+    """
+    found = REASONING_TOKEN_PATTERN.findall(text)
+    if not found:
+        return None
+    return sum(int(value) for _, value in found)
+
+
 def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bool, str]:
-    """Whether the transcript contradicts the effort this run claims to have used.
+    """Whether the effort this run claims to have used actually reached the model.
 
     A CLI that accepts the flag and silently ignores it would otherwise produce
-    a default-effort measurement wearing the requested label. Absence of a
-    contradiction is not confirmation, and the detail says which of the two it is.
+    a default-effort measurement wearing the requested label. Where the CLI
+    counts reasoning tokens the count answers it: across 356 measured runs every
+    transcript that carried the field reported between 127 and 8762, never zero,
+    so a zero is the CLI running the model without the reasoning that was asked
+    for. Where it does not count them, absence of a contradiction is all there
+    is, and the detail says which of the two this is.
     """
     if requested is None:
         return True, "no reasoning effort requested"
@@ -486,7 +506,12 @@ def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bo
     text = log_path.read_text(encoding="utf-8", errors="replace")
     if EFFORT_IGNORED in text:
         return False, f"the agent CLI reported it ignored the requested effort {requested}"
-    return True, f"requested {requested}; the transcript does not contradict it"
+    reported = reasoning_tokens_reported(text)
+    if reported is None:
+        return True, f"requested {requested}; this CLI reports no reasoning count and the transcript does not contradict it"
+    if reported == 0:
+        return False, f"requested {requested}, but the CLI counted 0 reasoning tokens for the whole run"
+    return True, f"requested {requested}; the CLI counted {reported} reasoning tokens"
 
 
 def create_volume(docker: str, name: str) -> None:

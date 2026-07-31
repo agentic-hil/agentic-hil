@@ -618,13 +618,17 @@ def unmanaged_entry_untouched(agent: str) -> tuple[bool, str]:
 
 def fixture_preserved(agent: str, fixture: str) -> tuple[bool, str]:
     path = agent_config_path(agent, HOME)
+    if fixture == "clean":
+        # Nothing was seeded, so there is nothing to preserve. Demanding the
+        # file first reported "agent config missing" as a preservation failure
+        # in 37 runs whose install never got far enough to write one, which is
+        # a loud way of saying the operator lost something they never had.
+        return True, "no operator fixture was seeded for this case"
     if not path.is_file():
         return False, "agent config missing"
     safe, detail = safe_owned_path(path, HOME)
     if not safe:
         return False, detail
-    if fixture == "clean":
-        return True, str(path)
     if fixture == "unsafe-existing-config":
         return operator_sentinel_intact(agent, path), "operator sentinel must survive a rejected setup"
 

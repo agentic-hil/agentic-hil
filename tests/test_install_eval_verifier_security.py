@@ -159,6 +159,40 @@ def test_unmanaged_entry_check_ignores_the_agent_cli_bookkeeping(
     assert verifier.unmanaged_entry_untouched(agent)[0]
 
 
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_a_clean_case_has_no_operator_fixture_to_lose(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The clean fixture seeds nothing, so a missing config is not a loss.
+
+    Requiring the file first reported "agent config missing" as a preservation
+    failure in 37 runs whose install never got far enough to write one.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    assert fixture_content(agent, "clean") is None
+
+    ok, detail = verifier.fixture_preserved(agent, "clean")
+
+    assert ok
+    assert "nothing" in detail or "no operator fixture" in detail
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
+def test_a_seeded_operator_fixture_that_vanished_is_a_failure(
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+
+    ok, detail = verifier.fixture_preserved(agent, "preserve-user-config")
+
+    assert not ok
+    assert detail == "agent config missing"
+
+
 @pytest.mark.parametrize("agent", ["claude-code", "opencode"])
 def test_skill_is_not_discoverable_when_nothing_was_installed(
     agent: str,

@@ -899,6 +899,61 @@ def test_an_authentication_failure_stops_the_remaining_runs(tmp_path: Path) -> N
     assert len(results) < len(planned)
 
 
+def test_a_counted_reasoning_token_confirms_the_requested_effort(tmp_path: Path) -> None:
+    """Where a CLI counts reasoning tokens, the count answers the question.
+
+    Across 356 measured runs every transcript carrying the field reported
+    between 127 and 8762 tokens and never zero, so a zero is the CLI running the
+    model without the reasoning that was asked for.
+    """
+    from evals.install.runner import reasoning_effort_evidence
+
+    log = tmp_path / "agent.log"
+    log.write_text('{"usage":{"reasoning_output_tokens":592,"output_tokens":1989}}\n', encoding="utf-8")
+
+    ok, detail = reasoning_effort_evidence(log, "medium")
+
+    assert ok
+    assert "counted 592 reasoning tokens" in detail
+
+
+def test_zero_counted_reasoning_tokens_contradicts_the_requested_effort(tmp_path: Path) -> None:
+    from evals.install.runner import reasoning_effort_evidence
+
+    log = tmp_path / "agent.log"
+    log.write_text('{"tokens":{"reasoning":0}}\n', encoding="utf-8")
+
+    ok, detail = reasoning_effort_evidence(log, "high")
+
+    assert not ok
+    assert "0 reasoning tokens" in detail
+
+
+def test_a_cli_that_counts_nothing_is_reported_as_unconfirmed(tmp_path: Path) -> None:
+    """Claude Code folds thinking into output_tokens, so it cannot answer this."""
+    from evals.install.runner import reasoning_effort_evidence
+
+    log = tmp_path / "agent.log"
+    log.write_text('{"usage":{"output_tokens":4538,"input_tokens":78}}\n', encoding="utf-8")
+
+    ok, detail = reasoning_effort_evidence(log, "medium")
+
+    assert ok
+    assert "reports no reasoning count" in detail
+
+
+def test_reasoning_text_is_not_mistaken_for_a_token_count(tmp_path: Path) -> None:
+    from evals.install.runner import reasoning_effort_evidence
+
+    log = tmp_path / "agent.log"
+    log.write_text('{"reasoning":"let me think about the flash step"}\n', encoding="utf-8")
+
+    ok, detail = reasoning_effort_evidence(log, "medium")
+
+    assert ok
+    assert "reports no reasoning count" in detail
+
+
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:
     matrix = _matrix_with_jobs(
         tmp_path,
