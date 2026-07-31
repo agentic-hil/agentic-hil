@@ -49,23 +49,16 @@ Fast path, in order — stop at the first persistent installation that works. We
 
 Agentic HIL 0.4.0 or newer is required because earlier releases do not provide `setup`. That floor names the first release with the capability, not the current release: it stays put while 0.5.0 and later ship, and moves only when a newly required capability lands. **Never lower it, and dropping the constraint is lowering it** — `install agentic-hil` after `install "agentic-hil>=0.4.0"` failed takes whatever the index has, which is the release you just established is too old. If no installable version satisfies the floor, stop and report that, naming what you tried — an older release gives you a server without `setup`, and every step after that fails in a way that looks like your mistake. A transient `uvx` or `pipx run` invocation is useful for evaluation but is not an installation and must not be stored as the long-lived MCP server command. Agentic HIL is a Python package, so a plain user-local `pip install` is fine where `pip` works. On current systems (Ubuntu 24.04+/PEP-668, minimal images) the system `pip` is often absent or externally managed. If `pip install` fails for that reason, do **not** hand-roll `ensurepip`/`get-pip`/`apt install python3-pip`; use `uv` or `pipx` as below.
 
-0. If you were pointed at this guide inside a source tree, that tree is the version this guide describes, and it is what you install. Install from it and skip steps 2 to 4, which fetch a published release instead:
+0. **Were you given a source tree, a tag, or a specific commit?** Then install from it, and skip steps 2 to 4 — those fetch a release, and you were handed something else:
 
 ```bash
-uv tool install --upgrade /path/to/that/tree     # or: python -m pip install --user --upgrade /path/to/that/tree
+uv tool install --upgrade /path/to/that/tree
+uv tool install --upgrade "git+<repository URL>@<tag or commit>"
 ```
 
-Same if the URL you were given names a commit, a tag, or a branch **other than the repository's default branch**. Install from that same ref, so the code matches the guide you are reading:
+Do this first, not after the steps below fail: what you were handed may have no release yet. Not finding it on PyPI is no reason to distrust it, but it is a reason never to substitute a published package of the same name — that is someone else's code.
 
-```bash
-uv tool install --upgrade "git+<the repository URL you were given>@<the ref in it>"
-```
-
-Do this before the steps below, not after they fail. A released version may not exist yet for what you were handed.
-
-A link to the default branch is not that case — it is just how this guide is normally shared, and it means the published release, so take the numbered steps below. Measured: given `blob/master/...`, models read "a URL naming a branch" literally and installed from git, which is slower, needs git, and follows a moving ref instead of a release.
-
-Such a tree or ref may be a pre-release that no package index carries yet. Not finding the name on PyPI is not a reason to distrust it — you are installing a directory the operator handed you, not a name you looked up — but it is a reason not to substitute a published package of the same name, which is a different thing by a different author. If neither is available, say so and stop.
+A plain link to this guide is **not** that case. It is how the guide is normally shared, it means the current release, and the numbered steps below are your path.
 
 1. Otherwise, reuse an existing installation only when `agentic-hil --version` reports 0.4.0 or newer and the setup command exists:
 
