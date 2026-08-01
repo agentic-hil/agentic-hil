@@ -48,7 +48,7 @@ Rules that hold whichever line you use:
 - **Never `--break-system-packages`**, and never into the system Python. PEP 668 refuses for good reason.
 - **Never your own virtual environment.** `agentic-hil` would exist only inside it, on nobody's `PATH`, and the MCP registration would name a path only that environment resolves.
 - **`uvx` and `pipx run` are not installations.** They leave nothing to register as a long-lived server command.
-- Do not hand-roll `ensurepip`, `get-pip`, or `apt install python3-pip`.
+- **Missing `pip`, `uv` or `pipx` is not a reason to install one system-wide.** No `ensurepip`, no `get-pip`, no `apt install python3-pip`, no package manager at all — the `uv` line above needs none of them and is the answer to a machine that has nothing.
 
 If every line fails, stop and report which one failed and what it printed. An honest report of a blocked prerequisite beats an installation nobody can reach.
 

@@ -1053,8 +1053,8 @@ def test_the_guide_link_is_handed_through_verbatim(tmp_path: Path) -> None:
     assert target.install_spec is None
 
 
-def test_an_index_install_is_the_published_path_and_a_direct_reference_is_not() -> None:
-    """pip records direct_url.json only for a direct reference, never for an index."""
+def test_the_index_and_this_repository_are_both_the_published_path() -> None:
+    """Same project either way; a reader handed a link naming a ref may take it."""
     from evals.install.verifier import origin_matches
 
     published = {"mode": "published", "expected_version": "0.4.0"}
@@ -1063,9 +1063,20 @@ def test_an_index_install_is_the_published_path_and_a_direct_reference_is_not() 
     assert ok
     assert "package index" in detail
 
-    ok, detail = origin_matches(published, {"direct_url": {"url": "file:///workspace/source"}})
+    ok, detail = origin_matches(published, {"direct_url": {"url": "https://github.com/agentic-hil/agentic-hil"}})
+    assert ok
+    assert "this repository" in detail
+
+
+def test_a_third_party_package_of_the_same_name_is_not() -> None:
+    from evals.install.verifier import origin_matches
+
+    published = {"mode": "published", "expected_version": "0.4.0"}
+
+    ok, detail = origin_matches(published, {"direct_url": {"url": "https://github.com/someone-else/agentic-hil"}})
+
     assert not ok
-    assert "/workspace/source" in detail
+    assert "someone-else" in detail
 
 
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:

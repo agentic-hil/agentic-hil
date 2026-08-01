@@ -398,12 +398,17 @@ def safe_user_launcher(path: Path) -> tuple[bool, str]:
 def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bool, str]:
     direct = metadata.get("direct_url")
     if target["mode"] == "published":
-        # An index install has no direct_url.json; a direct reference does. So
-        # the file's presence is what disqualifies this mode, and the version
-        # check is what ties the result to the release under test.
+        # An index install records no direct_url.json. Installing from this
+        # repository instead is also fine: it is the same project, and a reader
+        # handed a link that names a ref has a defensible reason to take it.
+        # What must not happen is a third party's package of the same name.
         if direct is None:
-            return True, "installed from a package index, as the published path prescribes"
-        return False, f"not the published path: installed from {direct.get('url')}"
+            return True, "installed from a package index"
+        url = str(direct.get("url") or "")
+        official = url.removesuffix(".git").rstrip("/").endswith("github.com/agentic-hil/agentic-hil")
+        if official:
+            return True, f"installed from this repository: {url}"
+        return False, f"neither the index nor this repository: {url}"
     if not isinstance(direct, dict):
         return False, "direct_url.json missing"
     if target["mode"] == "local":
