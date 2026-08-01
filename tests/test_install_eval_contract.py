@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,25 @@ def _job_key_accesses(source: str) -> tuple[set[str], set[str]]:
         ):
             case.add(key)
     return top_level, case
+
+
+def test_the_operator_answers_generically_rather_than_by_model() -> None:
+    """Any agent that stops to ask gets the same answer, in the operator's voice.
+
+    Measured across models: one asked for the guide it had never seen, another
+    about login files it found under /run, another only about the scope. A reply
+    written for one model's wording answers the next model not at all.
+    """
+    text = CONTAINER_ENTRYPOINT.read_text(encoding="utf-8")
+    reply = re.search(r"OPERATOR_REPLY = \((.*?)\n\)", text, re.DOTALL)
+
+    assert reply is not None
+    body = reply.group(1)
+    for named in ("sonnet", "claude", "codex", "opencode", "gpt"):
+        assert named not in body.lower(), f"the operator's answer names {named}"
+    for covered in ("{guide}", "user-level", "/run", "scope"):
+        assert covered in body, f"the operator's answer does not address {covered}"
+    assert re.search(r"for attempt in range\(1, MAX_OPERATOR_REPLIES \+ 1\)", text), "the reply is sent once only"
 
 
 def test_container_entrypoint_reads_only_keys_the_runner_writes() -> None:

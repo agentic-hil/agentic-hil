@@ -875,6 +875,67 @@ def test_a_run_of_a_busy_model_waits_while_other_models_keep_going(tmp_path: Pat
     assert finished.index("slow") >= 1
 
 
+def test_a_model_that_only_stalls_stops_holding_its_runs_back(tmp_path: Path) -> None:
+    """The cap protects a provider that answers. A dead one needs no protection.
+
+    Measured: 20 runs that produced nothing held 56% of a matrix's container
+    time, queueing two at a time through a five-minute silence budget each.
+    """
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [{"agent": "codex", "model": "dead", "credentials": ["OPENAI_API_KEY"]}],
+        cases=8,
+    )
+    lock = threading.Lock()
+    live = 0
+    peak = 0
+
+    def execute(case, job) -> dict:
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        return {"id": case.id, "status": "error", "failure": "agent produced no output for 300s"}
+
+    results, _ = run_concurrently(planned, execute, concurrency=8, per_model=2, abort_reason=lambda _: None)
+
+    assert len(results) == len(planned)
+    # Capped at two while it might still be healthy, uncapped once it is not.
+    assert peak > 2
+
+
+def test_a_model_that_answers_stays_capped(tmp_path: Path) -> None:
+    from evals.install.runner import run_concurrently
+
+    planned = _planned(
+        tmp_path,
+        [{"agent": "codex", "model": "alive", "credentials": ["OPENAI_API_KEY"]}],
+        cases=8,
+    )
+    lock = threading.Lock()
+    live = 0
+    peak = 0
+
+    def execute(case, job) -> dict:
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        return {"id": case.id, "status": "passed"}
+
+    run_concurrently(planned, execute, concurrency=8, per_model=2, abort_reason=lambda _: None)
+
+    assert peak == 2
+
+
 def test_an_authentication_failure_stops_the_remaining_runs(tmp_path: Path) -> None:
     from evals.install.runner import run_concurrently
 
@@ -976,6 +1037,46 @@ def test_the_expected_digest_comes_from_the_commit_not_the_working_tree(tmp_path
 
     assert committed_package_digest(tmp_path, head) == committed
     assert source_digest(package) != committed
+
+
+def test_the_guide_link_is_handed_through_verbatim(tmp_path: Path) -> None:
+    """What an engineer pastes is a link, and the guide's own path takes it from there."""
+    link = "https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md"
+    matrix = _matrix_with_jobs(tmp_path, [{"agent": "codex", "model": "m", "credentials": ["OPENAI_API_KEY"]}])
+    document = json.loads(matrix.read_text(encoding="utf-8"))
+    document["target"] = {"mode": "published", "expected_version": "0.4.0", "guide_url": link}
+    matrix.write_text(json.dumps(document), encoding="utf-8")
+
+    target = load_matrix(matrix).target
+
+    assert target.guide_url == link
+    assert target.install_spec is None
+
+
+def test_the_index_and_this_repository_are_both_the_published_path() -> None:
+    """Same project either way; a reader handed a link naming a ref may take it."""
+    from evals.install.verifier import origin_matches
+
+    published = {"mode": "published", "expected_version": "0.4.0"}
+
+    ok, detail = origin_matches(published, {"direct_url": None})
+    assert ok
+    assert "package index" in detail
+
+    ok, detail = origin_matches(published, {"direct_url": {"url": "https://github.com/agentic-hil/agentic-hil"}})
+    assert ok
+    assert "this repository" in detail
+
+
+def test_a_third_party_package_of_the_same_name_is_not() -> None:
+    from evals.install.verifier import origin_matches
+
+    published = {"mode": "published", "expected_version": "0.4.0"}
+
+    ok, detail = origin_matches(published, {"direct_url": {"url": "https://github.com/someone-else/agentic-hil"}})
+
+    assert not ok
+    assert "someone-else" in detail
 
 
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:

@@ -42,6 +42,10 @@ param(
     # Read the guide from the remote at this commit and install from it, instead
     # of from the mounted working tree.
     [switch]$FromBranch,
+    # The guide link to hand the agents, verbatim — the one out of README.md
+    # measures the release the way an engineer hands it over. Whatever that
+    # guide's published path installs is what gets verified.
+    [string]$Guide,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
     [switch]$RefreshLogin,
@@ -369,6 +373,11 @@ if ($FromBranch) {
         expected_commit = $head
     }
     Write-Host "Source:     the remote at $head"
+}
+if ($Guide) {
+    if ($FromBranch) { throw "-Guide and -FromBranch name different sources; pick one." }
+    $target = @{ mode = "published"; expected_version = $projectVersion.Trim(); guide_url = $Guide }
+    Write-Host "Guide:      $Guide"
 }
 
 $matrixPath = Join-Path ([IO.Path]::GetTempPath()) ("agentic-hil-eval-matrix-" + [Guid]::NewGuid().ToString("N") + ".json")

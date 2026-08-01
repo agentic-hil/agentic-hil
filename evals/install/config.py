@@ -170,8 +170,16 @@ def _load_target(raw: dict[str, Any]) -> Target:
     expected_version = _string(raw.get("expected_version"), "target.expected_version")
     if mode == "local":
         return Target(mode=mode, expected_version=expected_version)
+    if mode == "published":
+        # The link an engineer hands an agent, verbatim. No install source: the
+        # guide's own published path is the thing under test.
+        return Target(
+            mode=mode,
+            expected_version=expected_version,
+            guide_url=_string(raw.get("guide_url"), "target.guide_url"),
+        )
     if mode != "remote":
-        raise ValueError("target.mode must be 'local' or 'remote'")
+        raise ValueError("target.mode must be 'local', 'published' or 'remote'")
 
     install_spec = _string(raw.get("install_spec"), "target.install_spec")
     match = OFFICIAL_GIT_SPEC.fullmatch(install_spec)
