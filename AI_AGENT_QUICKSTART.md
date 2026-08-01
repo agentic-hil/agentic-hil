@@ -14,7 +14,7 @@ Not project-local. The whole of it, before you start:
 - An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches.
 - A skill file in your agent's skill directory.
 - One config per project, outside its repository, every hardware permission denied.
-- Nothing inside the firmware project, nothing committed.
+- Nothing inside the firmware project, nothing committed — no `.mcp.json`, no config, no checkout. `setup` needs none of them, and writing one puts the hardware gate in a file anyone with repository access can change.
 
 Larger than what the operator asked for? Say so and let them decide.
 
@@ -22,22 +22,17 @@ Larger than what the operator asked for? Say so and let them decide.
 
 Handed a source tree, a tag, or a commit instead of a link? Install from that — `uv tool install --upgrade <path or git+URL@ref>` — and skip to `setup`. What you were given may have no release yet. A link to this guide is not that case; it means the current release.
 
-Otherwise take these in order and stop at the first that works:
+Otherwise take these in order and stop at the first that works. The list is complete — the last line needs nothing preinstalled, so reaching the end of it without an installation means you skipped a line, not that you are out of options:
 
 ```bash
 agentic-hil --version && agentic-hil setup --help   # already installed and new enough? done
-python -m pip install --user --upgrade agentic-hil
-uv tool install --upgrade agentic-hil
-pipx install agentic-hil
+python -m pip install --user --upgrade agentic-hil  # wherever pip works
+uv tool install --upgrade agentic-hil               # wherever uv is present
+pipx install agentic-hil                            # wherever pipx is present
+curl -LsSf https://astral.sh/uv/install.sh | sh     # nothing present: this installs uv, then rerun the uv line
 ```
 
-If `uv` and `pipx` are both missing, install `uv` user-locally, then retry it:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh   # Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-That download regularly exceeds the 60-second timeout many agent shells default to. A timeout there is not a failed command — rerun it with a longer one. Do not switch methods because of it.
+On Windows the last line is `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`. That download regularly exceeds the 60-second timeout many agent shells default to. A timeout there is not a failed command — rerun it with a longer one. Do not switch methods because of it.
 
 **0.4.0 or newer is required**; earlier releases have no `setup`. Never lower that floor, and dropping the constraint is lowering it: installing `agentic-hil` unpinned after `"agentic-hil>=0.4.0"` failed takes the release you just established is too old. If nothing satisfies it, stop and report what you tried.
 
