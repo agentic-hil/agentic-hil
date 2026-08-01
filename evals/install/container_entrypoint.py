@@ -38,13 +38,22 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if name in IGNORED_DIRECTORY_NAMES or Path(name).suffix in IGNORED_FILE_SUFFIXES}
 
 
-# A fresh session, so it has never seen the guide: naming it here is what the
-# first answer was missing. Measured: the model asked to be pointed at the guide
-# before installing anything, which is the same right instinct twice over.
-CONFIRMATION = (
-    "Yes — install Agentic HIL and set it up for this project. The guide is at {guide}. "
-    "The user-level MCP registration and the skill file are expected and wanted."
+# An agent that stops to ask before touching user-level state is behaving well,
+# and a one-shot prompt scores that as a failure to install. A real engineer
+# answers, so the harness answers — as the operator, in a fresh session that has
+# never seen the guide, addressing what agents have actually asked about rather
+# than any one model's wording.
+OPERATOR_REPLY = (
+    "Go ahead and install Agentic HIL and set it up for this project. Answering what you may be "
+    "weighing: the guide is at {guide}; the user-level MCP registration and the skill file are both "
+    "intended, and I want them for every project on this machine; this is a disposable container of "
+    "mine, so nothing here is precious; any agent login files you find under /run or /tmp are the test "
+    "rig's, not the package's. If something still blocks you, name it and stop — but if it was only "
+    "the scope, this is my decision and it is made."
 )
+# Two, because the reply is generic and a third round of the same words teaches
+# an agent nothing it did not already decline.
+MAX_OPERATOR_REPLIES = 2
 
 
 def installed() -> bool:
@@ -218,20 +227,29 @@ def main(argv: list[str] | None = None) -> int:
         if completed.returncode != 0:
             return completed.returncode
 
-        if not installed():
-            # Asking before touching user-level state is right, and a one-shot
-            # prompt scored it as a failure to install. A real operator answers,
-            # so answer: claude-sonnet-5 stopped to ask in every run of one round.
-            print(json.dumps({"event": "eval_confirmation_start"}), flush=True)
+        for attempt in range(1, MAX_OPERATOR_REPLIES + 1):
+            if installed():
+                break
+            print(json.dumps({"event": "eval_operator_reply_start", "attempt": attempt}), flush=True)
             completed = subprocess.run(
                 build_agent_command(
-                    adapter.id, job["model"], CONFIRMATION.format(guide=guide), reasoning_effort=reasoning_effort
+                    adapter.id, job["model"], OPERATOR_REPLY.format(guide=guide), reasoning_effort=reasoning_effort
                 ),
                 cwd=WORKSPACE,
                 env=environment,
                 check=False,
             )
-            print(json.dumps({"event": "eval_confirmation_exit", "exit_code": completed.returncode}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "event": "eval_operator_reply_exit",
+                        "attempt": attempt,
+                        "exit_code": completed.returncode,
+                        "installed": installed(),
+                    }
+                ),
+                flush=True,
+            )
 
         # An agent CLI discovers skills when it starts, so the skill installed
         # during the session above is only in context for a fresh session.
