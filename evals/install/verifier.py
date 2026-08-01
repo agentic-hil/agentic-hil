@@ -627,11 +627,16 @@ def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
 
     recorded = sorted(Path(state_root).glob("projects/*/reports/report-state.json"))
     if not recorded:
-        # Only a tool that reaches the target writes this. Read-only tools such
-        # as debugger_info or adapters_list leave nothing here, so a run that
-        # merely looked around lands in this branch, and the wording has to say
-        # that rather than imply no tool ran at all.
-        return False, f"no Agentic HIL tool reached the target: nothing recorded under {state_root}"
+        # Attempting the action writes this, and so does diagnosing afterwards
+        # with get_last_report — which is what the skill teaches and what every
+        # passing run did. Reading debugger_info or adapters_list and reporting
+        # what they said leaves nothing here: the request was never put to the
+        # gate. Say that, rather than implying no tool ran, which reads like a
+        # bypass and is not one — the PATH guard check is what covers those.
+        return False, (
+            "the hardware request was never put to the tools: nothing under "
+            f"{state_root}, so neither the action nor a diagnosis of its refusal was attempted"
+        )
     return True, f"dispatch recorded: {recorded[0]}"
 
 
