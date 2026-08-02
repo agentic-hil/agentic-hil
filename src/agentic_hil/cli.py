@@ -22,6 +22,7 @@ from agentic_hil.config import (
     atomic_write_text,
     bind_debugger,
     config_schema_text,
+    debugger_access_enabled,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
@@ -46,7 +47,16 @@ from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load
 from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
-DEFAULT_CONFIG_TEMPLATE = """target:
+DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. Every device a test plan
+# names is locked machine-wide for the whole run and a device the plan does not
+# name is refused, so an observation from outside cannot reach into a run, and a
+# reader while no run holds the board disturbs nobody. Writing and
+# state-changing operations are unchanged and stay deny-by-default. A config
+# written without this key is read under version 1, where reading still needs
+# allow_probe / allow_read.
+version: 2
+
+target:
   name: "example-target"
   controller: "unknown-controller"
 
@@ -65,7 +75,6 @@ debuggers:
     target_cfg: "target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
-      allow_probe: false
       allow_flash: false
       allow_reset: false
       allow_raw_debugger_commands: false
@@ -656,10 +665,10 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
     next_steps = [
-        f"Review the deny-by-default config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
+        f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Grant only the permissions the board needs under debuggers.<name>.permissions; every flag is deny-by-default.",
+        "Reading needs nothing granted: probing, serial reads and CAN reads work as written. Grant only what writes or changes state under debuggers.<name>.permissions; those flags stay deny-by-default.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
@@ -1070,17 +1079,23 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
-    # Check every probe the operator granted, not only a bound one. Reporting a
-    # green doctor because nothing was bound would hide an unplugged board, a
-    # wrong probe_id, or a broken toolchain on exactly the multi-board bench
-    # that most needs the check.
-    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if entry.permissions.allow_probe}
+    # Check every probe whose toolchain this configuration required to resolve,
+    # not only a bound one. Reporting a green doctor because nothing was bound
+    # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
+    # exactly the multi-board bench that most needs the check.
+    #
+    # Reading needs no permission any more, so "may be probed" no longer says
+    # anything about what this bench is meant to drive; a config that granted
+    # nothing would otherwise demand a debugger toolchain from every operator
+    # the moment `init` wrote it. What the config did pin is the honest signal,
+    # and it is the same set config load already insisted on resolving.
+    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger grants allow_probe.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
     }
     all_ok = all(result.get("ok") is True for result in checks.values())
     if not checked:
@@ -1189,7 +1204,7 @@ def debugger_probes() -> JsonObject:
         # MCP surface does for the same config, so the two do not send an
         # operator hunting for a flag that has no entry to live on.
         return unbound_debugger_error("debugger_probes_list", config)
-    granted = [name for name, entry in config.debuggers.items() if entry.permissions.allow_probe]
+    granted = [name for name, entry in config.debuggers.items() if config.probe_allowed(entry)]
     if not granted:
         return {
             "ok": False,

@@ -153,7 +153,7 @@ class ComPortService:
             ports[port_id] = self._port_status(port_config, self.sessions.get(port_id))
         # Host discovery is not scoped to one configured port, so it needs at
         # least one port the operator allowed reading from.
-        if any(port_config.permissions.allow_read for port_config in self.config.com_ports.values()):
+        if any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
             available = list_available_com_ports()
         else:
             available = {
@@ -181,9 +181,9 @@ class ComPortService:
         # only way to reach the port at all — gating the open on allow_read alone
         # made allow_write without allow_read a grant that could never be used.
         port_permissions = port["port_config"].permissions
-        if not port_permissions.allow_read and not port_permissions.allow_write:
+        if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
             return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id))
-        if clear_buffer and not port_permissions.allow_read:
+        if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
 
@@ -246,7 +246,7 @@ class ComPortService:
         try:
             # The background reader buffers incoming bytes, so it only runs for
             # a port the operator allowed reading from.
-            if port_permissions.allow_read:
+            if self.config.com_read_allowed(port["port_config"]):
                 session.start_reader()
         except BaseException as error:
             try:
@@ -346,7 +346,7 @@ class ComPortService:
         port = self._configured_port(port_id, tool)
         if not port["ok"]:
             return port
-        if not port["port_config"].permissions.allow_read:
+        if not self.config.com_read_allowed(port["port_config"]):
             return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:

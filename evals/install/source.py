@@ -11,6 +11,10 @@ IGNORED_DIRECTORY_NAMES = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    # A redirected APPDATA/LOCALAPPDATA for a local test run. It is git-ignored
+    # machine-local environment, never source, and it holds live lock files that
+    # a digest of the tree has no business reading.
+    ".testenv",
     ".venv",
     "__pycache__",
     "artifacts",

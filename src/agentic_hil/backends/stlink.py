@@ -82,7 +82,7 @@ class STLinkBackend:
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
         resolved = self._resolve_executable()
         if not resolved["ok"]:
@@ -113,7 +113,7 @@ class STLinkBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):

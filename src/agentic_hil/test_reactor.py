@@ -577,7 +577,7 @@ class TestReactor:
                 if port is None:
                     return preflight_error(index, step, "port_id", "Test step references a COM port that is not in the authoritative config.", {"configured_com_ports": sorted(self.config.com_ports)})
                 if step.action == "uart_open":
-                    if not port.permissions.allow_read:
+                    if not self.config.com_read_allowed(port):
                         return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
                     if port_id in active_uarts:
                         return preflight_error(index, step, "action", "UART session is already open in this test plan.")
@@ -627,7 +627,7 @@ class TestReactor:
                 # before any tool call, so the backend's per-flag messages are
                 # never reached. Name the flag that actually fired rather than
                 # pointing at a permission the config plainly shows as false.
-                if not permissions.allow_probe:
+                if not self.config.probe_allowed(debugger):
                     return preflight_error(index, step, "action", "Debug sessions require allow_probe on this debugger.", {"permission": "allow_probe"})
                 if permissions.allow_raw_debugger_commands:
                     return preflight_error(index, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})

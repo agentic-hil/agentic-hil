@@ -114,9 +114,9 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         bus_permissions = bus["bus_config"].permissions
-        if not bus_permissions.allow_read and not bus_permissions.allow_write:
+        if not self.config.can_read_allowed(bus["bus_config"]) and not bus_permissions.allow_write:
             return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN bus are disabled by the authoritative config.", bus_id))
-        if clear_rx_queue and not bus_permissions.allow_read:
+        if clear_rx_queue and not self.config.can_read_allowed(bus["bus_config"]):
             return self._write_report(self._permission_denied("can_session_start", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
@@ -176,7 +176,7 @@ class CanBusService:
         discharge_provisional_handle(adapter_provisional)
         self.sessions[bus_id] = session
         cleared: JsonObject = {"ok": True, "frames_drained": 0}
-        if clear_rx_queue and bus_config.permissions.allow_read:
+        if clear_rx_queue and self.config.can_read_allowed(bus_config):
             try:
                 cleared = self._drain_rx_queue(session)
                 if not overall_success(cleared):
@@ -267,7 +267,7 @@ class CanBusService:
         bus = self._configured_bus(bus_id, "can_read")
         if not bus["ok"]:
             return self._write_report(bus)
-        if not bus["bus_config"].permissions.allow_read:
+        if not self.config.can_read_allowed(bus["bus_config"]):
             return self._write_report(self._permission_denied("can_read", "Reading this CAN bus is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_read")
         if not session_result["ok"]:
