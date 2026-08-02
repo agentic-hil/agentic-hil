@@ -117,8 +117,10 @@ From repository root:
 python -m evals.install build
 ```
 
-The Dockerfile pins all three agent CLI versions. Every result also records the
-built image ID. Override CLI pins explicitly:
+All three agent CLI versions are pinned in `container/package.json` and
+`container/package-lock.json`, and the image installs them with `npm ci`, which
+refuses any tarball whose integrity hash does not match the lock. Every result
+also records the built image ID. Override CLI pins explicitly:
 
 ```bash
 python -m evals.install build \
@@ -126,6 +128,13 @@ python -m evals.install build \
   --claude-version 2.1.218 \
   --opencode-version 1.18.3
 ```
+
+An override rewrites `container/package.json` and `container/package-lock.json`
+before building, so it needs `npm` on the host and it leaves those two files
+modified. That is deliberate: the version an eval ran against stays readable in
+the repository instead of living in a build flag nobody can reconstruct later.
+Commit the change when the new pin is meant to stick, discard it when the run
+was a one-off.
 
 The default image tag is `agentic-hil-install-eval:local`.
 
