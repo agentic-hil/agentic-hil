@@ -8,10 +8,17 @@ include docs/mcp-hosts.md
 recursive-include src/agentic_hil/schemas *.json
 recursive-include src/agentic_hil/skills *.md
 recursive-include tests *.py
-# The evaluation harness is repository tooling, not package content, so the
-# tests that import it would fail to collect in a source distribution.
+# The evaluation harness and the shipped-reference gate are repository tooling,
+# not package content, so the tests that import them would fail to collect in a
+# source distribution. CI runs tools/check_shipped_references.py directly, and
+# the test module still runs from a checkout.
 exclude tests/test_install_eval*.py
 exclude tests/test_windows_install_eval_scripts.py
+exclude tests/test_shipped_references.py
+# Content the shipped tests read, as opposed to harness code: the packaged
+# plugin they compare against the bundled skill, and the tool-name contract.
+recursive-include plugins *.md *.json
+include evals/install/tools.list.expected
 recursive-include examples *.py *.md *.yaml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

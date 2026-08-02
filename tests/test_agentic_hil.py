@@ -658,7 +658,13 @@ def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
     Measured: ten runs hand-edited the operator's entry to the path setup had
     reported, reran setup with --force, and reported success.
     """
-    from evals.install.fixtures import agent_config_path, fixture_content
+    # The install-eval harness is repository tooling, not package content, so it
+    # is absent from a source distribution the shipped tests are run against.
+    fixtures = pytest.importorskip(
+        "evals.install.fixtures",
+        reason="the install-eval harness is repository tooling, not package content",
+    )
+    agent_config_path, fixture_content = fixtures.agent_config_path, fixtures.fixture_content
 
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)

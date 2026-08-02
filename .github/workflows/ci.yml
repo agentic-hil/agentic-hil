@@ -62,6 +62,22 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
 
+      # twine check reads metadata; it never unpacks the archive and runs it.
+      # A downstream maintainer who builds from the sdist runs the tests it
+      # ships, and those failed at collection because the repository-only
+      # tooling they imported is deliberately not package content.
+      - name: Check the source distribution's own test suite runs
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        shell: bash
+        run: |
+          set -eux
+          rm -rf sdist-check
+          mkdir sdist-check
+          tar -xzf dist/*.tar.gz -C sdist-check --strip-components=1
+          python -m venv sdist-check/.venv
+          sdist-check/.venv/bin/python -m pip install --quiet dist/*.tar.gz pytest
+          cd sdist-check && ./.venv/bin/python -m pytest -q
+
   audit:
     name: Production dependency audit
     runs-on: ubuntu-latest
