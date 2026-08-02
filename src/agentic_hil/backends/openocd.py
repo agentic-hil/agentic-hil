@@ -139,10 +139,21 @@ class OpenOCDBackend:
         if self.config.debugger.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
-        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
+        artifact_path = str(artifact["resolved_path"])
+        # A raw binary carries no load address, so without the configured offset
+        # OpenOCD bases the image at zero. The ST-Link and pyOCD backends already
+        # demand this for .bin, and the same public artifact must not behave
+        # differently by backend. ELF and HEX carry their own addresses and get
+        # no offset.
+        offset_argument = ""
+        if Path(artifact_path).suffix.lower() == ".bin":
+            if self.config.debugger.flash_address is None:
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with OpenOCD requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+            offset_argument = f" {self.config.debugger.flash_address}"
+        command_path = escape_tcl_double_quoted_word(openocd_path_for_command(artifact_path))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
-        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("flash_firmware", f'program "{command_path}"{offset_argument} verify{reset_command}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -358,7 +369,7 @@ class OpenOCDBackend:
             "target_not_detected": ["DUT is not powered", "wrong interface configuration", "SWD/JTAG wiring issue", "debug probe already in use"],
             "adapter_not_found": ["debug probe is not connected", "debug probe driver is missing", "debug probe is already in use", "Windows USB driver is not bound to the ST-Link adapter"],
             "verify_failed": ["flash write did not persist correctly", "wrong target configuration", "firmware image does not match target memory layout"],
-            "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],
+            "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong for a raw .bin artifact"],
             "reset_failed": ["reset line wiring issue", "target is not responding", "wrong reset configuration"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],

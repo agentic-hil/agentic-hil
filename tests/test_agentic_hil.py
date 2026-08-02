@@ -1556,6 +1556,42 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert "verify reset" in reset_log
 
 
+def test_openocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
+    # A raw binary has no load address of its own. Flashing it with no offset
+    # bases the image at zero, which is a different physical location from the
+    # one the project configured.
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(write_config(tmp_path)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert "debuggers.<name>.flash_address" in result["summary"]
+
+
+def test_openocd_flashes_a_bin_at_the_configured_address(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(write_config(tmp_path, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    command = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    # The address belongs between the file and the verify keyword; anywhere else
+    # OpenOCD's program helper reads it as something other than the offset.
+    assert "0x08000000 verify" in command, command
+    assert command.index("firmware.bin") < command.index("0x08000000"), command
+
+
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
@@ -1582,6 +1618,24 @@ def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None
     assert "-w" in log_text
     assert "-v" in log_text
     assert "-rst" not in log_text
+
+
+@pytest.mark.parametrize("mode", ["halt", "init"])
+def test_stlink_halt_and_init_reset_modes_actually_reset(mode: str, tmp_path: Path) -> None:
+    # -halt alone stops an already-running core; nothing is reset, and the
+    # backend's own success confirmation keys on reset markers, so the call
+    # reported reset_unconfirmed for a mode the tool contract advertises.
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+    assert result["ok"] is True, result
+    assert result["mode"] == mode
+    log_text = (tmp_path / result["log_path"]).read_text(encoding="utf-8")
+    assert "-rst" in log_text
+    assert "-halt" in log_text
 
 
 def test_pyocd_backend_probes_flashes_and_resets_with_probe_and_target(tmp_path: Path) -> None:

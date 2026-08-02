@@ -147,7 +147,12 @@ class STLinkBackend:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
-        mode_args = {"run": ["-rst"], "halt": ["-halt"], "init": ["-halt"]}
+        # -halt alone stops an already-running core without resetting it, so a
+        # requested reset never happened and the reset markers this backend
+        # confirms on never appear. STM32_Programmer_CLI runs action arguments
+        # left to right, so reset first, then halt. `init` ends halted for the
+        # same reason pyOCD maps both non-run modes to "reset halt".
+        mode_args = {"run": ["-rst"], "halt": ["-rst", "-halt"], "init": ["-rst", "-halt"]}
         result = self._run_stlink("reset_target", [*self._connection_args("NORMAL"), *mode_args[mode]])
         result["mode"] = mode
         if result.get("ok"):
