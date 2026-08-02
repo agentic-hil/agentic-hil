@@ -315,7 +315,7 @@ class ComPortService:
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
         try:
-            session.serial_handle.write(data)
+            reported = session.serial_handle.write(data)
             flush = getattr(session.serial_handle, "flush", None)
             if callable(flush):
                 flush()
@@ -331,8 +331,42 @@ class ComPortService:
             if not isinstance(error, Exception):
                 raise
             return result
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
-        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        # pyserial returns the count it accepted, and with a short write_timeout_s
+        # a backend can accept part of the buffer and return without raising.
+        # Auditing and reporting len(data) there tells the caller the whole
+        # stimulus reached the board when the wire carries a truncated command.
+        # A duck-typed handle that returns nothing reports no count to act on.
+        confirmed = len(data) if not isinstance(reported, int) or isinstance(reported, bool) else max(0, min(reported, len(data)))
+        accepted = data[:confirmed]
+        if confirmed != len(data):
+            result = {
+                "ok": False,
+                "tool": tool,
+                "port_id": port_id,
+                "error_type": "serial_write_failed",
+                "summary": "COM port accepted only part of the write, so the stimulus on the wire is truncated.",
+                "backend_error": f"serial write accepted {confirmed} of {len(data)} bytes",
+                "likely_causes": likely_causes("serial_write_failed"),
+                "bytes_written": confirmed,
+                "bytes_requested": len(data),
+                "data": data_result(accepted, session.port_config.encoding),
+                "log_path": display_path(self.config, session.log_path),
+                "side_effect_committed": confirmed > 0,
+                "side_effect_status": "partial" if confirmed else "not_started",
+                "retry_safe": confirmed == 0,
+                "cleanup_required": confirmed > 0,
+            }
+            if confirmed:
+                session.lease.quarantine("com_write_partial", RuntimeError(result["backend_error"]))
+                result["quarantined"] = True
+            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "tx", "bytes": confirmed, "hex": accepted.hex(), **result})
+            if audit_error is not None:
+                session.audit_broken = True
+                session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+                return mark_audit_failure(result, audit_error)
+            return result
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": confirmed, "hex": accepted.hex(), "text": decode_bytes(accepted, session.port_config.encoding)})
+        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": confirmed, "data": data_result(accepted, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
@@ -375,7 +409,18 @@ class ComPortService:
             remaining = len(session.buffer)
         result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": len(data), "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Feedback read from COM port." if data else "No COM port feedback was available."}
         if session.reader_error:
-            result["reader_error"] = session.reader_error
+            # The reader can die while this call is still waiting. Nesting the
+            # failure under a top-level ok that overall_success() reads as clean
+            # lets a HIL assertion mistake device loss for valid silence. Whatever
+            # was already drained stays in the result: those bytes are real.
+            result.update({
+                "ok": False,
+                "error_type": "session_not_active",
+                "summary": "COM port session failed and is no longer active. Start it again with com_session_start.",
+                "reader_error": session.reader_error,
+            })
+            if session.audit_broken:
+                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
         return result
 
     def close(self) -> None:

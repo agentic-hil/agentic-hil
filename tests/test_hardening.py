@@ -2128,6 +2128,115 @@ class _RecordingSerial:
         self.is_open = False
 
 
+class _ShortWriteSerial(_RecordingSerial):
+    """A backend that accepts part of the buffer and returns without raising.
+
+    pyserial does exactly this when the OS output buffer is full and the write
+    timeout expires."""
+
+    def __init__(self, sink: list[bytes], accepted: int) -> None:
+        super().__init__(sink)
+        self._accepted = accepted
+
+    def write(self, data: bytes) -> int:
+        self._sink.append(bytes(data[: self._accepted]))
+        return self._accepted
+
+
+@pytest.mark.parametrize(
+    ("accepted", "expected_status", "expected_retry_safe"),
+    [(3, "partial", False), (0, "not_started", True)],
+)
+def test_short_com_write_is_not_audited_or_reported_as_complete(
+    accepted: int,
+    expected_status: str,
+    expected_retry_safe: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A truncated command reached the board. Reporting bytes_written: len(data)
+    # tells the test the whole stimulus was applied, and it then asserts on
+    # feedback the DUT was never asked to produce.
+    config = load_test_config(
+        tmp_path,
+        com_ports_yaml='com_ports:\n  dut:\n    device: "COM_TEST"\n    permissions:\n      allow_read: true\n      allow_write: true\n',
+    )
+    service = ComPortService(config)
+    written: list[bytes] = []
+    log_path = tmp_path / ".agentic-hil" / "logs" / "short-write.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        service,
+        "_open_serial",
+        lambda port_id, port_config, path, lease: {
+            "ok": True,
+            "session": ComPortSession(port_id, port_config, _ShortWriteSerial(written, accepted), str(log_path), lease, start_reader=False),
+        },
+    )
+    try:
+        assert service.session_start("dut")["ok"] is True
+
+        result = service.write("dut", {"text": "reset\n"})
+
+        assert result["ok"] is False, result
+        assert overall_success(result) is False
+        assert result["bytes_written"] == accepted
+        assert result["bytes_requested"] == len(b"reset\n")
+        assert result["side_effect_status"] == expected_status
+        assert result["retry_safe"] is expected_retry_safe
+        assert written == [b"reset\n"[:accepted]]
+
+        logged = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        transmitted = [entry for entry in logged if entry.get("direction") == "tx"]
+        assert transmitted, logged
+        assert all(entry["bytes"] == accepted for entry in transmitted), transmitted
+        assert all(entry["hex"] == b"reset\n"[:accepted].hex() for entry in transmitted), transmitted
+    finally:
+        with suppress(RuntimeError):
+            service.close()
+
+
+def test_com_read_that_races_a_dying_reader_fails(tmp_path: Path) -> None:
+    # The reader can fail after com_read has begun its timed wait. Returning
+    # ok: true with zero bytes lets a HIL assertion read device loss as valid
+    # silence from a healthy board.
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "racing-read.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class _FailsMidRead:
+        is_open = True
+        in_waiting = 0
+
+        def __init__(self) -> None:
+            self.fail = threading.Event()
+
+        def read(self, size: int) -> bytes:
+            if self.fail.is_set():
+                raise OSError("device disconnected")
+            return b""
+
+        def close(self) -> None:
+            self.is_open = False
+
+    handle = _FailsMidRead()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+    try:
+        threading.Timer(0.1, handle.fail.set).start()
+
+        result = service.read_bytes("dut", 16, 5.0)
+
+        assert wait_until(lambda: session.reader_error is not None)
+        assert result["ok"] is False, result
+        assert overall_success(result) is False
+        assert result["reader_error"]["error_type"] == "serial_read_failed"
+    finally:
+        session.active = False
+        service.sessions.pop("dut", None)
+
+
 def test_artifact_that_never_existed_is_reported_as_not_found(tmp_path: Path) -> None:
     # With require_existing_file: false the file may be absent at validation.
     # Reporting that as "changed after validation" sends the caller back to
