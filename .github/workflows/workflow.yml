@@ -179,7 +179,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install build tooling
-        run: python -m pip install build twine
+        run: python -m pip install --require-hashes -r requirements/build.txt
 
       - name: Build distributions
         run: python -m build
@@ -306,7 +306,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install build tooling
-        run: python -m pip install build cyclonedx-bom
+        run: python -m pip install --require-hashes -r requirements/sbom.txt
 
       - name: Build distributions
         run: python -m build

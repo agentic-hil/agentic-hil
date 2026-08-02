@@ -358,12 +358,13 @@ class CanBusService:
 
     def _drain_rx_queue(self, session: CanBusSession) -> JsonObject:
         drained = 0
-        deadline = time.monotonic() + CAN_DRAIN_TIMEOUT_S
         audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "queue_clear_start", "bus_id": session.bus_id})
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("can_queue_clear_audit_broken", audit_error, audit_broken=True)
             return mark_audit_failure({"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": "CAN receive queue clear could not be audited before execution.", "side_effect_committed": False, "side_effect_status": "not_started"}, audit_error)
+        # The drain budget bounds adapter time only, so it starts after the pre-drain audit write.
+        deadline = time.monotonic() + CAN_DRAIN_TIMEOUT_S
         for _ in range(CAN_DRAIN_BATCH_LIMIT):
             if time.monotonic() >= deadline:
                 break

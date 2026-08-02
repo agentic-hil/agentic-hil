@@ -20,7 +20,7 @@ from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
-from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
+from agentic_hil.can import CAN_DRAIN_TIMEOUT_S, CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.cli import debugger_probes
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
@@ -41,6 +41,7 @@ from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import (
     append_canonical_audit_log,
     append_jsonl,
+    append_jsonl_audited,
     attach_canonical_audit_evidence,
     canonical_audit_evidence,
     canonical_audit_log_path,
@@ -615,6 +616,80 @@ def test_active_can_session_quarantines_when_queue_never_drains(tmp_path: Path) 
     assert result["frames_drained"] > config.can_buses["bench"].max_buffer_frames
     assert result["side_effect_committed"] is True
     assert result["side_effect_status"] == "partial"
+    assert result["lease_state"] == "cleanup_required"
+
+
+def test_can_queue_drain_budget_excludes_the_pre_drain_audit_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    max_buffer_frames: 2\n')
+    service = CanBusService(config)
+    clock = {"now": 1000.0}
+
+    def slow_append(config_arg, log_path, record):
+        if record.get("event") == "queue_clear_start":
+            clock["now"] += CAN_DRAIN_TIMEOUT_S * 5
+        return append_jsonl_audited(config_arg, log_path, record)
+
+    monkeypatch.setattr("agentic_hil.can.append_jsonl_audited", slow_append)
+    monkeypatch.setattr("agentic_hil.can.time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    class QueuedAdapter:
+        adapter_name = "fake"
+
+        def __init__(self) -> None:
+            self.frames = [1, 2, 3, 4, 5]
+            self.reads = 0
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            self.reads += 1
+            batch = self.frames[:max_frames]
+            del self.frames[:max_frames]
+            return {"ok": True, "frames": [{"id": item} for item in batch]}
+
+        def status(self) -> dict:
+            return {"active": True}
+
+        def close(self) -> dict:
+            return {"safe_state_confirmed": True, "process_reaped": True}
+
+    adapter = QueuedAdapter()
+    session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can-slow-audit.jsonl"))
+    service.sessions["bench"] = session
+
+    result = service.session_start("bench", clear_rx_queue=True)
+
+    assert result["ok"] is True
+    assert adapter.frames == []
+    assert adapter.reads == 4
+
+
+def test_can_queue_drain_budget_still_bounds_adapter_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    max_buffer_frames: 2\n')
+    service = CanBusService(config)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("agentic_hil.can.time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    class SlowBusyAdapter:
+        adapter_name = "fake"
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            self.reads += 1
+            clock["now"] += CAN_DRAIN_TIMEOUT_S * 0.6
+            return {"ok": True, "frames": [{"id": 1}, {"id": 2}]}
+
+        def status(self) -> dict:
+            return {"active": True}
+
+    adapter = SlowBusyAdapter()
+    session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can-slow-adapter.jsonl"))
+    service.sessions["bench"] = session
+
+    result = service.session_start("bench", clear_rx_queue=True)
+
+    assert result["error_type"] == "can_queue_clear_limit"
+    assert adapter.reads == 2
     assert result["lease_state"] == "cleanup_required"
 
 
