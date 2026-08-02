@@ -73,7 +73,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 agentic_hil = [
   "schemas/*.json",
-  "templates/*.json",
   "skills/agentic-hil/SKILL.md"
 ]
 

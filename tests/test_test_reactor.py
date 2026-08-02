@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1052,3 +1053,43 @@ def test_version_1_plan_is_refused_with_the_key_that_replaced_device(tmp_path: P
     migration = rejected.value.details["migration"]
     assert any("debugger:" in value for value in migration.values())
     assert any("port_id:" in value for value in migration.values())
+
+
+def test_the_readme_reactor_section_names_only_actions_the_schema_defines() -> None:
+    """The README plan is what a reader copies first.
+
+    An action named there that the v2 schema does not define is a plan that
+    fails validation before it ever reaches hardware.
+    """
+    repository_root = Path(__file__).resolve().parents[1]
+    readme = (repository_root / "README.md").read_text(encoding="utf-8")
+    schema = json.loads(
+        (repository_root / "src" / "agentic_hil" / "schemas" / "testconfig.schema.json").read_text(encoding="utf-8")
+    )
+
+    def action_constants(node: object) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, dict):
+            action = node.get("action")
+            if isinstance(action, dict) and isinstance(action.get("const"), str):
+                found.add(action["const"])
+            for value in node.values():
+                found |= action_constants(value)
+        elif isinstance(node, list):
+            for value in node:
+                found |= action_constants(value)
+        return found
+
+    defined = action_constants(schema)
+    assert defined, "the schema stopped declaring action constants"
+
+    section = readme.split("## Test Reactor", 1)[1].split("\n## ", 1)[0]
+    documented = set(re.findall(r"\baction: (\w+)", section))
+
+    assert documented, "the README stopped showing a plan"
+    assert documented <= defined, sorted(documented - defined)
+
+    # The prose must not promise a stimulus action the schema has no way to
+    # express, nor claim a runtime failure leaves nothing behind.
+    assert "stimulate" not in section
+    assert "No half-run plans" not in section

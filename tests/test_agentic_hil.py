@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -524,6 +525,48 @@ def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path,
     # Two probes, so nothing is bound and every grant is still denied.
     assert all(entry["bound"] is False for entry in result["debuggers"].values())
     assert result["debuggers"]["dut_a"]["permissions"]["allow_flash"] is False
+
+
+def test_every_setup_command_the_quickstart_prints_actually_parses() -> None:
+    """A first-time reader types these verbatim.
+
+    A documented flag the parser does not define exits 2 before anything runs,
+    and the reader has no second form to fall back to.
+    """
+    quickstart = (Path(__file__).resolve().parents[1] / "AI_AGENT_QUICKSTART.md").read_text(encoding="utf-8")
+    section = quickstart.split("## Set up the project", 1)[1].split("\n## ", 1)[0]
+    commands = re.findall(r"^agentic-hil (.+)$", section, flags=re.MULTILINE)
+
+    assert commands, "the setup section stopped showing any command"
+    parser = build_parser()
+    for command in commands:
+        # Strip the trailing "# comment" the printed lines carry.
+        argv = command.split("#", 1)[0].split()
+        parser.parse_args(argv)
+
+    # The generic path must not claim setup takes skill-install's flag.
+    assert "setup --agent <agent> --target" not in quickstart
+    with pytest.raises(SystemExit):
+        parser.parse_args(["setup", "--agent", "my-agent", "--target", "/home/me/.my-agent/skills"])
+
+
+def test_the_package_ships_no_runnable_mcp_template() -> None:
+    """A shipped template is a reference, and a reference gets copied.
+
+    Registration pins a verified absolute executable on purpose. A packaged
+    template naming the bare command would hand a reader the one form the setup
+    path refuses, and nothing in the package reads or updates it.
+    """
+    package_root = Path(str(resources.files("agentic_hil")))
+    for candidate in package_root.rglob("*.json"):
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        servers = document.get("mcpServers") or document.get("mcp")
+        assert not isinstance(servers, dict), f"{candidate} ships a runnable MCP host template"
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -64,9 +64,20 @@ From the firmware project root:
 agentic-hil setup --agent <agent>
 ```
 
-Agent names: `claude-code`/`claude`, `codex`, `opencode`. For another skill-capable agent add `--target <its user-level skill directory>`.
+Agent names: `claude-code`/`claude`, `codex`, `opencode`. Those three are the whole list `setup` knows; any other name is `unsupported_agent`, because one-shot setup has to know where that host keeps its skills *and* how it records an MCP server.
 
-One command instead of `init`, `skill-install`, MCP registration and `doctor` separately. It returns one JSON result with a per-step breakdown; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
+Another skill-capable agent takes the steps separately, from the same directory:
+
+```bash
+agentic-hil init
+agentic-hil skill-install --agent <agent> --target <agent-skill-dir>
+agentic-hil mcp-config
+agentic-hil doctor
+```
+
+`<agent-skill-dir>` is that host's user-level skill directory. `mcp-config` prints the launch contract; add its `command`/`args` to the host's own **user-level** config by hand — [docs/mcp-hosts.md](docs/mcp-hosts.md) has the per-host syntax. `--target` belongs to `skill-install` only; `setup` does not accept it.
+
+For the three known agents, one command instead of `init`, `skill-install`, MCP registration and `doctor` separately. It returns one JSON result with a per-step breakdown; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
 
 The config it writes lives outside the repository, sets `workspace_root` to this project, and denies every hardware permission. **It is complete as written.** Adding debuggers, COM ports or CAN buses is not part of installing, and neither is granting a permission on one — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it.
 
