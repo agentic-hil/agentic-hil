@@ -362,6 +362,22 @@ def load_or_initialize_report_state(config: AgenticHILConfig) -> JsonObject:
     return state
 
 
+def claim_auto_recover_default_warning(config: AgenticHILConfig) -> bool:
+    """Claim the one-time warning that machine recovery drove hardware under a
+    defaulted ``recovery.auto_recover``.
+
+    True exactly once per project state. A bench that never named a policy still
+    gets the default, but the first physical act taken under it is stated in the
+    report instead of only being implied by a missing config key."""
+    with safe_file_lock(report_lock_path(config)):
+        state = load_or_initialize_report_state(config)
+        if state.get("auto_recover_default_warned") is True:
+            return False
+        state["auto_recover_default_warned"] = True
+        write_report_state(config, state)
+        return True
+
+
 def read_legacy_report(config: AgenticHILConfig, path: str) -> JsonObject | None:
     try:
         text = safe_read_text(path, workspace=config.work_dir)

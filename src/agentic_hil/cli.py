@@ -104,6 +104,16 @@ reports:
 
 logs:
   directory: ".agentic-hil/logs"
+
+# How far this bench lets the owning process clear its own hardware
+# quarantines. "off" always defers to the operator. "readonly" may reap
+# leftover debugger processes and re-read the probe, which touches nothing
+# physical. "reset_halt" may additionally drive a reset-into-halt, which is
+# what settles an unconfirmed flash or reset without a person — set
+# "readonly" instead if anything on this bench reacts to a target reset.
+recovery:
+  auto_recover: "reset_halt"
+  max_attempts: 3
 """
 
 SKILL_NAME = "agentic-hil"

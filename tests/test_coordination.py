@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from conftest import write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames
@@ -20,6 +20,8 @@ from agentic_hil.cli import debugger_probes, entrypoint
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
+    DEBUGGER_READONLY_RESULT_REASON,
+    RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
     HardwareCoordinator,
     _LifetimeLock,
@@ -1431,3 +1433,344 @@ def test_release_fault_reraises_keyboard_interrupt(tmp_path: Path, monkeypatch: 
     assert lease.state == "cleanup_required"
     monkeypatch.setattr(owner, "_write_record", type(owner)._write_record.__get__(owner))
     owner.close()
+
+
+UNCONFIRMED_PROBE = {
+    "ok": False,
+    "tool": "probe_target",
+    "error_type": "probe_failed",
+    "side_effect_status": "unknown",
+    "summary": "Probe result unconfirmed.",
+}
+DETECTED_PROBE = {"ok": True, "tool": "probe_target", "target_detected": True, "summary": "Target detected."}
+
+
+def quarantined_probe_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgenticHILToolService:
+    """A service whose one-shot probe_target left a retryable incident behind."""
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
+    first = service.call("probe_target")
+    assert first["quarantined"] is True, first
+    assert first["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON], first
+    assert service.coordinator.blocked is True
+    return service
+
+
+def test_lease_status_names_the_reason_and_whether_it_is_machine_recoverable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        # A second process reads the same incident off the record, so the reason
+        # has to survive into the project record instead of only reaching the
+        # caller whose failing tool result carried the lease status.
+        observer = HardwareCoordinator(service.config, "observer")
+        status = observer.status()
+        assert status["blocked"] is True
+        assert status["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        assert status["auto_recoverable"] is True
+    finally:
+        service.close()
+
+
+def test_a_healthy_project_reports_no_cleanup_reasons(tmp_path: Path) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "healthy")
+    lease = coordinator.acquire("physical:healthy")
+    try:
+        status = coordinator.status()
+        assert status["blocked"] is False
+        assert status["cleanup_reasons"] == []
+        assert status["auto_recoverable"] is False
+    finally:
+        lease.release()
+        coordinator.close()
+
+
+def test_machine_recovery_clears_a_retryable_readonly_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        # The next hardware call recovers the incident itself and then runs, so
+        # an unattended loop keeps going without an operator attestation.
+        recovered = service.call("probe_target")
+
+        assert recovered["ok"] is True, recovered
+        assert service.coordinator.blocked is False
+        assert service.coordinator.quarantine_id is None
+        assert service.coordinator.status()["cleanup_reasons"] == []
+    finally:
+        service.close()
+
+
+def test_machine_recovery_releases_the_lease_the_one_shot_left_registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        assert service.call("probe_target")["ok"] is True
+
+        # A lease that stays registered holds its locks for the rest of the
+        # process lifetime and fails every later acquire with resource_busy.
+        assert service.coordinator.leases == {}
+        assert service.coordinator.project_lock is None
+        assert service._quarantined_lease is None
+    finally:
+        service.close()
+
+
+def test_machine_recovery_writes_its_own_attestation_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        report = service._attempt_machine_recovery()
+
+        assert report is not None
+        assert report["recovery"] == "machine_attested"
+        assert report["reason"] == DEBUGGER_READONLY_RESULT_REASON
+        assert report["safe_state_confirmed"] is True
+        assert report["verification"]["target_detected"] is True
+    finally:
+        service.close()
+
+
+def test_machine_recovery_refuses_while_the_probe_stays_unreachable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        refused = service.call("probe_target")
+
+        assert refused["error_type"] == "resource_quarantined"
+        assert refused["auto_recovery_attempted"] is True
+        assert refused["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+UNCONFIRMED_RESET = {
+    "ok": False,
+    "tool": "reset_target",
+    "error_type": "reset_failed",
+    "side_effect_status": "unknown",
+    "summary": "Reset result unconfirmed.",
+}
+HALTED_RESET = {"ok": True, "tool": "reset_target", "mode": "halt", "summary": "Target reset with mode 'halt'."}
+
+
+def quarantined_reset_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config_kwargs) -> AgenticHILToolService:
+    """A service whose unconfirmed reset_target left an effect-class incident behind."""
+    service = AgenticHILToolService(config_for(tmp_path, **config_kwargs))
+    monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(UNCONFIRMED_RESET))
+    first = service.call("reset_target", {"mode": "run"})
+    assert first["cleanup_reasons"] == ["debugger_result_unconfirmed"], first
+    assert service.coordinator.blocked is True
+    return service
+
+
+def test_readonly_policy_leaves_an_unconfirmed_reset_to_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_reset_service(tmp_path, monkeypatch, auto_recover="readonly")
+    try:
+        # A reset may have left the target running, and a re-read cannot see
+        # that, so under this policy no amount of reachable probe helps.
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        refused = service.call("probe_target")
+
+        assert refused["error_type"] == "resource_quarantined"
+        assert refused["auto_recovery_attempted"] is True
+        assert service.coordinator.blocked is True
+        assert service.coordinator.status()["auto_recoverable"] is False
+    finally:
+        service.close()
+
+
+def test_reset_halt_policy_settles_an_unconfirmed_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_reset_service(tmp_path, monkeypatch, auto_recover="reset_halt")
+    try:
+        assert service.coordinator.status()["auto_recoverable"] is True
+        modes: list[str] = []
+
+        def reset(mode: str = "run") -> dict:
+            modes.append(mode)
+            return dict(HALTED_RESET)
+
+        monkeypatch.setattr(service.backend, "reset_target", reset)
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        report = service._attempt_machine_recovery()
+
+        assert report is not None
+        assert report["safe_state_predicate"] == "reset_halt"
+        assert report["auto_recover_policy_source"] == "config"
+        # Halted, not run: recovery establishes a defined state, it does not
+        # hand control back to firmware whose last action is unaccounted for.
+        assert modes == ["halt"]
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+
+
+def test_reset_halt_policy_keeps_the_quarantine_when_the_reset_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_reset_service(tmp_path, monkeypatch, auto_recover="reset_halt")
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        # reset_target is still the failing stub, so the predicate cannot pass.
+        assert service._attempt_machine_recovery() is None
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_reset_halt_policy_degrades_without_allow_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grants = {**DEFAULT_TEST_PERMISSIONS, "allow_reset": False}
+    service = AgenticHILToolService(config_for(tmp_path, auto_recover="reset_halt", permissions=grants))
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
+        assert service.call("probe_target")["quarantined"] is True
+
+        # The read-only class still recovers; the config may name the stronger
+        # predicate, but the bound probe does not authorize the reset it needs.
+        assert service.coordinator.recoverable_reasons() == RETRYABLE_CLEANUP_REASONS
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        report = service._attempt_machine_recovery()
+        assert report is not None
+        assert report["safe_state_predicate"] == "readonly_probe"
+    finally:
+        service.close()
+
+
+def test_off_policy_recovers_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path, auto_recover="off"))
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
+        assert service.call("probe_target")["quarantined"] is True
+        assert service.coordinator.recoverable_reasons() == frozenset()
+        assert service.coordinator.status()["auto_recoverable"] is False
+
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        assert service._attempt_machine_recovery() is None
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_readonly_reason_is_never_settled_by_driving_the_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        resets: list[str] = []
+        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": resets.append(mode) or dict(HALTED_RESET))
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        report = service._attempt_machine_recovery()
+
+        # reset_halt is the policy, but the open reason is settled by a re-read,
+        # and the stronger predicate is a physical act rather than a default.
+        assert report is not None
+        assert report["safe_state_predicate"] == "readonly_probe"
+        assert resets == []
+    finally:
+        service.close()
+
+
+def test_machine_recovery_attempts_are_bounded_per_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_reset_service(tmp_path, monkeypatch, auto_recover="reset_halt", recovery_max_attempts=2)
+    try:
+        resets: list[str] = []
+
+        def failing_reset(mode: str = "run") -> dict:
+            resets.append(mode)
+            return dict(UNCONFIRMED_RESET)
+
+        monkeypatch.setattr(service.backend, "reset_target", failing_reset)
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        for _ in range(5):
+            assert service._attempt_machine_recovery() is None
+
+        # A flapping probe must not translate into an unbounded series of resets.
+        assert len(resets) == 2
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_defaulted_policy_warns_once_when_it_first_drives_the_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No recovery section at all: the bench never chose reset_halt, it inherited it.
+    service = quarantined_reset_service(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(HALTED_RESET))
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        first = service._attempt_machine_recovery()
+        assert first is not None
+        assert first["auto_recover_policy"] == "reset_halt"
+        assert first["auto_recover_policy_source"] == "default"
+        assert "recovery.auto_recover is not named" in first["warnings"][0]
+
+        # Second incident, same project state: the operator has been told once.
+        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(UNCONFIRMED_RESET))
+        assert service.call("reset_target", {"mode": "run"})["quarantined"] is True
+        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(HALTED_RESET))
+        second = service._attempt_machine_recovery()
+        assert second is not None
+        assert "warnings" not in second
+    finally:
+        service.close()
+
+
+def test_an_explicit_policy_never_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_reset_service(tmp_path, monkeypatch, auto_recover="reset_halt")
+    try:
+        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(HALTED_RESET))
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+
+        report = service._attempt_machine_recovery()
+
+        assert report is not None
+        assert report["auto_recover_policy_source"] == "config"
+        assert "warnings" not in report
+    finally:
+        service.close()
+
+
+def test_machine_recovery_refuses_a_broken_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", lambda: {**UNCONFIRMED_PROBE, "audit_ok": False})
+        assert service.call("probe_target")["quarantined"] is True
+
+        assert service.coordinator.retryable_incident() is None
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        assert service._attempt_machine_recovery() is None
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_machine_recovery_refuses_an_incident_adopted_from_a_dead_owner(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    resource = "physical:dead-owner"
+    dead = HardwareCoordinator(config, "dead")
+    dead._write_record(resource, dead._base_record("active", [resource]))
+    dead._write_record(dead.project_key, dead._base_record("released", []))
+
+    successor = HardwareCoordinator(config, "successor")
+    with pytest.raises(CoordinationError):
+        successor.acquire(resource)
+
+    # Nothing this process did produced the incident, so nothing it can read
+    # tells it what the dead owner left behind on the bench.
+    assert successor.blocked is True
+    assert successor.retryable_incident() is None
+    assert successor.status()["auto_recoverable"] is False
+    successor.close()
+
+
+def test_resolve_retryable_incident_rejects_a_reason_that_is_not_the_open_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = quarantined_probe_service(tmp_path, monkeypatch)
+    try:
+        assert service.coordinator.resolve_retryable_incident("debug_target_state_unconfirmed") is False
+        assert service.coordinator.blocked is True
+
+        assert service.coordinator.resolve_retryable_incident(DEBUGGER_READONLY_RESULT_REASON) is True
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()

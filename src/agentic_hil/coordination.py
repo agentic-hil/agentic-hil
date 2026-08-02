@@ -30,6 +30,12 @@ DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
 # operator or MCP sink.
 _RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace")
 LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
+# A one-shot that only ever reads (probe discovery, probe_target) intends no
+# physical effect, so an unconfirmed result of one leaves the board where it was
+# and a read-only re-read can settle it. flash_firmware and reset_target keep the
+# undifferentiated debugger_result_unconfirmed: either may have left the target
+# running, and nothing on the host can tell that from the outside.
+DEBUGGER_READONLY_RESULT_REASON = "debugger_readonly_result_unconfirmed"
 RETRYABLE_CLEANUP_REASONS = frozenset(
     {
         "com_buffer_clear_unconfirmed",
@@ -38,7 +44,18 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
         "debug_session_cleanup_unconfirmed",
         "debug_session_result_unconfirmed",
         "debug_target_state_unconfirmed",
+        DEBUGGER_READONLY_RESULT_REASON,
         LEASE_RELEASE_RETRY_REASON,
+    }
+)
+# Reasons a verified reset-into-halt settles but a read-only re-read cannot: the
+# target may be running after an unconfirmed flash, reset, or session start, and
+# only driving it into a defined state answers that. Reaching for this set is a
+# physical act, so it is gated on the bench's recovery.auto_recover policy.
+RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
+    {
+        "debug_session_start_unconfirmed",
+        "debugger_result_unconfirmed",
     }
 )
 _LOCAL_LOCKS: set[str] = set()
@@ -51,6 +68,30 @@ def _public_record(record: JsonObject | None) -> JsonObject | None:
     redacted = redact_sensitive(record)
     assert isinstance(redacted, dict)
     return {key: value for key, value in redacted.items() if key not in _RECORD_OUTPUT_HIDDEN_KEYS}
+
+
+def _record_cleanup_reasons(record: JsonObject | None) -> list[str]:
+    """Every distinct cleanup reason an incident record carries.
+
+    An adopted incident keeps one top-level ``reason``; a quarantine this owner
+    raised keeps one per lease. Both have to reach the operator, because the
+    reason is the only field that separates a retryable toolchain fault from an
+    unconfirmed physical effect that needs a bench inspection."""
+    if not isinstance(record, dict):
+        return []
+    reasons: list[str] = []
+    top_level = record.get("reason")
+    if isinstance(top_level, str) and top_level:
+        reasons.append(top_level)
+    leases = record.get("leases")
+    for lease in leases if isinstance(leases, list) else []:
+        if not isinstance(lease, dict):
+            continue
+        lease_reasons = lease.get("cleanup_reasons")
+        for reason in lease_reasons if isinstance(lease_reasons, list) else []:
+            if isinstance(reason, str) and reason and reason not in reasons:
+                reasons.append(reason)
+    return reasons
 
 
 class CoordinationError(RuntimeError):
@@ -171,6 +212,15 @@ class HardwareLease:
     def resolve_retryable_cleanup(self, reason: str) -> bool:
         return self.coordinator.resolve_retryable_cleanup(self, reason)
 
+    def cleanup_reasons(self) -> list[str]:
+        """Distinct reasons this lease is holding cleanup state, in the order they occurred."""
+        reasons: list[str] = []
+        for error in self.errors:
+            reason = error.get("reason")
+            if isinstance(reason, str) and reason and reason not in reasons:
+                reasons.append(reason)
+        return reasons
+
     def status(self) -> JsonObject:
         return {
             "lease_id": self.lease_id,
@@ -181,6 +231,10 @@ class HardwareLease:
             "audit_ok": self.audit_ok,
             "cleanup_required": self.state in {"cleanup_required", "quarantined"},
             "quarantined": self.state in {"cleanup_required", "quarantined"},
+            # The reason decides whether a caller may retry or an operator has to
+            # inspect the bench, so it travels with the lease into the project
+            # record and every tool result instead of only into the marker file.
+            "cleanup_reasons": self.cleanup_reasons(),
             "quarantine_id": self.quarantine_id,
         }
 
@@ -404,13 +458,16 @@ class HardwareCoordinator:
                 return
             self._quarantine_registered_lease(lease, reason, error, audit_broken=audit_broken)
 
-    def resolve_retryable_cleanup(self, lease: HardwareLease, reason: str) -> bool:
+    def resolve_retryable_cleanup(self, lease: HardwareLease, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
         with self._guard:
             if not self._valid_lease(lease):
                 lease.valid = False
                 lease.state = "stale"
                 return False
-            if reason not in RETRYABLE_CLEANUP_REASONS:
+            # Callers that only re-read hardware stay on the default set; the
+            # wider one is reachable only through a caller that has driven the
+            # target into a defined state first.
+            if reason not in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed):
                 return False
             if lease.state != "cleanup_required" or not lease.audit_ok or any(error.get("reason") != reason for error in lease.errors):
                 return False
@@ -424,6 +481,60 @@ class HardwareCoordinator:
             self._persist_lease(lease)
             self._persist_project("cleanup_required" if self.blocked else "active")
             return True
+
+    def recoverable_reasons(self) -> frozenset[str]:
+        """The reasons this bench's policy and grants actually let the owner clear.
+
+        ``reset_halt`` degrades to the read-only set without ``allow_reset``: the
+        config may permit the stronger predicate while the bound probe does not
+        authorize the reset it needs."""
+        policy = self.config.recovery.auto_recover
+        if policy == "off":
+            return frozenset()
+        debugger = self.config.debugger
+        if policy == "reset_halt" and (debugger is None or debugger.permissions.allow_reset):
+            return RESET_RECOVERABLE_CLEANUP_REASONS
+        return RETRYABLE_CLEANUP_REASONS
+
+    def retryable_incident(self, allowed: frozenset[str] | None = None) -> str | None:
+        """The single reason this owner's whole incident consists of, if recoverable.
+
+        Machine recovery may only address an incident this live owner raised and
+        still holds. An incident adopted from a dead owner, a broken audit, a mix
+        of reasons, or a still-active sibling lease all leave state that no check
+        this process can run will settle, so each of those keeps needing the
+        operator regardless of how wide ``allowed`` is."""
+        with self._guard:
+            if self._state != "open" or not self.blocked or self.project_lock is None:
+                return None
+            quarantined = [lease for lease in self.leases.values() if lease.state == "cleanup_required"]
+            if not quarantined or any(lease.state == "active" for lease in self.leases.values()):
+                return None
+            if any(not lease.audit_ok for lease in quarantined):
+                return None
+            held = {resource for lease in quarantined for resource in lease.resources}
+            if not self.incident_resources <= held:
+                return None
+            reasons = {reason for lease in quarantined for reason in lease.cleanup_reasons()}
+            if len(reasons) != 1:
+                return None
+            reason = reasons.pop()
+            return reason if reason in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed) else None
+
+    def resolve_retryable_incident(self, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
+        """Clear a recoverable incident once the caller has verified safe state.
+
+        The caller owns the verification and, with it, the decision of how wide
+        ``allowed`` may be; this only performs the state transition, and only for
+        the exact incident ``retryable_incident`` still reports."""
+        with self._guard:
+            permitted = RETRYABLE_CLEANUP_REASONS if allowed is None else allowed
+            if reason not in permitted or self.retryable_incident(permitted) != reason:
+                return False
+            for lease in [item for item in self.leases.values() if item.state == "cleanup_required"]:
+                if not self.resolve_retryable_cleanup(lease, reason, allowed=permitted):
+                    return False
+            return not self.blocked
 
     def poison(self, reason: str, error: object | None = None, *, audit_broken: bool = False, resources: list[str] | None = None) -> None:
         with self._guard:
@@ -473,13 +584,20 @@ class HardwareCoordinator:
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
+            blocked = self.blocked or blocked_state
+            reasons = _record_cleanup_reasons(record)
             return {
                 "ok": True,
                 "tool": "hardware_lease_status",
                 "project_resource": self.project_key,
                 "owner_active": owner_active,
                 "snapshot_atomic": snapshot_atomic,
-                "blocked": self.blocked or blocked_state,
+                "blocked": blocked,
+                # Lifted out of the record so an operator can decide between
+                # retrying and walking to the bench without opening state files.
+                "cleanup_reasons": reasons,
+                "auto_recoverable": blocked and bool(reasons) and all(reason in self.recoverable_reasons() for reason in reasons),
+                "auto_recover_policy": self.config.recovery.auto_recover,
                 "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
                 "lifecycle_state": self._state,
                 # Strip secret-named fields AND the absolute env-derived paths

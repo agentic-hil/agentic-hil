@@ -455,6 +455,30 @@
           "default": ".agentic-hil/logs"
         }
       }
+    },
+    "recovery": {
+      "type": "object",
+      "description": "How far the owning process may clear its own hardware quarantines before an operator is required.",
+      "additionalProperties": false,
+      "properties": {
+        "auto_recover": {
+          "type": "string",
+          "enum": [
+            "off",
+            "readonly",
+            "reset_halt"
+          ],
+          "default": "reset_halt",
+          "description": "off: only an operator clears a quarantine. readonly: reap this owner's debugger processes and re-read the probe, touching nothing physical. reset_halt: additionally drive a reset-into-halt to settle an unconfirmed flash or reset. Use readonly on a bench whose peripherals react to a reset."
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 3,
+          "description": "Machine recovery attempts allowed per quarantine incident before the owner stops trying and defers to an operator."
+        }
+      }
     }
   }
 }

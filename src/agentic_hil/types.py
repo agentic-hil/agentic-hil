@@ -120,6 +120,24 @@ class LogsConfig:
 
 
 @dataclass(frozen=True)
+class RecoveryConfig:
+    """How far this bench lets the owner clear its own quarantines.
+
+    ``off`` always defers to the operator. ``readonly`` may reap this owner's
+    debugger processes and re-read the probe, which touches nothing physical.
+    ``reset_halt`` may additionally drive a reset-into-halt to establish a
+    defined state, which is what settles an unconfirmed flash or reset — and is
+    a physical action, so a bench whose peripherals react to a reset should say
+    ``readonly`` here."""
+
+    auto_recover: str = "reset_halt"
+    max_attempts: int = 3
+    # False when the config never named a policy, which is the one case an
+    # operator has not actually chosen the physical actions being taken.
+    auto_recover_explicit: bool = False
+
+
+@dataclass(frozen=True)
 class AgenticHILConfig:
     config_path: str
     work_dir: str
@@ -134,6 +152,7 @@ class AgenticHILConfig:
     validation: ValidationConfig
     reports: ReportsConfig
     logs: LogsConfig
+    recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     # The probe this config instance drives. A backend, a coordinator resource
     # and a debugger tool all act on exactly one probe, so the selection is made
     # once — by name — and carried here instead of re-derived at each call site.

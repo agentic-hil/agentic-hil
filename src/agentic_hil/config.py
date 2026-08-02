@@ -34,6 +34,7 @@ from agentic_hil.types import (
     IoPermissions,
     JsonObject,
     LogsConfig,
+    RecoveryConfig,
     ReportsConfig,
     TargetConfig,
     ValidationConfig,
@@ -200,6 +201,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     validation_raw = mapping(raw.get("validation"), "validation")
     reports_raw = mapping(raw.get("reports"), "reports")
     logs_raw = mapping(raw.get("logs"), "logs")
+    recovery_raw = mapping(raw.get("recovery"), "recovery")
 
     target = target_config(target_raw)
     debuggers = {name: named_debugger_config(name, value, target) for name, value in debuggers_raw.items()}
@@ -227,6 +229,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         validation=validation_config(validation_raw),
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
+        recovery=recovery_config(recovery_raw),
         debugger_id=single[0],
         debugger=single[1],
     )
@@ -1926,6 +1929,17 @@ def reports_config(raw: JsonObject) -> ReportsConfig:
 
 def logs_config(raw: JsonObject) -> LogsConfig:
     return LogsConfig(directory=str(raw.get("directory", ".agentic-hil/logs")))
+
+
+def recovery_config(raw: JsonObject) -> RecoveryConfig:
+    # Whether the key was named is recorded, not just its value: a bench that
+    # never chose a policy still gets the default, but machine recovery says so
+    # in the audit the first time it acts physically under it.
+    return RecoveryConfig(
+        auto_recover=str(raw.get("auto_recover", RecoveryConfig.auto_recover)),
+        max_attempts=int(raw.get("max_attempts", RecoveryConfig.max_attempts)),
+        auto_recover_explicit="auto_recover" in raw,
+    )
 
 
 REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
