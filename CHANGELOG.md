@@ -4,6 +4,33 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Changed
+
+- **A probe_id is required before any board is driven, not only when several probes are configured.** With no `probe_id` every backend omits its serial selector, so the toolchain drives whichever probe the host enumerates first — one configured debugger is not one attached board. `debugger_probes_list` and `debugger_info` still work without one, so the ids can still be discovered, and the config still loads without one.
+- **Two ordinary same-backend debuggers with no ids load again.** Coordination-resource validation fell back to the shared executable, so the documented "load the config, then discover the ids" bootstrap was impossible. Entries that name neither a probe nor a lease are skipped in that pass; explicit `probe_id` and `resource_id` collisions are rejected as before.
+- **A Claude or opencode MCP entry is only replaced when this installation recorded writing it.** Ownership was inferred from the executable passing the general trust check, which an operator's own reviewed wrapper does too, so a deliberate hardware gate could be silently repointed. A successful registration now leaves a receipt under the user state root. An installation from before the receipt whose launcher path has since moved gets one `mcp_config_conflict`; an unchanged path still matches as current.
+- **Direct PEAK and SocketCAN adapters refuse configuration they cannot apply.** `pcanbasic_dll`, a plain `data_bitrate`, and SocketCAN `listen_only` are rejected at `can_session_start` with the remediation named, instead of being dropped. PEAK `listen_only` is enforced with `BusState.PASSIVE`.
+- **`can_send` builds CAN FD frames on an `fd: true` bus.** A classic bus never accepts more than eight bytes whatever `max_frame_data_bytes` says, and an FD bus takes only the discrete DLC lengths and has no remote frames.
+- `agentic-hil schema`, `test-schema` and `mcp-config` print their document alone. They previously appended `{"ok": true}`, so redirecting the output produced two concatenated JSON documents.
+- `agentic-hil mcp-stdio` and `com-stdio` report startup errors on stderr, leaving stdout to the transport.
+
+### Fixed
+
+- **Two configured names that resolve to one physical pyOCD probe are refused before anything is driven.** pyOCD matches `--uid` as a substring, so selectors that do not contain each other (`OCD1`, `123`) can both resolve to `PYOCD123`; a plan that flashed two named boards flashed one board twice.
+- **A lost `-exec-continue` acknowledgement no longer abandons a possibly-running target.** The command bytes reach GDB before its result record is waited for, so a timeout is ambiguous. It now falls through to the interrupt and stop-confirmation path, and the session stays reachable for `debug_halt` instead of moving to `error`.
+- **ST-Link `reset_target` with `mode: halt` or `init` actually resets.** Both mapped to `-halt` alone, which stops an already-running core without resetting it and then usually reported `reset_unconfirmed`.
+- **OpenOCD flashing honours `debuggers.<name>.flash_address` for raw `.bin` artifacts.** It emitted no offset, so the image was based at zero; ST-Link and pyOCD already required the field.
+- **A short serial write is reported as one.** `com_write` discarded the count `serial.write` returns and audited and reported the requested length, so a truncated stimulus read as complete.
+- **A serial reader that dies during `com_read` fails the read.** The error was nested under a top-level `ok: true`, so device loss was indistinguishable from valid silence.
+- The source distribution's own test suite collects and runs; it previously aborted at collection because a shipped test imported repository-only tooling. CI now unpacks the archive, installs from it, and runs it.
+- Published-mode install evaluation compares the installed package against a host-generated digest of the release tag instead of accepting any package whose digest could be computed.
+
+### Removed
+
+- The dead `templates/mcp.json` package data. It shipped the bare `agentic-hil` command that registration refuses, and nothing read or updated it. Use `agentic-hil mcp-config` or `setup`, which generate a verified absolute path.
+
 ## [0.5.0] - 2026-08-02
 
 ### Changed
