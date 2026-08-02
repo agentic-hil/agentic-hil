@@ -28,15 +28,12 @@ describes, then from this directory:
 
 ```bash
 agentic-hil setup --agent claude-code   # or: codex / opencode
-# setup writes the external deny-by-default config and prints its path. This
-# demo needs the probe, flash, reset, and UART-read permissions enabled there,
-# and com_ports.dut_uart.device set to your port (/dev/ttyACM0, COM5, ...).
-# agentic-hil.config.example.yaml shows the shape; review every permission
-# before enabling it, then:
+# The included profile resolves one ST-Link, target, and matching COM port, then
+# externally grants only requested probe, flash, reset, and UART-read access.
 agentic-hil doctor
 ```
 
-The authoritative file belongs outside the repository at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Do not commit a machine-specific copy. The included template enables only the probe, flash, reset, and UART-read permissions required by this demo; review it before use.
+Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. The profile declares requirements; setup resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
 
 ## Run the loop from an agent (MCP)
 

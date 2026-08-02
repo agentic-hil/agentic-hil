@@ -1,7 +1,5 @@
-# Template only: copy these contents to the external config created by
-# `agentic-hil init`, never to the repository. Replace workspace_root with this
-# demo's absolute path, set state_root to an operator-controlled absolute path
-# outside the workspace, and adjust host-specific debugger and serial paths.
+# Bootstrap profile for `agentic-hil init` / `setup`. Roots, debugger/probe,
+# target, and serial bindings resolve externally; placeholders show final shape.
 workspace_root: "/absolute/path/to/agentic-hil/examples/nucleo-f446re_demo"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
