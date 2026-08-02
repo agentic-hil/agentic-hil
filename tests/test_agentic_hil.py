@@ -26,7 +26,7 @@ from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
-from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
+from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter, payload_frame
 from agentic_hil.cli import (
     build_parser,
     debugger_probes,
@@ -2090,6 +2090,155 @@ def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> Non
     result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
     assert result["ok"] is False
     assert result["error_type"] == "config_invalid"
+
+
+def _capture_can_bus(monkeypatch: pytest.MonkeyPatch) -> dict:
+    captured: dict = {}
+
+    class _FakeBus:
+        def shutdown(self) -> None:
+            return None
+
+    def fake_bus(**kwargs):
+        captured.update(kwargs)
+        return _FakeBus()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "can",
+        SimpleNamespace(Bus=fake_bus, BusState=SimpleNamespace(PASSIVE="passive-state")),
+    )
+    return captured
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only PEAK-on-SocketCAN routing")
+def test_peak_adapter_on_a_kernel_interface_opens_the_socketcan_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Validation accepts `adapter: peak, channel: can0` and tells the operator
+    # to write exactly that. Opening it with the pcan backend fails on the one
+    # shape the code recommends.
+    config = load_config(str(write_config(tmp_path, can_buses_yaml='can_buses:\n  dut_can:\n    adapter: "peak"\n    channel: "can0"\n')))
+    captured = _capture_can_bus(monkeypatch)
+
+    result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+
+    assert result["ok"] is True, result
+    assert captured["interface"] == "socketcan"
+    assert result["backend"] == "socketcan"
+    assert result["adapter"] == "peak"
+
+
+@pytest.mark.parametrize(
+    ("field", "bus_yaml"),
+    [
+        ("pcanbasic_dll", 'can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n    pcanbasic_dll: "/opt/pcan/libpcanbasic.so"\n'),
+        ("data_bitrate", 'can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n    fd: true\n    data_bitrate: 2000000\n'),
+        ("listen_only", 'can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n    listen_only: true\n'),
+    ],
+)
+def test_direct_can_adapter_refuses_an_option_it_cannot_enforce(
+    field: str,
+    bus_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Silently dropping listen_only opens an active controller on a bus the
+    # operator declared passive; dropping the data phase transmits at the wrong
+    # timing. Both were ignored on this path while the process bridge got them.
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=bus_yaml)))
+    captured = _capture_can_bus(monkeypatch)
+
+    result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == f"can_buses.dut_can.{field}"
+    assert result["side_effect_committed"] is False
+    assert captured == {}, "no bus may be constructed for a refused option"
+
+
+def test_listen_only_peak_bus_is_opened_passive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = "PCAN_USBBUS1" if os.name == "nt" else "can0"
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=f'can_buses:\n  dut_can:\n    adapter: "peak"\n    channel: "{channel}"\n    listen_only: true\n')))
+    captured = _capture_can_bus(monkeypatch)
+
+    result = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+
+    if os.name == "nt":
+        assert result["ok"] is True, result
+        assert captured["state"] == "passive-state"
+        assert result["session"].listen_only is True
+    else:
+        # can0 routes to SocketCAN, where listen-only is an `ip link` property.
+        assert result["ok"] is False
+        assert result["field"] == "can_buses.dut_can.listen_only"
+
+
+def test_fd_bus_sends_fd_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An FD bus that sends classic messages is rejected by the backend or put
+    # on the wire with the wrong frame semantics.
+    config = load_config(str(write_config(tmp_path, can_buses_yaml='can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n    fd: true\n')))
+    sent: list = []
+
+    class _FakeBus:
+        def send(self, message, timeout=None) -> None:
+            sent.append(message)
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "can",
+        SimpleNamespace(Bus=lambda **kwargs: _FakeBus(), Message=SimpleNamespace, BusState=SimpleNamespace(PASSIVE="passive-state")),
+    )
+    opened = open_python_can_adapter(config, "dut_can", config.can_buses["dut_can"], True)
+    assert opened["ok"] is True, opened
+
+    result = opened["session"].send(CanFrame(id=0x123, extended=False, rtr=False, data=bytes(12)))
+
+    assert result["ok"] is True, result
+    assert sent[0].is_fd is True
+
+
+@pytest.mark.parametrize(
+    ("fd", "payload", "expected_ok"),
+    [
+        (False, "00" * 12, False),
+        (False, "00" * 8, True),
+        (True, "00" * 12, True),
+        (True, "00" * 13, False),
+    ],
+)
+def test_frame_payload_length_matches_what_the_bus_can_carry(
+    fd: bool,
+    payload: str,
+    expected_ok: bool,
+    tmp_path: Path,
+) -> None:
+    # max_frame_data_bytes defaults to 64 when fd is true, so validation used to
+    # accept payloads the classic message the direct path builds cannot hold.
+    bus_yaml = 'can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n'
+    if fd:
+        bus_yaml += "    fd: true\n"
+    else:
+        bus_yaml += "    max_frame_data_bytes: 64\n"
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=bus_yaml)))
+
+    result = payload_frame(config.can_buses["dut_can"], {"frame_id": 0x123, "data_hex": payload})
+
+    assert result["ok"] is expected_ok, result
+
+
+def test_fd_bus_refuses_a_remote_frame(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, can_buses_yaml='can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "vcan0"\n    fd: true\n')))
+
+    result = payload_frame(config.can_buses["dut_can"], {"frame_id": 0x123, "rtr": True})
+
+    assert result["ok"] is False
+    assert "remote frames" in result["summary"]
 
 
 @pytest.mark.parametrize("command", ["init", "doctor", "mcp-stdio", "com-stdio"])

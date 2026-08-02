@@ -50,6 +50,11 @@ from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
 CAN_DRAIN_BATCH_LIMIT = 16
 CAN_DRAIN_TIMEOUT_S = 1.0
+CLASSIC_CAN_MAX_DATA_BYTES = 8
+# CAN FD encodes its payload size as a DLC, so only these lengths exist on the
+# wire. Anything between them would be padded by the driver into a frame the
+# caller did not write.
+CAN_FD_DATA_LENGTHS = frozenset({0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64})
 
 
 @dataclass(frozen=True)
@@ -452,17 +457,22 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
 
 
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object, timeout_s: float):
+    def __init__(self, adapter_name: str, bus: object, timeout_s: float, fd: bool = False, listen_only: bool = False):
         self.adapter_name = adapter_name
         self.bus = bus
         self.timeout_s = timeout_s
+        # The bus was opened in one mode and every frame leaving it has to say
+        # so. A python-can Message defaults to classic, so an FD bus that does
+        # not carry its mode here transmits FD payloads with classic semantics.
+        self.fd = fd
+        self.listen_only = listen_only
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
         try:
             import can
 
-            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data)
+            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data, is_fd=self.fd)
             self.bus.send(message, timeout=self.timeout_s)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
@@ -490,28 +500,52 @@ class PythonCanAdapterSession:
         return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
 
     def status(self) -> JsonObject:
-        return {"active": self.active, "backend": self.adapter_name}
+        return {"active": self.active, "backend": self.adapter_name, "fd": self.fd, "listen_only": self.listen_only}
+
+
+def unenforceable_direct_can_option(bus_config: CanBusConfig, interface: str) -> tuple[str, str] | None:
+    """The configured field this direct backend cannot actually apply.
+
+    A safety or timing option that python-can silently swallows is worse than
+    one that is refused: the operator wrote `listen_only` and got an active
+    controller that ACKs the traffic they asked it only to watch. Everything
+    this path cannot enforce is named here and refused before a bus exists.
+    """
+    if bus_config.pcanbasic_dll is not None:
+        return ("pcanbasic_dll", "python-can loads the PCAN-Basic library itself, so a direct adapter cannot select a DLL. Use adapter: process to drive a specific PCAN-Basic library.")
+    if bus_config.data_bitrate is not None:
+        return ("data_bitrate", "A direct adapter cannot set the CAN FD data-phase bitrate: python-can takes FD timing from the interface itself. Set it on the interface (SocketCAN: `ip link set <channel> type can ... dbitrate <rate> fd on`) or use adapter: process.")
+    if bus_config.listen_only and interface != "pcan":
+        return ("listen_only", "SocketCAN listen-only is a property of the interface, not of the opened bus. Set it with `ip link set <channel> type can listen-only on`, or use adapter: process. A direct adapter would open an active controller that participates in the traffic.")
+    return None
 
 
 def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
-    if (
-        bus_config.adapter == "peak"
-        and not is_windows_peak_channel(bus_config.channel)
-        and os.name != "nt"
-        and not re.fullmatch(r"can\d+|vcan\d+|slcan\d+", bus_config.channel)
-    ):
+    # A Linux PEAK device the kernel exposes as a netdev is driven through
+    # SocketCAN; PCAN-Basic channel names are the Windows shape. Selecting the
+    # pcan backend for `can0` would fail to open the very shape validation below
+    # tells the operator to write.
+    peak_via_socketcan = bus_config.adapter == "peak" and not is_windows_peak_channel(bus_config.channel) and os.name != "nt"
+    if peak_via_socketcan and not re.fullmatch(r"can\d+|vcan\d+|slcan\d+", bus_config.channel):
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0.", "side_effect_committed": False}
+    interface = "pcan" if bus_config.adapter == "peak" and not peak_via_socketcan else "socketcan"
+    unenforceable = unenforceable_direct_can_option(bus_config, interface)
+    if unenforceable is not None:
+        field, summary = unenforceable
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.{field}", "summary": summary, "side_effect_committed": False}
     try:
         import can
     except ImportError:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False}
     try:
-        interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
-        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+        # BusState is read only when a passive bus was asked for, so a classic
+        # active bus keeps working against a minimal python-can stand-in.
+        passive = {"state": can.BusState.PASSIVE} if bus_config.listen_only else {}
+        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages, **passive)
         shutdown = getattr(bus, "shutdown", None)
         provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
         try:
-            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s, bus_config.fd, bus_config.listen_only)
         except BaseException as primary_error:
             try:
                 if callable(shutdown):
@@ -563,7 +597,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error), "side_effect_committed": False}
     session = ProcessCanAdapterSession(child, bus_config.timeout_s)
     try:
-        opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
+        opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "pcanbasic_dll": bus_config.pcanbasic_dll, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
     except BaseException as primary_error:
         try:
             session.close()
@@ -606,8 +640,17 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
     data = parse_hex_bytes(data_hex)
     if data is None:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "data_hex must contain valid hexadecimal bytes."}
-    if len(data) > bus_config.max_frame_data_bytes:
-        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bytes_requested": len(data), "max_frame_data_bytes": bus_config.max_frame_data_bytes}
+    # A classic bus cannot carry more than eight bytes whatever the config says,
+    # and only CAN FD has the longer discrete lengths. Accepting a payload the
+    # wire cannot represent leaves the backend to reject or silently reshape it.
+    limit = bus_config.max_frame_data_bytes if bus_config.fd else min(bus_config.max_frame_data_bytes, CLASSIC_CAN_MAX_DATA_BYTES)
+    if len(data) > limit:
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds the largest payload this bus can carry.", "bytes_requested": len(data), "max_frame_data_bytes": limit, "fd": bus_config.fd}
+    if bus_config.fd:
+        if rtr:
+            return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN FD has no remote frames, so rtr cannot be set on an fd: true bus."}
+        if len(data) not in CAN_FD_DATA_LENGTHS:
+            return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN FD carries only the discrete payload lengths; a shorter payload has to be padded by the caller.", "bytes_requested": len(data), "allowed_values": sorted(CAN_FD_DATA_LENGTHS)}
     return {"ok": True, "frame": CanFrame(id=parsed_id, extended=extended, rtr=rtr, data=data)}
 
 
