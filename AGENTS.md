@@ -10,6 +10,17 @@ Use Agentic HIL MCP tools for hardware actions. Do not bypass them with raw Open
 
 If an Agentic HIL tool returns `permission_denied`, stop and ask the operator to review the authoritative config. Do not bypass it or replace the operator-controlled environment or MCP host registration.
 
+Read facts about the server from its MCP resources, not from its source or its installed package. A failing result already carries `remediation` and `do_not` when a fix is known; `resources/list` carries the rest.
+
+| Resource | Answers |
+|---|---|
+| `agentic-hil://reference/debugger-backends` | which `debuggers.<name>` field each of `openocd`, `stlink`, `pyocd` requires, discovers, or ignores; when `probe_id` and `flash_address` become mandatory |
+| `agentic-hil://reference/target-support` | which field names the target per backend, known-good values, where pyOCD `target_type` values come from |
+| `agentic-hil://reference/errors` | every `error_type` with its meaning, ordered fix, and the wrong fix; one entry at `.../errors/<error_type>[:<field-or-backend>]` |
+| `agentic-hil://reference/platform-paths` | which locations pass the path trust check, and where the configuration and `state_root` belong |
+| `agentic-hil://reference/lease-lifecycle` | lease states, the continue predicate, the recovery path |
+| `agentic-hil://reference/config-schema` | the authoritative configuration JSON Schema |
+
 Continue after a result only when `ok` is true, `target_ok`, `audit_ok`, and `cleanup_ok` are not false, `cleanup_required` and `quarantined` are not true, `lease_state` is one of `null`, `active`, or `released` (any other value, including `stale`, blocks success), `side_effect_status` is not `unknown` or `partial`, and `hardware_state` is not `unknown`. The public `overall_success()` helper in `agentic_hil.report` encodes exactly this predicate. For quarantined hardware, stop effects and read `cleanup_reasons` plus `auto_recoverable` from `hardware_lease_status`. `auto_recoverable: true` means the running owner clears the incident itself on the next hardware call, so retry that call once: it reaps leftover debugger processes, verifies the safe state under the bench's `auto_recover_policy`, and proceeds. A refusal carrying `auto_recovery_attempted: true` means that already ran and did not confirm the safe state — do not retry it again. Otherwise ask the operator to inspect `agentic-hil lease-status`, physically confirm the current incident, and run `agentic-hil recover --confirm-safe-state --quarantine-id <id>`. If recovery returns `config_changed` (the authoritative config changed since the incident), the operator verifies the config delta and reruns with the explicit `--accept-config-change` override.
 
 Install or update the local agent setup skill with:
