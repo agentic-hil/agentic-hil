@@ -13,7 +13,7 @@ Not project-local. The whole of it, before you start:
 - A user-local package and console script in your home directory. No admin rights, ever.
 - An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches.
 - A skill file in your agent's skill directory.
-- One config per project, outside its repository, every hardware permission denied.
+- One config per project, outside its repository. Reading a device needs no permission; every permission that writes or changes state is denied.
 - Nothing inside the firmware project, nothing committed — no `.mcp.json`, no config, no checkout. `setup` needs none of them, and writing one puts the hardware gate in a file anyone with repository access can change.
 
 Larger than what the operator asked for? Say so and let them decide.
@@ -68,7 +68,7 @@ Agent names: `claude-code`/`claude`, `codex`, `opencode`. For another skill-capa
 
 One command instead of `init`, `skill-install`, MCP registration and `doctor` separately. It returns one JSON result with a per-step breakdown; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
 
-The config it writes lives outside the repository, sets `workspace_root` to this project, and denies every hardware permission. **It is complete as written.** Adding debuggers, COM ports or CAN buses is not part of installing, and neither is granting a permission on one — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it.
+The config it writes lives outside the repository, sets `workspace_root` to this project, and denies every permission that writes or changes state. Reading needs none: a run locks the devices its test plan names for its whole duration, and that exclusivity is what protects a read. **It is complete as written.** Adding debuggers, COM ports or CAN buses is not part of installing, and neither is granting a permission on one — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it.
 
 **`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
 
