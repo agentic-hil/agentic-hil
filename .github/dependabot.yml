@@ -1,5 +1,10 @@
 version: 2
 updates:
+  # This entry covers pyproject.toml and the lock files under requirements/.
+  # The pip ecosystem already looks into a requirements/ subdirectory from the
+  # configured directory, so a second entry pointing at "/requirements" does not
+  # add coverage - it produces a duplicate pull request against the same file
+  # for every update, which is what it did.
   - package-ecosystem: pip
     directory: "/"
     schedule:
@@ -8,24 +13,19 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    # wrapt is not a dependency this project declares. It arrives through
+    # python-can, which requires wrapt~=1.10, so anything from 2.0 up cannot
+    # resolve. python-can 4.6.1 is the newest release and predates wrapt 2.0.0
+    # by two months, so there is no version to move to; the ceiling is upstream,
+    # not here. Mirror that ceiling instead of reopening the same unmergeable
+    # pull request every month, and keep 1.x patches flowing. Drop this once
+    # python-can ships a release that accepts wrapt 2.
+    ignore:
+      - dependency-name: "wrapt"
+        update-types:
+          - version-update:semver-major
     groups:
       python-dependencies:
-        patterns:
-          - "*"
-
-  # The hash-pinned lock files under requirements/ pin the release pipeline's
-  # build tooling. Without their own entry they never get updated, and a pinned
-  # dependency that never moves is a stale dependency.
-  - package-ecosystem: pip
-    directory: "/requirements"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:15"
-      timezone: Europe/Berlin
-    open-pull-requests-limit: 5
-    groups:
-      release-tooling:
         patterns:
           - "*"
 
