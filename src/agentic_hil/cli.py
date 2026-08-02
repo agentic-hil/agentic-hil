@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack, suppress
@@ -241,6 +242,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--agent", default="claude-code")
     setup_parser.add_argument("--force", action="store_true")
 
+    upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh agent skills")
+    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh this agent's skill after upgrading; repeat for multiple agents")
+
     return parser
 
 
@@ -274,7 +278,105 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return install_skill(args.agent, args.target, args.force)
     if args.command == "setup":
         return setup_project(args.agent, args.force)
+    if args.command == "upgrade":
+        return upgrade_installation(args.agent)
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
+
+
+def _distribution_installer() -> str | None:
+    try:
+        from importlib.metadata import distribution
+
+        installer = distribution("agentic-hil").read_text("INSTALLER")
+    except Exception:
+        return None
+    return installer.strip().lower() if installer else None
+
+
+def _upgrade_command() -> tuple[str, list[str]]:
+    """Select the manager that owns the running installation, never another PATH copy."""
+    prefix = os.path.normcase(str(Path(sys.prefix).resolve())).replace("\\", "/").casefold()
+    installer = _distribution_installer()
+    if "/uv/tools/agentic-hil" in prefix:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
+        return "uv", [uv, "tool", "upgrade", "agentic-hil"]
+    if "/pipx/venvs/agentic-hil" in prefix:
+        pipx = shutil.which("pipx")
+        if pipx is None:
+            raise ConfigError("upgrade_manager_not_found", "This installation is managed by pipx, but pipx is not on PATH.", {"manager": "pipx", "python": sys.executable})
+        return "pipx", [pipx, "upgrade", "agentic-hil"]
+    if installer == "uv":
+        uv = shutil.which("uv")
+        if uv is None:
+            raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
+        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", "agentic-hil"]
+    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
+
+
+def _run_upgrade_process(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=600, check=False)
+
+
+def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
+    result: JsonObject = {"returncode": completed.returncode}
+    if completed.stdout.strip():
+        result["stdout"] = completed.stdout.strip()
+    if completed.stderr.strip():
+        result["stderr"] = completed.stderr.strip()
+    return result
+
+
+def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
+    """Upgrade the package owning this process, then run maintenance from new code."""
+    requested_agents = agents or []
+    invalid = [agent for agent in requested_agents if resolve_skill_agent(agent) is None]
+    if invalid:
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
+
+    manager, command = _upgrade_command()
+    previous_version = __version__
+    try:
+        installed = _run_upgrade_process(command)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "error_type": "upgrade_failed", "summary": "Agentic HIL package upgrade could not run.", "manager": manager, "command": command, "previous_version": previous_version, "exception_type": type(error).__name__, "detail": str(error)}
+    install_result = _process_result(installed)
+    if installed.returncode != 0:
+        return {"ok": False, "error_type": "upgrade_failed", "summary": "Agentic HIL package manager reported an upgrade failure.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result}
+
+    version_command = [sys.executable, "-m", "agentic_hil", "--version"]
+    verified = _run_upgrade_process(version_command)
+    verification = _process_result(verified)
+    current_version = verified.stdout.strip() if verified.returncode == 0 else None
+    if verified.returncode != 0 or not current_version:
+        return {"ok": False, "error_type": "upgrade_verification_failed", "summary": "Package manager completed, but updated Agentic HIL could not be loaded by this installation's Python.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result, "verification": verification}
+
+    skill_results: JsonObject = {}
+    with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
+        for agent in requested_agents:
+            skill_command = [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", agent]
+            refreshed = _run_upgrade_process(skill_command, cwd=maintenance_cwd)
+            child = _process_result(refreshed)
+            if refreshed.stdout.strip():
+                with suppress(json.JSONDecodeError):
+                    child["result"] = json.loads(refreshed.stdout)
+            skill_results[agent] = child
+
+    skills_ok = all(result.get("returncode") == 0 for result in skill_results.values())
+    return {
+        "ok": skills_ok,
+        "tool": "agentic_hil_upgrade",
+        "summary": "Agentic HIL upgraded; restart agent hosts to load the new MCP server." if skills_ok else "Agentic HIL package upgraded, but one or more agent skills could not be refreshed.",
+        "manager": manager,
+        "command": command,
+        "python": sys.executable,
+        "previous_version": previous_version,
+        "version": current_version,
+        "install": install_result,
+        "skills": skill_results,
+        "restart_required": True,
+    }
 
 
 def _agent_mcp_config_path(agent_id: str) -> Path:
