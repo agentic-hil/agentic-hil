@@ -11,6 +11,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
+from typing import TextIO
 
 from agentic_hil import __version__
 from agentic_hil.comports import list_available_com_ports
@@ -149,24 +150,35 @@ def skill_agents() -> list[SkillAgent]:
     ]
 
 
+def protocol_stdout_commands() -> set[str]:
+    """Commands whose stdout is a transport, not a place to report to.
+
+    `mcp-stdio` speaks JSON-RPC and `com-stdio` carries raw COM port bytes. A
+    startup diagnostic written there is not a message the caller can read: it is
+    a corrupt first frame. These commands report on stderr and stdout stays
+    exclusively the protocol's."""
+    return {"mcp-stdio", "com-stdio"}
+
+
 def entrypoint(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
         parser.print_help(sys.stderr)
         return 2
+    diagnostic_stream = sys.stderr if args.command in protocol_stdout_commands() else sys.stdout
     try:
         result = dispatch(args)
     except ConfigError as error:
-        print_json(error.to_dict())
+        print_json(error.to_dict(), stream=diagnostic_stream)
         return 1
     except CoordinationError as error:
-        print_json(error.result)
+        print_json(error.result, stream=diagnostic_stream)
         return 1
     if isinstance(result, int):
         return result
     if result is not None:
-        print_json(result)
+        print_json(result, stream=diagnostic_stream)
         return 0 if result_succeeded(result) else 1
     return 0
 
@@ -672,11 +684,14 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[
     return next_steps
 
 
-def schema(output: str | None = None, force: bool = False) -> JsonObject:
+def schema(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = config_schema_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        # The document IS the output. Returning a status envelope would make
+        # `agentic-hil schema > config.schema.json` two concatenated JSON
+        # documents, which no single-document loader can read.
+        return 0
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -685,11 +700,11 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
 
 
-def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = resources.files("agentic_hil").joinpath("schemas", "testconfig.schema.json").read_text(encoding="utf-8")
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return 0
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -745,11 +760,11 @@ def mcp_config_text() -> str:
     return json.dumps({"mcpServers": {"agentic-hil": {"command": mcp_server_command(), "args": ["mcp-stdio"]}}}, indent=2) + "\n"
 
 
-def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
+def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = mcp_config_text()
     if output is None:
         sys.stdout.write(text)
-        return {"ok": True}
+        return 0
     workspace = absolute_without_symlinks(Path.cwd())
     requested = Path(output).expanduser()
     output_path = absolute_without_symlinks(requested if requested.is_absolute() else workspace / requested)
@@ -1417,5 +1432,5 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
     return {"updated": False}
 
 
-def print_json(value: JsonObject) -> None:
-    sys.stdout.write(json.dumps(redact_sensitive(value), indent=2) + "\n")
+def print_json(value: JsonObject, stream: TextIO | None = None) -> None:
+    (stream or sys.stdout).write(json.dumps(redact_sensitive(value), indent=2) + "\n")

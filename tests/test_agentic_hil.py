@@ -419,6 +419,37 @@ def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     assert "Agentic HIL configuration" in schema_path.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("command", "marker"),
+    [
+        ("schema", "Agentic HIL configuration"),
+        ("test-schema", "test reactor configuration"),
+        ("mcp-config", "mcpServers"),
+    ],
+)
+def test_printed_documents_are_one_parseable_json_document(
+    command: str,
+    marker: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `agentic-hil schema > config.schema.json` has to produce a file a normal
+    # single-document loader can read. A trailing {"ok": true} makes it "Extra
+    # data" for every one of them.
+    _trusted_test_mcp_command(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = entrypoint([command])
+
+    assert exit_code == 0
+    printed = capsys.readouterr().out
+    # json.loads raises "Extra data" on a second concatenated document.
+    document = json.loads(printed)
+    assert marker in printed
+    assert set(document) != {"ok"}
+
+
 def test_test_schema_exports_bundled_testconfig_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "testconfig.schema.json"
     result = test_schema(str(schema_path))
@@ -1223,9 +1254,31 @@ def test_mcp_stdio_reports_missing_discovered_config(
 
     exit_code = entrypoint(["mcp-stdio"])
 
-    result = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    # stdout is the JSON-RPC transport. A diagnostic written there is not a
+    # message the host can read, it is a corrupt first frame.
+    assert captured.out == ""
+    result = json.loads(captured.err)
     assert exit_code == 1
     assert result["error_type"] == "config_file_not_found"
+
+
+def test_com_stdio_reports_missing_discovered_config_on_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # com-stdio's stdout carries raw COM port bytes, so it is a transport too.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    exit_code = entrypoint(["com-stdio", "--port", "dut"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["error_type"] == "config_file_not_found"
+    assert exit_code == 1
 
 
 def test_mcp_stdio_passes_authoritative_config_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
