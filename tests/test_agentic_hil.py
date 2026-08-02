@@ -32,7 +32,9 @@ from agentic_hil.cli import (
     doctor,
     entrypoint,
     init_config,
+    init_project,
     initialized_config_path,
+    install_agent,
     install_skill,
     is_agentic_hil_setup_skill,
     mcp_config,
@@ -404,6 +406,296 @@ def test_setup_preserves_absolute_config_override_as_only_authority(
     assert result["steps"]["config"]["skipped"] is True
     assert override.read_bytes() == before
     assert not project_config_path(workspace).exists()
+
+
+def _claude_skill_path() -> Path:
+    return Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
+
+
+def _registered_claude_command() -> str | None:
+    entry = json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))["mcpServers"].get("agentic-hil")
+    return None if entry is None else entry["command"]
+
+
+def _default_state_root() -> Path:
+    """The state root without creating it; user_state_root() would."""
+    return Path(os.environ["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"]) / "agentic-hil"
+
+
+def _refuse_the_config_location(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the profile of hardci-hq#64.
+
+    There, `%APPDATA%` carries an app-capability ACE and the authoritative
+    config's own location fails the ancestor trust check before anything is
+    written. The ACL is not reproducible in a test on either platform; a
+    location the config rules refuse outright is, and it refuses at the same
+    point for the same reason — the location, not the content.
+    """
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(workspace / "in-the-repo.yaml"))
+
+
+def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The machine-wide half is machine state and nothing else.
+
+    It has to run before any project exists, so it may not read a config, and it
+    may not create one — nor the state root a config would have to name.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scope"] == "machine"
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+    assert not project_config_path(elsewhere).exists()
+    assert not _default_state_root().exists()
+
+
+def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    skill_before = _claude_skill_path().read_bytes()
+    registration_before = (Path.home() / ".claude.json").read_bytes()
+
+    again = install_agent(agent="claude-code")
+
+    assert again["ok"] is True, again
+    assert again["steps"]["skill_install"]["installed"] is False
+    assert _claude_skill_path().read_bytes() == skill_before
+    assert (Path.home() / ".claude.json").read_bytes() == registration_before
+
+
+def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    first = init_project(agent="claude-code")
+
+    assert first["ok"] is True, first
+    assert first["steps"]["config"]["ok"] is True
+    assert first["steps"]["doctor"]["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    second = init_project(agent="claude-code")
+
+    assert second["ok"] is True, second
+    assert second["steps"]["config"]["skipped"] is True
+    assert second["steps"]["agent_write_restriction"]["added"] == []
+    assert config_path.read_bytes() == before
+
+
+def test_agent_install_completes_where_the_config_location_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """hardci-hq#64: a refused config location is not the skill's problem.
+
+    Before the split both halves shared one transaction, so this refusal took
+    the skill installation and the MCP registration with it and the operator was
+    left with nothing. The machine-wide half never reads or writes a config, so
+    it has to finish here.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    _refuse_the_config_location(workspace, monkeypatch)
+    with pytest.raises(ConfigError) as refusal:
+        init_project()
+    assert refusal.value.error_type == "config_invalid"
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
+def test_setup_keeps_the_installed_agent_when_the_config_location_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composed command must not lose the half that succeeded.
+
+    Reporting only the configuration refusal would tell the operator nothing
+    about the agent that is now installed, which is exactly what they get to
+    keep on such a profile.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    _refuse_the_config_location(workspace, monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["scopes"]["machine"]["ok"] is True
+    assert result["scopes"]["project"]["ok"] is False
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["steps"]["config"]["error_type"] == "config_invalid"
+    assert result["rollback"]["ok"] is True
+    assert "agentic-hil init" in result["next_step"]
+    # The point of the split: the agent works even though the project does not.
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
+def test_a_failed_project_half_leaves_the_machine_wide_installation_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback stays inside its own half.
+
+    opencode is the case that can go wrong: its MCP entry and its permission
+    rules live in one file, so a project half that restored that file from a
+    snapshot taken before the machine half ran would delete the registration.
+    Each half snapshots when it starts, so the project baseline already holds
+    the machine half's write.
+    """
+    from agentic_hil import cli as cli_module
+
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="opencode")["ok"] is True
+    opencode_json = Path.home() / ".config" / "opencode" / "opencode.json"
+    skill_path = Path.home() / ".config" / "opencode" / "skills" / "agentic-hil" / "SKILL.md"
+    registered = json.loads(opencode_json.read_text(encoding="utf-8"))["mcp"]["agentic-hil"]
+    real_restrict = cli_module.restrict_agent_write_access
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        written = real_restrict(*args, **kwargs)
+        assert written["ok"] is True
+        return {"ok": False, "error_type": "injected_failure", "summary": "late restriction failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.restrict_agent_write_access", write_then_fail)
+
+    result = init_project(agent="opencode")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    # The project half took back its own two writes...
+    assert not initialized_config_path(workspace).exists()
+    assert "permission" not in json.loads(opencode_json.read_text(encoding="utf-8"))
+    # ...and neither of the machine half's.
+    assert json.loads(opencode_json.read_text(encoding="utf-8"))["mcp"]["agentic-hil"] == registered
+    assert skill_path.is_file()
+
+
+def test_a_failed_machine_half_leaves_an_existing_project_config_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the same in the other direction."""
+    from agentic_hil import cli as cli_module
+
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+    real_register = cli_module.register_agent_mcp
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        real_register(*args, **kwargs)
+        return {"ok": False, "error_type": "injected_failure", "summary": "late MCP failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    assert not _claude_skill_path().exists()
+    assert config_path.read_bytes() == before
+
+
+def test_one_agent_install_serves_every_project_on_the_machine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install once per machine, bind once per project.
+
+    The whole reason for the split: the second firmware repository must not
+    reinstall the skill or re-register the MCP server.
+    """
+    outside = tmp_path / "not-a-project"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    machine_files = {path: path.read_bytes() for path in (_claude_skill_path(), Path.home() / ".claude.json")}
+
+    configs = []
+    for name in ("firmware-a", "firmware-b"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        result = init_project()
+        assert result["ok"] is True, result
+        config_path = initialized_config_path(workspace)
+        assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_path.read_text(encoding="utf-8")
+        configs.append(config_path)
+
+    assert configs[0] != configs[1]
+    for path, content in machine_files.items():
+        assert path.read_bytes() == content, f"{path} was rewritten by a project step"
+
+
+def test_setup_is_the_two_halves_and_says_which_is_which(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scopes"]["machine"]["ok"] is True
+    assert result["scopes"]["machine"]["scope"] == "machine"
+    assert result["scopes"]["project"]["scope"] == "project"
+    assert set(result["scopes"]["machine"]["steps"]) == {"skill_install", "mcp_config"}
+    assert set(result["scopes"]["project"]["steps"]) == {"config", "doctor", "agent_write_restriction"}
+    # Each half rolls back only itself, so neither may hold the other's paths.
+    assert result["rollback"]["attempted"] is False
+
+
+def test_both_halves_are_reachable_from_the_command_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outside = tmp_path / "not-a-project"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    _trusted_test_mcp_command(monkeypatch)
+
+    assert entrypoint(["agent-install", "--agent", "claude-code"]) == 0
+    machine = json.loads(capsys.readouterr().out)
+    assert machine["scope"] == "machine"
+
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    assert entrypoint(["init", "--agent", "claude-code"]) == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["scope"] == "project"
+    assert project["steps"]["doctor"]["ok"] is True
+    assert initialized_config_path(workspace).is_file()
 
 
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

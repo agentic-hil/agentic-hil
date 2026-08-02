@@ -719,6 +719,19 @@ def _unreached_project_scope(summary: str) -> JsonObject:
     }
 
 
+def _refused_project_scope(error: ConfigError) -> JsonObject:
+    """Report a project half that was refused before it changed anything.
+
+    Raising here would leave the operator reading a configuration refusal with
+    no word about the machine-wide half that just succeeded — which is the whole
+    thing they get to keep on a profile that refuses the configuration location.
+    """
+    refusal = error.to_dict()
+    scope = _unreached_project_scope(str(refusal.get("summary") or "The project half was refused."))
+    scope["steps"]["config"] = refusal
+    return scope
+
+
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """First run in one command: the machine-wide half, then the project half.
 
@@ -737,7 +750,10 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     if "steps" not in machine_result:
         return machine_result
     if overall_success(machine_result):
-        project_result = init_project(agent=agent)
+        try:
+            project_result = init_project(agent=agent)
+        except ConfigError as error:
+            project_result = _refused_project_scope(error)
     else:
         project_result = _unreached_project_scope("Project setup was not reached; the machine-wide half did not complete, and nothing project-local was changed.")
 
@@ -771,6 +787,13 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
             "agent_write_restriction": project_result["steps"]["agent_write_restriction"],
         },
     }
+    if machine_ok and not ok:
+        result["next_step"] = (
+            "The agent is installed on this machine and stays installed; only the project half was rolled back. "
+            "Fix what its `config` or `doctor` step reports, then run "
+            f"`agentic-hil init --agent {agent}` from this project root. "
+            "`agentic-hil agent-install` does not have to run again."
+        )
     if "left_behind" in machine_result:
         result["left_behind"] = machine_result["left_behind"]
     return result
