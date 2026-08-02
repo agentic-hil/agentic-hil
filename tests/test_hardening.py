@@ -167,7 +167,7 @@ def test_world_writable_derived_state_dir_is_rejected(tmp_path: Path) -> None:
 def test_world_writable_lock_dir_blocks_hardware_coordination(tmp_path: Path) -> None:
     # Coordination state is created when hardware is actually coordinated, not
     # when the coordinator is constructed, so acquiring is where the directory
-    # has to be refused — the last moment before a lock could be taken.
+    # has to be refused â€” the last moment before a lock could be taken.
     from agentic_hil.coordination import HardwareCoordinator
 
     config = load_config(str(write_config(tmp_path)))
@@ -1279,7 +1279,7 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Configured values differ (absolute path vs. bare PATH name), so the
-    # pre-pin collision check passes — but both pin onto the same binary with no
+    # pre-pin collision check passes â€” but both pin onto the same binary with no
     # probe_id, i.e. the same physical probe. Pinned validation must reject it.
     toolchain = tmp_path / "toolchain"
     toolchain.mkdir()
@@ -2050,3 +2050,117 @@ def test_report_api_surfaces_canonical_audit_evidence(tmp_path: Path) -> None:
     Path(workspace_log).write_text("tampered\n", encoding="utf-8")
     retampered = attach_canonical_audit_evidence(config, result)
     assert retampered["canonical_audit"]["workspace_log_verified"] is False
+
+
+def test_staging_refusal_before_any_backend_call_does_not_quarantine_the_lease(tmp_path: Path) -> None:
+    # require_existing_file: false lets validation pass on a file that is not
+    # there yet, so nothing about those bytes was checked. Staging must refuse â€”
+    # but the refusal happened before the backend ran, so it must not be
+    # recorded as an unconfirmed hardware effect and poison the bench.
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_existing_file: false\nlogs:\n", 1), encoding="utf-8")
+    config = load_config(str(config_path))
+    service = AgenticHILToolService(config)
+    try:
+        (tmp_path / "build").mkdir(parents=True, exist_ok=True)
+        validated = service.artifacts.validate_local_path("build/app.elf")
+        assert validated["ok"] is True
+        assert validated["artifact"]["integrity_sha256"] is None
+
+        (tmp_path / "build" / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+        staged = service.artifacts.stage_for_backend(validated["artifact"], "flash_firmware")
+
+        assert staged["ok"] is False
+        assert staged["error_type"] == "artifact_changed"
+        assert staged["side_effect_committed"] is False
+        assert service._result_requires_quarantine(staged) is False
+    finally:
+        service.close()
+
+
+def test_dump_output_path_outside_the_workspace_is_refused_up_front(tmp_path: Path) -> None:
+    # The mirror of the artifact read check: without it a symlinked directory
+    # inside the workspace only failed after the plan had already flashed and
+    # halted the board.
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        outside = tmp_path.parent / "escaped.hex"
+        result = service.artifacts.validate_output_path(str(outside), "debug_dump_symbol_ihex")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "output_validation_failed"
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+
+
+def test_artifact_outside_the_workspace_is_refused_with_the_real_reason(tmp_path: Path) -> None:
+    # With require_allowed_root off, the allowed-roots refusal no longer fires
+    # first and this is the path that used to answer "must be a single-link
+    # regular file" with a backend_error about an *output* file. No permission
+    # relaxes workspace containment, so a caller told "regular file" keeps
+    # retrying a path that can never work.
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_allowed_root: false\nlogs:\n", 1), encoding="utf-8")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        outside = tmp_path.parent / "elsewhere.elf"
+        outside.write_bytes(b"\x7fELF" + b"\x00" * 12)
+        result = service.artifacts.validate_local_path(str(outside))
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+    assert "single-link regular file" not in result["summary"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows construct")
+def test_artifact_behind_a_link_that_leaves_the_workspace_is_named_too(tmp_path: Path) -> None:
+    # A lexical containment check reports this path as contained, so the
+    # refusal fell back to the misleading "single-link regular file" wording on
+    # exactly the case where naming the reason matters most.
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True)
+    (outside / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+    config_path = write_config(workspace)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_allowed_root: false\nlogs:\n", 1), encoding="utf-8")
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(workspace / "build"), str(outside)], check=True, capture_output=True)
+
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("build/app.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows construct")
+def test_dump_into_an_allowed_root_that_is_a_link_is_not_falsely_refused(tmp_path: Path) -> None:
+    # validate_output_path resolves symlinks while the allowed roots are built
+    # lexically, so an allowed root that is itself a link inside the workspace
+    # refused every legitimate dump into it.
+    workspace = tmp_path / "ws"
+    config_path = write_config(workspace)
+    (workspace / "real").mkdir(parents=True, exist_ok=True)
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(workspace / "build"), str(workspace / "real")], check=True, capture_output=True)
+
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_output_path("build/dump.hex", "debug_dump_symbol_ihex")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["validation"]["allowed_root"] is True
+    assert result["validation"]["within_workspace"] is True

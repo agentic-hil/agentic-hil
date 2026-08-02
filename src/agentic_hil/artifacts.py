@@ -15,6 +15,7 @@ from agentic_hil.config import (
     atomic_write_bytes,
     configured_work_path,
     display_path,
+    is_path_within,
     is_path_within_frozen,
     resolve_work_path,
     safe_configured_directory,
@@ -83,6 +84,12 @@ class ArtifactManager:
             "exists": False,
             "allowed_root": self._is_under_allowed_roots(resolved),
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
+            # Both views, because either one alone lies here. Lexical alone
+            # reports a junction that leaves the workspace as contained — the
+            # very case whose refusal this flag exists to name. Resolved alone
+            # would call a path contained that only reaches the workspace by
+            # following a link, which safe_open_binary's O_NOFOLLOW gate refuses.
+            "within_workspace": is_path_within_frozen(resolved, Path(self.config.work_dir)) and is_path_within(resolved, Path(self.config.work_dir)),
             "sha256_computed": False,
         }
         validation["require_allowed_root"] = self.config.validation.require_allowed_root
@@ -93,6 +100,16 @@ class ArtifactManager:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
+        # safe_open_binary below refuses this too, but only as "not a single-link
+        # regular file" carrying a backend_error about an *output* file. Name the
+        # real reason here: no configuration key relaxes workspace containment,
+        # so a caller told "regular file" would keep retrying a path that can
+        # never work.
+        if not validation["within_workspace"]:
+            return self._validation_error(
+                "Firmware artifact is outside workspace_root. Artifact paths must stay inside the configured workspace; no permission relaxes this.",
+                validation,
+            )
 
         sha256: str | None = None
         size_bytes: int | None = None
@@ -143,20 +160,42 @@ class ArtifactManager:
         }
 
     def stage_for_backend(self, artifact: JsonObject, tool: str) -> JsonObject:
+        """Copy a validated artifact into private staging for the backend.
+
+        Every refusal below happens before the backend is invoked, so each one
+        carries side_effect_committed: False. Without that marker
+        _result_requires_quarantine treats a plain re-validation failure as an
+        unconfirmed hardware effect and quarantines the probe lease, which puts
+        a bench into recovery over a firmware file that was never flashed."""
         source = Path(str(artifact["resolved_path"]))
         try:
             source_context = safe_open_binary(source, workspace=self.config.work_dir)
             source_file = source_context.__enter__()
             descriptor = source_file.fileno()
         except (ConfigError, OSError) as error:
-            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error)}
+            # A missing file that validation never saw either did not change —
+            # it was never there. Saying "changed after validation" sends the
+            # caller back to re-validate, which will keep succeeding under
+            # validation.require_existing_file: false; the artifact has to be
+            # built instead.
+            if isinstance(error, FileNotFoundError) and artifact.get("integrity_sha256") is None:
+                return {
+                    "ok": False,
+                    "tool": tool,
+                    "error_type": "artifact_not_found",
+                    "summary": "Firmware artifact does not exist and did not exist when it was validated. Build it first, then retry.",
+                    "side_effect_committed": False,
+                    "side_effect_status": "not_started",
+                    "retry_safe": True,
+                }
+            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
         temporary_path: Path | None = None
         staging_directory: Path | None = None
         try:
             source_stat = os.fstat(descriptor)
             if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file."}
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
             if source_stat.st_size > self._max_upload_bytes():
                 return self._artifact_too_large(source_stat.st_size, tool)
             digest = hashlib.sha256()
@@ -175,8 +214,21 @@ class ArtifactManager:
                 os.fsync(staged_file.fileno())
             actual_sha256 = digest.hexdigest()
             expected_sha256 = artifact.get("integrity_sha256") or artifact.get("sha256")
-            if expected_sha256 is not None and actual_sha256 != expected_sha256:
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation."}
+            # integrity_sha256 is None only when validation saw no file at all,
+            # which validation.require_existing_file: false permits. Everything
+            # that inspects content — size, ELF/HEX/BIN plausibility, the hash —
+            # was skipped for those bytes, so a file that appears between
+            # validation and staging would otherwise be flashed unchecked.
+            if expected_sha256 is None:
+                return {
+                    "ok": False,
+                    "tool": tool,
+                    "error_type": "artifact_changed",
+                    "summary": "Firmware artifact did not exist when it was validated, so its content was never checked. Build the artifact first, then retry.",
+                    "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True,
+                }
+            if actual_sha256 != expected_sha256:
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
             staged_path = staging_directory / source.name
             os.replace(temporary_path, staged_path)
             temporary_path = None
@@ -190,6 +242,7 @@ class ArtifactManager:
                 "error_type": "artifact_staging_failed",
                 "summary": "Firmware artifact could not be copied into private backend staging.",
                 "backend_error": str(error),
+                "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True,
             }
         finally:
             source_context.__exit__(None, None, None)
@@ -246,14 +299,23 @@ class ArtifactManager:
         create_parent: bool = False,
     ) -> JsonObject:
         allowed_extensions = allowed_extensions or [".hex", ".ihex"]
+        # resolve_work_path() resolves symlinks, and work_dir is already
+        # resolved at load, so this comparison sees through a symlinked
+        # directory inside the workspace that points somewhere else.
         resolved = Path(resolve_work_path(self.config, output_path))
         validation: JsonObject = {
             "path_traversal_safe": not has_traversal_segment(output_path),
             "allowed_root": self._is_under_allowed_roots(resolved),
             "allowed_extension": resolved.suffix.lower() in allowed_extensions,
+            "within_workspace": is_path_within_frozen(resolved, Path(self.config.work_dir)),
         }
         if not validation["path_traversal_safe"]:
             return self._output_validation_error(tool, "Output path contains traversal segments.", validation)
+        # Unconditional, unlike the allowed-roots check: no configuration key
+        # relaxes workspace containment, and this is the reactor's only chance
+        # to reject the path before a plan starts flashing and halting a board.
+        if not validation["within_workspace"]:
+            return self._output_validation_error(tool, "Output path is outside workspace_root; no permission relaxes this.", validation)
         if self.config.validation.require_allowed_root and not validation["allowed_root"]:
             return self._output_validation_error(tool, "Output path is outside allowed artifact roots.", validation)
         if not validation["allowed_extension"]:
@@ -354,7 +416,13 @@ class ArtifactManager:
         roots = [configured_work_path(self.config, root) for root in self.config.artifacts.allowed_roots]
         if self.config.artifacts.allow_upload:
             roots.append(configured_work_path(self.config, self.config.artifacts.upload_directory))
-        return any(is_path_within_frozen(resolved_path, root) for root in roots)
+        # Callers hand this both lexical and symlink-resolved paths, while the
+        # roots are built lexically. Comparing in one view only would refuse a
+        # legitimate dump into an allowed root that is itself a link inside the
+        # workspace (pre-existing: validate_output_path has always resolved).
+        # Containment is enforced separately by within_workspace, so matching in
+        # either view widens nothing that policy relies on.
+        return any(is_path_within_frozen(resolved_path, root) or is_path_within(resolved_path, root) for root in roots)
 
     def _inspect_format_bytes(self, suffix: str, data: bytes) -> JsonObject:
         if suffix == ".elf":

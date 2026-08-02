@@ -490,7 +490,7 @@ class GdbDebugSessions:
             return self._report(memory)
         try:
             safe_configured_directory(self.config, str(Path(str(output["resolved_path"])).parent), f"{tool}.output_path")
-            write_intel_hex_file(Path(str(output["resolved_path"])), int(resolved["address_value"]), memory["data"])
+            write_intel_hex_file(Path(str(output["resolved_path"])), int(resolved["address_value"]), memory["data"], workspace=self.config.work_dir)
         except (ConfigError, OSError) as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "output_write_failed", "summary": "Intel HEX output file could not be written.", "backend_error": str(error)})
         self._write_session_log(session)

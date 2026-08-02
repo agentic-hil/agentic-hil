@@ -1108,7 +1108,8 @@ def _validated_absolute_file_path(file_path: str | Path, workspace: str | Path |
     if workspace is not None and not is_path_within_frozen(path, Path(workspace)):
         raise ConfigError(
             "unsafe_configured_path",
-            "Output file leaves the workspace.",
+            # Reads reach this too (artifact validation), so do not say "output".
+            "Path leaves the workspace.",
             {"path": str(path)},
         )
     return path

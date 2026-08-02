@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_GDB, write_config
 
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
@@ -595,7 +595,7 @@ def test_intel_hex_record_matches_reference_vectors() -> None:
 
 def test_write_intel_hex_file_emits_extended_address_and_eof(tmp_path: Path) -> None:
     output = tmp_path / "memory.hex"
-    write_intel_hex_file(output, 0x200006F0, bytes(range(20)))
+    write_intel_hex_file(output, 0x200006F0, bytes(range(20)), workspace=tmp_path)
     lines = output.read_text(encoding="ascii").splitlines()
     assert lines[0] == ":020000042000DA"
     assert lines[1].startswith(":10" + "06F0" + "00")
@@ -974,3 +974,18 @@ def test_clear_breakpoints_missing_delete_does_not_poison_next_continue(tmp_path
         assert service.call("debug_stop_session")["ok"] is True
     finally:
         service.close()
+
+
+def test_write_intel_hex_file_refuses_a_path_outside_the_workspace(tmp_path: Path) -> None:
+    # The dump write is the one primitive an agent aims at a path it chose, so
+    # containment must hold at the write itself, not only in the caller's
+    # earlier directory check.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    escaped = tmp_path / "outside.hex"
+
+    with pytest.raises(ConfigError) as rejected:
+        write_intel_hex_file(escaped, 0x20000000, bytes([0, 1]), workspace=workspace)
+
+    assert rejected.value.error_type == "unsafe_configured_path"
+    assert not escaped.exists()
