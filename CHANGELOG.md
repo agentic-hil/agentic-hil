@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- `setup` and `init` now bootstrap an attached STM32 bench when the project ships `agentic-hil.config.example.yaml`: they locate STM32CubeProgrammer, enumerate exactly one ST-Link, identify its target through a fixed HOTPLUG-only command, correlate its virtual COM port by USB serial number, and write those host-specific values into the external authoritative config. This bootstrap path exists before runtime permissions do and never exposes reset, halt, erase, flash, raw commands, or serial I/O.
+
+### Changed
+
+- A project hardware profile can request the probe, flash, reset, artifact, and UART permissions that the generated authoritative config needs. Raw debugger commands and mass erase remain disabled regardless of project input. Projects without the profile retain the previous deny-by-default starter config, and setup never replaces an existing operator config.
+- Windows discovery now recognizes versioned STM32CubeCLT installations under `C:\ST` in addition to PATH, standalone CubeProgrammer, and CubeIDE-bundled installations.
+
 ## [0.6.0] - 2026-08-02
 
 An unattended loop no longer stops at every quarantine. The owning process clears the failure classes it can actually verify, and the audit records what verified them.
