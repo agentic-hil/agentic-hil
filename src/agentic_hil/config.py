@@ -331,8 +331,9 @@ def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: b
     This runs at config load and therefore may not touch hardware: `doctor`,
     `mcp-stdio` and every test load a config with no probe attached. It rejects
     what is decidable from the text alone. Whether a selector actually resolves
-    to exactly one connected probe is enforced at the hardware boundary, where
-    enumeration is possible — see PyOCDBackend._resolve_probe_selector."""
+    to exactly one connected probe, and to a probe no other configured name also
+    selects, is enforced at the hardware boundary, where enumeration is possible
+    — see PyOCDBackend._resolve_probe_selector."""
     # probe_id decides the hardware, so it is checked on its own. The identity
     # pass below cannot stand in for this: debugger_resource_identity() prefers
     # resource_id and never looks at probe_id in that branch, so two entries

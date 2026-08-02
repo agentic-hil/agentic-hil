@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from conftest import FAKE_OPENOCD, FAKE_PYOCD, write_authoritative_config, write_config
 
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
@@ -2477,6 +2477,36 @@ def test_pyocd_ambiguous_probe_selector_is_refused_before_touching_a_board(tmp_p
     assert result["error_type"] == "adapter_not_found"
     assert result["side_effect_committed"] is False
     assert sorted(result["candidate_probe_ids"]) == ["PYOCD123", "PYOCD456"]
+
+
+@pytest.mark.parametrize("driven", ["board_a", "board_b"])
+def test_two_pyocd_selectors_that_resolve_to_one_probe_are_refused(driven: str, tmp_path: Path) -> None:
+    # "OCD1" and "123" do not contain each other, so config load accepts them,
+    # but both uniquely resolve to PYOCD123. A plan that flashes both named
+    # boards would then flash one board twice, and the configured coordination
+    # resources (probe:OCD1 and probe:123) would not expose the alias.
+    from agentic_hil.config import bind_debugger
+
+    config = load_test_config(
+        tmp_path,
+        debugger_type="pyocd",
+        debugger_name="board_a",
+        probe_id="OCD1",
+        auto_probe_ids=False,
+        debuggers_yaml=f'debuggers:\n  board_b:\n    type: pyocd\n    probe_id: "123"\n    executable: "{FAKE_PYOCD.as_posix()}"\n',
+    )
+    service = AgenticHILToolService(bind_debugger(config, driven))
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["candidate_probe_ids"] == ["PYOCD123"]
+    assert "also selects this probe" in result["summary"]
 
 
 def test_pyocd_probe_selector_that_matches_nothing_is_refused(tmp_path: Path) -> None:

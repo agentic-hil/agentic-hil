@@ -12,7 +12,7 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.config import ConfigError, display_path, probe_selector_key, resolve_work_path, safe_write_text
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -305,8 +305,34 @@ class PyOCDBackend:
         reselected = [uid for uid in available if matches[0].lower() in uid.lower()]
         if len(reselected) > 1:
             return self._probe_selector_error(tool, "the resolved probe UID is itself a prefix of another connected probe's UID, so it cannot address one board.", debugger.probe_id, reselected)
-        self._resolved_probe_uid = matches[0]
-        return {"ok": True, "uid": matches[0]}
+        # One resolved UID must belong to one configured name. Config load
+        # rejects selectors that contain each other, but two that do not can
+        # still both substring-match the same connected UID — "OCD1" and "123"
+        # both select "PYOCD123" — and then a plan that flashes two named boards
+        # flashes one board twice. Only enumeration can see that, so it belongs
+        # here rather than in the text-only load-time check.
+        resolved = matches[0]
+        claimants = sorted(name for name in self._other_names_selecting(resolved))
+        if claimants:
+            return self._probe_selector_error(tool, f"another configured debugger ({', '.join(claimants)}) also selects this probe, so two names would drive one board.", debugger.probe_id, [resolved])
+        self._resolved_probe_uid = resolved
+        return {"ok": True, "uid": resolved}
+
+    def _other_names_selecting(self, resolved_uid: str) -> list[str]:
+        """Configured debuggers other than the bound one that select this probe."""
+        names: list[str] = []
+        for name, other in self.config.debuggers.items():
+            if name == self.config.debugger_id:
+                continue
+            other_key = probe_selector_key(other)
+            if other_key is None:
+                continue
+            # pyOCD matches its selector as a substring; the other backends pass
+            # the serial verbatim, so only an exact match claims the same probe.
+            claims = other_key in resolved_uid.lower() if other.type == "pyocd" else other_key == resolved_uid.lower()
+            if claims:
+                names.append(name)
+        return names
 
     def _probe_selector_error(self, tool: str, reason: str, configured: str, candidates: list[str]) -> JsonObject:
         return {
