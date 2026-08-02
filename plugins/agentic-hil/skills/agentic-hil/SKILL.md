@@ -59,9 +59,17 @@ when they start, so when the server is missing — typically in the session that
 just installed it — say so and ask the user to restart the agent rather than
 answering the hardware question another way.
 
-The CLI installs, configures, and diagnoses: `agentic-hil init`, `agentic-hil
-setup`, and `agentic-hil doctor` report what is configured and whether hardware
-access is permitted. None of them is a hardware call.
+The CLI installs, configures, and diagnoses: `agentic-hil agent-install`,
+`agentic-hil init`, `agentic-hil setup`, and `agentic-hil doctor` report what is
+configured and whether hardware access is permitted. None of them is a hardware
+call.
+
+Installation and project binding are separate commands with separate scopes.
+`agent-install` installs this skill and the user-level MCP registration once per
+machine and agent, and needs no project. `init` binds one project by writing its
+authoritative configuration and verifying it. `setup` runs both, so a first run
+stays one command. A second project on the same machine needs `init` alone, and
+a project step that fails never removes the machine-wide installation.
 
 ## Configuration and regression runs
 
@@ -100,6 +108,8 @@ firmware project directory:
 agentic-hil setup --agent claude
 ```
 
-`setup` creates the deny-by-default project configuration, installs the packaged
-copy of this skill, and registers the MCP server with the verified absolute
-persistent console-script path.
+`setup` installs the packaged copy of this skill, registers the MCP server with
+the verified absolute persistent console-script path, and creates the
+deny-by-default project configuration. The first two are machine-wide and also
+available on their own as `agentic-hil agent-install --agent claude`; the last
+is per project and also available on its own as `agentic-hil init`.

@@ -143,12 +143,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Set `state_root: {safe_state_root}` in the authoritative configuration.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
-            "`agentic-hil init` and `agentic-hil setup` derive the default state_root from %LOCALAPPDATA% on Windows "
-            "and $XDG_STATE_HOME on POSIX, and validate before writing anything. On a stock Windows profile that "
-            "default is rejected, so neither command can produce a usable file: write the configuration at "
-            "{safe_user_config} yourself with `state_root: {safe_state_root}` (every field is in MCP resource "
+            "`agentic-hil init` derives the default state_root from %LOCALAPPDATA% on Windows and $XDG_STATE_HOME on "
+            "POSIX, and validates before writing anything. On a stock Windows profile that default is rejected, so it "
+            "cannot produce a usable file: write the configuration at {safe_user_config} yourself with "
+            "`state_root: {safe_state_root}` (every field is in MCP resource "
             + CONFIG_SCHEMA_URI
             + "), then set AGENTIC_HIL_CONFIG to that absolute path.",
+            "This is the project half only. `agentic-hil agent-install` reads and writes no configuration and no "
+            "state_root, so it is unaffected: the agent skill and the user-level MCP registration are installed on "
+            "such a profile, and only this project binding is left to do.",
             "Re-run `agentic-hil doctor`; it reports the first path that still fails.",
         ),
         do_not=(
@@ -512,7 +515,19 @@ A failure raises `error_type: unsafe_configured_path` and names the offending co
 
 `S-1-15-3-*` is an app-capability SID that Windows itself applies to `AppData` for packaged applications. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. This is the check working as specified, not a bug in the profile.
 
-Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and `agentic-hil init`, `agentic-hil setup`, and every config load hit it.
+Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+
+## Which command touches which of these
+
+`setup` is a composition of two commands with different scopes, and only one of them has anything to do with the paths above.
+
+| Command | Scope | Touches | On a profile that rejects the paths above |
+|---|---|---|---|
+| `agentic-hil agent-install --agent <agent>` | machine and agent, once per machine | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; it reads and writes no configuration and no `state_root` |
+| `agentic-hil init [--agent <agent>]` | this workspace, once per project | the authoritative configuration and `state_root`, then `doctor` | refuses, because those are exactly the rejected paths |
+| `agentic-hil setup --agent <agent>` | both, in that order | both of the above | the machine half completes and stays; the project half refuses and rolls back only itself |
+
+So a rejected configuration location leaves the agent installed and working. Fix the location as below and run `agentic-hil init` alone; `agent-install` does not have to run again, on this project or any other on this machine.
 
 ## Where to put things instead
 

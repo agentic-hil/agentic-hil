@@ -4,6 +4,8 @@ Agentic HIL is the hardware gate. It discovers the project's authoritative confi
 
 For installation and first-time setup, follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local without admin rights.
 
+Setting up has two scopes. `agentic-hil agent-install --agent <agent>` installs the agent skill and the user-level MCP registration once per machine and agent, needs no workspace and no configuration, and finishes even where the configuration location is refused. `agentic-hil init [--agent <agent>]` binds one project: it writes that workspace's authoritative configuration and verifies it with `doctor`. `agentic-hil setup --agent <agent>` runs both, so a first run stays one command; a second project on the same machine needs `init` alone. Neither half rolls back the other, so a `setup` that reports `ok: false` with `scopes.machine.ok` true has left a working agent behind — read that field before concluding nothing was installed.
+
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 Use Agentic HIL MCP tools for hardware actions. Do not bypass them with raw OpenOCD commands, arbitrary debugger shells, direct serial-device access, or direct CAN-adapter access when an Agentic HIL tool is available.

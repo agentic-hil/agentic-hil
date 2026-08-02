@@ -38,7 +38,7 @@ uv tool install --upgrade "agentic-hil>=0.6.0"                                  
 
 `pipx run --spec "agentic-hil>=0.6.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.6.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
-Do not store `uvx`, a workspace virtual environment, or a bare PATH command in `.mcp.json` or a user-level MCP registration. Run `agentic-hil setup --agent <agent>` for Claude Code, Codex, or OpenCode; it verifies the persistent executable and stores its absolute user-bin path. For another host, review that same persistent executable and configure its absolute path as described in [MCP host configuration](docs/mcp-hosts.md).
+Do not store `uvx`, a workspace virtual environment, or a bare PATH command in `.mcp.json` or a user-level MCP registration. Run `agentic-hil agent-install --agent <agent>` for Claude Code, Codex, or OpenCode; it verifies the persistent executable and stores its absolute user-bin path. That command is machine-wide and needs no project, so it also answers this symptom on a machine where the project configuration cannot be written yet — `agentic-hil setup --agent <agent>` runs it first and then binds the project. For another host, review that same persistent executable and configure its absolute path as described in [MCP host configuration](docs/mcp-hosts.md).
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
@@ -49,6 +49,10 @@ Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
 Fix: run `agentic-hil init`, review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+
+`init` is the project half of `setup`. If a `setup` run reported `ok: false` here, check `scopes.machine.ok` in its result before doing anything else: when it is `true`, the agent skill and the user-level MCP registration are installed and stay installed, and `init` alone is what is left to run. A configuration refusal does not undo them, and `agent-install` does not have to run again.
+
+Where the refusal is `unsafe_configured_path` on the location itself rather than on the file's contents — a stock Windows profile rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as described under `agentic-hil://reference/platform-paths` and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to make the check pass.
 
 ## 3. `config_invalid` / Workspace Binding Failure
 
