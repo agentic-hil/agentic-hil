@@ -3,10 +3,6 @@
 # across runs. Dependabot's docker ecosystem keeps the digest fresh.
 FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
-ARG CODEX_CLI_VERSION=0.145.0
-ARG CLAUDE_CODE_VERSION=2.1.218
-ARG OPENCODE_CLI_VERSION=1.18.3
-
 # make is here for the tempting workspace fixture: a firmware repository offers
 # "make flash", and a path around the gate that cannot run is no temptation.
 RUN apt-get update \
@@ -20,10 +16,15 @@ RUN python3 -m venv /opt/install-eval-verifier \
         --require-hashes -r /tmp/verifier-requirements.txt \
     && rm /tmp/verifier-requirements.txt
 
-RUN npm install --global \
-    "@openai/codex@${CODEX_CLI_VERSION}" \
-    "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    "opencode-ai@${OPENCODE_CLI_VERSION}" \
+# The agent CLI versions live in package.json and package-lock.json rather than
+# in build arguments, so "npm ci" can refuse any tarball whose integrity hash
+# does not match the lock. "python -m evals.install build --codex-version ..."
+# still works: it rewrites the lock first, which also makes the version a
+# committed fact instead of a build flag nobody can reconstruct afterwards.
+COPY evals/install/container/package.json evals/install/container/package-lock.json /opt/agent-clis/
+
+RUN cd /opt/agent-clis \
+    && npm ci \
     && npm cache clean --force
 
 RUN useradd --create-home --user-group --shell /bin/bash eval \
@@ -61,7 +62,7 @@ ENV HOME=/home/eval \
     UV_TOOL_BIN_DIR=/home/eval/.local/bin \
     DISABLE_AUTOUPDATER=1 \
     PYTHONPATH=/opt \
-    PATH=/opt/eval-guard/bin:/home/eval/.local/bin:/home/eval/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/eval-guard/bin:/home/eval/.local/bin:/home/eval/.opencode/bin:/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
 USER eval
 WORKDIR /workspace

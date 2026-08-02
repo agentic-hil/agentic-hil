@@ -33,6 +33,12 @@ from .source import create_source_snapshot, source_digest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DOCKERFILE = REPOSITORY_ROOT / "evals" / "install" / "container" / "Dockerfile"
+CONTAINER_DIRECTORY = DEFAULT_DOCKERFILE.parent
+AGENT_CLI_PACKAGES = {
+    "codex": "@openai/codex",
+    "claude-code": "@anthropic-ai/claude-code",
+    "opencode": "opencode-ai",
+}
 TOOL_CONTRACT = Path("evals") / "install" / "tools.list.expected"
 
 
@@ -1289,10 +1295,47 @@ def run_matrix(args: argparse.Namespace) -> int:
         return 0 if summary["status"] == "passed" else 1
 
 
+def repin_agent_clis(specifiers: list[str]) -> None:
+    """Move the npm lock file to the requested agent CLI versions.
+
+    The image installs the CLIs with "npm ci", which installs exactly what the
+    lock file records and refuses anything whose integrity hash does not match.
+    That is the property that makes an image reproducible, so a version override
+    has to move the lock rather than go around it. The pinned version becomes a
+    committed fact instead of a build flag nobody can reconstruct afterwards.
+    """
+    npm = shutil.which("npm")
+    if npm is None:
+        raise RuntimeError(
+            "npm is required to override agent CLI versions because the image installs them with "
+            f"'npm ci' from a committed lock file; install npm, or edit {CONTAINER_DIRECTORY / 'package.json'} "
+            "and regenerate package-lock.json by hand"
+        )
+    completed = subprocess.run(
+        [npm, "install", "--package-lock-only", "--no-audit", "--no-fund", *specifiers],
+        cwd=str(CONTAINER_DIRECTORY),
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"npm could not pin {', '.join(specifiers)}")
+    print(f"repinned {', '.join(specifiers)} in {CONTAINER_DIRECTORY}")
+
+
 def build_image(args: argparse.Namespace) -> int:
     docker = shutil.which(args.docker)
     if docker is None:
         raise RuntimeError(f"Docker CLI not found: {args.docker}")
+    specifiers = [
+        f"{AGENT_CLI_PACKAGES[agent]}@{version}"
+        for agent, version in (
+            ("codex", args.codex_version),
+            ("claude-code", args.claude_version),
+            ("opencode", args.opencode_version),
+        )
+        if version
+    ]
+    if specifiers:
+        repin_agent_clis(specifiers)
     command = [
         docker,
         "build",
@@ -1300,15 +1343,8 @@ def build_image(args: argparse.Namespace) -> int:
         str(DEFAULT_DOCKERFILE),
         "--tag",
         args.image,
+        str(REPOSITORY_ROOT),
     ]
-    for name, value in (
-        ("CODEX_CLI_VERSION", args.codex_version),
-        ("CLAUDE_CODE_VERSION", args.claude_version),
-        ("OPENCODE_CLI_VERSION", args.opencode_version),
-    ):
-        if value:
-            command.extend(["--build-arg", f"{name}={value}"])
-    command.append(str(REPOSITORY_ROOT))
     return subprocess.run(
         command,
         check=False,
