@@ -1,0 +1,12 @@
+# Verifier dependencies for the install-eval container's private virtualenv.
+#
+# This environment only ever runs the eval harness's own checks, so the pins
+# stay exact and are updated deliberately rather than resolved at build time.
+#
+# Regenerate the hash-pinned lock file after editing:
+#   uv pip compile --generate-hashes --universal --python-version 3.11 \
+#     evals/install/container/requirements.in \
+#     -o evals/install/container/requirements.txt
+jsonschema==4.25.1
+pyserial==3.5
+PyYAML==6.0.2

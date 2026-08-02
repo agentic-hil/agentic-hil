@@ -1,4 +1,7 @@
-FROM node:22-bookworm-slim
+# Pinned by digest, not by tag: a tag is a moving target, and an eval that
+# silently changes its base image is an eval whose results cannot be compared
+# across runs. Dependabot's docker ecosystem keeps the digest fresh.
+FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 ARG CODEX_CLI_VERSION=0.145.0
 ARG CLAUDE_CODE_VERSION=2.1.218
@@ -10,11 +13,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git make python3 python3-venv python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
+COPY evals/install/container/requirements.txt /tmp/verifier-requirements.txt
+
 RUN python3 -m venv /opt/install-eval-verifier \
     && /opt/install-eval-verifier/bin/pip install --no-cache-dir \
-        "jsonschema==4.25.1" \
-        "pyserial==3.5" \
-        "PyYAML==6.0.2"
+        --require-hashes -r /tmp/verifier-requirements.txt \
+    && rm /tmp/verifier-requirements.txt
 
 RUN npm install --global \
     "@openai/codex@${CODEX_CLI_VERSION}" \
