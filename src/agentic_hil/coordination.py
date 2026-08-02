@@ -48,6 +48,16 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
         LEASE_RELEASE_RETRY_REASON,
     }
 )
+# Reasons a verified reset-into-halt settles but a read-only re-read cannot: the
+# target may be running after an unconfirmed flash, reset, or session start, and
+# only driving it into a defined state answers that. Reaching for this set is a
+# physical act, so it is gated on the bench's recovery.auto_recover policy.
+RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
+    {
+        "debug_session_start_unconfirmed",
+        "debugger_result_unconfirmed",
+    }
+)
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
 
@@ -448,13 +458,16 @@ class HardwareCoordinator:
                 return
             self._quarantine_registered_lease(lease, reason, error, audit_broken=audit_broken)
 
-    def resolve_retryable_cleanup(self, lease: HardwareLease, reason: str) -> bool:
+    def resolve_retryable_cleanup(self, lease: HardwareLease, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
         with self._guard:
             if not self._valid_lease(lease):
                 lease.valid = False
                 lease.state = "stale"
                 return False
-            if reason not in RETRYABLE_CLEANUP_REASONS:
+            # Callers that only re-read hardware stay on the default set; the
+            # wider one is reachable only through a caller that has driven the
+            # target into a defined state first.
+            if reason not in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed):
                 return False
             if lease.state != "cleanup_required" or not lease.audit_ok or any(error.get("reason") != reason for error in lease.errors):
                 return False
@@ -469,13 +482,28 @@ class HardwareCoordinator:
             self._persist_project("cleanup_required" if self.blocked else "active")
             return True
 
-    def retryable_incident(self) -> str | None:
-        """The single retryable reason this owner's whole incident consists of.
+    def recoverable_reasons(self) -> frozenset[str]:
+        """The reasons this bench's policy and grants actually let the owner clear.
+
+        ``reset_halt`` degrades to the read-only set without ``allow_reset``: the
+        config may permit the stronger predicate while the bound probe does not
+        authorize the reset it needs."""
+        policy = self.config.recovery.auto_recover
+        if policy == "off":
+            return frozenset()
+        debugger = self.config.debugger
+        if policy == "reset_halt" and (debugger is None or debugger.permissions.allow_reset):
+            return RESET_RECOVERABLE_CLEANUP_REASONS
+        return RETRYABLE_CLEANUP_REASONS
+
+    def retryable_incident(self, allowed: frozenset[str] | None = None) -> str | None:
+        """The single reason this owner's whole incident consists of, if recoverable.
 
         Machine recovery may only address an incident this live owner raised and
         still holds. An incident adopted from a dead owner, a broken audit, a mix
-        of reasons, or a still-active sibling lease all leave state that no
-        host-side check can settle, so each of those keeps needing the operator."""
+        of reasons, or a still-active sibling lease all leave state that no check
+        this process can run will settle, so each of those keeps needing the
+        operator regardless of how wide ``allowed`` is."""
         with self._guard:
             if self._state != "open" or not self.blocked or self.project_lock is None:
                 return None
@@ -491,18 +519,20 @@ class HardwareCoordinator:
             if len(reasons) != 1:
                 return None
             reason = reasons.pop()
-            return reason if reason in RETRYABLE_CLEANUP_REASONS else None
+            return reason if reason in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed) else None
 
-    def resolve_retryable_incident(self, reason: str) -> bool:
-        """Clear a fully retryable incident once the caller has verified safe state.
+    def resolve_retryable_incident(self, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
+        """Clear a recoverable incident once the caller has verified safe state.
 
-        The caller owns the verification; this only performs the state transition
-        and only for the exact incident ``retryable_incident`` still reports."""
+        The caller owns the verification and, with it, the decision of how wide
+        ``allowed`` may be; this only performs the state transition, and only for
+        the exact incident ``retryable_incident`` still reports."""
         with self._guard:
-            if reason not in RETRYABLE_CLEANUP_REASONS or self.retryable_incident() != reason:
+            permitted = RETRYABLE_CLEANUP_REASONS if allowed is None else allowed
+            if reason not in permitted or self.retryable_incident(permitted) != reason:
                 return False
             for lease in [item for item in self.leases.values() if item.state == "cleanup_required"]:
-                if not self.resolve_retryable_cleanup(lease, reason):
+                if not self.resolve_retryable_cleanup(lease, reason, allowed=permitted):
                     return False
             return not self.blocked
 
@@ -566,7 +596,8 @@ class HardwareCoordinator:
                 # Lifted out of the record so an operator can decide between
                 # retrying and walking to the bench without opening state files.
                 "cleanup_reasons": reasons,
-                "auto_recoverable": blocked and bool(reasons) and all(reason in RETRYABLE_CLEANUP_REASONS for reason in reasons),
+                "auto_recoverable": blocked and bool(reasons) and all(reason in self.recoverable_reasons() for reason in reasons),
+                "auto_recover_policy": self.config.recovery.auto_recover,
                 "quarantine_id": self.quarantine_id or (record or {}).get("quarantine_id"),
                 "lifecycle_state": self._state,
                 # Strip secret-named fields AND the absolute env-derived paths

@@ -142,7 +142,17 @@ Fix: inspect ownership with `agentic-hil lease-status`. If a live owner exists, 
 
 For a quarantine, read `cleanup_reasons` and `auto_recoverable` from `lease-status` before doing anything physical. They name what is actually unresolved and whether an operator is needed at all:
 
-- `auto_recoverable: true` — the incident is a host-side toolchain fault the running owner clears by itself. The next hardware tool call reaps this owner's leftover debugger processes, re-reads the probe without resetting it, records the attestation as `recovery: machine_attested`, and then runs. No operator step. If the probe is still unreachable the call returns `resource_quarantined` with `auto_recovery_attempted: true` and the quarantine stands.
-- `auto_recoverable: false` — an unconfirmed physical effect (`debugger_result_unconfirmed` after `flash_firmware` / `reset_target`, `debug_session_start_unconfirmed`), a broken audit (`*_audit_broken`), or an incident adopted from an owner that died. The target may be running code nothing on the host can observe, so this needs a person.
+- `auto_recoverable: true` — the running owner clears this incident itself on the next hardware tool call, then runs it. It reaps this owner's leftover debugger processes, verifies the safe state, records the attestation as `recovery: machine_attested`, and proceeds. No operator step. If verification fails the call returns `resource_quarantined` with `auto_recovery_attempted: true` and the quarantine stands; after `recovery.max_attempts` failures for the same incident it stops retrying.
+- `auto_recoverable: false` — a broken audit (`*_audit_broken`), an incident adopted from an owner that died, or an unconfirmed physical effect on a bench whose policy does not allow the stronger predicate. This needs a person.
+
+Which reasons are machine-recoverable is the bench's `recovery.auto_recover` policy, reported as `auto_recover_policy`:
+
+| Policy | Verification it may run | Settles |
+| --- | --- | --- |
+| `off` | none | nothing — operator only |
+| `readonly` | reap this owner's debugger processes, re-read the probe (connects without resetting) | toolchain faults: `debug_session_cleanup_unconfirmed`, `debug_target_state_unconfirmed`, `debugger_readonly_result_unconfirmed`, … |
+| `reset_halt` (default) | the above, plus a reset-into-halt that establishes a defined state | additionally `debugger_result_unconfirmed` (unconfirmed flash/reset) and `debug_session_start_unconfirmed` |
+
+`reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
 For the operator case, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.

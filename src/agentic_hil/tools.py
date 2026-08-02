@@ -12,6 +12,7 @@ from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
+    RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
@@ -23,6 +24,7 @@ from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
     attach_canonical_audit_evidence,
     audit_unavailable,
+    claim_auto_recover_default_warning,
     ensure_audit_ready,
     overall_success,
     read_last_report,
@@ -59,6 +61,8 @@ class AgenticHILToolService:
         # rest of the process lifetime, so even a retryable incident could only
         # ever be cleared by an operator running `agentic-hil recover`.
         self._quarantined_lease: HardwareLease | None = None
+        self._machine_recovery_incident: str | None = None
+        self._machine_recovery_attempts = 0
         self._lifecycle_lock = threading.RLock()
         self._dispatch_local = threading.local()
         self._state = "open"
@@ -386,50 +390,88 @@ class AgenticHILToolService:
         return None
 
     def _attempt_machine_recovery(self) -> JsonObject | None:
-        """Clear a fully retryable incident without an operator, or refuse to.
+        """Clear a recoverable incident without an operator, or refuse to.
 
-        The verification is deliberately read-only. Leftover debugger processes
-        of this owner are reaped host-side, then the probe is re-read through
-        probe_target, which connects without resetting on every backend
-        (OpenOCD `init; targets`, pyOCD `status`, ST-Link `-HOTPLUG`). Nothing
-        here drives the target, so the physical state an operator would have to
-        attest to cannot change underneath the check. Whatever a read-only
-        re-read cannot settle keeps needing that operator.
+        Two safe-state predicates, and the weakest one that can settle the open
+        reason is the one that runs. Both first reap this owner's leftover
+        debugger processes. `readonly_probe` then re-reads the probe through
+        probe_target, which connects without resetting on every backend (OpenOCD
+        `init; targets`, pyOCD `status`, ST-Link `-HOTPLUG`), so it cannot change
+        the state it is attesting to. `reset_halt` additionally drives the target
+        into a defined halted state first, which is what settles an unconfirmed
+        flash, reset, or session start — a physical act, gated on the bench's
+        recovery.auto_recover policy and on allow_reset.
 
         Returns the recovery report, or None when the incident is not machine
-        recoverable or verification did not confirm the safe state."""
-        reason = self.coordinator.retryable_incident()
+        recoverable or a predicate did not confirm the safe state."""
+        allowed = self.coordinator.recoverable_reasons()
+        reason = self.coordinator.retryable_incident(allowed) if allowed else None
         if reason is None or not self.debugger_permissions.allow_probe:
             return None
+        if not self._machine_recovery_attempt_allowed():
+            return None
+        # Never drive the board for a reason a re-read already settles: the
+        # stronger predicate is a physical act, not a default.
+        needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
             return None
+        if needs_reset:
+            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+            if not overall_success(reset):
+                return None
         verification = self._invoke_dispatch(self.backend.probe_target)
         if not overall_success(verification) or verification.get("target_detected") is not True:
             return None
+        policy = self.config.recovery
+        record: JsonObject = {
+            "ok": True,
+            "tool": "hardware_recover",
+            "recovery": "machine_attested",
+            "reason": reason,
+            "quarantine_id": self.coordinator.quarantine_id,
+            "safe_state_confirmed": True,
+            "processes_reaped": True,
+            "safe_state_predicate": "reset_halt" if needs_reset else "readonly_probe",
+            "auto_recover_policy": policy.auto_recover,
+            "auto_recover_policy_source": "config" if policy.auto_recover_explicit else "default",
+            "summary": (
+                "Target was reset into a halted state, verified, and the incident cleared without operator attestation."
+                if needs_reset
+                else "Cleanup state was verified by a read-only probe re-read and cleared without operator attestation."
+            ),
+            "verification": {"tool": verification.get("tool"), "backend": verification.get("backend"), "target_detected": True},
+        }
+        if needs_reset and not policy.auto_recover_explicit and claim_auto_recover_default_warning(self.config):
+            record["warnings"] = [
+                "recovery.auto_recover is not named in the authoritative config, so it defaulted to reset_halt and this "
+                "recovery reset the target without an operator. Set recovery.auto_recover explicitly to choose this bench's policy."
+            ]
         # Evidence first: a quarantine must never be cleared without a durable
         # record of what attested the safe state, so a failed audit write aborts
         # the recovery instead of silently unblocking the hardware.
-        report = write_report(
-            self.config,
-            {
-                "ok": True,
-                "tool": "hardware_recover",
-                "recovery": "machine_attested",
-                "reason": reason,
-                "quarantine_id": self.coordinator.quarantine_id,
-                "safe_state_confirmed": True,
-                "processes_reaped": True,
-                "summary": "Retryable cleanup state was verified by a read-only probe re-read and cleared without operator attestation.",
-                "verification": {"tool": verification.get("tool"), "backend": verification.get("backend"), "target_detected": True},
-            },
-        )
+        report = write_report(self.config, record)
         if report.get("audit_ok") is False:
             self._poison_quietly("machine_recovery_audit_broken", audit_broken=True)
             return None
-        if not self.coordinator.resolve_retryable_incident(reason):
+        if not self.coordinator.resolve_retryable_incident(reason, allowed=allowed):
             return None
         self._release_recovered_leases()
         return report
+
+    def _machine_recovery_attempt_allowed(self) -> bool:
+        """Bound recovery attempts per incident.
+
+        Recovery can drive the target, and a refused attempt leaves the
+        quarantine standing, so every later call would retry it. A flapping probe
+        must not translate into an unbounded series of resets."""
+        incident = self.coordinator.quarantine_id
+        if incident != self._machine_recovery_incident:
+            self._machine_recovery_incident = incident
+            self._machine_recovery_attempts = 0
+        if self._machine_recovery_attempts >= self.config.recovery.max_attempts:
+            return False
+        self._machine_recovery_attempts += 1
+        return True
 
     def _release_recovered_leases(self) -> None:
         """Drop every lease handle the cleared incident left behind.

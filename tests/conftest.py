@@ -82,6 +82,8 @@ def write_config(
     interface_cfg: str = "interface/stlink.cfg",
     target_cfg: str = "target/stm32f4x.cfg",
     config_path: Path | None = None,
+    auto_recover: str | None = None,
+    recovery_max_attempts: int | None = None,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     workspace_root = (workspace_root or directory).resolve()
@@ -103,6 +105,16 @@ def write_config(
         "flash_address": flash_address,
         "timeout_s": 5,
     }
+    # Omitted entirely by default, so the common test config exercises the same
+    # "policy was never named" path a config written before recovery existed has.
+    recovery_lines = "".join(
+        [
+            "recovery:\n" if auto_recover is not None or recovery_max_attempts is not None else "",
+            # Quoted: YAML 1.1 reads a bare `off` as the boolean False.
+            f'  auto_recover: "{auto_recover}"\n' if auto_recover is not None else "",
+            f"  max_attempts: {recovery_max_attempts}\n" if recovery_max_attempts is not None else "",
+        ]
+    )
     config_path = config_path or directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -126,7 +138,7 @@ artifacts:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"
-""",
+{recovery_lines}""",
         encoding="utf-8",
     )
     return config_path

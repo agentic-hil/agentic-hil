@@ -238,7 +238,10 @@ def test_debug_load_failure_retains_quarantined_lease(
     expected_phase: str,
     timed_out: bool,
 ) -> None:
-    service = debug_service(tmp_path, fake_gdb_behavior=behavior)
+    # readonly: a half-written flash is an effect no re-read can settle, so this
+    # is the policy under which the incident must survive to the operator. The
+    # reset_halt path is covered separately below.
+    service = debug_service(tmp_path, fake_gdb_behavior=behavior, auto_recover="readonly")
     if timed_out:
         monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", TIMEOUT_TEST_CAP_S)
     try:
@@ -261,6 +264,37 @@ def test_debug_load_failure_retains_quarantined_lease(
         with pytest.raises(RuntimeError):
             service.close()
         service.coordinator.close()
+
+
+def test_reset_halt_policy_settles_a_failed_load_without_running_the_partial_image(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="download_error", auto_recover="reset_halt")
+    modes: list[str] = []
+    original_reset = service.backend.reset_target
+
+    def recorded_reset(mode: str = "run") -> dict:
+        modes.append(mode)
+        return original_reset(mode)
+
+    service.backend.reset_target = recorded_reset  # type: ignore[method-assign]
+    try:
+        failed = start_debug_session(service)
+        assert failed["ok"] is False, failed
+        assert failed["lease_state"] == "cleanup_required"
+
+        # A mid-download failure is an ordinary development outcome. Under this
+        # policy the owner drives the target into a defined halted state and
+        # carries on; the operator is not the recovery mechanism for it.
+        recovered = service.call("probe_target")
+
+        assert recovered["ok"] is True, recovered
+        assert service.coordinator.blocked is False
+        # Halted only. Control is never handed back to a partially written image
+        # — flashing and running it again stays an explicit, permissioned act.
+        assert modes == ["halt"]
+    finally:
+        # Teardown is clean here precisely because the incident was settled: the
+        # readonly parametrizations above still have to swallow a RuntimeError.
+        service.close()
 
 
 def test_attach_target_connect_timeout_retains_quarantined_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
