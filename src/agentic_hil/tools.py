@@ -296,7 +296,7 @@ class AgenticHILToolService:
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
                 return unbound_debugger_error(name, self.config)
-            if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
+            if name in probe_addressing_tools() and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
             if self.coordinator.blocked and name in audited_hardware_tools() and name not in containment_tools():
                 return {
@@ -703,14 +703,19 @@ def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     Config load cannot demand a probe_id: discovering the ids is exactly what
     an operator does before they can write one down, and loading must work with
     no hardware attached. The demand belongs here, where a board is about to be
-    driven and picking the wrong one is the failure that matters."""
+    driven and picking the wrong one is the failure that matters.
+
+    One configured debugger is not one attached board. With no probe_id every
+    backend omits its serial selector, so the toolchain drives whichever probe
+    it enumerates first — which is the unrelated board still plugged in when the
+    intended DUT is not."""
     return {
         "ok": False,
         "tool": tool,
         "error_type": "not_supported",
         "summary": (
-            f"Debugger '{config.debugger_id}' has no probe_id, and the project configures "
-            f"{len(config.debuggers)} debuggers, so this call cannot say which board it means. "
+            f"Debugger '{config.debugger_id}' has no probe_id, so this call cannot say which physical board it drives: "
+            "the backend would omit its probe selector and take whichever probe the host enumerates first. "
             "Run `agentic-hil debugger-probes` to list the connected probes and give each entry its own probe_id. "
             "OpenOCD cannot enumerate probes; read the serial from the probe itself, or use a pyocd or stlink entry to discover it."
         ),

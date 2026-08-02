@@ -668,13 +668,18 @@ def test_multi_probe_config_without_probe_ids_still_loads(tmp_path: Path) -> Non
                 tmp_path,
                 debugger_name="probe_x",
                 auto_probe_ids=False,
-                debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n',
+                # The realistic shape: two ordinary same-backend entries on the
+                # one installed executable. Falling back to that executable for
+                # a coordination identity collapsed them into one resource and
+                # rejected the config before discovery could run at all.
+                debuggers_yaml=f'debuggers:\n  probe_y:\n    type: openocd\n    executable: "{FAKE_OPENOCD.as_posix()}"\n',
             )
         )
     )
 
     assert sorted(config.debuggers) == ["probe_x", "probe_y"]
     assert config.debuggers["probe_y"].probe_id is None
+    assert config.debuggers["probe_x"].probe_id is None
 
 
 def test_driving_an_unnamed_probe_is_refused_when_several_are_configured(tmp_path: Path) -> None:
@@ -755,8 +760,10 @@ def test_config_rejects_a_pyocd_probe_id_that_only_differs_by_its_type_prefix(tm
     assert excinfo.value.details["other_debugger"] == "probe_x"
 
 
-def test_single_debugger_needs_no_probe_id(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)))
+def test_single_debugger_without_a_probe_id_still_loads(tmp_path: Path) -> None:
+    # Load must accept it — that is the bootstrap `agentic-hil debugger-probes`
+    # needs. Driving a board with it is refused at the hardware boundary.
+    config = load_config(str(write_config(tmp_path, auto_probe_ids=False)))
 
     assert config.debuggers["dut"].probe_id is None
     assert config.debugger_id == "dut"

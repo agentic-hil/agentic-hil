@@ -1216,6 +1216,37 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
     assert rejected.value.details["other_debugger"] == "dut_a"
 
 
+def test_authoritative_config_loads_two_unnamed_probes_on_one_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The documented bootstrap: two entries, no ids yet, one installed pyOCD.
+    # Deriving a coordination identity from the shared executable collapsed them
+    # into one resource and rejected the config, so `agentic-hil debugger-probes`
+    # could never run the discovery that breaks the cycle.
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    shim = toolchain / "pyocd-shim.bat"
+    shim.write_text("@echo off\n", encoding="utf-8")
+    os.chmod(shim, 0o755)
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_type="pyocd",
+        debugger_executable=shim,
+        debugger_name="dut_a",
+        auto_probe_ids=False,
+        debuggers_yaml=f'debuggers:\n  dut_b:\n    type: pyocd\n    executable: "{shim.as_posix()}"\n',
+        permissions={"allow_probe": True},
+    )
+
+    config = load_authoritative_config(workspace)
+
+    assert sorted(config.debuggers) == ["dut_a", "dut_b"]
+    assert config.debuggers["dut_a"].probe_id is None
+    assert config.debuggers["dut_b"].probe_id is None
+
+
 def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2461,10 +2492,20 @@ def test_pyocd_probe_selector_that_matches_nothing_is_refused(tmp_path: Path) ->
     assert result["configured_probe_id"] == "NOT-CONNECTED"
 
 
-def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
-    service = _pyocd_service(tmp_path, None)
+def test_pyocd_without_a_probe_id_is_refused_before_touching_a_board(tmp_path: Path) -> None:
+    # Without --uid pyOCD selects whichever probe it enumerates first. One
+    # configured debugger is not one attached board: the intended DUT can be
+    # unplugged while an unrelated supported board is not.
+    config = load_test_config(tmp_path, debugger_type="pyocd", probe_id=None, auto_probe_ids=False)
+    service = AgenticHILToolService(config)
     try:
-        assert service.call("probe_target")["ok"] is True
-        assert "--uid" not in service.backend._connection_args()
+        for tool in ("probe_target", "reset_target", "flash_firmware"):
+            result = service.call(tool, {"image_path": "build/firmware.elf"} if tool == "flash_firmware" else {})
+            assert result["ok"] is False, (tool, result)
+            assert result["error_type"] == "not_supported", (tool, result)
+            assert result["side_effect_status"] == "not_started", (tool, result)
+        # Discovery must keep working: it is how the operator learns the id.
+        assert service.call("debugger_probes_list")["ok"] is True
+        assert service.call("debugger_info")["ok"] is True
     finally:
         service.close()

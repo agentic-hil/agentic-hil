@@ -1410,7 +1410,10 @@ def test_com_stdio_uses_authoritative_config(tmp_path: Path, monkeypatch: pytest
 
 
 def test_config_loads_defaults(tmp_path: Path) -> None:
-    config = load_config(str(write_config(tmp_path)))
+    # Loading must still accept a debugger with no probe_id: discovering the ids
+    # is what an operator does before they can write one down, and doctor and
+    # mcp-stdio load with no hardware attached.
+    config = load_config(str(write_config(tmp_path, auto_probe_ids=False)))
     assert config.target.name == "example-target"
     assert config.debugger.probe_id is None
     assert config.artifacts.allowed_extensions == [".elf", ".hex", ".bin"]

@@ -1,7 +1,9 @@
 # Authoritative Agentic HIL config TEMPLATE for the STM32CubeProgrammer CLI
 # backend (debugger type "stlink" -- ST's standard tool). run-all.sh renders
-# __WORKSPACE__ / __STATE__ / __CUBECLI__ to real absolute guest paths and points
-# AGENTIC_HIL_CONFIG at the result. Only used when STM32CubeProgrammer is present.
+# __WORKSPACE__ / __STATE__ / __CUBECLI__ to real absolute guest paths, and
+# __PROBE_ID__ to the ST-Link serial `agentic-hil debugger-probes` reports, then
+# points AGENTIC_HIL_CONFIG at the result. Only used when STM32CubeProgrammer
+# is present.
 workspace_root: "__WORKSPACE__"
 state_root: "__STATE__"
 
@@ -13,7 +15,7 @@ debuggers:
   dut:
     type: "stlink"                 # STM32CubeProgrammer CLI (STM32_Programmer_CLI)
     executable: "__CUBECLI__"      # absolute path; Linux auto-discovery only checks PATH
-    probe_id: null
+    probe_id: "__PROBE_ID__"   # the only field that selects a physical probe
     target_type: null
     interface: "SWD"
     timeout_s: 60

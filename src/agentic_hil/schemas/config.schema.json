@@ -82,7 +82,7 @@
     },
     "debuggers": {
       "type": "object",
-      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id \u2014 it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one.",
+      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Every entry needs its own probe_id before it can drive a board \u2014 it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one. The config still loads without a probe_id, so `agentic-hil debugger-probes` can discover the ids.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },

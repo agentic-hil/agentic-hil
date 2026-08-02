@@ -25,6 +25,10 @@ FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
+# The UIDs fake_pyocd.py reports from `pyocd json --probes`. The real backend
+# resolves its configured selector against that listing, so a default probe_id
+# for a pyocd entry has to come from here.
+FAKE_PYOCD_UIDS = ("PYOCD123", "PYOCD456")
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 
@@ -167,14 +171,17 @@ def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: di
     defaults = {flag: bool(grants.get(source, False)) for flag, source in SECTION_GRANTS[section].items()}
     for entry in entries.values():
         entry.setdefault("permissions", defaults)
-    if section == "debuggers" and len(entries) > 1 and auto_probe_ids:
-        # A multi-probe config must name each probe's hardware, so give every
-        # entry that did not declare one a distinct probe_id. A test that wants
-        # a collision sets matching probe_ids itself; a test that wants the
-        # missing-probe_id refusal passes auto_probe_ids=False.
+    if section == "debuggers" and auto_probe_ids:
+        # Driving any board needs the probe named, so give every entry that did
+        # not declare one a distinct probe_id. A test that wants a collision sets
+        # matching probe_ids itself; a test that wants the missing-probe_id
+        # refusal passes auto_probe_ids=False.
         for index, (name, entry) in enumerate(entries.items()):
             if entry.get("probe_id") is None:
-                entry["probe_id"] = f"TESTPROBE{index}-{name}"
+                # pyOCD verifies the selector against what it enumerates, so the
+                # default has to be a UID the fake actually reports.
+                enumerable = FAKE_PYOCD_UIDS if entry.get("type") == "pyocd" else ()
+                entry["probe_id"] = enumerable[index] if index < len(enumerable) else f"TESTPROBE{index}-{name}"
     return yaml.safe_dump({section: entries}, sort_keys=False, default_flow_style=False)
 
 

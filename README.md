@@ -108,8 +108,10 @@ target:
 debuggers:
   dut:
     type: "openocd"          # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
-    probe_id: "0668FF383036" # required once several probes are configured: it is
-                             # the only field that selects a physical probe
+    probe_id: "0668FF383036" # required before any board is driven: it is the only
+                             # field that selects a physical probe. The config
+                             # still loads without it, so `agentic-hil
+                             # debugger-probes` can discover the ids
     interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
     target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60

@@ -363,6 +363,16 @@ def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: b
         probe_owner[probe_key] = name
     resource_owner: dict[str, str] = {}
     for name, debugger in debuggers.items():
+        # An entry that names neither a probe nor a lease has no identity yet:
+        # debugger_resource_identity() falls back to the executable or the
+        # backend type, and one pyOCD install driving two probes is not two
+        # names on one board. Rejecting that here would break the bootstrap the
+        # missing id exists for — `agentic-hil debugger-probes` has to load this
+        # very config to discover the ids the operator will write down. Driving
+        # such an entry is already refused at the hardware boundary by
+        # tools.unnamed_probe_error.
+        if not debugger.probe_id and not debugger.resource_id:
+            continue
         identity = debugger_resource_identity(debugger)
         if identity in resource_owner:
             stage = " after executable pinning" if after_pinning else ""

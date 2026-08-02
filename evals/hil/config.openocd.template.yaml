@@ -1,8 +1,10 @@
 # Authoritative Agentic HIL config template (external policy model).
 # run-all.sh renders this to an EXTERNAL file outside the workspace and points
 # AGENTIC_HIL_CONFIG at it. __WORKSPACE__ / __STATE__ are filled with real
-# absolute guest paths at run time; the OpenOCD script paths below are the
-# Ubuntu apt-openocd defaults -- adjust if your openocd installs elsewhere.
+# absolute guest paths at run time, and __PROBE_ID__ with the ST-Link serial
+# `agentic-hil debugger-probes` reports for the attached board; the OpenOCD
+# script paths below are the Ubuntu apt-openocd defaults -- adjust if your
+# openocd installs elsewhere.
 workspace_root: "__WORKSPACE__"
 state_root: "__STATE__"
 
@@ -14,7 +16,7 @@ debuggers:
   dut:
     type: "openocd"
     executable: null
-    probe_id: null
+    probe_id: "__PROBE_ID__"   # the only field that selects a physical probe
     target_type: null
     interface_cfg: "/usr/share/openocd/scripts/interface/stlink.cfg"
     target_cfg: "/usr/share/openocd/scripts/target/stm32f4x.cfg"
