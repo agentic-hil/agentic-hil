@@ -138,4 +138,11 @@ Symptom: tools return `resource_busy`, `cleanup_required`, or `quarantined`, and
 
 Likely cause: another live process owns the project or resource lease, or a previous owner crashed / left an unknown hardware effect, which quarantines the resource instead of silently releasing it.
 
-Fix: inspect ownership with `agentic-hil lease-status`. If a live owner exists, wait or stop it. For a quarantine, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.
+Fix: inspect ownership with `agentic-hil lease-status`. If a live owner exists, wait or stop it.
+
+For a quarantine, read `cleanup_reasons` and `auto_recoverable` from `lease-status` before doing anything physical. They name what is actually unresolved and whether an operator is needed at all:
+
+- `auto_recoverable: true` — the incident is a host-side toolchain fault the running owner clears by itself. The next hardware tool call reaps this owner's leftover debugger processes, re-reads the probe without resetting it, records the attestation as `recovery: machine_attested`, and then runs. No operator step. If the probe is still unreachable the call returns `resource_quarantined` with `auto_recovery_attempted: true` and the quarantine stands.
+- `auto_recoverable: false` — an unconfirmed physical effect (`debugger_result_unconfirmed` after `flash_firmware` / `reset_target`, `debug_session_start_unconfirmed`), a broken audit (`*_audit_broken`), or an incident adopted from an owner that died. The target may be running code nothing on the host can observe, so this needs a person.
+
+For the operator case, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.
