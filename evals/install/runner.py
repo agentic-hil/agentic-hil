@@ -171,10 +171,16 @@ def job_payload(
             raise ValueError("target requires trusted source evidence")
         target["expected_package_digest"] = source_digest(source_root / "src" / "agentic_hil")
     elif matrix.target.mode == "published":
-        # A released wheel is built, not checked out, so no tree here digests to
-        # it. What ties the install to this release is the recorded version and
-        # the absence of a direct reference, both checked separately.
-        target["expected_package_digest"] = None
+        # A wheel built from a tree digests to that tree, which is exactly what
+        # local mode's own digest gate proves on every passing run. The release
+        # tag is the immutable ref for it, so a working tree that has moved on
+        # cannot silently redefine what "the release" is. Without this the
+        # verifier had nothing to compare against and treated any package with a
+        # computable digest as matching its trusted source, so an install from a
+        # custom or compromised index could be staged and executed as trusted.
+        target["expected_package_digest"] = committed_package_digest(
+            host_source_root, f"v{matrix.target.expected_version}"
+        )
     else:
         target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
     target["source_git"] = git_metadata(host_source_root)

@@ -404,6 +404,8 @@ def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bo
         # What must not happen is a third party's package of the same name.
         if direct is None:
             return True, "installed from a package index"
+        if not isinstance(direct, dict):
+            return False, "direct_url.json is not an object"
         url = str(direct.get("url") or "")
         official = url.removesuffix(".git").rstrip("/").endswith("github.com/agentic-hil/agentic-hil")
         if official:
@@ -1096,9 +1098,12 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 package_tree_detail = f"{type(error).__name__}: {error}"
         expected_digest = target["expected_package_digest"]
         if expected_digest is None:
-            # Published mode: nothing on this host digests to a released wheel.
-            package_matches = installed_digest is not None
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against"
+            # Every mode now supplies a host-generated digest. A job.json without
+            # one proves nothing about the installed bytes, and a check named
+            # "installed package matches trusted source" must not pass on the
+            # strength of the digest merely being computable.
+            package_matches = False
+            digest_detail = f"digest={installed_digest or '<unavailable>'}; no expected package digest in job.json"
         else:
             package_matches = installed_digest == expected_digest
             digest_detail = f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}"

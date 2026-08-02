@@ -326,6 +326,27 @@ official commit-pinned raw URL. Remote evaluation also requires
 `src/agentic_hil`, plus clean `evals/install/tools.list.expected`, so the host
 can produce trusted package and target-specific MCP contract evidence.
 
+`target.mode: "published"` measures the guide's own published install path, so
+it names no install source:
+
+```json
+{
+  "mode": "published",
+  "expected_version": "0.5.0",
+  "guide_url": "https://raw.githubusercontent.com/agentic-hil/agentic-hil/v0.5.0/AI_AGENT_QUICKSTART.md"
+}
+```
+
+Its expected package digest comes from the `v<expected_version>` tag in the
+host checkout, exported with `git archive` so a working tree that has moved on
+cannot redefine what "the release" is, and so a CRLF checkout does not hash
+differently from what pip fetches. That tag must be present, or the run fails
+at plan time rather than mid-matrix. An index install records no PEP 610
+`direct_url.json`, and its absence says the bytes came from *an* index, never
+which one: a counterfeit package of the same name and version records nothing
+either. The digest is therefore the only thing that ties the installed bytes to
+the release, and nothing reaches the verifier's trusted staging without it.
+
 ## Inspect plan
 
 No Docker or model call:

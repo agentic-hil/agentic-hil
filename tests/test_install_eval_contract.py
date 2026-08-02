@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from evals.install.config import load_matrix
-from evals.install.runner import expected_mcp_tools, job_payload
+from evals.install.runner import committed_package_digest, expected_mcp_tools, job_payload
 from evals.install.verifier import target_mcp_tools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +98,48 @@ def test_every_agent_session_receives_the_reasoning_effort() -> None:
     assert len(calls) == 3, "one call per agent session: install, confirmation, follow-up"
     for call in calls:
         assert any(keyword.arg == "reasoning_effort" for keyword in call.keywords)
+
+
+def test_published_mode_binds_a_host_generated_release_digest() -> None:
+    """Published mode used to send no expected digest at all.
+
+    The verifier then treated any successfully computed digest as a match and
+    staged those unchecked bytes as its trusted package, so an install of the
+    expected name and version from a custom or compromised index could be
+    certified as coming from the release. The host holds the digest of the tree
+    the release tag names, and that is what the installed package is compared
+    against.
+    """
+    version = "0.5.0"
+    if f"v{version}" not in _repository_tags():
+        pytest.skip(f"release tag v{version} is not present in this checkout")
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    published = dataclasses.replace(
+        matrix.target,
+        mode="published",
+        expected_version=version,
+        guide_url="https://example.invalid/guide",
+    )
+
+    payload = job_payload(
+        dataclasses.replace(matrix, target=published),
+        matrix.cases[0],
+        matrix.jobs[0],
+        None,
+        REPOSITORY_ROOT,
+    )
+
+    assert payload["target"]["expected_package_digest"] == committed_package_digest(REPOSITORY_ROOT, f"v{version}")
+
+
+def _repository_tags() -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(REPOSITORY_ROOT), "tag", "--list"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return set(result.stdout.split())
 
 
 def test_job_binds_mcp_contract_from_target_source() -> None:

@@ -325,6 +325,35 @@ def test_a_malformed_origin_record_still_fails() -> None:
     assert "not an object" in detail
 
 
+def test_a_malformed_published_origin_record_fails_instead_of_raising() -> None:
+    ok, detail = verifier.origin_matches({"mode": "published"}, {"direct_url": "not-an-object"})
+
+    assert not ok
+    assert "not an object" in detail
+
+
+def test_a_counterfeit_index_package_fails_the_trusted_source_check(tmp_path: Path) -> None:
+    """Absence of direct_url.json says the bytes came from *an* index, never which.
+
+    A counterfeit package with the expected name and version records no direct
+    URL either, so the trusted-source check cannot rest on origin metadata; it
+    has to compare the installed bytes with a host-held digest of the release.
+    """
+    from evals.install.runner import committed_package_digest
+
+    repository = Path(__file__).resolve().parents[1]
+    released = committed_package_digest(repository, "HEAD")
+
+    counterfeit = tmp_path / "agentic_hil"
+    counterfeit.mkdir()
+    (counterfeit / "__init__.py").write_text("# same name, same version, other bytes\n", encoding="utf-8")
+
+    # Origin metadata cannot tell the two apart...
+    assert verifier.origin_matches({"mode": "published"}, {"direct_url": None})[0] is True
+    # ...so the digest is what has to, and a null expectation is not a match.
+    assert source_digest(counterfeit) != released
+
+
 @pytest.mark.parametrize("agent", ["codex", "claude-code", "opencode"])
 def test_a_clean_case_has_no_operator_fixture_to_lose(
     agent: str,
