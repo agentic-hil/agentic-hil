@@ -1900,6 +1900,8 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         encoding=str(raw.get("encoding", "utf-8")),
         max_buffer_bytes=int(raw.get("max_buffer_bytes", 65536)),
         max_write_bytes=int(raw.get("max_write_bytes", 4096)),
+        assert_dtr=bool(raw.get("assert_dtr", True)),
+        assert_rts=bool(raw.get("assert_rts", True)),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )

@@ -6,7 +6,9 @@ that an update quietly widens what an existing bench allows.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
@@ -166,6 +168,67 @@ def test_an_unsupported_version_is_refused_by_number(tmp_path: Path) -> None:
     assert excinfo.value.error_type == "config_invalid"
     assert excinfo.value.details["field"] == "version"
     assert excinfo.value.details["supported_versions"] == [LEGACY_CONFIG_VERSION, CURRENT_CONFIG_VERSION]
+
+
+class _RecordingHandle:
+    """A pyserial stand-in that records the order of attribute writes and open()."""
+
+    def __init__(self, inner, record) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_record", record)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        self._record(name, value)
+        setattr(self._inner, name, value)
+
+    def __getattr__(self, name: str):
+        if name == "open":
+            def open_port() -> None:
+                self._record("open", True)
+                self._inner.is_open = True
+
+            return open_port
+        return getattr(self._inner, name)
+
+
+def test_a_port_can_be_opened_without_touching_the_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The passive mode that is no longer an access precondition.
+
+    Reading needs no permission now, so the way to prove an observation did not
+    disturb the target is to open the port without raising the lines that reset
+    it — and the line state has to be decided before the port is open, not
+    after."""
+    events: list[tuple[str, object]] = []
+    inner = SimpleNamespace(is_open=False, in_waiting=0, close=lambda: None, read=lambda size: b"", reset_input_buffer=lambda: None, reset_output_buffer=lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "serial",
+        SimpleNamespace(Serial=lambda *args, **kwargs: _RecordingHandle(inner, lambda name, value: events.append((name, value)))),
+    )
+    config = config_for(
+        tmp_path,
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n    assert_dtr: false\n    assert_rts: false\n',
+    )
+    assert config.com_ports["dut_uart"].assert_dtr is False
+    assert config.com_ports["dut_uart"].assert_rts is False
+
+    service = ComPortService(config)
+    try:
+        started = service.session_start("dut_uart", clear_buffer=False)
+        assert started["ok"] is True, started
+        # Reported, so a reader can tell a passive observation from one that
+        # raised the line that resets the board.
+        assert service.list_ports()["ports"]["dut_uart"]["assert_dtr"] is False
+    finally:
+        service.close()
+
+    # Both lines are decided before the port exists, or the open itself has
+    # already reset the board this was meant to observe.
+    assert ("dtr", False) in events
+    assert ("rts", False) in events
+    assert events.index(("dtr", False)) < events.index(("open", True))
+    assert events.index(("rts", False)) < events.index(("open", True))
 
 
 def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:

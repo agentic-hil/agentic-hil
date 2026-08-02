@@ -305,6 +305,91 @@ def test_a_run_must_declare_something(tmp_path: Path) -> None:
         coordinator.close()
 
 
+PROBE_ONLY_PLAN = """version: 2
+name: probe-plan
+steps:
+  - debugger: dut
+    action: flash
+    image_path: build/app.bin
+"""
+
+
+def write_plan(workspace: Path, text: str = PROBE_ONLY_PLAN) -> Path:
+    path = workspace / ".agentic-hil" / "testconfig.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_plan_is_what_the_run_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.test_reactor import declared_devices, load_test_config
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = load_config(str(write_config(workspace, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    monkeypatch.chdir(workspace)
+    plan = load_test_config(
+        str(
+            write_plan(
+                workspace,
+                """version: 2
+name: two-devices
+steps:
+  - port_id: dut_uart
+    action: uart_open
+  - debugger: dut
+    action: flash
+    image_path: build/app.bin
+  - port_id: dut_uart
+    action: uart_close
+""",
+            )
+        ),
+        config.work_dir,
+    )
+
+    devices = declared_devices(config, plan)
+
+    # One entry per physical device, not per step: the mutex locks boards.
+    assert len(devices) == 2
+    assert any(item.startswith("com:") or item.startswith("physical:") for item in devices)
+
+
+def test_a_reactor_run_is_refused_while_a_stranger_holds_a_declared_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal an operator gets when the bench is already in use.
+
+    Nothing runs, and the result names who has the board."""
+    from conftest import write_authoritative_config
+
+    from agentic_hil.cli import run_test_reactor
+    from agentic_hil.config import load_authoritative_config
+    from agentic_hil.test_reactor import declared_devices, load_test_config
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+    (workspace / "build").mkdir(exist_ok=True)
+    (workspace / "build" / "app.bin").write_bytes(b"\x00" * 16)
+    plan_path = write_plan(workspace)
+    config = load_authoritative_config(workspace)
+    devices = declared_devices(config, load_test_config(str(plan_path), config.work_dir))
+    assert devices
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(devices)
+    try:
+        result = run_test_reactor(str(plan_path))
+    finally:
+        stranger.release_all()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "device_busy"
+    assert result["holder"]["label"] == "other-bench-session"
+    assert result["steps"] == []
+    assert result["side_effect_committed"] is False
+
+
 def test_the_holder_record_names_the_device_it_belongs_to() -> None:
     mutex = BenchMutex(frontend="first", label="plan")
     mutex.acquire([BOARD])

@@ -43,7 +43,7 @@ from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, declared_devices, load_test_config
 from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -222,6 +222,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     reactor_parser = subparsers.add_parser("test-reactor", help="run a validated hardware test sequence")
     reactor_parser.add_argument("--test-config", default=DEFAULT_TEST_CONFIG_PATH)
+    reactor_parser.add_argument(
+        "--wait-s",
+        type=float,
+        default=0.0,
+        help="wait up to this many seconds for a device another run holds, instead of refusing immediately; bounded and never implicit",
+    )
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
@@ -268,7 +274,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
-        return run_test_reactor(args.test_config)
+        return run_test_reactor(args.test_config, wait_s=args.wait_s)
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -575,10 +581,36 @@ def initialized_config_path(workspace: Path) -> Path:
     return target
 
 
-def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
+def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
     service = AgenticHILToolService(config, frontend="reactor")
+    # The plan's devices are held from before its first step to after its last,
+    # not around each call: between two steps there would otherwise be no lock at
+    # all, and an observation from outside could reach the board exactly where
+    # the plan assumes nothing moved. The same declaration fixes what this run
+    # may touch, so a step reaching past the plan is refused rather than
+    # silently widening what the plan says it does.
+    devices = declared_devices(config, test_config)
+    if devices:
+        try:
+            service.coordinator.begin_run(devices, label=test_config.name, wait_s=wait_s)
+        except CoordinationError as error:
+            service.close()
+            return write_report(
+                config,
+                {
+                    "tool": "test_reactor",
+                    "name": test_config.name,
+                    "test_config_path": test_config.path,
+                    "steps": [],
+                    "cleanup": [],
+                    "cleanup_ok": True,
+                    "declared_devices": devices,
+                    **error.result,
+                    "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
+                },
+            )
     # A step naming another probe gets its own service driving that debugger,
     # sharing the base coordinator so the whole project stays one owner.
     def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:

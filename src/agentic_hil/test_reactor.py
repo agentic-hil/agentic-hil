@@ -22,6 +22,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.contracts import validate_tool_arguments
+from agentic_hil.coordination import com_resource, debugger_resource
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
@@ -688,13 +689,7 @@ class TestReactor:
         return None
 
     def step_debugger_id(self, step: TestStep) -> str | None:
-        """The probe a debugger step runs on: the name the plan gave, or the only
-        configured one. None means the plan must name it — with several probes
-        configured, picking one for the author is how the wrong board gets
-        flashed."""
-        if step.debugger is not None:
-            return step.debugger
-        return next(iter(self.config.debuggers)) if len(self.config.debuggers) == 1 else None
+        return step_debugger_id(self.config, step)
 
     def _preflight_tool_contract(self, index: int, step: TestStep) -> JsonObject | None:
         # Validate each step's plan-supplied tool arguments against the exact MCP
@@ -724,6 +719,36 @@ class TestReactor:
         if require_elf and Path(image_path).suffix.lower() != ".elf":
             return preflight_error(index, step, "image_path", "Debug sessions require an ELF artifact with debug symbols.")
         return None
+
+
+def step_debugger_id(config: AgenticHILConfig, step: TestStep) -> str | None:
+    """The probe a debugger step runs on: the name the plan gave, or the only
+    configured one. None means the plan must name it — with several probes
+    configured, picking one for the author is how the wrong board gets
+    flashed."""
+    if step.debugger is not None:
+        return step.debugger
+    return next(iter(config.debuggers)) if len(config.debuggers) == 1 else None
+
+
+def declared_devices(config: AgenticHILConfig, test_config: TestConfig) -> list[str]:
+    """Every physical device this plan says it touches.
+
+    This is what the run locks before its first step, and what every call inside
+    it is checked against, so the plan stays the honest record of what a test
+    reaches for. A name the config does not know is left out on purpose:
+    preflight refuses that step with a message about the name, which is a better
+    answer than a lock failure about a device nobody configured."""
+    devices: list[str] = []
+    for step in test_config.steps:
+        if step.action in UART_ACTIONS:
+            if step.port_id in config.com_ports:
+                devices.append(com_resource(config, str(step.port_id)))
+            continue
+        debugger_id = step_debugger_id(config, step)
+        if debugger_id in config.debuggers:
+            devices.append(debugger_resource(bind_debugger(config, str(debugger_id))))
+    return sorted(set(devices))
 
 
 def step_tool_arguments(step: TestStep) -> list[tuple[str, JsonObject]]:

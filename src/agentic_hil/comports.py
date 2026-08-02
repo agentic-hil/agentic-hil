@@ -407,7 +407,22 @@ class ComPortService:
         except ImportError:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
         try:
-            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
+            # Built unopened so the modem lines are decided BEFORE the port is
+            # opened. Passing the device to the constructor opens it immediately
+            # with pyserial's own defaults, which raise DTR and RTS — and on a
+            # board that wires DTR to reset, listening to a target restarts it.
+            # pyserial applies the requested states as part of open(); a driver
+            # that pulses a line during the open itself is beyond what any host
+            # can suppress, which is why listen_only and this pair are described
+            # as evidence of intent, not as a hardware guarantee.
+            serial_handle = serial.Serial()
+            serial_handle.port = port_config.device
+            serial_handle.baudrate = port_config.baudrate
+            serial_handle.timeout = port_config.timeout_s
+            serial_handle.write_timeout = port_config.write_timeout_s
+            serial_handle.dtr = port_config.assert_dtr
+            serial_handle.rts = port_config.assert_rts
+            serial_handle.open()
             provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
             try:
                 session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
@@ -449,7 +464,10 @@ class ComPortService:
         return {"ok": True, "session": session}
 
     def _port_status(self, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
-        result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "session_active": False}
+        # assert_dtr/assert_rts are reported because they decide whether merely
+        # opening this port touches the target; a reader judging whether an
+        # observation was passive needs to see them without opening the config.
+        result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "assert_dtr": port_config.assert_dtr, "assert_rts": port_config.assert_rts, "session_active": False}
         if session is not None:
             result.update(self._session_status(session))
         return result

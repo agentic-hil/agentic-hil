@@ -265,7 +265,7 @@
     },
     "com_ports": {
       "type": "object",
-      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback.",
+      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback. Reading needs no permission; assert_dtr and assert_rts decide whether opening the port touches the target.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -297,6 +297,16 @@
           "encoding": {
             "type": "string",
             "default": "utf-8"
+          },
+          "assert_dtr": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether DTR is asserted when the port is opened. pyserial asserts it by default, and on boards that wire DTR to reset that restarts the target on every open. Set false to observe a target provably undisturbed; leave true when the peer needs DTR to talk."
+          },
+          "assert_rts": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether RTS is asserted when the port is opened. Same reasoning as assert_dtr; some boards wire RTS to reset or boot mode."
           },
           "max_buffer_bytes": {
             "type": "integer",

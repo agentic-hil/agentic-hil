@@ -92,6 +92,12 @@ class ComPortConfig:
     encoding: str
     max_buffer_bytes: int
     max_write_bytes: int
+    # pyserial raises DTR and RTS on open, and a board that wires either to
+    # reset is restarted by the act of listening to it. Both default to what
+    # pyserial has always done, so no existing bench changes behaviour; setting
+    # them false is how a target is observed provably undisturbed.
+    assert_dtr: bool = True
+    assert_rts: bool = True
     resource_id: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
 
