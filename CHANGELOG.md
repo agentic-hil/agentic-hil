@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- With `agentic-hil.config.example.yaml`, `setup` and `init` locate STM32CubeProgrammer, require one ST-Link, identify it via HOTPLUG, match its COM port by USB serial, and write host values externally. This pre-policy path cannot reset, halt, erase, flash, run raw commands, or access serial I/O.
+
+### Changed
+
+- Profiles may request probe, flash, reset, artifact, and UART access; raw commands and mass erase stay denied. No profile remains deny-by-default; existing operator configs remain untouched.
+- Windows discovery includes versioned `C:\ST` CubeCLT, PATH, standalone CubeProgrammer, and CubeIDE installs.
+
 ## [0.6.0] - 2026-08-02
 
 An unattended loop no longer stops at every quarantine. The owning process clears the failure classes it can actually verify, and the audit records what verified them.

@@ -42,6 +42,7 @@ from agentic_hil.cli import (
     setup_project,
     skill_version,
     test_schema,
+    upgrade_installation,
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
@@ -244,6 +245,90 @@ def test_doctor_calls_a_copied_installation_what_it_is(monkeypatch: pytest.Monke
 
     assert report["editable"] is False
     assert "summary" not in report
+
+
+def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], str | None]] = []
+
+    def run(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append((command, cwd))
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "9.9.9\n", "")
+        if "skill-install" in command:
+            return subprocess.CompletedProcess(command, 0, '{"ok": true}\n', "")
+        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert result["version"] == "9.9.9"
+    assert result["restart_required"] is True
+    assert calls[0][0][:3] == [sys.executable, "-m", "pip"]
+    assert calls[1] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
+    assert calls[2][0] == [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", "opencode"]
+    assert calls[2][1] is not None
+
+
+def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", command))
+    monkeypatch.setattr(
+        "agentic_hil.cli._run_upgrade_process",
+        lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert result["install"]["stderr"] == "network failed"
+
+
+def test_upgrade_rejects_unknown_agent_before_mutating_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+
+    result = upgrade_installation(["unknown"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsupported_agent"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "installer", "manager", "expected"),
+    [
+        ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]),
+        ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx", ["pipx.exe", "upgrade", "agentic-hil"]),
+        ("C:/Users/op/venv", "uv", "uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil"]),
+        ("C:/Python313", "pip", "pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil"]),
+    ],
+)
+def test_upgrade_selects_manager_owning_running_installation(
+    prefix: str,
+    installer: str,
+    manager: str,
+    expected: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentic_hil.cli import _upgrade_command
+
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+
+    selected_manager, command = _upgrade_command()
+
+    assert selected_manager == manager
+    assert command == expected
 
 
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
