@@ -44,8 +44,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # Dependencies come from a hash-pinned lock so pip can reject a substituted
+      # artifact; the project itself is then installed editable with --no-deps,
+      # because a local path has no artifact to hash and pip refuses to mix the
+      # two modes in one command.
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r requirements/dev.txt
+
       - name: Install package
-        run: python -m pip install -e '.[dev,can]'
+        run: python -m pip install --no-deps -e .
 
       - name: Lint
         run: ruff check src tests evals tools
