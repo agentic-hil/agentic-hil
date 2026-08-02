@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import (
     AgenticHILConfig,
     ArtifactsConfig,
@@ -56,7 +57,15 @@ class ConfigError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> JsonObject:
-        return {"ok": False, "error_type": self.error_type, "summary": self.summary, **self.details}
+        # Every CLI and tool path serializes a ConfigError here, so this is the
+        # one place a concrete fix has to be attached. It comes from the same
+        # catalogue the MCP reference serves, scoped by the config field the
+        # error already names, so the fix in the refusal and the fix a caller
+        # looks up cannot drift apart. Error types the catalogue does not cover
+        # contribute nothing: no result grows advice nobody wrote.
+        field = self.details.get("field")
+        remediation = remediation_fields(self.error_type, field if isinstance(field, str) else None)
+        return {"ok": False, "error_type": self.error_type, "summary": self.summary, **self.details, **remediation}
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -411,7 +420,10 @@ def ensure_safe_state_root() -> list[str]:
     permissions. Unsafe ownership or replaceable ancestors fail closed. This
     validator itself never chmods; ``setup`` performs any user-owned tightening
     explicitly beforehand via tighten_owned_writable_ancestors()."""
-    secure_user_directory(user_state_root())
+    # field="state_root": this is the state directory, not the config directory,
+    # and the field decides which remediation the refusal carries. Reported as
+    # user_config it proposed moving config.yaml, which fixes nothing here.
+    secure_user_directory(user_state_root(), field="state_root", label="Default state root")
     return []
 
 
@@ -886,14 +898,19 @@ def safe_directory(directory: str | Path) -> Path:
     return path
 
 
-def secure_user_directory(directory: str | Path) -> Path:
+def secure_user_directory(directory: str | Path, *, field: str = "user_config", label: str = "User configuration directory") -> Path:
     """Create and pin a user-controlled directory, rejecting replaceable
-    ancestors and unsafe ownership/modes instead of repairing them in place."""
+    ancestors and unsafe ownership/modes instead of repairing them in place.
+
+    ``field`` names the configuration setting the refusal is about. It selects
+    the remediation attached to the result, so a caller told which directory
+    failed is also told where that particular directory may live instead.
+    """
     path = absolute_without_symlinks(Path(directory))
     if os.name == "nt":
         handles = _windows_hold_directory_chain(path, create=True)
         try:
-            validate_windows_state_root(path, field="user_config", label="User configuration directory")
+            validate_windows_state_root(path, field=field, label=label)
         finally:
             _close_windows_handles(handles)
         return path
@@ -909,8 +926,8 @@ def secure_user_directory(directory: str | Path) -> Path:
             if (final and opened.st_uid != euid) or unsafe_write:
                 raise ConfigError(
                     "unsafe_configured_path",
-                    "User configuration directories must be owned by the current user and must have no replaceable components.",
-                    {"field": "user_config", "path": str(path)},
+                    f"{label} must be owned by the current user and must have no replaceable components.",
+                    {"field": field, "path": str(path)},
                 )
     finally:
         for descriptor in reversed(descriptors):

@@ -143,6 +143,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Set `state_root: {safe_state_root}` in the authoritative configuration.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
+            "`agentic-hil init` and `agentic-hil setup` derive the default state_root from %LOCALAPPDATA% on Windows "
+            "and $XDG_STATE_HOME on POSIX, and validate before writing anything. On a stock Windows profile that "
+            "default is rejected, so neither command can produce a usable file: write the configuration at "
+            "{safe_user_config} yourself with `state_root: {safe_state_root}` (every field is in MCP resource "
+            + CONFIG_SCHEMA_URI
+            + "), then set AGENTIC_HIL_CONFIG to that absolute path.",
             "Re-run `agentic-hil doctor`; it reports the first path that still fails.",
         ),
         do_not=(

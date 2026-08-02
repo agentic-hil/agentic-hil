@@ -13,6 +13,7 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -315,6 +316,7 @@ class PyOCDBackend:
             "backend": self.backend_name,
             "error_type": "adapter_not_found",
             "summary": f"Probe selection is not unambiguous: {reason}",
+            **remediation_fields("adapter_not_found", self.backend_name),
             "configured_probe_id": configured,
             "candidate_probe_ids": candidates,
             "side_effect_committed": False,
@@ -326,8 +328,12 @@ class PyOCDBackend:
         return {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
+        # likely_causes says what may be wrong; remediation says what to check
+        # next, scoped to this backend. target_type_invalid is the case that
+        # cost the most: without the fix in the result, the caller has to work
+        # out from pyOCD's own sources that the value comes from a CMSIS pack.
         error_type = self._public_error_type(backend_error_type)
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), "log_path": display_path(self.config, log_path)}
+        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
         backend_error_type = self._classify_output(output, tool)
