@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-02
+
+An unattended loop no longer stops at every quarantine. The owning process clears the failure classes it can actually verify, and the audit records what verified them.
+
+### Added
+
+- **The owning process recovers its own quarantines.** A blocked hardware call attempts recovery before refusing: it reaps this owner's leftover debugger processes, verifies the safe state, writes a `recovery: machine_attested` report, and then runs. Previously a quarantine could only be cleared by a person running `agentic-hil recover` — for every class of fault, including ones no person can add information to, such as an OpenOCD process that died mid-cleanup.
+- **`recovery.auto_recover` policy** (`off`, `readonly`, `reset_halt`; defaults to `reset_halt`) with `recovery.max_attempts` (default 3) bounding attempts per incident. `readonly` reaps processes and re-reads the probe, which connects without resetting on every backend and therefore cannot alter the state it attests to. `reset_halt` additionally drives a reset-into-halt, which is what settles an unconfirmed flash, reset, or debug-session start. Set `readonly` if anything on the bench reacts to a target reset.
+- **`lease-status` reports why, not just that.** New `cleanup_reasons`, `auto_recoverable`, and `auto_recover_policy` fields answer whether to retry or fetch an operator. `cleanup_reasons` also travels on lease-carrying tool results and into the project record, so a second process sees it. The reason previously existed only inside the on-disk marker's `errors[]`, so classifying an incident meant opening state files under the state root.
+- **Machine-recovery provenance in reports:** `safe_state_predicate` (`readonly_probe` or `reset_halt`), `auto_recover_policy`, and `auto_recover_policy_source` (`config` or `default`). A config that never names the policy gets the default plus a one-time `warnings` entry the first time recovery resets its target.
+
+### Changed
+
+- One-shot debugger failures no longer share one undifferentiated quarantine reason. Read-only calls (`debugger_probes_list`, `probe_target`) raise `debugger_readonly_result_unconfirmed`, which a re-read settles; `flash_firmware` and `reset_target` keep `debugger_result_unconfirmed`, which needs the `reset_halt` predicate because either may have left the target running.
+- A one-shot call that quarantined kept its lease registered but unreachable, so nothing in the process could ever resolve it. The lease is now retained for recovery and released once the safe state is verified.
+- Under the default policy a failed `debug_start_session` load is settled by machine recovery instead of waiting for an operator. Recovery halts and never runs the target, so control is not handed back to a partially written image; flashing and running it again stays an explicit, permissioned act. Set `recovery.auto_recover: "readonly"` to keep the previous behaviour.
+
+Excluded from machine recovery regardless of policy: a broken audit (`*_audit_broken`), an incident adopted from an owner that died, a mix of reasons, a still-active sibling lease, an incident whose resources this owner no longer fully holds, and any bench without `allow_probe`. `reset_halt` degrades to `readonly` when the bound probe lacks `allow_reset`. The `machine_attested` report is written before the state transition, so a failed audit write aborts the recovery instead of silently unblocking hardware.
+
 ### Fixed
 
 - The CAN receive-queue drain budget bounds time spent talking to the adapter instead of also covering the `queue_clear_start` audit write that precedes it. The one-second deadline was armed before that write, so a slow first append — a cold runner creating the JSONL log while a scanner holds it — could consume the whole budget and break the loop before a single frame was read, failing `can_session_start` with `can_queue_clear_limit` and `frames_drained: 0` on a queue that was never touched.
