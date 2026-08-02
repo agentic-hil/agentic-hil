@@ -28,14 +28,12 @@ describes, then from this directory:
 
 ```bash
 agentic-hil setup --agent claude-code   # or: codex / opencode
-# The included agentic-hil.config.example.yaml acts as this demo's bootstrap
-# profile. Setup detects one attached ST-Link, the STM32 target, and its matching
-# virtual COM port, then writes the external host-specific config with only the
-# probe, flash, reset, and UART-read permissions requested by the profile.
+# The included profile resolves one ST-Link, target, and matching COM port, then
+# externally grants only requested probe, flash, reset, and UART-read access.
 agentic-hil doctor
 ```
 
-The authoritative file belongs outside the repository at `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Do not commit a machine-specific copy. The included profile contains requirements, not host bindings: setup replaces its placeholder paths with the attached probe, detected CubeProgrammer executable, and correlated COM device. Existing authoritative configs are preserved.
+Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. The profile declares requirements; setup resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
 
 ## Run the loop from an agent (MCP)
 

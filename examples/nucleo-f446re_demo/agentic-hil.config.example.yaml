@@ -1,7 +1,5 @@
-# Bootstrap profile consumed by `agentic-hil init` / `agentic-hil setup`.
-# workspace_root, state_root, debugger executable, probe id, backend, target
-# identity, and serial device are detected or generated outside the repository.
-# Host placeholders below document the full resulting config shape.
+# Bootstrap profile for `agentic-hil init` / `setup`. Roots, debugger/probe,
+# target, and serial bindings resolve externally; placeholders show final shape.
 workspace_root: "/absolute/path/to/agentic-hil/examples/nucleo-f446re_demo"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
