@@ -1,36 +1,37 @@
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override.
-# Multi-board plans simply address several configured devices; each device binds
-# to the top-level debugger (debugger: true) or a named `debuggers` entry in the
-# authoritative config, e.g. a second board as
-#   - {device: dut_b, action: flash, image_path: build/sensor.elf}
+# Steps address configured devices by their names: `debugger` names a
+# `debuggers` entry, `port_id` names a `com_ports` entry. `debugger` may be
+# omitted while the config declares exactly one probe; with several, name it —
+# e.g. a second board as
+#   - {debugger: dut_b, action: flash, image_path: build/sensor.elf}
 version: 1
 name: capture-state
 steps:
-  - device: dut
+  - debugger: dut
     action: flash
     image_path: build/app.elf
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_open
 
-  - device: dut
+  - debugger: dut
     action: debug_start
     image_path: build/app.elf
     mode: attach
 
-  - device: dut
+  - debugger: dut
     action: run_until_breakpoint
     location: capture_done
     timeout_s: 5
 
-  - device: dut
+  - debugger: dut
     action: dump_memory
     symbol: capture_buffer
     output_path: build/capture.hex
 
-  - device: dut
+  - debugger: dut
     action: debug_stop
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_close

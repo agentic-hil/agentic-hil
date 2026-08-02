@@ -24,17 +24,16 @@ from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
 from agentic_hil.types import (
-    AdapterConfig,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
     ComPortConfig,
     DebuggerConfig,
+    DebuggerPermissions,
     DebugInterfaceConfig,
-    DeviceConfig,
+    IoPermissions,
     JsonObject,
     LogsConfig,
-    PermissionsConfig,
     ReportsConfig,
     TargetConfig,
     ValidationConfig,
@@ -166,6 +165,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
     reject_bridge_args(raw, resolved_config_path)
+    reject_removed_sections(raw, resolved_config_path)
     validate_config_schema(raw, resolved_config_path)
 
     workspace_value = str(raw["workspace_root"])
@@ -192,38 +192,26 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path)
 
     target_raw = mapping(raw.get("target"), "target")
-    devices_raw = mapping(raw.get("devices"), "devices")
-    debugger_raw = mapping(raw.get("debugger"), "debugger")
+    debuggers_raw = mapping(raw.get("debuggers"), "debuggers")
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
     com_ports_raw = mapping(raw.get("com_ports"), "com_ports")
     can_buses_raw = mapping(raw.get("can_buses"), "can_buses")
-    adapters_raw = mapping(raw.get("adapters"), "adapters")
     validation_raw = mapping(raw.get("validation"), "validation")
-    permissions_raw = mapping(raw.get("permissions"), "permissions")
     reports_raw = mapping(raw.get("reports"), "reports")
     logs_raw = mapping(raw.get("logs"), "logs")
 
-    debugger_type = str(debugger_raw.get("type", "openocd"))
-    if debugger_type not in {"openocd", "stlink", "pyocd"}:
-        raise ConfigError(
-            "config_invalid",
-            "Unsupported debugger.type.",
-            {"field": "debugger.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
-        )
-
     target = target_config(target_raw)
-    debuggers_raw = mapping(raw.get("debuggers"), "debuggers")
-    debuggers = {name: named_debugger_config(name, value) for name, value in debuggers_raw.items()}
-    if "default" in debuggers:
-        raise ConfigError(
-            "config_invalid",
-            "The debugger name 'default' is reserved for the top-level debugger configuration.",
-            {"field": "debuggers.default"},
-        )
-    com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
-    devices = {name: device_config(name, value, target) for name, value in devices_raw.items()}
-    validate_devices(devices, debugger_config(debugger_raw, debugger_type), debuggers, com_ports)
+    debuggers = {name: named_debugger_config(name, value, target) for name, value in debuggers_raw.items()}
+    validate_debuggers(debuggers)
+    # One configured probe has no ambiguity to resolve, so bind it and let the
+    # single-board path stay free of a name it could only get wrong once.
+    single = next(iter(debuggers.items())) if len(debuggers) == 1 else (None, None)
+    # Auto-binding the only configured probe must honour its target override
+    # exactly as bind_debugger() does, or the override would work on every
+    # multi-probe project and be silently dropped on single-probe ones.
+    if single[1] is not None and single[1].target is not None:
+        target = single[1].target
 
     return AgenticHILConfig(
         config_path=resolved_config_path,
@@ -231,19 +219,36 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         workspace_root=str(workspace),
         state_root=str(state_root),
         target=target,
-        devices=devices,
-        debugger=debugger_config(debugger_raw, debugger_type),
         debuggers=debuggers,
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
-        com_ports=com_ports,
+        com_ports={name: com_port_config(name, value) for name, value in com_ports_raw.items()},
         can_buses={name: can_bus_config(name, value) for name, value in can_buses_raw.items()},
-        adapters={name: adapter_config(name, value) for name, value in adapters_raw.items()},
         validation=validation_config(validation_raw),
-        permissions=permissions_config(permissions_raw),
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
+        debugger_id=single[0],
+        debugger=single[1],
     )
+
+
+def bind_debugger(config: AgenticHILConfig, debugger_id: str) -> AgenticHILConfig:
+    """Return the config bound to one named probe.
+
+    Everything downstream — the backend, the coordination resource, the audit
+    report — acts on a single probe. Resolving the name here once means a wrong
+    or unknown name fails before any hardware is touched."""
+    debugger = config.debuggers.get(debugger_id)
+    if debugger is None:
+        raise ConfigError(
+            "config_invalid",
+            "Unknown debugger name.",
+            {"field": "debugger_id", "value": debugger_id, "configured_debuggers": sorted(config.debuggers)},
+        )
+    # A probe's own target overrides the project target for everything that
+    # runs on it. Applying it here rather than at one call site means every
+    # consumer of config.target sees the board it is actually driving.
+    return replace(config, debugger_id=debugger_id, debugger=debugger, target=debugger.target or config.target)
 
 
 def load_authoritative_config(expected_workspace: str | Path | None = None) -> AgenticHILConfig:
@@ -293,24 +298,62 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
 
 
 def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfig:
-    # validate_devices() rejects probe collisions on the *configured* values, but
-    # pinning can collapse two lexically distinct executables (or a null one
-    # resolved from PATH) onto the same binary. Re-check on the pinned config so
-    # two devices can never silently drive one physical probe.
-    resource_owner: dict[str, str] = {}
-    for name, device in config.devices.items():
-        if device.debugger is None:
-            continue
-        resolved = config.debugger if device.debugger == "default" else config.debuggers[device.debugger]
-        identity = debugger_resource_identity(resolved)
-        if identity in resource_owner:
+    # Re-run the probe rules on the pinned config. Pinning rewrites executables
+    # and script paths, not probe_id or resource_id, so today this cannot find
+    # anything validate_debuggers did not already reject at parse time — it is
+    # here so that a future pinning step which does touch those fields cannot
+    # quietly hand two names one probe.
+    validate_debuggers(config.debuggers, after_pinning=True)
+    return config
+
+
+def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: bool = False) -> None:
+    """Each configured debugger must name a distinct physical probe.
+
+    Two names pointing at one probe is how a plan that says "flash board_b"
+    silently flashes board_a: OpenOCD would happily attach to whatever single
+    probe is plugged in. Names are the only routing the operator has, so a
+    collision fails closed instead of picking a board for them."""
+    for name, debugger in debuggers.items():
+        # probe_id is the ONLY field that reaches hardware: the backends turn it
+        # into `adapter serial` (openocd.py), `sn=` (stlink.py) and `--uid`
+        # (pyocd.py), and emit nothing when it is None. resource_id only aliases
+        # a coordination lease. So with several probes configured, distinct
+        # resource_ids or distinct executables prove nothing — every entry would
+        # still attach to whichever probe happens to be plugged in.
+        if len(debuggers) > 1 and debugger.probe_id is None:
             raise ConfigError(
                 "config_invalid",
-                "Two devices resolve to the same physical debug probe after executable pinning; give each debugger a distinct probe_id or resource_id so boards cannot silently share a probe.",
-                {"field": f"devices.{name}.debugger", "resource": identity, "other_device": resource_owner[identity]},
+                "A project with several debuggers must give every entry a probe_id; it is the only field that selects a physical probe, so without it two names would drive whichever probe is plugged in.",
+                {"field": f"debuggers.{name}.probe_id", "configured_debuggers": sorted(debuggers)},
+            )
+    # probe_id decides the hardware, so it is checked on its own. The identity
+    # pass below cannot stand in for this: debugger_resource_identity() prefers
+    # resource_id and never looks at probe_id in that branch, so two entries
+    # naming one probe serial under different lease aliases would both pass.
+    probe_owner: dict[str, str] = {}
+    for name, debugger in debuggers.items():
+        if debugger.probe_id is None:
+            continue
+        probe_key = os.path.normcase(debugger.probe_id)
+        if probe_key in probe_owner:
+            raise ConfigError(
+                "config_invalid",
+                "Two configured debuggers name the same probe_id, so both drive one physical probe; a distinct resource_id only renames the lease and cannot make them different boards.",
+                {"field": f"debuggers.{name}.probe_id", "probe_id": debugger.probe_id, "other_debugger": probe_owner[probe_key]},
+            )
+        probe_owner[probe_key] = name
+    resource_owner: dict[str, str] = {}
+    for name, debugger in debuggers.items():
+        identity = debugger_resource_identity(debugger)
+        if identity in resource_owner:
+            stage = " after executable pinning" if after_pinning else ""
+            raise ConfigError(
+                "config_invalid",
+                f"Two configured debuggers resolve to the same coordination resource{stage}; give each debugger the probe_id of its own probe so boards cannot silently share a probe.",
+                {"field": f"debuggers.{name}", "resource": identity, "other_debugger": resource_owner[identity]},
             )
         resource_owner[identity] = name
-    return config
 
 
 def project_config_directory() -> Path:
@@ -654,13 +697,6 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
 
 
 def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
-    debugger_enabled = any(
-        [
-            config.permissions.allow_probe,
-            config.permissions.allow_flash,
-            config.permissions.allow_reset,
-        ]
-    )
     gdb_executable = configured_executable(
         config,
         config.debug.gdb_executable,
@@ -680,32 +716,19 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         )
         for name, bus in config.can_buses.items()
     }
-    adapters = {
-        name: replace(
-            adapter,
-            executable=configured_executable(
-                config,
-                adapter.executable,
-                f"adapters.{name}.executable",
-                workspace_relative=True,
-                required=True,
-            )
-            or adapter.executable,
-        )
-        for name, adapter in config.adapters.items()
-    }
-    debugger = pin_one_debugger(config, config.debugger, "debugger", debugger_enabled)
-    # Named debuggers drive independent multi-board probes and MUST be pinned and
-    # validated exactly like the top-level one — otherwise a named entry could
-    # point a per-device backend at an unvalidated executable.
-    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_enabled) for name, named in config.debuggers.items()}
+    # Every named debugger MUST be pinned and validated: a named entry could
+    # otherwise point a backend at an unvalidated executable. Each is required to
+    # resolve on its own grants, so a board with no enabled permission does not
+    # force an operator to install a toolchain it will never drive.
+    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named)) for name, named in config.debuggers.items()}
     return replace(
         config,
-        debugger=debugger,
         debuggers=debuggers,
+        # Re-point the binding at the pinned entry; leaving the pre-pin object
+        # bound would run the backend on the unvalidated executable.
+        debugger=None if config.debugger_id is None else debuggers[config.debugger_id],
         debug=replace(config.debug, gdb_executable=gdb_executable),
         can_buses=can_buses,
-        adapters=adapters,
     )
 
 
@@ -1742,34 +1765,6 @@ def target_config(raw: JsonObject) -> TargetConfig:
     return TargetConfig(name=str(raw.get("name", "unknown-target")), controller=str(raw.get("controller", "unknown-controller")))
 
 
-def device_config(name: str, value: Any, default_target: TargetConfig) -> DeviceConfig:
-    raw = mapping(value, f"devices.{name}")
-    target: TargetConfig | None = None
-    if raw.get("target") is not None:
-        target_raw = mapping(raw.get("target"), f"devices.{name}.target")
-        target = TargetConfig(
-            name=str(target_raw.get("name", default_target.name)),
-            controller=str(target_raw.get("controller", default_target.controller)),
-        )
-    return DeviceConfig(debugger=device_debugger_selector(name, raw.get("debugger", False)), uart=optional_string(raw.get("uart")), target=target)
-
-
-def device_debugger_selector(name: str, value: Any) -> str | None:
-    # false/absent -> no debugger; true -> the top-level debugger ("default");
-    # a non-empty string -> a named debugger for an independently controlled board.
-    if value is False or value is None:
-        return None
-    if value is True:
-        return "default"
-    if isinstance(value, str) and value:
-        return value
-    raise ConfigError(
-        "config_invalid",
-        "Device debugger must be false, true, or the name of a configured debugger.",
-        {"field": f"devices.{name}.debugger", "value": value},
-    )
-
-
 def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     # Mirror coordination.debugger_resource() so config validation rejects exactly
     # the collisions the coordinator would (and OpenOCD would silently share).
@@ -1778,60 +1773,27 @@ def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     return f"probe:{os.path.normcase(str(debugger.probe_id or debugger.executable or debugger.type))}"
 
 
-def validate_devices(devices: dict[str, DeviceConfig], debugger: DebuggerConfig, debuggers: dict[str, DebuggerConfig], com_ports: dict[str, ComPortConfig]) -> None:
-    debugger_owner: dict[str, str] = {}
-    resource_owner: dict[str, str] = {}
-    for name, device in devices.items():
-        if device.target is not None and device.debugger in (None, "default"):
-            raise ConfigError(
-                "config_invalid",
-                "A per-device target override requires a named debugger; devices on the top-level debugger use the top-level target.",
-                {"field": f"devices.{name}.target", "debugger": device.debugger},
-            )
-        if device.debugger is not None:
-            if device.debugger != "default" and device.debugger not in debuggers:
-                raise ConfigError(
-                    "config_invalid",
-                    "Device references an unknown debugger.",
-                    {"field": f"devices.{name}.debugger", "value": device.debugger},
-                )
-            if device.debugger in debugger_owner:
-                raise ConfigError(
-                    "config_invalid",
-                    "Two devices may not use the same debugger; each physical probe drives one device.",
-                    {"field": f"devices.{name}.debugger", "value": device.debugger, "other_device": debugger_owner[device.debugger]},
-                )
-            debugger_owner[device.debugger] = name
-            resolved = debugger if device.debugger == "default" else debuggers[device.debugger]
-            identity = debugger_resource_identity(resolved)
-            if identity in resource_owner:
-                raise ConfigError(
-                    "config_invalid",
-                    "Two devices resolve to the same physical debug probe; give each debugger a distinct probe_id or resource_id so boards cannot silently share a probe.",
-                    {"field": f"devices.{name}.debugger", "resource": identity, "other_device": resource_owner[identity]},
-                )
-            resource_owner[identity] = name
-        if device.uart is not None and device.uart not in com_ports:
-            raise ConfigError(
-                "config_invalid",
-                "Device references an unknown UART from com_ports.",
-                {"field": f"devices.{name}.uart", "value": device.uart},
-            )
-
-
-def named_debugger_config(name: str, value: Any) -> DebuggerConfig:
-    raw = mapping(value, f"debuggers.{name}")
+def named_debugger_config(name: str, value: Any, default_target: TargetConfig) -> DebuggerConfig:
+    field = f"debuggers.{name}"
+    raw = mapping(value, field)
     debugger_type = str(raw.get("type", "openocd"))
     if debugger_type not in {"openocd", "stlink", "pyocd"}:
         raise ConfigError(
             "config_invalid",
-            "Unsupported debugger.type.",
-            {"field": f"debuggers.{name}.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+            "Unsupported debugger type.",
+            {"field": f"{field}.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
         )
-    return debugger_config(raw, debugger_type)
+    target: TargetConfig | None = None
+    if raw.get("target") is not None:
+        target_raw = mapping(raw.get("target"), f"{field}.target")
+        target = TargetConfig(
+            name=str(target_raw.get("name", default_target.name)),
+            controller=str(target_raw.get("controller", default_target.controller)),
+        )
+    return debugger_config(raw, debugger_type, field, target)
 
 
-def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
+def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger", target: TargetConfig | None = None) -> DebuggerConfig:
     return DebuggerConfig(
         type=debugger_type,  # type: ignore[arg-type]
         executable=optional_string(raw.get("executable")),
@@ -1843,7 +1805,27 @@ def debugger_config(raw: JsonObject, debugger_type: str) -> DebuggerConfig:
         flash_address=optional_string(raw.get("flash_address")),
         timeout_s=float(raw.get("timeout_s", 60)),
         resource_id=optional_string(raw.get("resource_id")),
+        permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
+        target=target,
     )
+
+
+def debugger_permissions(raw: JsonObject) -> DebuggerPermissions:
+    return DebuggerPermissions(
+        allow_probe=bool(raw.get("allow_probe", False)),
+        allow_flash=bool(raw.get("allow_flash", False)),
+        allow_reset=bool(raw.get("allow_reset", False)),
+        allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
+        allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
+    )
+
+
+def io_permissions(raw: JsonObject) -> IoPermissions:
+    return IoPermissions(allow_read=bool(raw.get("allow_read", False)), allow_write=bool(raw.get("allow_write", False)))
+
+
+def debugger_access_enabled(debugger: DebuggerConfig) -> bool:
+    return any([debugger.permissions.allow_probe, debugger.permissions.allow_flash, debugger.permissions.allow_reset])
 
 
 def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
@@ -1876,6 +1858,7 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         max_buffer_bytes=int(raw.get("max_buffer_bytes", 65536)),
         max_write_bytes=int(raw.get("max_write_bytes", 4096)),
         resource_id=optional_string(raw.get("resource_id")),
+        permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )
 
 
@@ -1905,18 +1888,7 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
         max_buffer_frames=int(raw.get("max_buffer_frames", 1024)),
         max_frame_data_bytes=int(raw.get("max_frame_data_bytes", 64 if fd else 8)),
         resource_id=optional_string(raw.get("resource_id")),
-    )
-
-
-def adapter_config(name: str, value: Any) -> AdapterConfig:
-    raw = mapping(value, f"adapters.{name}")
-    return AdapterConfig(
-        executable=str(raw["executable"]),
-        args=[],
-        timeout_s=float(raw.get("timeout_s", 10.0)),
-        channels=string_list(raw.get("channels"), []),
-        faults=string_list(raw.get("faults"), []),
-        resource_id=optional_string(raw.get("resource_id")),
+        permissions=io_permissions(mapping(raw.get("permissions"), f"can_buses.{name}.permissions")),
     )
 
 
@@ -1930,23 +1902,6 @@ def validation_config(raw: JsonObject) -> ValidationConfig:
     )
 
 
-def permissions_config(raw: JsonObject) -> PermissionsConfig:
-    default = False
-    return PermissionsConfig(
-        allow_probe=bool(raw.get("allow_probe", default)),
-        allow_flash=bool(raw.get("allow_flash", default)),
-        allow_reset=bool(raw.get("allow_reset", default)),
-        allow_com_read=bool(raw.get("allow_com_read", default)),
-        allow_com_write=bool(raw.get("allow_com_write", default)),
-        allow_can_read=bool(raw.get("allow_can_read", default)),
-        allow_can_write=bool(raw.get("allow_can_write", default)),
-        allow_adapter_read=bool(raw.get("allow_adapter_read", default)),
-        allow_adapter_write=bool(raw.get("allow_adapter_write", default)),
-        allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
-        allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
-    )
-
-
 def reports_config(raw: JsonObject) -> ReportsConfig:
     return ReportsConfig(directory=str(raw.get("directory", ".agentic-hil/reports")))
 
@@ -1955,8 +1910,56 @@ def logs_config(raw: JsonObject) -> LogsConfig:
     return LogsConfig(directory=str(raw.get("directory", ".agentic-hil/logs")))
 
 
+REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
+    "permissions": (
+        "The top-level permissions block was removed. Declare permissions on the device they authorize.",
+        {
+            "allow_probe": "debuggers.<name>.permissions.allow_probe",
+            "allow_flash": "debuggers.<name>.permissions.allow_flash",
+            "allow_reset": "debuggers.<name>.permissions.allow_reset",
+            "allow_raw_debugger_commands": "debuggers.<name>.permissions.allow_raw_debugger_commands",
+            "allow_mass_erase": "debuggers.<name>.permissions.allow_mass_erase",
+            "allow_com_read": "com_ports.<name>.permissions.allow_read",
+            "allow_com_write": "com_ports.<name>.permissions.allow_write",
+            "allow_can_read": "can_buses.<name>.permissions.allow_read",
+            "allow_can_write": "can_buses.<name>.permissions.allow_write",
+            "allow_adapter_read": "no replacement; test adapters are not supported in this release",
+            "allow_adapter_write": "no replacement; test adapters are not supported in this release",
+        },
+    ),
+    "debugger": (
+        "The single top-level debugger block was removed. Every debug probe is now a named entry under debuggers.",
+        {"debugger": "debuggers.<name> — pick any name; test plans and tool calls address the probe by it"},
+    ),
+    "devices": (
+        "The devices block was removed. Debug probes, COM ports, and CAN buses are addressed by their own names.",
+        {
+            "devices.<name>.debugger": "debuggers.<name> — the debugger name IS the routing key",
+            "devices.<name>.uart": "com_ports.<name> — test steps and tool calls name the port directly",
+            "devices.<name>.target": "debuggers.<name>.target",
+        },
+    ),
+    "adapters": (
+        "Test adapters are not supported in this release; the adapters block was removed.",
+        {"adapters": "no replacement yet"},
+    ),
+}
+
+
+def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
+    """Refuse config sections this release removed.
+
+    Schema validation alone would only say the field is unknown. A permission or
+    routing model is the last thing an operator should have to guess at, so name
+    where each removed key went and fail closed rather than running a config
+    whose grants and device bindings are no longer read by anything."""
+    for section, (summary, migration) in REMOVED_SECTIONS.items():
+        if section in raw:
+            raise ConfigError("config_invalid", summary, {"path": config_path, "field": section, "migration": migration})
+
+
 def reject_bridge_args(raw: JsonObject, config_path: str) -> None:
-    for section in ("can_buses", "adapters"):
+    for section in ("can_buses",):
         entries = raw.get(section)
         if not isinstance(entries, dict):
             continue

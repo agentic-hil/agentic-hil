@@ -26,7 +26,8 @@
     }
   },
   "$defs": {
-    "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+    "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
+    "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "path": { "type": "string", "minLength": 1 },
     "timeout": { "type": "number", "minimum": 0 },
     "location": {
@@ -62,9 +63,9 @@
     "flash": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action", "image_path"],
+      "required": ["action", "image_path"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "flash" },
         "image_path": { "$ref": "#/$defs/path" },
         "reset_after_flash": { "type": "boolean", "default": false }
@@ -73,9 +74,9 @@
     "uartOpen": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action"],
+      "required": ["action", "port_id"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
         "clear_buffer": { "type": "boolean", "default": true }
       }
@@ -83,18 +84,18 @@
     "uartClose": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action"],
+      "required": ["action", "port_id"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_close" }
       }
     },
     "debugStart": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action", "image_path"],
+      "required": ["action", "image_path"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "debug_start" },
         "image_path": { "$ref": "#/$defs/path" },
         "mode": { "type": "string", "enum": ["attach", "reset_halt", "load"], "default": "attach" },
@@ -104,9 +105,9 @@
     "runUntilBreakpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action", "location"],
+      "required": ["action", "location"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "run_until_breakpoint" },
         "location": { "$ref": "#/$defs/location" },
         "timeout_s": { "$ref": "#/$defs/timeout" }
@@ -115,9 +116,9 @@
     "dumpMemory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action", "symbol", "output_path"],
+      "required": ["action", "symbol", "output_path"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "dump_memory" },
         "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
         "output_path": { "$ref": "#/$defs/path" }
@@ -126,9 +127,9 @@
     "debugStop": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device", "action"],
+      "required": ["action"],
       "properties": {
-        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "debug_stop" },
         "timeout_s": { "$ref": "#/$defs/timeout" }
       }

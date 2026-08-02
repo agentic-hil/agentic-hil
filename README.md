@@ -91,7 +91,7 @@ Host configuration schemas are not portable: VS Code uses `servers`, Claude Code
 
 ## Configuration
 
-`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, debugger backend, artifact roots, named serial ports, CAN buses, test adapters, and per-action permissions:
+`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses — each with its own deny-by-default permissions:
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
@@ -101,11 +101,34 @@ target:
   name: "sensor-board"
   controller: "stm32f4"
 
-debugger:
-  type: "openocd"            # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
-  interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
-  target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
-  timeout_s: 60
+# Every device is named, and every device carries its own permissions. Test
+# plan steps address a device by that name. The MCP tool surface drives the
+# single configured probe, so a project with several probes runs multi-board
+# work through `agentic-hil test-reactor`.
+debuggers:
+  dut:
+    type: "openocd"          # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
+    probe_id: "0668FF383036" # required once several probes are configured: it is
+                             # the only field that selects a physical probe
+    interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_probe: true
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+  probe_b:                   # a second, independently controlled board
+    type: "openocd"
+    probe_id: "0669FF505153" # pin the physical probe so boards cannot swap silently
+    interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
+    target:                  # optional per-probe override of the project target
+      name: "sensor-node"
+    permissions:
+      allow_probe: true
+      allow_flash: false     # this board is read-only for now
 
 debug:
   allowed_symbols: ["main", "sensor_state", "capture_done", "capture_buffer"]
@@ -119,48 +142,21 @@ com_ports:
   dut_uart:
     device: "/dev/ttyACM0"  # Windows example: "COM5"
     baudrate: 115200
-
-devices:
-  dut:
-    debugger: true            # at most one Device may use the top-level debugger
-    uart: "dut_uart"          # reference a named com_ports entry
-  dut_b:
-    debugger: "probe_b"       # named entry in `debuggers` for an independent board
-    target:                   # optional override; requires a named debugger
-      name: "sensor-node"
-
-debuggers:                    # additional probes for multi-board test-reactor plans
-  probe_b:
-    type: "openocd"
-    probe_id: "0669FF505153"  # pin the physical probe so boards cannot swap silently
+    permissions:
+      allow_read: true
+      allow_write: true
 
 can_buses:
   dut_can:
     adapter: "socketcan"     # or "peak", or "process" for a custom bridge
     channel: "can0"
     bitrate: 500000
-
-adapters:
-  ntc_sim:
-    executable: "/operator-controlled/agentic-hil-bridges/sim_ntc_adapter.py"
-    channels: ["temperature", "resistance"]
-    faults: ["open", "short_to_gnd", "short_to_vcc"]
-
-permissions:
-  allow_probe: true
-  allow_flash: true
-  allow_reset: true
-  allow_com_read: true
-  allow_com_write: true
-  allow_can_read: true
-  allow_can_write: true
-  allow_adapter_read: true
-  allow_adapter_write: true
-  allow_raw_debugger_commands: false
-  allow_mass_erase: false
+    permissions:
+      allow_read: true
+      allow_write: false
 ```
 
-The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on debugger, COM, CAN, or adapter entries when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease.
+The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
@@ -174,7 +170,6 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Firmware | `flash_firmware`, `artifact_upload` | artifacts are validated, rechecked, and copied to private process staging before flashing; `allow_reset` is additionally required when `reset_after_flash` is requested |
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
-| Test adapters | `adapters_list`, `adapter_session_start`, `adapter_session_stop`, `adapter_set_value`, `adapter_inject_fault`, `adapter_clear_fault`, `adapter_measure` | externally pinned bridge entry point with channel/fault allowlists |
 | Diagnostics | `get_last_report`, `classify_last_error` | structured error classification with likely causes |
 | Debug sessions | `debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 
@@ -184,9 +179,9 @@ A typical loop: build firmware → `flash_firmware` with `reset_after_flash: tru
 
 Write a hardware test as a plan, not a script: one reviewable YAML file describes flash → stimulate → break → dump, and the reactor guarantees it is either executed exactly as written or rejected before the first hardware action. No half-run plans, no leftover breakpoints, no orphaned debug or UART sessions — the same file behaves identically on your bench and in CI, and it diffs like code in a pull request.
 
-The test reactor executes a strict, sequential YAML or JSON test plan against logical `devices` from the authoritative config. A Device binds to a debugger, to one named UART, or to both — nothing more is required, and a UART-only device runs UART-only plans without any debugger configured. The debugger is either the top-level `debugger` (`devices.<id>.debugger: true`) or a named entry in the `debuggers` map for an independently controlled board (`devices.<id>.debugger: <name>`, with an optional per-device `target`). Each physical probe drives exactly one device; named-debugger devices run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
+The test reactor executes a strict, sequential YAML or JSON test plan against the named devices in the authoritative config. A debugger step names a `debuggers` entry (`debugger: <name>`); a UART step names a `com_ports` entry (`port_id: <name>`). `debugger` may be omitted while the config declares exactly one probe — with several, the plan must name one, because picking a board for the author is how the wrong board gets flashed. Every probe carries its own permissions, so a step is judged by the grants of the board it names. Probes other than the bound one run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
 
-Before the first hardware action, the reactor validates every device, capability, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
+Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple — validate everything, then execute, then always clean up:
 
@@ -200,16 +195,16 @@ The run pipeline is deliberately simple — validate everything, then execute, t
 version: 1
 name: capture-state
 steps:
-  - {device: dut, action: flash, image_path: build/app.elf}
-  - {device: dut, action: uart_open}
-  - {device: dut, action: debug_start, image_path: build/app.elf, mode: attach}
-  - {device: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
-  - {device: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
-  - {device: dut, action: debug_stop}
-  - {device: dut, action: uart_close}
+  - {debugger: dut, action: flash, image_path: build/app.elf}
+  - {port_id: dut_uart, action: uart_open}
+  - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {debugger: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
+  - {debugger: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
+  - {debugger: dut, action: debug_stop}
+  - {port_id: dut_uart, action: uart_close}
 ```
 
-`.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and logical device names. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
+`.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
 ```text
 agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
@@ -266,7 +261,7 @@ agentic-hil skill-install --agent opencode
 
 ## Platform Support
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debugger.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
 ## Development
 

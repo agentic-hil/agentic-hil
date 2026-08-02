@@ -33,7 +33,7 @@ STLINK_NOT_FOUND: JsonObject = {
     "error_type": "debugger_not_found",
     "backend_error_type": "stm32_programmer_cli_not_found",
     "summary": "STM32CubeProgrammer CLI executable could not be found.",
-    "likely_causes": ["debugger.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"],
+    "likely_causes": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"],
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -81,7 +81,7 @@ class STLinkBackend:
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
         resolved = self._resolve_executable()
         if not resolved["ok"]:
@@ -112,7 +112,7 @@ class STLinkBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):
@@ -121,18 +121,18 @@ class STLinkBackend:
         return self._write_action_report(result)
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
-        if not self.config.permissions.allow_flash:
+        if not self.config.debugger.permissions.allow_flash:
             return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
-        if self.config.permissions.allow_raw_debugger_commands:
+        if self.config.debugger.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
-        if self.config.permissions.allow_mass_erase:
+        if self.config.debugger.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
         artifact_path = str(artifact["resolved_path"])
         write_args = ["-w", artifact_path]
         if Path(artifact_path).suffix.lower() == ".bin":
             if self.config.debugger.flash_address is None:
-                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with ST-Link requires debugger.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with ST-Link requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
             write_args.append(self.config.debugger.flash_address)
         reset_args = ["-rst"] if reset_after_flash else []
         result = self._run_stlink("flash_firmware", [*self._connection_args("HOTPLUG"), *write_args, "-v", *reset_args])
@@ -316,7 +316,7 @@ class STLinkBackend:
         return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "adapter_not_found": ["debug probe is not connected", "debugger.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debugger.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debugger.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
 
 
 def version_line(output: str) -> str:

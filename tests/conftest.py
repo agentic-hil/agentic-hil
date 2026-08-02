@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytest_plugins = ["pytester"]
 
@@ -25,7 +26,7 @@ FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
-SIM_NTC_ADAPTER = ROOT / "examples" / "adapters" / "sim_ntc_adapter.py"
+
 
 
 @pytest.fixture(autouse=True)
@@ -72,12 +73,14 @@ def write_config(
     workspace_root: Path | None = None,
     state_root: Path | None = None,
     max_dump_size_bytes: int = 1048576,
-    devices_yaml: str = "devices: {}\n",
     debuggers_yaml: str = "",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
-    adapters_yaml: str = "adapters: {}\n",
-    permissions_yaml: str | None = None,
+    permissions: dict[str, bool] | None = None,
+    debugger_name: str = "dut",
+    auto_probe_ids: bool = True,
+    interface_cfg: str = "interface/stlink.cfg",
+    target_cfg: str = "target/stm32f4x.cfg",
     config_path: Path | None = None,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
@@ -88,20 +91,18 @@ def write_config(
         debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
     if allow_all_symbols is None:
         allow_all_symbols = allowed_symbols is None
-    if permissions_yaml is None:
-        permissions_yaml = """permissions:
-  allow_probe: true
-  allow_flash: true
-  allow_reset: true
-  allow_com_read: true
-  allow_com_write: true
-  allow_can_read: true
-  allow_can_write: true
-  allow_adapter_read: true
-  allow_adapter_write: true
-  allow_raw_debugger_commands: false
-  allow_mass_erase: false
-"""
+    grants = DEFAULT_TEST_PERMISSIONS if permissions is None else permissions
+    primary = {
+        "type": debugger_type,
+        "executable": debugger_executable.as_posix(),
+        "probe_id": probe_id,
+        "target_type": target_type,
+        "interface": "SWD",
+        "interface_cfg": interface_cfg,
+        "target_cfg": target_cfg,
+        "flash_address": flash_address,
+        "timeout_s": 5,
+    }
     config_path = config_path or directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -110,16 +111,6 @@ state_root: {state_root.as_posix()!r}
 target:
   name: "example-target"
   controller: "stm32f4"
-{devices_yaml}debugger:
-  type: "{debugger_type}"
-  executable: "{debugger_executable.as_posix()}"
-  probe_id: {('null' if probe_id is None else repr(probe_id))}
-  target_type: {('null' if target_type is None else repr(target_type))}
-  interface: "SWD"
-  interface_cfg: "interface/stlink.cfg"
-  target_cfg: "target/stm32f4x.cfg"
-  flash_address: {('null' if flash_address is None else repr(flash_address))}
-  timeout_s: 5
 debug:
   gdb_executable: {('null' if gdb_executable is None else repr(gdb_executable.as_posix()))}
   allowed_symbols: {(allowed_symbols if allowed_symbols is not None else [])}
@@ -131,7 +122,7 @@ artifacts:
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{debuggers_yaml}{com_ports_yaml}{can_buses_yaml}{adapters_yaml}{permissions_yaml}reports:
+{section_yaml("debuggers", debuggers_yaml, grants, extra={debugger_name: primary}, auto_probe_ids=auto_probe_ids)}{section_yaml("com_ports", com_ports_yaml, grants)}{section_yaml("can_buses", can_buses_yaml, grants)}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"
@@ -139,6 +130,52 @@ logs:
         encoding="utf-8",
     )
     return config_path
+
+
+# The old flat permission names stay the vocabulary of the test helper: a test
+# that wants "no COM write" should say so once, not repeat a permissions block
+# under every com_ports entry it happens to declare.
+DEFAULT_TEST_PERMISSIONS = {
+    "allow_probe": True,
+    "allow_flash": True,
+    "allow_reset": True,
+    "allow_com_read": True,
+    "allow_com_write": True,
+    "allow_can_read": True,
+    "allow_can_write": True,
+    "allow_raw_debugger_commands": False,
+    "allow_mass_erase": False,
+}
+SECTION_GRANTS = {
+    "debuggers": {"allow_probe": "allow_probe", "allow_flash": "allow_flash", "allow_reset": "allow_reset", "allow_raw_debugger_commands": "allow_raw_debugger_commands", "allow_mass_erase": "allow_mass_erase"},
+    "com_ports": {"allow_read": "allow_com_read", "allow_write": "allow_com_write"},
+    "can_buses": {"allow_read": "allow_can_read", "allow_write": "allow_can_write"},
+}
+
+
+def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: dict | None = None, *, auto_probe_ids: bool = True) -> str:
+    """Render one named-device section, giving every entry the permissions it
+    does not declare itself.
+
+    Tests hand this helper raw YAML; a round-trip is the only way to reach each
+    entry without guessing at indentation, and it also merges the helper's own
+    primary debugger with any extra probes a multi-board test adds."""
+    document = yaml.safe_load(supplied) or {}
+    entries = {**(extra or {}), **(document.get(section) or {})}
+    if not entries:
+        return f"{section}: {{}}\n"
+    defaults = {flag: bool(grants.get(source, False)) for flag, source in SECTION_GRANTS[section].items()}
+    for entry in entries.values():
+        entry.setdefault("permissions", defaults)
+    if section == "debuggers" and len(entries) > 1 and auto_probe_ids:
+        # A multi-probe config must name each probe's hardware, so give every
+        # entry that did not declare one a distinct probe_id. A test that wants
+        # a collision sets matching probe_ids itself; a test that wants the
+        # missing-probe_id refusal passes auto_probe_ids=False.
+        for index, (name, entry) in enumerate(entries.items()):
+            if entry.get("probe_id") is None:
+                entry["probe_id"] = f"TESTPROBE{index}-{name}"
+    return yaml.safe_dump({section: entries}, sort_keys=False, default_flow_style=False)
 
 
 def write_authoritative_config(
@@ -155,19 +192,23 @@ def write_authoritative_config(
     from agentic_hil.config import project_config_path
 
     config_path = project_config_path(workspace)
-    path = write_config(workspace, workspace_root=workspace, config_path=config_path, **kwargs)
-
     # Enabled OpenOCD access requires scripts outside the authorized workspace.
     interface_cfg = config_path.parent / "interface.cfg"
     target_cfg = config_path.parent / "target.cfg"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     interface_cfg.write_text("# test interface\n", encoding="utf-8")
     target_cfg.write_text("# test target\n", encoding="utf-8")
-    text = path.read_text(encoding="utf-8")
-    path.write_text(
-        text.replace('interface_cfg: "interface/stlink.cfg"', f'interface_cfg: "{interface_cfg.as_posix()}"').replace(
-            'target_cfg: "target/stm32f4x.cfg"', f'target_cfg: "{target_cfg.as_posix()}"'
-        ),
-        encoding="utf-8",
-    )
+    kwargs.setdefault("interface_cfg", interface_cfg.as_posix())
+    kwargs.setdefault("target_cfg", target_cfg.as_posix())
+    # Extra probes need the same absolute scripts: an OpenOCD entry that keeps
+    # the relative schema defaults is rejected at pinning, which would make a
+    # multi-board test fail on script paths instead of what it means to check.
+    extra = yaml.safe_load(kwargs.get("debuggers_yaml") or "") or {}
+    if extra.get("debuggers"):
+        for entry in extra["debuggers"].values():
+            entry.setdefault("interface_cfg", interface_cfg.as_posix())
+            entry.setdefault("target_cfg", target_cfg.as_posix())
+        kwargs["debuggers_yaml"] = yaml.safe_dump(extra, sort_keys=False, default_flow_style=False)
+    path = write_config(workspace, workspace_root=workspace, config_path=config_path, **kwargs)
     monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(path.resolve()))
     return path

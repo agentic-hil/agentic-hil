@@ -138,8 +138,11 @@ class ComPortService:
         self.sessions: dict[str, ComPortSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
+        # The port config carries its own permissions, so an inequality here also
+        # covers a revoked grant: a session may not outlive the permission that
+        # authorized it.
         for port_id, session in list(self.sessions.items()):
-            if not config.permissions.allow_com_read or config.com_ports.get(port_id) != session.port_config:
+            if config.com_ports.get(port_id) != session.port_config:
                 self._stop_session(session, "config_reloaded")
                 self.sessions.pop(port_id, None)
         self.config = config
@@ -148,14 +151,16 @@ class ComPortService:
         ports: JsonObject = {}
         for port_id, port_config in self.config.com_ports.items():
             ports[port_id] = self._port_status(port_config, self.sessions.get(port_id))
-        if self.config.permissions.allow_com_read:
+        # Host discovery is not scoped to one configured port, so it needs at
+        # least one port the operator allowed reading from.
+        if any(port_config.permissions.allow_read for port_config in self.config.com_ports.values()):
             available = list_available_com_ports()
         else:
             available = {
                 "ok": False,
                 "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by the authoritative config (allow_com_read).",
+                "summary": "Host COM port discovery is disabled by the authoritative config; no configured COM port has permissions.allow_read.",
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
@@ -172,8 +177,15 @@ class ComPortService:
         port = self._configured_port(port_id, "com_session_start")
         if not port["ok"]:
             return self._write_report(port)
-        if not self.config.permissions.allow_com_read:
-            return self._write_report(self._permission_denied("com_session_start", "COM port reading is disabled by the authoritative config.", port_id))
+        # A write-only line is a legitimate configuration, and the session is the
+        # only way to reach the port at all — gating the open on allow_read alone
+        # made allow_write without allow_read a grant that could never be used.
+        port_permissions = port["port_config"].permissions
+        if not port_permissions.allow_read and not port_permissions.allow_write:
+            return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id))
+        if clear_buffer and not port_permissions.allow_read:
+            # Clearing drains the receive buffer, which is a read.
+            clear_buffer = False
 
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
@@ -232,7 +244,10 @@ class ComPortService:
                     self.sessions.pop(port_id, None)
                 return recommit_report_with_status(self.config, written, session.lease.status())
         try:
-            session.start_reader()
+            # The background reader buffers incoming bytes, so it only runs for
+            # a port the operator allowed reading from.
+            if port_permissions.allow_read:
+                session.start_reader()
         except BaseException as error:
             try:
                 self._stop_session(session, "start_failed", defer_release=True)
@@ -288,8 +303,11 @@ class ComPortService:
         return self._write_report(self.write_bytes(port_id, encoded["data"], "com_write"))
 
     def write_bytes(self, port_id: str, data: bytes, tool: str = "com_write") -> JsonObject:
-        if not self.config.permissions.allow_com_write:
-            return self._permission_denied(tool, "COM port writing is disabled by the authoritative config.", port_id)
+        port = self._configured_port(port_id, tool)
+        if not port["ok"]:
+            return port
+        if not port["port_config"].permissions.allow_write:
+            return self._permission_denied(tool, "Writing to this COM port is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -325,8 +343,11 @@ class ComPortService:
         return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
 
     def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
-        if not self.config.permissions.allow_com_read:
-            return self._permission_denied(tool, "COM port reading is disabled by the authoritative config.", port_id)
+        port = self._configured_port(port_id, tool)
+        if not port["ok"]:
+            return port
+        if not port["port_config"].permissions.allow_read:
+            return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result

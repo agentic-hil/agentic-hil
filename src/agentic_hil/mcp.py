@@ -20,7 +20,7 @@ SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 # before it had called a single tool here.
 SERVER_INSTRUCTIONS = (
     "This project's hardware is reachable only through these tools. Every request that would touch the "
-    "target board — flashing, resetting, probing, debugging, UART or CAN traffic, bench adapters, "
+    "target board — flashing, resetting, probing, debugging, UART or CAN traffic, "
     "firmware artifacts, test reports — is answered by calling one of them, before reaching for a "
     "shell.\n"
     "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, "
@@ -47,7 +47,7 @@ Workflow:
 4. Probe the target before flashing.
 5. Flash only validated artifacts from configured allowed roots; flashing does not reset unless reset_after_flash is true.
 6. Read structured results after every hardware action.
-7. Use configured COM port, CAN bus, and test-adapter ids only.
+7. Use configured COM port and CAN bus ids only.
 8. Continue only when ok is true; target_ok, audit_ok, and cleanup_ok are not false; cleanup_required and quarantined are not true; lease_state is one of null, active, or released (any other value, including stale, blocks success); side_effect_status is neither unknown nor partial; and hardware_state is not unknown.
 9. On any composite failure, diagnose using error_type, backend_error_type, likely_causes, report_path, and log_path.
 10. For quarantined hardware, stop effects and ask the operator to inspect lease-status, physically confirm the current quarantine_id, and run recover --confirm-safe-state --quarantine-id <id>. If recovery returns config_changed, the operator verifies the config delta and reruns with --accept-config-change.

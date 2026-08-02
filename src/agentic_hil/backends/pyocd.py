@@ -33,7 +33,7 @@ PYOCD_NOT_FOUND: JsonObject = {
     "backend_error_type": "pyocd_not_found",
     "summary": "pyOCD executable could not be found.",
     "likely_causes": [
-        "debugger.executable is not configured",
+        "debuggers.<name>.executable is not configured",
         "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)",
         "pyocd is not in PATH",
     ],
@@ -74,7 +74,7 @@ class PyOCDBackend:
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
         resolved = self._resolve_executable()
         if not resolved["ok"]:
@@ -100,7 +100,7 @@ class PyOCDBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         result = self._run_pyocd("probe_target", ["commander", "--command", "status", *self._connection_args()])
         if result.get("ok"):
@@ -109,18 +109,18 @@ class PyOCDBackend:
         return self._write_action_report(result)
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
-        if not self.config.permissions.allow_flash:
+        if not self.config.debugger.permissions.allow_flash:
             return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
-        if self.config.permissions.allow_raw_debugger_commands:
+        if self.config.debugger.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
-        if self.config.permissions.allow_mass_erase:
+        if self.config.debugger.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
         artifact_path = str(artifact["resolved_path"])
         address_args: list[str] = []
         if Path(artifact_path).suffix.lower() == ".bin":
             if self.config.debugger.flash_address is None:
-                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debugger.flash_address.", "artifact": self._artifact_summary(artifact)}
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debuggers.<name>.flash_address.", "artifact": self._artifact_summary(artifact)}
             address_args = ["--base-address", self.config.debugger.flash_address]
 
         result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), *address_args, artifact_path])
@@ -309,7 +309,7 @@ class PyOCDBackend:
             "debugger_not_found": "Debugger executable could not be found.",
             "adapter_not_found": "Debugger probe could not be found or opened.",
             "target_not_detected": "Debugger could not detect the target.",
-            "target_type_invalid": "pyOCD does not know the configured debugger.target_type.",
+            "target_type_invalid": "pyOCD does not know the configured debuggers.<name>.target_type.",
             "flash_failed": "Debugger failed to flash the firmware.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
@@ -319,14 +319,14 @@ class PyOCDBackend:
 
     def _likely_causes(self, error_type: str) -> list[str]:
         return {
-            "target_not_detected": ["DUT is not powered", "SWD/JTAG wiring issue", "debug probe already in use", "wrong debugger.target_type for this device"],
-            "adapter_not_found": ["debug probe is not connected", "debugger.probe_id does not match a connected probe", "probe driver or udev rule is missing", "debug probe is already in use"],
-            "target_type_invalid": ["debugger.target_type is misspelled", "the target requires a CMSIS pack (pyocd pack install <type>)"],
+            "target_not_detected": ["DUT is not powered", "SWD/JTAG wiring issue", "debug probe already in use", "wrong debuggers.<name>.target_type for this device"],
+            "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected probe", "probe driver or udev rule is missing", "debug probe is already in use"],
+            "target_type_invalid": ["debuggers.<name>.target_type is misspelled", "the target requires a CMSIS pack (pyocd pack install <type>)"],
             "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"],
-            "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debugger.flash_address is wrong"],
+            "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"],
             "reset_failed": ["reset line wiring issue", "target is not responding"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
-            "debugger_not_found": ["debugger.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
+            "debugger_not_found": ["debuggers.<name>.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])
 
 

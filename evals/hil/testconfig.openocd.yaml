@@ -3,26 +3,26 @@
 version: 1
 name: nucleo-f446re-openocd
 steps:
-  - device: dut
+  - debugger: dut
     action: flash
     image_path: build/Debug/nucleo-f446re_demo.elf
     reset_after_flash: true
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_open
 
-  - device: dut
+  - debugger: dut
     action: debug_start
     image_path: build/Debug/nucleo-f446re_demo.elf
     mode: reset_halt
 
-  - device: dut
+  - debugger: dut
     action: run_until_breakpoint
     location: delay
     timeout_s: 5
 
-  - device: dut
+  - debugger: dut
     action: debug_stop
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_close

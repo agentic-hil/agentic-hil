@@ -9,11 +9,21 @@ target:
   name: "nucleo-f446re-demo"
   controller: "stm32f446ret6"
 
-debugger:
-  type: "openocd"            # or "stlink" for STM32CubeProgrammer CLI
-  interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
-  target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
-  timeout_s: 60
+# Every device is named, and every device carries its own permissions. The name
+# is how test plans and MCP tool calls address it. All permission flags are
+# deny-by-default: what is not listed here is refused.
+debuggers:
+  dut:
+    type: "openocd"          # or "stlink" for STM32CubeProgrammer CLI
+    interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_probe: true
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
 
 artifacts:
   allowed_roots: ["build"]
@@ -23,19 +33,6 @@ com_ports:
   dut_uart:
     device: "/dev/ttyACM0"   # Nucleo ST-LINK virtual COM port; e.g. COM5 on Windows
     baudrate: 115200
-
-devices:
-  dut:
-    debugger: true
-    uart: "dut_uart"
-
-permissions:
-  allow_probe: true
-  allow_flash: true
-  allow_reset: true
-  allow_com_read: true
-  allow_com_write: false
-  allow_can_read: false
-  allow_can_write: false
-  allow_raw_debugger_commands: false
-  allow_mass_erase: false
+    permissions:
+      allow_read: true
+      allow_write: false

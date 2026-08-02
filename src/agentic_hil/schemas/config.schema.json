@@ -2,9 +2,55 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
   "title": "Agentic HIL configuration",
-  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits.",
+  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Permissions are declared per device: on the debugger that may be probed or flashed, and on each COM port and CAN bus that may be read or written.",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "debugger_permissions": {
+      "type": "object",
+      "description": "What this debug probe is allowed to do. Deny-by-default; scoped to this debugger alone.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_probe": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_flash": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_reset": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_raw_debugger_commands": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_mass_erase": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "default": {}
+    },
+    "io_permissions": {
+      "type": "object",
+      "description": "What this COM port or CAN bus is allowed to do. Deny-by-default; scoped to this device alone.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_read": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_write": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "default": {}
+    }
+  },
   "required": [
     "workspace_root",
     "state_root"
@@ -34,9 +80,9 @@
         }
       }
     },
-    "devices": {
+    "debuggers": {
       "type": "object",
-      "description": "Logical DUTs available to the test reactor. Each device may bind the top-level debugger (true), a named entry from `debuggers`, or no debugger, plus one configured UART.",
+      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id \u2014 it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -44,15 +90,31 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "debugger": {
-            "type": [
-              "boolean",
-              "string"
-            ],
-            "description": "false = no debugger; true = the top-level debugger; a name = an entry in `debuggers`.",
-            "default": false
+          "type": {
+            "type": "string",
+            "default": "openocd",
+            "enum": [
+              "openocd",
+              "stlink",
+              "pyocd"
+            ]
           },
-          "uart": {
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "probe_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          },
+          "target_type": {
             "type": [
               "string",
               "null"
@@ -60,10 +122,50 @@
             "pattern": "^[A-Za-z0-9_.-]+$",
             "default": null
           },
+          "interface": {
+            "type": "string",
+            "default": "SWD",
+            "enum": [
+              "SWD",
+              "JTAG"
+            ]
+          },
+          "interface_cfg": {
+            "type": "string",
+            "default": "interface/stlink.cfg"
+          },
+          "target_cfg": {
+            "type": "string",
+            "default": "target/stm32f4x.cfg"
+          },
+          "flash_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$",
+            "default": null
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null
+          },
+          "timeout_s": {
+            "type": "number",
+            "minimum": 0,
+            "default": 60.0
+          },
+          "permissions": {
+            "$ref": "#/$defs/debugger_permissions"
+          },
           "target": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Per-device target override for a device on a named debugger; unspecified fields default to the top-level target.",
+            "description": "Per-debugger target override for a probe on a second board; unspecified fields default to the top-level target.",
             "properties": {
               "name": {
                 "type": "string"
@@ -73,114 +175,9 @@
               }
             }
           }
-        },
-        "anyOf": [
-          {
-            "properties": {
-              "debugger": {
-                "anyOf": [
-                  {
-                    "const": true
-                  },
-                  {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                ]
-              }
-            },
-            "required": [
-              "debugger"
-            ]
-          },
-          {
-            "properties": {
-              "uart": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "uart"
-            ]
-          }
-        ]
+        }
       },
       "default": {}
-    },
-    "debugger": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string",
-          "default": "openocd",
-          "enum": [
-            "openocd",
-            "stlink",
-            "pyocd"
-          ]
-        },
-        "executable": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "probe_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[A-Za-z0-9_.:-]+$",
-          "default": null
-        },
-        "target_type": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[A-Za-z0-9_.-]+$",
-          "default": null
-        },
-        "interface": {
-          "type": "string",
-          "default": "SWD",
-          "enum": [
-            "SWD",
-            "JTAG"
-          ]
-        },
-        "interface_cfg": {
-          "type": "string",
-          "default": "interface/stlink.cfg"
-        },
-        "target_cfg": {
-          "type": "string",
-          "default": "target/stm32f4x.cfg"
-        },
-        "flash_address": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$",
-          "default": null
-        },
-        "resource_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[A-Za-z0-9_.:-]+$",
-          "default": null
-        },
-        "timeout_s": {
-          "type": "number",
-          "minimum": 0,
-          "default": 60.0
-        }
-      }
     },
     "debug": {
       "type": "object",
@@ -305,6 +302,9 @@
             ],
             "pattern": "^[A-Za-z0-9_.:-]+$",
             "default": null
+          },
+          "permissions": {
+            "$ref": "#/$defs/io_permissions"
           }
         }
       },
@@ -402,55 +402,9 @@
             ],
             "pattern": "^[A-Za-z0-9_.:-]+$",
             "default": null
-          }
-        }
-      },
-      "default": {}
-    },
-    "adapters": {
-      "type": "object",
-      "description": "Named test adapters controlled through externally pinned bridge entry points.",
-      "propertyNames": {
-        "pattern": "^[A-Za-z0-9_.-]+$"
-      },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "executable"
-        ],
-        "properties": {
-          "executable": {
-            "type": "string"
           },
-          "timeout_s": {
-            "type": "number",
-            "minimum": 0,
-            "default": 10.0
-          },
-          "channels": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9_.-]+$"
-            },
-            "default": []
-          },
-          "faults": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9_.-]+$"
-            },
-            "default": []
-          },
-          "resource_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^[A-Za-z0-9_.:-]+$",
-            "default": null
+          "permissions": {
+            "$ref": "#/$defs/io_permissions"
           }
         }
       },
@@ -482,56 +436,6 @@
         }
       }
     },
-    "permissions": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allow_probe": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_flash": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_reset": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_com_read": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_com_write": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_can_read": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_can_write": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_adapter_read": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_adapter_write": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_raw_debugger_commands": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_mass_erase": {
-          "type": "boolean",
-          "default": false
-        }
-      }
-    },
     "reports": {
       "type": "object",
       "additionalProperties": false,
@@ -551,98 +455,6 @@
           "default": ".agentic-hil/logs"
         }
       }
-    },
-    "debuggers": {
-      "type": "object",
-      "description": "Named debugger configurations for independently controlled multi-board test-reactor devices. The name 'default' is reserved for the top-level debugger.",
-      "propertyNames": {
-        "allOf": [
-          {
-            "pattern": "^[A-Za-z0-9_.-]+$"
-          },
-          {
-            "not": {
-              "const": "default"
-            }
-          }
-        ]
-      },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "type": {
-            "type": "string",
-            "default": "openocd",
-            "enum": [
-              "openocd",
-              "stlink",
-              "pyocd"
-            ]
-          },
-          "executable": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "default": null
-          },
-          "probe_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^[A-Za-z0-9_.:-]+$",
-            "default": null
-          },
-          "target_type": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^[A-Za-z0-9_.-]+$",
-            "default": null
-          },
-          "interface": {
-            "type": "string",
-            "default": "SWD",
-            "enum": [
-              "SWD",
-              "JTAG"
-            ]
-          },
-          "interface_cfg": {
-            "type": "string",
-            "default": "interface/stlink.cfg"
-          },
-          "target_cfg": {
-            "type": "string",
-            "default": "target/stm32f4x.cfg"
-          },
-          "flash_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$",
-            "default": null
-          },
-          "resource_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^[A-Za-z0-9_.:-]+$",
-            "default": null
-          },
-          "timeout_s": {
-            "type": "number",
-            "minimum": 0,
-            "default": 60.0
-          }
-        }
-      },
-      "default": {}
     }
   }
 }

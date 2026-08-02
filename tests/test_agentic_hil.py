@@ -13,8 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import (
+    FAKE_OPENOCD,
+    FAKE_STLINK,
     FAKE_STLINK_UNCONFIRMED,
-    SIM_NTC_ADAPTER,
     write_authoritative_config,
     write_config,
 )
@@ -27,6 +28,7 @@ from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import (
     build_parser,
+    debugger_probes,
     doctor,
     entrypoint,
     init_config,
@@ -437,7 +439,7 @@ def test_doctor_reports_the_command_registration_would_accept(
     # Printing the bare name would name the one form registration refuses, so an
     # operator who copies what doctor prints would be sent to a dead end.
     workspace = tmp_path / "workspace"
-    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    write_authoritative_config(workspace, monkeypatch, permissions={})
     monkeypatch.chdir(workspace)
     launcher = str(trusted_launcher())
     monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: launcher)
@@ -454,7 +456,7 @@ def test_doctor_says_when_there_is_nothing_trustworthy_to_register(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "workspace"
-    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    write_authoritative_config(workspace, monkeypatch, permissions={})
     monkeypatch.chdir(workspace)
 
     def no_trusted_executable() -> str:
@@ -472,22 +474,25 @@ def test_doctor_says_when_there_is_nothing_trustworthy_to_register(
     assert result["ok"] is True
 
 
-def test_doctor_reports_named_debugger_selectors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     write_authoritative_config(
         workspace,
         monkeypatch,
+        debugger_name="dut_a",
         debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n",
-        devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: probe_b\n",
-        permissions_yaml="permissions: {}\n",
+        permissions={},
     )
     monkeypatch.chdir(workspace)
 
     result = doctor()
 
     assert result["ok"] is True
-    assert result["devices"]["dut_a"]["debugger"] == "default"
-    assert result["devices"]["dut_b"]["debugger"] == "probe_b"
+    assert sorted(result["debuggers"]) == ["dut_a", "probe_b"]
+    assert result["debuggers"]["probe_b"]["probe_id"] is not None
+    # Two probes, so nothing is bound and every grant is still denied.
+    assert all(entry["bound"] is False for entry in result["debuggers"].values())
+    assert result["debuggers"]["dut_a"]["permissions"]["allow_flash"] is False
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1226,7 +1231,7 @@ def test_mcp_stdio_reports_missing_discovered_config(
 def test_mcp_stdio_passes_authoritative_config_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
     config_path = write_authoritative_config(
-        workspace, monkeypatch, permissions_yaml="permissions:\n  allow_probe: false\n"
+        workspace, monkeypatch, permissions={"allow_probe": False}
     )
     monkeypatch.delenv("AGENTIC_HIL_CONFIG")
     received: dict = {}
@@ -1242,12 +1247,12 @@ def test_mcp_stdio_passes_authoritative_config_to_server(tmp_path: Path, monkeyp
 
     assert exit_code == 0
     assert received["config"].config_path == str(config_path.resolve())
-    assert received["config"].permissions.allow_probe is False
+    assert received["config"].debuggers["dut"].permissions.allow_probe is False
 
 
 def test_doctor_succeeds_when_debugger_check_is_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    config_path = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    config_path = write_authoritative_config(workspace, monkeypatch, permissions={})
     monkeypatch.chdir(workspace)
 
     result = doctor()
@@ -1314,14 +1319,15 @@ def test_config_loads_defaults(tmp_path: Path) -> None:
     assert config.debugger.probe_id is None
     assert config.artifacts.allowed_extensions == [".elf", ".hex", ".bin"]
     assert config.can_buses == {}
-    assert config.permissions.allow_can_read is True
+    assert config.debugger_id == "dut"
+    assert config.debuggers["dut"].permissions.allow_flash is True
 
 
 def test_tool_service_keeps_startup_config_when_file_becomes_invalid(tmp_path: Path) -> None:
     config_path = write_config(tmp_path)
     service = AgenticHILToolService(load_config(str(config_path)))
     try:
-        config_path.write_text("permissions: [invalid\n", encoding="utf-8")
+        config_path.write_text("debuggers: [invalid\n", encoding="utf-8")
         result = service.call("probe_target")
     finally:
         service.close()
@@ -1399,7 +1405,7 @@ def test_pyocd_lists_all_connected_probe_ids(tmp_path: Path) -> None:
 
 def test_probe_listing_requires_probe_permission(tmp_path: Path) -> None:
     config = load_config(
-        str(write_config(tmp_path, debugger_type="stlink", permissions_yaml="permissions:\n  allow_probe: false\n")),
+        str(write_config(tmp_path, debugger_type="stlink", permissions={"allow_probe": False})),
     )
     service = AgenticHILToolService(config)
     try:
@@ -1527,7 +1533,7 @@ def test_pyocd_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
         service.close()
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
-    assert "debugger.flash_address" in result["summary"]
+    assert "debuggers.<name>.flash_address" in result["summary"]
 
 
 def test_stlink_rejects_unconfirmed_successful_exit(tmp_path: Path) -> None:
@@ -1556,7 +1562,7 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
         service.close()
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
-    assert "debugger.flash_address" in result["summary"]
+    assert "debuggers.<name>.flash_address" in result["summary"]
 
 
 def test_artifact_validation_computes_sha256(tmp_path: Path) -> None:
@@ -1719,9 +1725,14 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 36
-    assert len(set(MCP_TOOL_NAMES)) == 36
+    assert len(MCP_TOOL_NAMES) == 29
+    assert len(set(MCP_TOOL_NAMES)) == 29
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
+    # The install eval asserts the live tools/list against this snapshot, so a
+    # tool added or removed here has to reach it or every eval run fails on a
+    # contract mismatch that has nothing to do with the change under test.
+    snapshot = (Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected").read_text(encoding="utf-8").split()
+    assert snapshot == sorted(MCP_TOOL_NAMES)
     config = load_config(str(write_config(tmp_path)))
     service = AgenticHILToolService(config)
     try:
@@ -1985,33 +1996,6 @@ def test_peak_adapter_on_posix_requires_socketcan_channel(tmp_path: Path) -> Non
     assert result["error_type"] == "config_invalid"
 
 
-NTC_ADAPTER_YAML = f'''adapters:
-  ntc_sim:
-    executable: "{SIM_NTC_ADAPTER.as_posix()}"
-    channels: ["temperature", "resistance"]
-    faults: ["open", "short_to_gnd", "short_to_vcc"]
-'''
-
-
-def test_adapter_api_roundtrip_remains_available(tmp_path: Path) -> None:
-    service = AgenticHILToolService(load_config(str(write_config(tmp_path, adapters_yaml=NTC_ADAPTER_YAML))))
-    try:
-        assert mcp_tool_call(service, "adapters_list")["adapters"]["ntc_sim"]["session_active"] is False
-        assert mcp_tool_call(service, "adapter_session_start", {"adapter_id": "ntc_sim"})["ok"] is True
-        assert mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 85})["ok"] is True
-        measured = mcp_tool_call(service, "adapter_measure", {"adapter_id": "ntc_sim", "channel": "temperature"})
-        assert measured["value"] == 85.0
-        invalid = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": float("nan")})
-        assert invalid["error_type"] == "invalid_argument"
-        huge = mcp_tool_call(service, "adapter_set_value", {"adapter_id": "ntc_sim", "channel": "temperature", "value": 10**10000})
-        assert huge["error_type"] == "invalid_argument"
-        assert mcp_tool_call(service, "adapter_inject_fault", {"adapter_id": "ntc_sim", "fault": "open"})["ok"] is True
-        assert mcp_tool_call(service, "adapter_clear_fault", {"adapter_id": "ntc_sim"})["ok"] is True
-        assert mcp_tool_call(service, "adapter_session_stop", {"adapter_id": "ntc_sim"})["ok"] is True
-    finally:
-        service.close()
-
-
 @pytest.mark.parametrize("command", ["init", "doctor", "mcp-stdio", "com-stdio"])
 def test_legacy_cli_config_option_is_parsed(command: str) -> None:
     arguments = [command, "--config", "legacy.yaml"]
@@ -2021,3 +2005,64 @@ def test_legacy_cli_config_option_is_parsed(command: str) -> None:
     parsed = build_parser().parse_args(arguments)
 
     assert parsed.config == "legacy.yaml"
+
+
+def test_doctor_checks_every_probe_that_grants_allow_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A multi-board bench is exactly where a green "skipped" doctor would hide
+    # an unplugged board or a wrong probe_id, so every granted probe is checked.
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_name="board_a",
+        probe_id="PROBE-A",
+        debuggers_yaml=(
+            'debuggers:\n  board_b:\n    type: openocd\n    probe_id: "PROBE-B"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
+        ),
+    )
+    monkeypatch.chdir(workspace)
+
+    result = doctor()
+
+    assert sorted(result["debuggers"]) == ["board_a", "board_b"]
+    assert result["debuggers"]["board_a"]["check"]["tool"] == "debugger_info"
+    assert result["debuggers"]["board_b"]["check"]["tool"] == "debugger_info"
+    assert "skipped" not in result["summary"]
+
+
+def test_doctor_skips_only_when_no_probe_grants_allow_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, permissions={})
+    monkeypatch.chdir(workspace)
+
+    result = doctor()
+
+    assert result["ok"] is True
+    assert "skipped" in result["summary"]
+    assert "check" not in result["debuggers"]["dut"]
+
+
+def test_debugger_probes_enumerates_every_granted_probe_when_none_is_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Probe discovery is how an operator finds the serials a multi-board config
+    # demands, so it has to work in exactly the config that has no bound probe.
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_type="stlink",
+        debugger_name="board_a",
+        probe_id="PROBE-A",
+        debuggers_yaml=(
+            'debuggers:\n  board_b:\n    type: stlink\n    probe_id: "PROBE-B"\n'
+            f'    executable: "{FAKE_STLINK.as_posix()}"\n'
+        ),
+    )
+    monkeypatch.chdir(workspace)
+
+    result = debugger_probes()
+
+    assert result["error_type"] if result.get("ok") is False else True
+    assert sorted(result["debuggers"]) == ["board_a", "board_b"]
+    assert result["debuggers"]["board_a"]["tool"] == "debugger_probes_list"
+    assert result["debuggers"]["board_a"].get("error_type") != "not_supported"

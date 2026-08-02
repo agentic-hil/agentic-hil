@@ -10,14 +10,21 @@ target:
   name: "nucleo-f446re-demo"
   controller: "stm32f446ret6"
 
-debugger:
-  type: "openocd"
-  executable: null
-  probe_id: null
-  target_type: null
-  interface_cfg: "/usr/share/openocd/scripts/interface/stlink.cfg"
-  target_cfg: "/usr/share/openocd/scripts/target/stm32f4x.cfg"
-  timeout_s: 60
+debuggers:
+  dut:
+    type: "openocd"
+    executable: null
+    probe_id: null
+    target_type: null
+    interface_cfg: "/usr/share/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "/usr/share/openocd/scripts/target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_probe: true
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
 
 debug:
   gdb_executable: null
@@ -40,15 +47,11 @@ com_ports:
   dut_uart:
     device: "/dev/ttyACM0"
     baudrate: 115200
+    permissions:
+      allow_read: true
+      allow_write: false
 
 can_buses: {}
-
-adapters: {}
-
-devices:
-  dut:
-    debugger: true
-    uart: "dut_uart"
 
 validation:
   require_existing_file: true
@@ -56,19 +59,6 @@ validation:
   require_allowed_extension: true
   compute_sha256: true
   inspect_known_formats: true
-
-permissions:
-  allow_probe: true
-  allow_flash: true
-  allow_reset: true
-  allow_com_read: true
-  allow_com_write: false
-  allow_can_read: false
-  allow_can_write: false
-  allow_adapter_read: false
-  allow_adapter_write: false
-  allow_raw_debugger_commands: false
-  allow_mass_erase: false
 
 reports:
   directory: ".agentic-hil/reports"
