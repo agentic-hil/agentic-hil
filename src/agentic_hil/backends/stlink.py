@@ -50,6 +50,7 @@ STLINK_SUCCESS_CONFIRMATION = {
     "reset_target": ["MCU Reset", "reset is performed"],
 }
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+STLINK_DEVICE_PATTERN = re.compile(r"^\s*Device\s+name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link detected", "0 stlink detected"]
 
 
@@ -328,6 +329,14 @@ def version_line(output: str) -> str:
 
 def stlink_probe_ids(output: str) -> list[str]:
     return list(dict.fromkeys(STLINK_SERIAL_PATTERN.findall(output)))
+
+
+def stlink_target_info(output: str) -> JsonObject | None:
+    serials = stlink_probe_ids(output)
+    devices = list(dict.fromkeys(value.strip() for value in STLINK_DEVICE_PATTERN.findall(output) if value.strip()))
+    if len(serials) != 1 or len(devices) != 1:
+        return None
+    return {"probe_id": serials[0], "controller": devices[0]}
 
 
 def stlink_empty_result(output: str) -> bool:

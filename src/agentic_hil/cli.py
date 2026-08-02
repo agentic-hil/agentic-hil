@@ -13,7 +13,10 @@ from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
 
+import yaml
+
 from agentic_hil import __version__
+from agentic_hil.bootstrap import apply_discovery_to_template, discover_attached_hardware, load_project_profile
 from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
@@ -613,7 +616,16 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         with secure_user_file_lock(target_path):
             return init_config(config_path, force, _locked=True)
     existing = secure_optional_read_text(target_path)
-    text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
+    profile = load_project_profile(workspace)
+    discovery = discover_attached_hardware() if profile is not None else None
+    if profile is not None and discovery is not None and overall_success(discovery):
+        template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+        assert isinstance(template, dict)
+        configured = apply_discovery_to_template(template, profile, discovery)
+        document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
+        text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
+    else:
+        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
     secure_user_directory(target_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
     temporary_path = Path(temporary_name)
@@ -646,10 +658,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     available_com_ports = list_available_com_ports()
     return {
         "ok": True,
-        "summary": "Deny-by-default Agentic HIL project configuration written.",
+        "summary": "Attached hardware was discovered and configured." if discovery is not None and overall_success(discovery) else "Deny-by-default Agentic HIL project configuration written.",
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
         "available_com_ports": available_com_ports,
+        "hardware_discovery": discovery,
         "next_steps": init_next_steps(available_com_ports, target_path),
     }
 

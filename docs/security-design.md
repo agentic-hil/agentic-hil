@@ -20,7 +20,7 @@ The primary risks are:
 
 - MCP startup fails unless the discovered config or absolute-path override is outside the workspace and its `workspace_root` exactly matches the current project.
 - The authoritative config contains hardware resources, permissions, validation requirements, allowlists, and limits. It is the only project/hardware configuration used by MCP, `doctor`, `com-stdio`, pytest, and the test reactor.
-- `agentic-hil init` creates this external config deny-by-default from the project root and prints the environment setting for the operator to install.
+- `agentic-hil init` creates this external config from the project root and prints its path. Without a project hardware profile it remains deny-by-default. When `agentic-hil.config.example.yaml` exists, the explicit setup operation treats it as bootstrap requirements, runs only fixed STM32CubeProgrammer probe-list and HOTPLUG identity commands, and writes detected host bindings plus requested runtime grants into the external config. This bootstrap capability is not exposed through MCP and cannot reset, halt, erase, flash, run raw commands, or open a serial port.
 - MCP tools expose named, high-level actions — probe, flash, reset, report retrieval, and configured COM/CAN sessions — instead of a raw debugger shell or direct host device access.
 - Firmware artifacts must be under configured artifact roots, match configured extensions, and pass format plausibility checks before flashing or upload resolution; path traversal is rejected.
 - Before backend use, artifacts are reopened without following links, checked for replacement and multiple links, and copied to a private process staging directory. Debuggers never reopen the agent-controlled source path.
@@ -29,7 +29,7 @@ The primary risks are:
 - Configured debugger, GDB, CAN process-bridge executables, and OpenOCD scripts are resolved and pinned at startup; missing, relative OpenOCD-script, and workspace-resident paths are rejected.
 - Artifact roots and report/log/upload directories are frozen to lexical workspace paths. Symlink pivots and symlinked output files fail closed.
 - Empty symbol allowlists mean deny-all. Unrestricted symbol access requires `debug.allow_all_symbols: true` in the authoritative config.
-- Debugger discovery/execution requires `allow_probe`; this includes listing every probe serial visible to the configured backend through `debugger_probes_list`. Target reset requires the separate `allow_reset` permission.
+- Runtime debugger discovery/execution requires `allow_probe`; this includes listing every probe serial visible to the configured backend through `debugger_probes_list`. Setup-time STM32 bootstrap discovery is the sole exception because no authoritative resource policy exists yet; its command forms and backend are fixed in the installed package rather than supplied by project data. Target reset requires the separate `allow_reset` permission.
 - Flashing requires `allow_flash`; an explicit post-flash reset additionally requires `allow_reset`.
 - Serial/CAN writes are size-capped; reads are buffer-capped; debugger calls run with timeouts and with OpenOCD's TCP servers disabled.
 - Flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled — validated flashing and unrestricted debugger access are mutually exclusive policies.
