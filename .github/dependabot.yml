@@ -32,6 +32,13 @@ updates:
   # The eval container's base image is pinned by digest. Without this entry the
   # digest never moves, and a pin that never moves is a stale, vulnerable image
   # rather than a safe one.
+  #
+  # What this entry is for is digest freshness inside node:22, not moving to a
+  # new Node. The image is the runtime underneath the three agent CLIs the eval
+  # measures, so changing its major changes what the measurement means, and the
+  # first proposal this entry produced was a jump to node:25 - an odd-numbered
+  # line that never becomes LTS. Major bumps are a deliberate decision, made the
+  # same way the CLI pins are.
   - package-ecosystem: docker
     directory: "/evals/install/container"
     schedule:
@@ -40,6 +47,10 @@ updates:
       time: "06:45"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "node"
+        update-types:
+          - version-update:semver-major
     groups:
       eval-container:
         patterns:
