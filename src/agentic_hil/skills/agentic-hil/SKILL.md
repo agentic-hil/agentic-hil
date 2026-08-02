@@ -3,7 +3,7 @@ name: agentic-hil
 description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
 metadata:
   origin: Agentic HIL
-  agentic_hil_version: "0.4.0"
+  agentic_hil_version: "0.5.0"
 ---
 
 # Agentic HIL
