@@ -13,6 +13,38 @@ updates:
         patterns:
           - "*"
 
+  # The hash-pinned lock files under requirements/ pin the release pipeline's
+  # build tooling. Without their own entry they never get updated, and a pinned
+  # dependency that never moves is a stale dependency.
+  - package-ecosystem: pip
+    directory: "/requirements"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      release-tooling:
+        patterns:
+          - "*"
+
+  # The eval container's base image is pinned by digest. Without this entry the
+  # digest never moves, and a pin that never moves is a stale, vulnerable image
+  # rather than a safe one.
+  - package-ecosystem: docker
+    directory: "/evals/install/container"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:45"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      eval-container:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

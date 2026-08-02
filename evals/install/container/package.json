@@ -1,0 +1,12 @@
+{
+  "name": "agentic-hil-install-eval-clis",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned agent CLIs under test in the Agentic HIL installation evaluation.",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.218",
+    "@openai/codex": "0.145.0",
+    "opencode-ai": "1.18.3"
+  }
+}

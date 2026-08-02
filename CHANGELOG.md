@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- The CAN receive-queue drain budget bounds time spent talking to the adapter instead of also covering the `queue_clear_start` audit write that precedes it. The one-second deadline was armed before that write, so a slow first append — a cold runner creating the JSONL log while a scanner holds it — could consume the whole budget and break the loop before a single frame was read, failing `can_session_start` with `can_queue_clear_limit` and `frames_drained: 0` on a queue that was never touched.
+
 ## [0.5.0] - 2026-08-02
 
 ### Changed
