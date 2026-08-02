@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from conftest import FAKE_GDB, write_config
 
 from agentic_hil.config import ConfigError, load_config
-from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
+from agentic_hil.gdbmi import GdbMiCommandResult, GdbMiStopResult, intel_hex_record, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
@@ -754,6 +755,84 @@ def test_audit_break_during_continue_still_halts_the_target(tmp_path: Path, monk
         assert service.coordinator.blocked is True
     finally:
         with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+def test_continue_ack_loss_still_contains_the_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The -exec-continue bytes reach gdb's stdin before the result record is
+    # waited for, so a lost or delayed ^running is ambiguous: the MCU may
+    # already be executing actuator firmware. Returning a plain command failure
+    # skipped the interrupt entirely and left the board free-running, and
+    # setting the session to "error" then closed debug_halt against it too.
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        debug = service.backend._debug
+        original = debug._gdb_command
+        issued: list[str] = []
+
+        def ack_losing_command(session, command: str, timeout_s=None, **kwargs):
+            issued.append(command)
+            if command.startswith("-exec-continue"):
+                # The command still runs; only its acknowledgement is lost.
+                original(session, command, timeout_s, **kwargs)
+                return GdbMiCommandResult(result_class="timeout", line="", timed_out=True, error_message="GDB/MI command timed out.")
+            return original(session, command, timeout_s, **kwargs)
+
+        monkeypatch.setattr(debug, "_gdb_command", ack_losing_command)
+
+        continued = service.call("debug_continue", {"timeout_s": 5})
+
+        # The stop record is proof the target ran and is halted again, so this
+        # is a success -- but it is reached only because the lost ACK no longer
+        # short-circuits the wait, and the lost ACK stays on the record.
+        assert continued["command_timed_out"] is True
+        assert debug.session.status == "halted", continued
+        assert continued["ok"] is True, continued
+        assert any(command.startswith("-exec-continue") for command in issued), issued
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        assert service.call("debug_stop_session")["ok"] is True
+    finally:
+        with suppress(RuntimeError):
+            service.close()
+
+
+def test_continue_ack_loss_with_no_stop_interrupts_instead_of_abandoning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The worst case: the ACK is lost AND no stop record arrives. The target is
+    # then possibly free-running, so the interrupt has to be issued and the
+    # result has to say the halt could not be proven.
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        debug = service.backend._debug
+        original = debug._gdb_command
+        issued: list[str] = []
+
+        def ack_losing_command(session, command: str, timeout_s=None, **kwargs):
+            issued.append(command)
+            if command.startswith("-exec-continue"):
+                return GdbMiCommandResult(result_class="timeout", line="", timed_out=True, error_message="GDB/MI command timed out.")
+            return original(session, command, timeout_s, **kwargs)
+
+        monkeypatch.setattr(debug, "_gdb_command", ack_losing_command)
+        assert debug.session is not None
+        monkeypatch.setattr(debug.session.gdb, "wait_for_stop", lambda timeout_s: GdbMiStopResult(line="", reason="timeout", timed_out=True))
+
+        continued = service.call("debug_continue", {"timeout_s": 5})
+
+        assert overall_success(continued) is False
+        assert continued["command_timed_out"] is True
+        assert continued["halt_requested"] is True
+        assert continued["halt_confirmed"] is False
+        assert continued["target_state"] == "unknown"
+        assert continued["side_effect_status"] == "unknown"
+        assert any(command.startswith("-exec-interrupt") for command in issued), issued
+        # Never wedged into a state that closes _require_session against halt.
+        assert debug.session.status != "error"
+    finally:
+        with suppress(RuntimeError):
             service.close()
         service.coordinator.close()
 

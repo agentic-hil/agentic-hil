@@ -391,12 +391,19 @@ class GdbDebugSessions:
         session.status = "running"
         session.stop_reason = None
         response = self._gdb_command(session, "-exec-continue", min(timeout, CONTINUE_COMMAND_TIMEOUT_CAP_S))
-        # A post-execution audit break (executed=True) means the target is now
-        # running: fall through to the wait/interrupt containment below so it is
-        # not abandoned free-running. The broken audit is still reported by
-        # `_report`, and the lease quarantines on audit_ok=False.
+        # Two ways the target can be running without an acknowledgement in hand.
+        # A post-execution audit break (executed=True) means it already is. A
+        # lost ACK (timed_out) is ambiguous, and the command bytes were written
+        # to gdb's stdin before the wait began, so the remote may well have
+        # resumed. Both fall through to the wait/interrupt containment below
+        # rather than being reported as a command that did nothing: returning
+        # here would leave the board free-running, and setting status to "error"
+        # would also close _require_session against the containment call that
+        # could still stop it. The broken audit is still reported by `_report`,
+        # and the lease quarantines on audit_ok=False.
         audit_refused_running = bool(getattr(response, "audit_failure", False) and getattr(response, "executed", False))
-        if response.result_class not in {"running", "done"} and not audit_refused_running:
+        acknowledgement_lost = bool(response.timed_out)
+        if response.result_class not in {"running", "done"} and not audit_refused_running and not acknowledgement_lost:
             session.status = "error"
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
         assert session.gdb is not None
@@ -412,13 +419,17 @@ class GdbDebugSessions:
                 session.status = "running"
                 session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
             self._write_session_log(session)
-            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": interrupt.ok, "halt_confirmed": halt_confirmed, "target_state": "halted" if halt_confirmed else "unknown", "side_effect_committed": halt_confirmed, "side_effect_status": "committed" if halt_confirmed else "unknown"}
+            result: JsonObject = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Target did not stop before the timeout.", "stop_reason": "timeout", "stop": session.stop_reason, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "halt_requested": True, "halt_command_acknowledged": interrupt.ok, "halt_confirmed": halt_confirmed, "target_state": "halted" if halt_confirmed else "unknown", "side_effect_committed": halt_confirmed, "side_effect_status": "committed" if halt_confirmed else "unknown", "command_timed_out": acknowledgement_lost}
             result.update(target_stop_fields(session.stop_reason))
             return self._report(result)
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         stop_reason = str(session.stop_reason.get("stop_reason"))
         session.status = "error" if stop_reason == "debugger_error" else "halted"
         result = self._stopped_result(tool, session, "Target stopped")
+        # A *stopped record is proof the target ran and is halted again, but the
+        # lost acknowledgement stays on the record: it is what a reader needs to
+        # explain the gap between the request and the log.
+        result["command_timed_out"] = acknowledgement_lost
         self._write_session_log(session)
         return self._report(result)
 
