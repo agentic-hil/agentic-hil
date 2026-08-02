@@ -192,7 +192,7 @@ The run pipeline is deliberately simple — validate everything, then execute, t
 
 ```yaml
 # .agentic-hil/testconfig.yaml
-version: 1
+version: 2
 name: capture-state
 steps:
   - {debugger: dut, action: flash, image_path: build/app.elf}

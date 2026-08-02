@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["version", "steps"],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "const": 2, "description": "Format version. Version 1 addressed a `device:` that no longer exists; steps now name a `debuggers` entry or a `com_ports` entry directly." },
     "name": { "type": "string", "minLength": 1 },
     "steps": {
       "type": "array",

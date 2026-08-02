@@ -50,9 +50,11 @@ DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
   controller: "unknown-controller"
 
-# Every debug probe is a named entry. The name is the routing key: test plans
-# and MCP tool calls address a probe by it, and each probe carries its own
-# deny-by-default permissions.
+# Every debug probe is a named entry, and each carries its own
+# deny-by-default permissions. Test-reactor plan steps address a probe by that
+# name. The MCP tools drive one probe: with exactly one entry it is bound
+# automatically, and with several they refuse rather than pick a board, so
+# multi-board work runs through `agentic-hil test-reactor`.
 debuggers:
   dut:
     type: "openocd"
@@ -648,7 +650,7 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
         "Grant only the permissions the board needs under debuggers.<name>.permissions; every flag is deny-by-default.",
-        "If multiple debug probes are connected, give each debuggers entry a distinct probe_id. Test plans and tool calls then address a board by its name.",
+        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])

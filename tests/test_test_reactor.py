@@ -124,7 +124,7 @@ def test_reactor_runs_flash_uart_breakpoint_and_memory_dump(tmp_path: Path) -> N
     service, com_ports = reactor_service(tmp_path)
     test_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 name: capture-state
 steps:
   - debugger: dut
@@ -177,7 +177,7 @@ def test_reactor_stops_debug_and_uart_after_failed_step(tmp_path: Path) -> None:
     service, com_ports = reactor_service(tmp_path, "unexpected_breakpoint")
     test_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {port_id: dut_uart, action: uart_open}
   - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
@@ -201,12 +201,12 @@ steps:
 def test_test_config_accepts_json_and_rejects_unknown_actions(tmp_path: Path) -> None:
     json_path = tmp_path / "testconfig.json"
     json_path.write_text(
-        json.dumps({"version": 1, "steps": [{"port_id": "dut_uart", "action": "uart_open"}]}),
+        json.dumps({"version": 2, "steps": [{"port_id": "dut_uart", "action": "uart_open"}]}),
         encoding="utf-8",
     )
     assert load_test_config(str(json_path), str(tmp_path)).steps[0].action == "uart_open"
 
-    invalid_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {debugger: dut, action: shell}\n")
+    invalid_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: shell}\n")
     with pytest.raises(ConfigError) as excinfo:
         load_test_config(str(invalid_path), str(tmp_path))
     assert excinfo.value.error_type == "test_config_invalid"
@@ -217,7 +217,7 @@ def test_test_config_accepts_json_and_rejects_unknown_actions(tmp_path: Path) ->
 def test_test_config_rejects_duplicate_keys_with_location(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - port_id: dut_uart\n    action: uart_open\n    action: uart_close\n",
+        "version: 2\nsteps:\n  - port_id: dut_uart\n    action: uart_open\n    action: uart_close\n",
     )
     with pytest.raises(ConfigError) as excinfo:
         load_test_config(str(path), str(tmp_path))
@@ -230,7 +230,7 @@ def test_test_config_schema_error_does_not_echo_structured_input(tmp_path: Path)
     secret = "operator-secret-must-not-leak"
     path = write_test_config(
         tmp_path,
-        f"version: 1\nname:\n  secret: {secret}\nsteps:\n  - {{port_id: dut_uart, action: uart_open}}\n",
+        f"version: 2\nname:\n  secret: {secret}\nsteps:\n  - {{port_id: dut_uart, action: uart_open}}\n",
     )
 
     with pytest.raises(ConfigError) as excinfo:
@@ -245,7 +245,7 @@ def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     plan = tmp_path / "outside.yaml"
-    plan.write_text("version: 1\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n", encoding="utf-8")
+    plan.write_text("version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n", encoding="utf-8")
 
     with pytest.raises(ConfigError) as rejected:
         load_test_config(str(plan), str(workspace))
@@ -257,7 +257,7 @@ def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
 def test_reactor_schema_rejects_traversal_breakpoint_file(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - {debugger: dut, action: run_until_breakpoint, location: {file: ../evil.c, line: 10}}\n",
+        "version: 2\nsteps:\n  - {debugger: dut, action: run_until_breakpoint, location: {file: ../evil.c, line: 10}}\n",
     )
     with pytest.raises(ConfigError) as excinfo:
         load_test_config(str(path), str(tmp_path))
@@ -267,7 +267,7 @@ def test_reactor_schema_rejects_traversal_breakpoint_file(tmp_path: Path) -> Non
 def test_reactor_schema_accepts_windows_drive_breakpoint_file(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - {debugger: dut, action: run_until_breakpoint, location: {file: 'C:/src/main.c', line: 10}}\n",
+        "version: 2\nsteps:\n  - {debugger: dut, action: run_until_breakpoint, location: {file: 'C:/src/main.c', line: 10}}\n",
     )
     loaded = load_test_config(str(path), str(tmp_path))
     assert loaded.steps[0].arguments["location"] == {"file": "C:/src/main.c", "line": 10}
@@ -301,7 +301,7 @@ def test_preflight_rejects_late_unknown_debugger_before_flash(tmp_path: Path) ->
     config = load_config(str(write_config(tmp_path)))
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: dut, action: flash, image_path: build/app.elf}
   - {debugger: typo, action: flash, image_path: build/app.elf}
@@ -331,7 +331,7 @@ def test_preflight_rejects_closing_a_uart_the_plan_never_opened(tmp_path: Path) 
     )
     plan_path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n  - {port_id: other_uart, action: uart_close}\n",
+        "version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n  - {port_id: other_uart, action: uart_close}\n",
     )
     service = RecordingService()
 
@@ -347,7 +347,7 @@ def test_preflight_does_not_create_dump_output_directories(tmp_path: Path) -> No
     service, _ = reactor_service(tmp_path)
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
   - {debugger: dut, action: dump_memory, symbol: CTC_array, output_path: build/new/nested/memory.hex}
@@ -375,7 +375,7 @@ def test_preflight_enforces_symbol_allowlist_before_hardware_actions(tmp_path: P
     )
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: dut, action: flash, image_path: build/app.elf}
   - {debugger: dut, action: debug_start, image_path: build/app.elf}
@@ -402,7 +402,7 @@ def test_reactor_cleanup_continues_after_debug_stop_exception(tmp_path: Path) ->
     )
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {port_id: dut_uart, action: uart_open}
   - {debugger: dut, action: debug_start, image_path: build/app.elf}
@@ -425,7 +425,7 @@ def test_reactor_converts_step_exception_to_structured_failure(tmp_path: Path) -
     config = load_config(
         str(write_config(tmp_path)),
     )
-    plan_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
     service = RecordingService(raise_flash=True)
 
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
@@ -441,7 +441,7 @@ def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
     )
     plan_path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n  - {port_id: dut_uart, action: uart_open}\n",
+        "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n  - {port_id: dut_uart, action: uart_open}\n",
     )
     service = RecordingService(audit_flash_failure=True)
 
@@ -467,7 +467,7 @@ def test_run_until_breakpoint_propagates_internal_audit_failures(tmp_path: Path,
     config = load_config(str(write_config(tmp_path)))
     plan_path = write_test_config(
         tmp_path,
-        "version: 1\nsteps:\n  - {debugger: dut, action: debug_start, image_path: build/app.elf}\n  - {debugger: dut, action: run_until_breakpoint, location: test_done}\n",
+        "version: 2\nsteps:\n  - {debugger: dut, action: debug_start, image_path: build/app.elf}\n  - {debugger: dut, action: run_until_breakpoint, location: test_done}\n",
     )
     service = RecordingService(audit_failure_call=failed_call)
 
@@ -486,7 +486,7 @@ def test_run_until_breakpoint_removes_each_owned_breakpoint(tmp_path: Path) -> N
     )
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: dut, action: debug_start, image_path: build/app.elf}
   - {debugger: dut, action: run_until_breakpoint, location: first_stop}
@@ -504,7 +504,7 @@ steps:
 
 def test_plan_rejects_a_com_port_the_config_does_not_declare(tmp_path: Path) -> None:
     config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
-    plan_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {port_id: missing_uart, action: uart_open}\n")
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: missing_uart, action: uart_open}\n")
     service = RecordingService()
 
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
@@ -538,7 +538,7 @@ def test_plan_must_name_the_debugger_when_several_are_configured(tmp_path: Path)
     config = load_config(
         str(write_config(tmp_path, debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n"))
     )
-    plan_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {action: flash, image_path: build/app.elf}\n")
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {action: flash, image_path: build/app.elf}\n")
     service = RecordingService()
 
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
@@ -581,7 +581,7 @@ def test_cli_uses_authoritative_config_and_repository_local_test_plan(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     write_authoritative_config(tmp_path, monkeypatch)
-    test_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {debugger: dut, action: shell}\n")
+    test_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: shell}\n")
     monkeypatch.chdir(tmp_path)
 
     exit_code = entrypoint(["test-reactor", "--test-config", str(test_path)])
@@ -657,25 +657,101 @@ def test_config_rejects_named_debuggers_that_share_a_physical_probe(tmp_path: Pa
     assert excinfo.value.details["other_debugger"] == "probe_x"
 
 
-def test_config_requires_a_probe_id_once_several_debuggers_are_configured(tmp_path: Path) -> None:
-    # probe_id is the only field the backends turn into `adapter serial` / `sn=`
-    # / `--uid`. Without it a second entry names nothing physical, so both would
-    # attach to whichever probe happens to be plugged in.
-    with pytest.raises(ConfigError) as excinfo:
+def test_multi_probe_config_without_probe_ids_still_loads(tmp_path: Path) -> None:
+    # Discovering the ids is exactly what an operator does before they can write
+    # one down, and loading must work with no hardware attached, so the demand
+    # for a probe_id cannot live at config load.
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debugger_name="probe_x",
+                auto_probe_ids=False,
+                debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n',
+            )
+        )
+    )
+
+    assert sorted(config.debuggers) == ["probe_x", "probe_y"]
+    assert config.debuggers["probe_y"].probe_id is None
+
+
+def test_driving_an_unnamed_probe_is_refused_when_several_are_configured(tmp_path: Path) -> None:
+    # The demand belongs at the hardware boundary, where picking the wrong board
+    # is the failure that matters.
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
         load_config(
             str(
                 write_config(
                     tmp_path,
                     debugger_name="probe_x",
+                    auto_probe_ids=False,
+                    debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n',
+                )
+            )
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        driven = service.call("reset_target", {"mode": "run"})
+        listed = service.call("debugger_probes_list")
+    finally:
+        service.close()
+
+    assert driven["ok"] is False
+    assert driven["error_type"] == "not_supported"
+    assert driven["side_effect_committed"] is False
+    assert "debugger-probes" in driven["summary"]
+    # Discovery is the way out of that state, so the unnamed-probe guard must
+    # not swallow it. (OpenOCD answers not_supported on its own — it cannot
+    # enumerate — but the refusal is the backend's, not the guard's.)
+    assert "configured_debuggers" not in listed
+    assert listed["backend"] == "openocd"
+
+
+def test_config_rejects_a_pyocd_probe_id_contained_in_another(tmp_path: Path) -> None:
+    # pyOCD matches --uid as a case-insensitive substring, so the shorter
+    # selector also selects the board the longer one names.
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            str(
+                write_config(
+                    tmp_path,
+                    debugger_type="pyocd",
+                    debugger_name="probe_x",
                     probe_id="0669FF505153",
                     auto_probe_ids=False,
-                    debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n    resource_id: "rig-b"\n',
+                    debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "0669FF"\n',
                 )
             )
         )
 
     assert excinfo.value.error_type == "config_invalid"
-    assert excinfo.value.details["field"] == "debuggers.probe_y.probe_id"
+    assert excinfo.value.details["other_debugger"] == "probe_x"
+
+
+def test_config_rejects_a_pyocd_probe_id_that_only_differs_by_its_type_prefix(tmp_path: Path) -> None:
+    # pyOCD strips an optional `<type>:` prefix before matching, so these two
+    # spellings are one selector.
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            str(
+                write_config(
+                    tmp_path,
+                    debugger_type="pyocd",
+                    debugger_name="probe_x",
+                    probe_id="0669FF505153",
+                    auto_probe_ids=False,
+                    debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "stlink:0669ff505153"\n',
+                )
+            )
+        )
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.details["other_debugger"] == "probe_x"
 
 
 def test_single_debugger_needs_no_probe_id(tmp_path: Path) -> None:
@@ -693,7 +769,7 @@ def test_reactor_requires_factory_for_an_unbound_debugger(tmp_path: Path) -> Non
         load_config(str(write_config(tmp_path, debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n"))),
         "dut",
     )
-    plan_path = write_test_config(tmp_path, "version: 1\nsteps:\n  - {debugger: probe_b, action: flash, image_path: build/app.elf}\n")
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: probe_b, action: flash, image_path: build/app.elf}\n")
     service = RecordingService()
 
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
@@ -722,7 +798,7 @@ def test_preflight_gates_debug_actions_on_the_named_debuggers_type(tmp_path: Pat
     elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: probe_b, action: debug_start, image_path: build/app.elf, mode: attach}
   - {debugger: probe_b, action: debug_stop}
@@ -764,7 +840,7 @@ def test_debug_steps_execute_on_the_named_debugger_service(tmp_path: Path) -> No
     elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
     plan_path = write_test_config(
         tmp_path,
-        """version: 1
+        """version: 2
 steps:
   - {debugger: probe_b, action: debug_start, image_path: build/app.elf, mode: attach}
   - {debugger: probe_b, action: debug_stop}
@@ -957,3 +1033,22 @@ def test_bind_debugger_applies_the_probes_own_target(tmp_path: Path) -> None:
 
     assert bind_debugger(config, "board_b").target.name == "sensor-node"
     assert bind_debugger(config, "board_a").target.name == config.target.name
+
+
+def test_version_1_plan_is_refused_with_the_key_that_replaced_device(tmp_path: Path) -> None:
+    # Version 1 steps addressed a `device:` the config model no longer has.
+    # Without a version boundary every old plan would fail on a bare const
+    # mismatch with nothing pointing at the replacement.
+    plan_path = write_test_config(
+        tmp_path,
+        "version: 1\nsteps:\n  - {device: dut, action: flash, image_path: build/app.elf}\n",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(str(plan_path), str(tmp_path))
+
+    assert rejected.value.error_type == "test_config_invalid"
+    assert rejected.value.details["field"] == "version"
+    migration = rejected.value.details["migration"]
+    assert any("debugger:" in value for value in migration.values())
+    assert any("port_id:" in value for value in migration.values())

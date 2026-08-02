@@ -5,7 +5,7 @@
 # omitted while the config declares exactly one probe; with several, name it —
 # e.g. a second board as
 #   - {debugger: dut_b, action: flash, image_path: build/sensor.elf}
-version: 1
+version: 2
 name: capture-state
 steps:
   - debugger: dut

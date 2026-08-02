@@ -307,41 +307,59 @@ def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfi
     return config
 
 
+def probe_selector_key(debugger: DebuggerConfig) -> str | None:
+    """The configured probe selector as the backend will actually read it.
+
+    pyOCD strips an optional ``<type>:`` prefix from ``--uid`` before matching,
+    so ``stlink:0669FF`` and ``0669FF`` are one selector wearing two spellings.
+    Comparison is case-insensitive because pyOCD lowercases both sides."""
+    if debugger.probe_id is None:
+        return None
+    selector = debugger.probe_id
+    if debugger.type == "pyocd" and ":" in selector:
+        selector = selector.split(":", 1)[1]
+    return selector.lower()
+
+
 def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: bool = False) -> None:
     """Each configured debugger must name a distinct physical probe.
 
     Two names pointing at one probe is how a plan that says "flash board_b"
-    silently flashes board_a: OpenOCD would happily attach to whatever single
-    probe is plugged in. Names are the only routing the operator has, so a
-    collision fails closed instead of picking a board for them."""
-    for name, debugger in debuggers.items():
-        # probe_id is the ONLY field that reaches hardware: the backends turn it
-        # into `adapter serial` (openocd.py), `sn=` (stlink.py) and `--uid`
-        # (pyocd.py), and emit nothing when it is None. resource_id only aliases
-        # a coordination lease. So with several probes configured, distinct
-        # resource_ids or distinct executables prove nothing — every entry would
-        # still attach to whichever probe happens to be plugged in.
-        if len(debuggers) > 1 and debugger.probe_id is None:
-            raise ConfigError(
-                "config_invalid",
-                "A project with several debuggers must give every entry a probe_id; it is the only field that selects a physical probe, so without it two names would drive whichever probe is plugged in.",
-                {"field": f"debuggers.{name}.probe_id", "configured_debuggers": sorted(debuggers)},
-            )
+    silently flashes board_a. Names are the only routing the operator has, so a
+    collision fails closed instead of picking a board for them.
+
+    This runs at config load and therefore may not touch hardware: `doctor`,
+    `mcp-stdio` and every test load a config with no probe attached. It rejects
+    what is decidable from the text alone. Whether a selector actually resolves
+    to exactly one connected probe is enforced at the hardware boundary, where
+    enumeration is possible — see PyOCDBackend._resolve_probe_selector."""
     # probe_id decides the hardware, so it is checked on its own. The identity
     # pass below cannot stand in for this: debugger_resource_identity() prefers
     # resource_id and never looks at probe_id in that branch, so two entries
     # naming one probe serial under different lease aliases would both pass.
     probe_owner: dict[str, str] = {}
     for name, debugger in debuggers.items():
-        if debugger.probe_id is None:
+        probe_key = probe_selector_key(debugger)
+        if probe_key is None:
             continue
-        probe_key = os.path.normcase(debugger.probe_id)
         if probe_key in probe_owner:
             raise ConfigError(
                 "config_invalid",
                 "Two configured debuggers name the same probe_id, so both drive one physical probe; a distinct resource_id only renames the lease and cannot make them different boards.",
                 {"field": f"debuggers.{name}.probe_id", "probe_id": debugger.probe_id, "other_debugger": probe_owner[probe_key]},
             )
+        # pyOCD matches --uid as a case-insensitive SUBSTRING of a probe's
+        # unique ID, so one selector containing another is not two probes: the
+        # shorter one selects whatever the longer one selects, and more.
+        for other_key, other_name in probe_owner.items():
+            if debugger.type != "pyocd" and debuggers[other_name].type != "pyocd":
+                continue
+            if probe_key in other_key or other_key in probe_key:
+                raise ConfigError(
+                    "config_invalid",
+                    "One configured probe_id contains the other, and pyOCD matches --uid as a case-insensitive substring of a probe's unique ID, so the shorter selector also selects the board the longer one names. Give each debugger the full unique ID of its own probe.",
+                    {"field": f"debuggers.{name}.probe_id", "probe_id": debugger.probe_id, "other_debugger": other_name},
+                )
         probe_owner[probe_key] = name
     resource_owner: dict[str, str] = {}
     for name, debugger in debuggers.items():

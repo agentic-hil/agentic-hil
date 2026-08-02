@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -160,6 +160,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     if not isinstance(raw, dict):
         raise ConfigError("test_config_invalid", "Test reactor configuration root must be a mapping.", {"path": str(path)})
     reject_nonfinite_numbers(raw, "test_config_invalid", str(path))
+    reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
     steps = [
         TestStep(
@@ -171,6 +172,29 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
         for step in raw["steps"]
     ]
     return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=steps)
+
+
+def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> None:
+    """Refuse a version 1 plan by name.
+
+    Version 1 steps addressed a `device:` that the config model no longer has.
+    Leaving the plan at version 1 would have made every old plan invalid with
+    only a bare const mismatch to go on, so the break gets a version boundary
+    and a message that says which key replaced which."""
+    if raw.get("version") != 1:
+        return
+    raise ConfigError(
+        "test_config_invalid",
+        "This test plan is version 1, whose steps address a `device:` that no longer exists. Set `version: 2` and route each step by the name it drives.",
+        {
+            "path": path,
+            "field": "version",
+            "migration": {
+                "device (flash, debug_start, run_until_breakpoint, dump_memory, debug_stop)": "debugger: <name of a debuggers entry>, or omit it while the project configures exactly one probe",
+                "device (uart_open, uart_close)": "port_id: <name of a com_ports entry>",
+            },
+        },
+    )
 
 
 def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> None:
@@ -385,7 +409,8 @@ class TestReactor:
             service = self.service
         else:
             bound = bind_debugger(self.config, debugger_id)
-            service = self._service_factory(replace(bound, target=debugger.target or self.config.target))
+            # bind_debugger() already applies this probe's target override.
+            service = self._service_factory(bound)
             self._owned_services.append(service)
         built = DebuggerRunner(debugger_id, debugger, service)
         self.runners[debugger_id] = built

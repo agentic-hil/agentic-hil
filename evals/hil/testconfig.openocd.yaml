@@ -1,6 +1,6 @@
 # OpenOCD reactor plan: flash, open UART, and prove execution reached `delay`
 # through a typed GDB/MI debug session before closing every session.
-version: 1
+version: 2
 name: nucleo-f446re-openocd
 steps:
   - debugger: dut

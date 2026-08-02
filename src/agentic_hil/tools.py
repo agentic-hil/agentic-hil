@@ -296,6 +296,8 @@ class AgenticHILToolService:
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
                 return unbound_debugger_error(name, self.config)
+            if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
+                return unnamed_probe_error(name, self.config)
             if self.coordinator.blocked and name in audited_hardware_tools() and name not in containment_tools():
                 return {
                     "ok": False,
@@ -682,6 +684,39 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         # No argument to this tool can change the outcome; retrying only wastes turns.
+        "retry_safe": False,
+    }
+
+
+def probe_addressing_tools() -> set[str]:
+    """Tools that drive one specific physical probe.
+
+    Excludes the two that must keep working while an operator is still finding
+    out which probes exist: debugger_probes_list enumerates them, and
+    debugger_info only runs the toolchain's version command."""
+    return debugger_tools() - {"debugger_probes_list", "debugger_info"}
+
+
+def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
+    """Refuse to drive a board when the bound probe names no hardware.
+
+    Config load cannot demand a probe_id: discovering the ids is exactly what
+    an operator does before they can write one down, and loading must work with
+    no hardware attached. The demand belongs here, where a board is about to be
+    driven and picking the wrong one is the failure that matters."""
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_type": "not_supported",
+        "summary": (
+            f"Debugger '{config.debugger_id}' has no probe_id, and the project configures "
+            f"{len(config.debuggers)} debuggers, so this call cannot say which board it means. "
+            "Run `agentic-hil debugger-probes` to list the connected probes and give each entry its own probe_id. "
+            "OpenOCD cannot enumerate probes; read the serial from the probe itself, or use a pyocd or stlink entry to discover it."
+        ),
+        "configured_debuggers": sorted(config.debuggers),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
         "retry_safe": False,
     }
 

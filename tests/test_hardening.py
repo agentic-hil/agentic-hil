@@ -1186,9 +1186,9 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Two pyocd entries reached through different spellings of one binary (an
-    # absolute path and a bare PATH name). Distinct executables never made these
-    # distinct boards — only probe_id reaches the hardware — so the config is
-    # refused for naming no probe rather than being accepted as two probes.
+    # absolute path and a bare PATH name), both naming the same probe serial.
+    # Distinct executables never made these distinct boards, and pinning
+    # collapses them onto one file, so the config is refused.
     toolchain = tmp_path / "toolchain"
     toolchain.mkdir()
     shim = toolchain / "pyocd-shim.bat"
@@ -1203,7 +1203,7 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
         debugger_name="dut_a",
         probe_id="PROBE-A",
         auto_probe_ids=False,
-        debuggers_yaml='debuggers:\n  probe_b:\n    type: pyocd\n    executable: "pyocd-shim.bat"\n',
+        debuggers_yaml='debuggers:\n  probe_b:\n    type: pyocd\n    probe_id: "PROBE-A"\n    executable: "pyocd-shim.bat"\n',
         permissions={"allow_probe": True},
     )
     monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
@@ -1213,6 +1213,7 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
 
     assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "debuggers.probe_b.probe_id"
+    assert rejected.value.details["other_debugger"] == "dut_a"
 
 
 def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(
@@ -2302,3 +2303,59 @@ def test_dump_into_an_allowed_root_that_is_a_link_is_not_falsely_refused(tmp_pat
     assert result["ok"] is True, result
     assert result["validation"]["allowed_root"] is True
     assert result["validation"]["within_workspace"] is True
+
+
+def _pyocd_service(tmp_path: Path, probe_id: str | None):
+    config = load_test_config(tmp_path, debugger_type="pyocd", probe_id=probe_id)
+    return AgenticHILToolService(config)
+
+
+def test_pyocd_probe_selector_is_canonicalized_to_a_full_uid(tmp_path: Path) -> None:
+    # pyOCD matches --uid as a case-insensitive SUBSTRING, so a partial value
+    # must be resolved against the enumerated probes and the full UID passed on,
+    # or the configured name does not mean one board.
+    service = _pyocd_service(tmp_path, "pyocd123")
+    try:
+        result = service.call("probe_target")
+        assert result["ok"] is True, result
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+        assert service.backend._connection_args()[:2] == ["--uid", "PYOCD123"]
+    finally:
+        service.close()
+
+
+def test_pyocd_ambiguous_probe_selector_is_refused_before_touching_a_board(tmp_path: Path) -> None:
+    # "PYOCD" is a substring of both connected probes, so pyOCD would silently
+    # take the first one.
+    service = _pyocd_service(tmp_path, "PYOCD")
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert sorted(result["candidate_probe_ids"]) == ["PYOCD123", "PYOCD456"]
+
+
+def test_pyocd_probe_selector_that_matches_nothing_is_refused(tmp_path: Path) -> None:
+    service = _pyocd_service(tmp_path, "NOT-CONNECTED")
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert result["configured_probe_id"] == "NOT-CONNECTED"
+
+
+def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
+    service = _pyocd_service(tmp_path, None)
+    try:
+        assert service.call("probe_target")["ok"] is True
+        assert "--uid" not in service.backend._connection_args()
+    finally:
+        service.close()

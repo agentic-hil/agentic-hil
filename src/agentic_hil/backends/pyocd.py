@@ -50,8 +50,11 @@ class PyOCDBackend:
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        self._resolved_probe_uid: str | None = None
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
+        if config.debugger is None or self.config.debugger is None or config.debugger.probe_id != self.config.debugger.probe_id:
+            self._resolved_probe_uid = None
         self.config = config
 
     def info(self) -> JsonObject:
@@ -76,6 +79,12 @@ class PyOCDBackend:
         tool = "debugger_probes_list"
         if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+        return self._enumerate_probes(tool)
+
+    def _enumerate_probes(self, tool: str) -> JsonObject:
+        """List connected probes. Split out of list_probes because selector
+        canonicalization needs it before flashing or resetting, which a config
+        may grant without granting probe discovery."""
         resolved = self._resolve_executable()
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
@@ -102,6 +111,9 @@ class PyOCDBackend:
     def probe_target(self) -> JsonObject:
         if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
+        selected = self._resolve_probe_selector("probe_target")
+        if not selected["ok"]:
+            return selected
         result = self._run_pyocd("probe_target", ["commander", "--command", "status", *self._connection_args()])
         if result.get("ok"):
             result["target_detected"] = True
@@ -123,6 +135,9 @@ class PyOCDBackend:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debuggers.<name>.flash_address.", "artifact": self._artifact_summary(artifact)}
             address_args = ["--base-address", self.config.debugger.flash_address]
 
+        selected = self._resolve_probe_selector("flash_firmware")
+        if not selected["ok"]:
+            return selected
         result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
         result["verify"] = True
@@ -156,6 +171,9 @@ class PyOCDBackend:
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         commander_command = "reset" if mode == "run" else "reset halt"
+        selected = self._resolve_probe_selector("reset_target")
+        if not selected["ok"]:
+            return selected
         result = self._run_pyocd("reset_target", ["commander", "--command", commander_command, *self._connection_args()])
         result["mode"] = mode
         if result.get("ok"):
@@ -245,11 +263,64 @@ class PyOCDBackend:
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
-        if self.config.debugger.probe_id is not None:
-            args.extend(["--uid", self.config.debugger.probe_id])
+        # The canonical full UID when one was resolved, so pyOCD's substring
+        # match can only land on the probe the operator named.
+        selector = self._resolved_probe_uid or (self.config.debugger.probe_id if self.config.debugger else None)
+        if selector is not None:
+            args.extend(["--uid", selector])
         if self.config.debugger.target_type is not None:
             args.extend(["--target", self.config.debugger.target_type])
         return args
+
+    def _resolve_probe_selector(self, tool: str) -> JsonObject:
+        """Resolve the configured probe_id to the one full probe UID it selects.
+
+        pyOCD matches --uid as a case-insensitive SUBSTRING of a probe's unique
+        ID and strips an optional `<type>:` prefix first (pyocd.probe.aggregator).
+        So a configured value can select a board the operator never named, and
+        two different values can select one board. Enumerating and then passing
+        the full UID is the only way a configured name means one probe.
+
+        Config load cannot do this — it must work with no hardware attached —
+        so it happens here, once per bound probe, before anything is driven."""
+        debugger = self.config.debugger
+        if debugger is None or debugger.probe_id is None:
+            return {"ok": True, "uid": None}
+        if self._resolved_probe_uid is not None:
+            return {"ok": True, "uid": self._resolved_probe_uid}
+
+        listed = self._enumerate_probes(tool)
+        if not listed["ok"]:
+            return listed
+        available = [str(probe.get("probe_id", "")) for probe in listed["probes"]]
+        needle = debugger.probe_id.split(":", 1)[1] if ":" in debugger.probe_id else debugger.probe_id
+        matches = [uid for uid in available if needle.lower() in uid.lower()]
+        if not matches:
+            return self._probe_selector_error(tool, "no connected probe matches the configured probe_id.", debugger.probe_id, available)
+        if len(matches) > 1:
+            return self._probe_selector_error(tool, "the configured probe_id matches more than one connected probe.", debugger.probe_id, matches)
+        # The resolved UID is passed back through the same substring match, so
+        # it must be unambiguous in its own right: one full UID can be a
+        # substring of a longer one.
+        reselected = [uid for uid in available if matches[0].lower() in uid.lower()]
+        if len(reselected) > 1:
+            return self._probe_selector_error(tool, "the resolved probe UID is itself a prefix of another connected probe's UID, so it cannot address one board.", debugger.probe_id, reselected)
+        self._resolved_probe_uid = matches[0]
+        return {"ok": True, "uid": matches[0]}
+
+    def _probe_selector_error(self, tool: str, reason: str, configured: str, candidates: list[str]) -> JsonObject:
+        return {
+            "ok": False,
+            "tool": tool,
+            "backend": self.backend_name,
+            "error_type": "adapter_not_found",
+            "summary": f"Probe selection is not unambiguous: {reason}",
+            "configured_probe_id": configured,
+            "candidate_probe_ids": candidates,
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": False,
+        }
 
     def _artifact_summary(self, artifact: JsonObject) -> JsonObject:
         return {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
