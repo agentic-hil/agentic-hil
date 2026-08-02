@@ -1,0 +1,6 @@
+# Build tooling for the PyPI publish job (.github/workflows/workflow.yml).
+#
+# Regenerate the hash-pinned lock file after editing:
+#   uv pip compile --generate-hashes --universal requirements/build.in -o requirements/build.txt
+build
+twine
