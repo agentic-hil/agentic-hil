@@ -269,7 +269,13 @@ def parse_gdb_integer(value: str | None) -> int | None:
         return None
 
 
-def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> None:
+def write_intel_hex_file(file_path: Path, start_address: int, data: bytes, *, workspace: str | Path) -> None:
+    """Write a symbol dump as Intel HEX inside ``workspace``.
+
+    ``workspace`` is required rather than defaulted: this is the one write
+    primitive an agent aims at a path of its own choosing, and a caller that
+    forgets the argument would silently drop the only containment check the
+    write itself performs."""
     lines: list[str] = []
     upper_address: int | None = None
     for offset in range(0, len(data), INTEL_HEX_BYTES_PER_RECORD):
@@ -280,7 +286,7 @@ def write_intel_hex_file(file_path: Path, start_address: int, data: bytes) -> No
             upper_address = chunk_upper
         lines.append(intel_hex_record(absolute & 0xFFFF, 0x00, data[offset : offset + INTEL_HEX_BYTES_PER_RECORD]))
     lines.append(INTEL_HEX_EOF_RECORD)
-    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii")
+    atomic_write_text(file_path, "\n".join(lines) + "\n", encoding="ascii", workspace=workspace)
 
 
 def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:

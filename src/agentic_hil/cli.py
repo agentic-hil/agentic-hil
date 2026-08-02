@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from agentic_hil.config import (
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
+    bind_debugger,
     config_schema_text,
     ensure_safe_state_root,
     is_path_within_frozen,
@@ -42,26 +43,33 @@ from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   name: "example-target"
   controller: "unknown-controller"
 
-devices:
+# Every debug probe is a named entry, and each carries its own
+# deny-by-default permissions. Test-reactor plan steps address a probe by that
+# name. The MCP tools drive one probe: with exactly one entry it is bound
+# automatically, and with several they refuse rather than pick a board, so
+# multi-board work runs through `agentic-hil test-reactor`.
+debuggers:
   dut:
-    debugger: true
-    uart: null
-
-debugger:
-  type: "openocd"
-  executable: null
-  probe_id: null
-  target_type: null
-  interface_cfg: "interface/stlink.cfg"
-  target_cfg: "target/stm32f4x.cfg"
-  timeout_s: 60
+    type: "openocd"
+    executable: null
+    probe_id: null
+    target_type: null
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_probe: false
+      allow_flash: false
+      allow_reset: false
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
 
 debug:
   gdb_executable: null
@@ -84,27 +92,12 @@ com_ports: {}
 
 can_buses: {}
 
-adapters: {}
-
 validation:
   require_existing_file: true
   require_allowed_root: true
   require_allowed_extension: true
   compute_sha256: true
   inspect_known_formats: true
-
-permissions:
-  allow_probe: false
-  allow_flash: false
-  allow_reset: false
-  allow_com_read: false
-  allow_com_write: false
-  allow_can_read: false
-  allow_can_write: false
-  allow_adapter_read: false
-  allow_adapter_write: false
-  allow_raw_debugger_commands: false
-  allow_mass_erase: false
 
 reports:
   directory: ".agentic-hil/reports"
@@ -567,18 +560,18 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
     service = AgenticHILToolService(config, frontend="reactor")
-    # Devices on named debuggers (multi-board) get their own service driving their
-    # debugger, sharing the base coordinator so the whole project is one owner.
-    def device_service_factory(device_config: AgenticHILConfig) -> AgenticHILToolService:
-        return AgenticHILToolService(device_config, coordinator=service.coordinator, frontend="reactor")
+    # A step naming another probe gets its own service driving that debugger,
+    # sharing the base coordinator so the whole project stays one owner.
+    def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
+        return AgenticHILToolService(bound_config, coordinator=service.coordinator, frontend="reactor")
 
     # Construction happens inside the guarded block: the factory builds real
-    # per-device services in TestReactor.__init__, so a failure there must still
+    # per-probe services while the plan runs, so a failure there must still
     # produce a JSON error result and fall through to service.close() below.
     reactor: TestReactor | None = None
     primary_error: BaseException | None = None
     try:
-        reactor = TestReactor(service.config, service, service_factory=device_service_factory)
+        reactor = TestReactor(service.config, service, service_factory=debugger_service_factory)
         result = reactor.run(test_config)
     except BaseException as error:
         primary_error = error
@@ -655,9 +648,9 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[
     next_steps = [
         f"Review the deny-by-default config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
-        "Set debugger.interface_cfg and debugger.target_cfg for your OpenOCD setup.",
-        "Configure devices with the debugger and optional UART used by test-reactor sequences.",
-        "If multiple debug probes are connected, set debugger.probe_id to the intended probe serial number. For multi-board test plans, add named entries under debuggers and bind each device via devices.<id>.debugger.",
+        "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
+        "Grant only the permissions the board needs under debuggers.<name>.permissions; every flag is deny-by-default.",
+        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])
@@ -1040,6 +1033,26 @@ def _load_json_object(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> JsonObject:
+    """Run debugger_info against one named probe."""
+    service = AgenticHILToolService(bind_debugger(config, debugger_id), frontend="doctor")
+    primary_error: BaseException | None = None
+    try:
+        result = service.call("debugger_info")
+    except BaseException as error:
+        primary_error = error
+        result = {"ok": False, "tool": "debugger_info", "summary": "Debugger check raised an exception.", "backend_error": str(error)}
+    try:
+        service.close()
+    except BaseException as cleanup_error:
+        if primary_error is None:
+            raise
+        primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+    if primary_error is not None:
+        raise primary_error
+    return result
+
+
 def doctor(config_path: str | None = None) -> JsonObject:
     try:
         config = load_cli_authoritative_config(config_path)
@@ -1047,41 +1060,46 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
-    if config.permissions.allow_probe:
-        service = AgenticHILToolService(config, frontend="doctor")
-        primary_error: BaseException | None = None
-        try:
-            debugger_info = service.call("debugger_info")
-        except BaseException as error:
-            primary_error = error
-            debugger_info = {"ok": False}
-        try:
-            service.close()
-        except BaseException as cleanup_error:
-            if primary_error is not None:
-                primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
-            else:
-                raise
-        if primary_error is not None:
-            raise primary_error
+    # Check every probe the operator granted, not only a bound one. Reporting a
+    # green doctor because nothing was bound would hide an unplugged board, a
+    # wrong probe_id, or a broken toolchain on exactly the multi-board bench
+    # that most needs the check.
+    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if entry.permissions.allow_probe}
+    checked = [result for result in checks.values() if result.get("skipped") is not True]
+    debugger_info = next(iter(checks.values()), None) or {
+        "ok": True,
+        "tool": "debugger_info",
+        "skipped": True,
+        "summary": "Debugger check skipped: no configured debugger grants allow_probe.",
+    }
+    all_ok = all(result.get("ok") is True for result in checks.values())
+    if not checked:
+        summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
+    elif all_ok:
+        summary = f"Agentic HIL configuration loaded and {len(checked)} debugger(s) checked."
     else:
-        debugger_info = {
-            "ok": True,
-            "tool": "debugger_info",
-            "skipped": True,
-            "summary": "Debugger check skipped because allow_probe is disabled by the authoritative config.",
-        }
+        failed = sorted(name for name, result in checks.items() if result.get("ok") is not True)
+        summary = f"Agentic HIL configuration loaded, but the debugger check failed for: {', '.join(failed)}."
     return {
-        "ok": debugger_info.get("ok") is True,
+        "ok": all_ok,
         "tool": "agentic_hil_doctor",
-        "summary": "Agentic HIL authoritative configuration loaded; debugger check skipped." if debugger_info.get("skipped") else ("Agentic HIL configuration loaded and debugger checked." if debugger_info.get("ok") else "Agentic HIL configuration loaded, but debugger check failed."),
+        "summary": summary,
         "config_path": config.config_path,
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
         "target": {"name": config.target.name, "controller": config.target.controller},
-        "devices": {device_id: {"debugger": device.debugger, "uart": device.uart} for device_id, device in config.devices.items()},
-        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding} for port_id, port in config.com_ports.items()},
-        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd} for bus_id, bus in config.can_buses.items()},
+        "debuggers": {
+            name: {
+                "type": entry.type,
+                "probe_id": entry.probe_id,
+                "bound": name == config.debugger_id,
+                "permissions": asdict(entry.permissions),
+                **({"check": checks[name]} if name in checks else {}),
+            }
+            for name, entry in config.debuggers.items()
+        },
+        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, "permissions": asdict(port.permissions)} for port_id, port in config.com_ports.items()},
+        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": asdict(bus.permissions)} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }
 
@@ -1143,11 +1161,66 @@ def _doctor_mcp_report() -> JsonObject:
 
 
 def debugger_probes() -> JsonObject:
-    service = AgenticHILToolService(load_authoritative_config(Path.cwd()))
-    try:
-        return service.call("debugger_probes_list")
-    finally:
-        service.close()
+    """Enumerate connected probes for every configured debugger that may probe.
+
+    Probe discovery is how an operator finds the serial numbers a multi-board
+    config needs, so it has to work in exactly the multi-probe project where no
+    single debugger is bound. Each backend enumerates all attached probes, so
+    binding one entry at a time is only about which toolchain to invoke."""
+    config = load_authoritative_config(Path.cwd())
+    if config.debugger is not None:
+        service = AgenticHILToolService(config)
+        try:
+            return service.call("debugger_probes_list")
+        finally:
+            service.close()
+    if not config.debuggers:
+        # Nothing is switched off here — nothing exists. Answer exactly as the
+        # MCP surface does for the same config, so the two do not send an
+        # operator hunting for a flag that has no entry to live on.
+        return unbound_debugger_error("debugger_probes_list", config)
+    granted = [name for name, entry in config.debuggers.items() if entry.permissions.allow_probe]
+    if not granted:
+        return {
+            "ok": False,
+            "tool": "debugger_probes_list",
+            "error_type": "permission_denied",
+            "summary": "No configured debugger grants allow_probe, so probe discovery is disabled by the authoritative config.",
+            "configured_debuggers": sorted(config.debuggers),
+        }
+    results: JsonObject = {}
+    for name in granted:
+        service = AgenticHILToolService(bind_debugger(config, name))
+        try:
+            results[name] = service.call("debugger_probes_list")
+        finally:
+            service.close()
+    failed = sorted(name for name, result in results.items() if not overall_success(result))
+    aggregate: JsonObject = {
+        # `all`, not `any`: one probe answering must not report the run as
+        # healthy while another failed, and the CLI exit code is derived from
+        # this verdict alone.
+        "ok": not failed,
+        "tool": "debugger_probes_list",
+        "debuggers": results,
+        "summary": (
+            f"Probe discovery ran for {len(results)} configured debugger(s)."
+            if not failed
+            else f"Probe discovery failed for: {', '.join(failed)}."
+        ),
+    }
+    # A containment marker on any probe has to reach the top level, or
+    # overall_success() reads clean over a nested quarantine.
+    for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False)):
+        if any(result.get(marker) is unsafe for result in results.values()):
+            aggregate[marker] = unsafe
+    unsafe_effect = next((result.get("side_effect_status") for result in results.values() if result.get("side_effect_status") in {"unknown", "partial"}), None)
+    if unsafe_effect is not None:
+        aggregate["side_effect_status"] = unsafe_effect
+    quarantine_id = next((result.get("quarantine_id") for result in results.values() if result.get("quarantine_id")), None)
+    if quarantine_id is not None:
+        aggregate["quarantine_id"] = quarantine_id
+    return aggregate
 
 
 def load_cli_authoritative_config(config_path: str | None = None) -> AgenticHILConfig:
@@ -1321,7 +1394,7 @@ def codex_registration_block(target_path: str, version: str, requested_agent: st
 - Skill path: `{target_path}`
 - Agentic HIL version: `{version}`
 - Agentic HIL is for embedded firmware development with local hardware-in-the-loop targets.
-- Read and follow this skill before acting on any firmware or hardware request: flashing, resetting, probing, debugging, UART or CAN traffic, bench adapters, firmware artifacts, and hardware test runs, as well as Agentic HIL setup, configuration, and MCP registration.
+- Read and follow this skill before acting on any firmware or hardware request: flashing, resetting, probing, debugging, UART or CAN traffic, firmware artifacts, and hardware test runs, as well as Agentic HIL setup, configuration, and MCP registration.
 - Do not invoke a debugger, serial device, or CAN adapter directly when an Agentic HIL tool covers the request.
 - If this version differs from `agentic-hil --version`, run `agentic-hil skill-install --agent {requested_agent}`.
 {AGENTIC_HIL_REGISTRATION_END}"""

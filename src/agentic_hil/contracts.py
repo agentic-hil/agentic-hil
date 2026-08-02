@@ -85,13 +85,6 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, required=["bus_id", "frame_id"])},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["bus_id"])},
-    {"name": "adapters_list", "description": "List configured test adapters and session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "adapter_session_start", "description": "Start a configured test-adapter bridge session.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING}, required=["adapter_id"])},
-    {"name": "adapter_session_stop", "description": "Stop a configured test-adapter session.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING}, required=["adapter_id"])},
-    {"name": "adapter_set_value", "description": "Set an allowed test-adapter channel value.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING, "channel": NONEMPTY_STRING, "value": {"type": "number"}, "unit": {"type": "string"}}, required=["adapter_id", "channel", "value"])},
-    {"name": "adapter_inject_fault", "description": "Inject an allowed test-adapter fault.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING, "fault": NONEMPTY_STRING, "channel": NONEMPTY_STRING}, required=["adapter_id", "fault"])},
-    {"name": "adapter_clear_fault", "description": "Clear one or all injected test-adapter faults.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING, "fault": NONEMPTY_STRING, "channel": NONEMPTY_STRING}, required=["adapter_id"])},
-    {"name": "adapter_measure", "description": "Measure an allowed test-adapter channel.", "inputSchema": object_schema({"adapter_id": NONEMPTY_STRING, "channel": NONEMPTY_STRING}, required=["adapter_id", "channel"])},
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

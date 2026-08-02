@@ -826,9 +826,12 @@ def project_resource(config: AgenticHILConfig) -> str:
 
 
 def debugger_resource(config: AgenticHILConfig) -> str:
-    if config.debugger.resource_id:
-        return f"physical:{os.path.normcase(config.debugger.resource_id)}"
-    identity = config.debugger.probe_id or config.debugger.executable or config.debugger.type
+    debugger = config.debugger
+    if debugger is None:
+        raise CoordinationError({"ok": False, "error_type": "invalid_argument", "summary": "No debugger is bound, so no probe resource can be leased.", "configured_debuggers": sorted(config.debuggers), "retry_safe": True})
+    if debugger.resource_id:
+        return f"physical:{os.path.normcase(debugger.resource_id)}"
+    identity = debugger.probe_id or debugger.executable or debugger.type
     return f"probe:{os.path.normcase(str(identity))}"
 
 
@@ -844,11 +847,6 @@ def com_resource(config: AgenticHILConfig, port_id: str) -> str:
 def can_resource(config: AgenticHILConfig, bus_id: str) -> str:
     bus = config.can_buses[bus_id]
     return f"physical:{os.path.normcase(bus.resource_id)}" if bus.resource_id else f"can:{bus.adapter}:{os.path.normcase(bus.channel)}"
-
-
-def adapter_resource(config: AgenticHILConfig, adapter_id: str) -> str:
-    adapter = config.adapters[adapter_id]
-    return f"physical:{os.path.normcase(adapter.resource_id)}" if adapter.resource_id else f"adapter:{os.path.normcase(str(Path(adapter.executable).resolve()))}"
 
 
 def resource_digest(resource: str) -> str:

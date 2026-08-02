@@ -1,15 +1,15 @@
 # STM32CubeProgrammer plan. This backend supports flash/verify/reset and UART,
 # but deliberately contains no typed debug action (those require OpenOCD).
-version: 1
+version: 2
 name: nucleo-f446re-stlink
 steps:
-  - device: dut
+  - debugger: dut
     action: flash
     image_path: build/Debug/nucleo-f446re_demo.elf
     reset_after_flash: true
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_open
 
-  - device: dut
+  - port_id: dut_uart
     action: uart_close

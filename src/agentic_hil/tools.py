@@ -4,7 +4,6 @@ import math
 import threading
 from pathlib import Path
 
-from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
@@ -28,7 +27,7 @@ from agentic_hil.report import (
     read_last_report,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject
 
 
 class AgenticHILToolService:
@@ -39,7 +38,6 @@ class AgenticHILToolService:
         artifacts: ArtifactManager | None = None,
         com_ports: ComPortService | None = None,
         can_buses: CanBusService | None = None,
-        adapters: AdapterService | None = None,
         coordinator: HardwareCoordinator | None = None,
         frontend: str = "python",
     ):
@@ -53,7 +51,6 @@ class AgenticHILToolService:
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
-        self.adapters = adapters or AdapterService(self.config, self.coordinator)
         self._debug_artifact: JsonObject | None = None
         self._debug_lease: HardwareLease | None = None
         self._lifecycle_lock = threading.RLock()
@@ -69,15 +66,27 @@ class AgenticHILToolService:
     def _dispatch_depth(self, value: int) -> None:
         self._dispatch_local.depth = value
 
+    @property
+    def debugger_permissions(self) -> DebuggerPermissions:
+        """The bound probe's grants, or nothing at all.
+
+        An unbound config has no board to authorize, and _call_unlocked refuses
+        those calls with the name it needs before any of these gates run; the
+        deny-all fallback only keeps a direct method call from reading grants
+        off a probe that was never selected."""
+        return self.config.debugger.permissions if self.config.debugger is not None else DebuggerPermissions()
+
     def debugger_info(self) -> JsonObject:
-        if not self.config.permissions.allow_probe:
+        if self.config.debugger is None:
+            return unbound_debugger_error("debugger_info", self.config)
+        if not self.debugger_permissions.allow_probe:
             return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
         return self.backend.info()
 
     def debugger_probes_list(self) -> JsonObject:
         if self._dispatch_depth == 0:
             return self.call("debugger_probes_list")
-        if not self.config.permissions.allow_probe:
+        if not self.debugger_permissions.allow_probe:
             return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.")
         result = self.backend.list_probes()
         if result.get("cleanup_required") is not True and result.get("side_effect_status") not in {"unknown", "partial"}:
@@ -93,7 +102,7 @@ class AgenticHILToolService:
         if self._dispatch_depth == 0:
             return self.call("flash_firmware", payload)
         payload = payload or {}
-        if not self.config.permissions.allow_flash:
+        if not self.debugger_permissions.allow_flash:
             return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.")
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
@@ -102,7 +111,7 @@ class AgenticHILToolService:
         reset_after_flash = payload.get("reset_after_flash", False)
         if not isinstance(reset_after_flash, bool):
             return tool_error("flash_firmware", "invalid_argument", "reset_after_flash must be a boolean.")
-        if reset_after_flash and not self.config.permissions.allow_reset:
+        if reset_after_flash and not self.debugger_permissions.allow_reset:
             return tool_error("flash_firmware", "permission_denied", "Post-flash reset is disabled by the authoritative config.")
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
@@ -121,7 +130,7 @@ class AgenticHILToolService:
     def reset_target(self, mode: str = "run") -> JsonObject:
         if self._dispatch_depth == 0:
             return self.call("reset_target", {"mode": mode})
-        if not self.config.permissions.allow_reset:
+        if not self.debugger_permissions.allow_reset:
             return tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.")
         return self.backend.reset_target(mode)
 
@@ -283,15 +292,12 @@ class AgenticHILToolService:
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
             "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
-            "adapters_list": lambda: self.adapters.list_adapters(),
-            "adapter_session_start": lambda: self.adapters.session_start(str(args.get("adapter_id", ""))),
-            "adapter_session_stop": lambda: self.adapters.session_stop(str(args.get("adapter_id", ""))),
-            "adapter_set_value": lambda: self.adapters.set_value(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_inject_fault": lambda: self.adapters.inject_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_clear_fault": lambda: self.adapters.clear_fault(str(args.get("adapter_id", "")), adapter_payload(args)),
-            "adapter_measure": lambda: self.adapters.measure(str(args.get("adapter_id", "")), adapter_payload(args)),
         }
         if name in dispatch:
+            if name in debugger_tools() and self.config.debugger is None:
+                return unbound_debugger_error(name, self.config)
+            if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
+                return unnamed_probe_error(name, self.config)
             if self.coordinator.blocked and name in audited_hardware_tools() and name not in containment_tools():
                 return {
                     "ok": False,
@@ -371,19 +377,19 @@ class AgenticHILToolService:
 
     def _debug_permission_failure(self, name: str, args: JsonObject) -> JsonObject | None:
         if name == "flash_firmware":
-            if not self.config.permissions.allow_flash:
+            if not self.debugger_permissions.allow_flash:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
-            if args.get("reset_after_flash") is True and not self.config.permissions.allow_reset:
+            if args.get("reset_after_flash") is True and not self.debugger_permissions.allow_reset:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
-        if name == "reset_target" and not self.config.permissions.allow_reset:
+        if name == "reset_target" and not self.debugger_permissions.allow_reset:
             return self._invoke_dispatch(lambda: self.reset_target(args.get("mode", "run")))
-        if name == "probe_target" and not self.config.permissions.allow_probe:
+        if name == "probe_target" and not self.debugger_permissions.allow_probe:
             return self._invoke_dispatch(self.probe_target)
-        if name == "debugger_probes_list" and not self.config.permissions.allow_probe:
+        if name == "debugger_probes_list" and not self.debugger_permissions.allow_probe:
             return self._invoke_dispatch(self.debugger_probes_list)
         if name == "debug_start_session":
             mode = args.get("mode", "attach")
-            permissions = self.config.permissions
+            permissions = self.debugger_permissions
             denied = (
                 not permissions.allow_probe
                 or (mode != "attach" and not permissions.allow_reset)
@@ -537,7 +543,6 @@ class AgenticHILToolService:
             ("artifacts", self.artifacts),
             ("com_ports", self.com_ports),
             ("can_buses", self.can_buses),
-            ("adapters", self.adapters),
         ]:
             try:
                 resource.close()
@@ -612,10 +617,6 @@ def number_argument(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def adapter_payload(args: JsonObject) -> JsonObject:
-    return {key: value for key, value in args.items() if key != "adapter_id"}
-
-
 def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
     result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
     if error_type == "permission_denied":
@@ -641,14 +642,92 @@ def audited_hardware_tools() -> set[str]:
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
-        "adapter_session_start", "adapter_set_value", "adapter_inject_fault", "adapter_measure",
     }
 
 
 def containment_tools() -> set[str]:
     return {
         "debug_stop_session", "debug_clear_breakpoints", "debug_halt",
-        "com_session_stop", "can_session_stop", "adapter_session_stop", "adapter_clear_fault",
+        "com_session_stop", "can_session_stop",
+    }
+
+
+def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
+    """Refuse a debugger call that has no probe to run on.
+
+    Two different configurations land here and they need different answers. No
+    MCP tool schema carries a probe name — this surface drives the one bound
+    probe — so telling a caller to "name the debugger" would demand something
+    the protocol cannot express, which is the shape of refusal that has already
+    driven a model to reach for st-flash instead. Say what is actually wrong and
+    which route exists, and mark the call unretryable so nobody loops on it."""
+    configured = sorted(config.debuggers)
+    if not configured:
+        summary = (
+            "No debugger is configured in the authoritative config, so this tool has no probe to act on. "
+            "Only the operator can add one."
+        )
+    else:
+        summary = (
+            f"This MCP surface drives a single debug probe, and the authoritative config declares {len(configured)}, "
+            "so none is bound. Debugger tools are unavailable here until the project configures exactly one probe. "
+            "A multi-board run goes through `agentic-hil test-reactor` with a plan whose steps name their probe."
+        )
+    return {
+        "ok": False,
+        "tool": tool,
+        # not_supported, not permission_denied: nothing is switched off here, the
+        # surface simply cannot address a probe in this configuration.
+        "error_type": "not_supported",
+        "summary": summary,
+        "configured_debuggers": configured,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        # No argument to this tool can change the outcome; retrying only wastes turns.
+        "retry_safe": False,
+    }
+
+
+def probe_addressing_tools() -> set[str]:
+    """Tools that drive one specific physical probe.
+
+    Excludes the two that must keep working while an operator is still finding
+    out which probes exist: debugger_probes_list enumerates them, and
+    debugger_info only runs the toolchain's version command."""
+    return debugger_tools() - {"debugger_probes_list", "debugger_info"}
+
+
+def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
+    """Refuse to drive a board when the bound probe names no hardware.
+
+    Config load cannot demand a probe_id: discovering the ids is exactly what
+    an operator does before they can write one down, and loading must work with
+    no hardware attached. The demand belongs here, where a board is about to be
+    driven and picking the wrong one is the failure that matters."""
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_type": "not_supported",
+        "summary": (
+            f"Debugger '{config.debugger_id}' has no probe_id, and the project configures "
+            f"{len(config.debuggers)} debuggers, so this call cannot say which board it means. "
+            "Run `agentic-hil debugger-probes` to list the connected probes and give each entry its own probe_id. "
+            "OpenOCD cannot enumerate probes; read the serial from the probe itself, or use a pyocd or stlink entry to discover it."
+        ),
+        "configured_debuggers": sorted(config.debuggers),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": False,
+    }
+
+
+def debugger_tools() -> set[str]:
+    """Every tool that acts on, or reports about, one debug probe. These need a
+    bound probe: without one there is no board the call could mean."""
+    return {
+        *debugger_effect_tools(),
+        "debugger_info", "debug_stop_session", "debug_get_session_status",
+        "debug_list_breakpoints", "debug_get_stop_reason",
     }
 
 

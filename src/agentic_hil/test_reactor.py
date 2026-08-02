@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
     absolute_without_symlinks,
+    bind_debugger,
     is_path_within_frozen,
     reject_nonfinite_numbers,
     safe_read_text,
@@ -23,7 +24,7 @@ from agentic_hil.config import (
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import AgenticHILConfig, DebuggerConfig, DeviceConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
@@ -37,7 +38,10 @@ ACTION_SCHEMAS = {
     "debug_stop": "debugStop",
 }
 DEBUG_ACTIONS = {"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"}
-DEBUGGER_DEVICE_ACTIONS = {"flash", *DEBUG_ACTIONS}
+# Routing is a two-way split, so it has exactly one authority: an action is a
+# UART action or it runs on a debugger. A second "which actions need a probe"
+# constant would go stale silently the first time an action is added.
+UART_ACTIONS = {"uart_open", "uart_close"}
 
 
 def result_failed(result: JsonObject) -> bool:
@@ -91,9 +95,18 @@ def merge_result_status(result: JsonObject, *sources: JsonObject) -> JsonObject:
 
 @dataclass(frozen=True)
 class TestStep:
-    device: str
     action: str
     arguments: JsonObject
+    # Routing keys, straight from the authoritative config's own names: a
+    # debugger action names a `debuggers` entry, a UART action names a
+    # `com_ports` entry. `debugger` may be None only while the project
+    # configures exactly one probe.
+    debugger: str | None = None
+    port_id: str | None = None
+
+    @property
+    def route(self) -> str:
+        return self.debugger or self.port_id or "-"
 
 
 @dataclass(frozen=True)
@@ -147,16 +160,41 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     if not isinstance(raw, dict):
         raise ConfigError("test_config_invalid", "Test reactor configuration root must be a mapping.", {"path": str(path)})
     reject_nonfinite_numbers(raw, "test_config_invalid", str(path))
+    reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
     steps = [
         TestStep(
-            device=str(step["device"]),
             action=str(step["action"]),
-            arguments={key: value for key, value in step.items() if key not in {"device", "action"}},
+            arguments={key: value for key, value in step.items() if key not in {"action", "debugger", "port_id"}},
+            debugger=None if step.get("debugger") is None else str(step["debugger"]),
+            port_id=None if step.get("port_id") is None else str(step["port_id"]),
         )
         for step in raw["steps"]
     ]
     return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=steps)
+
+
+def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> None:
+    """Refuse a version 1 plan by name.
+
+    Version 1 steps addressed a `device:` that the config model no longer has.
+    Leaving the plan at version 1 would have made every old plan invalid with
+    only a bare const mismatch to go on, so the break gets a version boundary
+    and a message that says which key replaced which."""
+    if raw.get("version") != 1:
+        return
+    raise ConfigError(
+        "test_config_invalid",
+        "This test plan is version 1, whose steps address a `device:` that no longer exists. Set `version: 2` and route each step by the name it drives.",
+        {
+            "path": path,
+            "field": "version",
+            "migration": {
+                "device (flash, debug_start, run_until_breakpoint, dump_memory, debug_stop)": "debugger: <name of a debuggers entry>, or omit it while the project configures exactly one probe",
+                "device (uart_open, uart_close)": "port_id: <name of a com_ports entry>",
+            },
+        },
+    )
 
 
 def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> None:
@@ -234,45 +272,21 @@ def format_test_config_field(parts: list[str]) -> str:
     return field or "$"
 
 
-class Device:
-    def __init__(self, device_id: str, config: DeviceConfig, service: AgenticHILToolService, debugger: DebuggerConfig | None = None):
-        self.id = device_id
-        self.config = config
-        self.service = service
-        # The debugger this device drives (the top-level one, a named one for a
-        # multi-board setup, or None). Used for per-device preflight checks.
+class DebuggerRunner:
+    """Executes one test plan's debugger steps against a single named probe and
+    owns the debug session it opened, so cleanup can close exactly what this
+    plan started on that board."""
+
+    def __init__(self, debugger_id: str, debugger: DebuggerConfig, service: AgenticHILToolService):
+        self.id = debugger_id
         self.debugger = debugger
+        self.service = service
         self._owns_debug_session = False
-        self._owns_uart_session = False
         self.cleanup_interrupts: list[BaseException] = []
 
     def execute(self, action: str, arguments: JsonObject) -> JsonObject:
-        if action in DEBUGGER_DEVICE_ACTIONS and not self.config.has_debugger:
-            return self._capability_error(action, "debugger")
-        if action in {"uart_open", "uart_close"} and self.config.uart is None:
-            return self._capability_error(action, "uart")
-
         if action == "flash":
             return self.service.call("flash_firmware", arguments)
-        if action == "uart_open":
-            self._owns_uart_session = True
-            result = self.service.call("com_session_start", {"port_id": self.config.uart, "clear_buffer": arguments.get("clear_buffer", True)})
-            self._owns_uart_session = result.get("ok") is True and not result.get("already_active", False)
-            return result
-        if action == "uart_close":
-            if not self._owns_uart_session:
-                return {
-                    "ok": False,
-                    "tool": "test_reactor",
-                    "error_type": "uart_session_not_owned",
-                    "summary": "Device cannot close a UART session it did not open.",
-                    "device": self.id,
-                    "uart": self.config.uart,
-                }
-            result = self.service.call("com_session_stop", {"port_id": self.config.uart})
-            if result.get("ok") is True:
-                self._owns_uart_session = False
-            return result
         if action == "debug_start":
             self._owns_debug_session = True
             result = self.service.call("debug_start_session", arguments)
@@ -301,23 +315,17 @@ class Device:
             "tool": "test_reactor",
             "error_type": "unknown_action",
             "summary": "Unknown test reactor action.",
-            "device": self.id,
+            "debugger": self.id,
             "action": action,
         }
 
     def cleanup(self) -> list[JsonObject]:
-        results: list[JsonObject] = []
-        if self._owns_debug_session:
-            result = self._cleanup_call("debug_stop_session")
-            results.append({"device": self.id, "action": "debug_stop", "result": result})
-            if result.get("ok") is True:
-                self._owns_debug_session = False
-        if self._owns_uart_session and self.config.uart is not None:
-            result = self._cleanup_call("com_session_stop", {"port_id": self.config.uart})
-            results.append({"device": self.id, "action": "uart_close", "result": result})
-            if result.get("ok") is True:
-                self._owns_uart_session = False
-        return results
+        if not self._owns_debug_session:
+            return []
+        result = self._cleanup_call("debug_stop_session")
+        if result.get("ok") is True:
+            self._owns_debug_session = False
+        return [{"debugger": self.id, "action": "debug_stop", "result": result}]
 
     def _run_until_breakpoint(self, arguments: JsonObject) -> JsonObject:
         breakpoint_result = self.service.call("debug_set_breakpoint", {"location": arguments["location"]})
@@ -326,7 +334,7 @@ class Device:
                 cleared = self.service.call("debug_clear_breakpoints")
                 return merge_result_status({**breakpoint_result, "breakpoint_cleanup": cleared}, breakpoint_result, cleared)
             return breakpoint_result
-        continued = self.service.call("debug_continue", {"timeout_s": arguments.get("timeout_s")})
+        continued = self.service.call("debug_continue", {} if arguments.get("timeout_s") is None else {"timeout_s": arguments["timeout_s"]})
         cleared = self.service.call("debug_clear_breakpoints")
         if result_failed(cleared):
             if result_failed(continued):
@@ -336,7 +344,7 @@ class Device:
                 "tool": "test_reactor",
                 "error_type": result_error_type(cleared) if cleared.get("audit_ok") is False or cleared.get("target_ok") is False else "breakpoint_cleanup_failed",
                 "summary": "Target stopped, but the reactor breakpoint could not be removed.",
-                "device": self.id,
+                "debugger": self.id,
                 "breakpoint": breakpoint_result.get("breakpoint"),
                 "breakpoint_cleanup": cleared,
             }, breakpoint_result, continued, cleared)
@@ -350,7 +358,7 @@ class Device:
                 "tool": "test_reactor",
                 "error_type": "unexpected_stop",
                 "summary": "Target did not stop at the breakpoint created by this test step.",
-                "device": self.id,
+                "debugger": self.id,
                 "expected_breakpoint_id": expected_id,
                 "stop": continued.get("stop"),
             }, breakpoint_result, continued, cleared)
@@ -362,17 +370,6 @@ class Device:
             "stop_reason": continued["stop_reason"],
             "stop": continued["stop"],
         }, breakpoint_result, continued, cleared)
-
-    def _capability_error(self, action: str, capability: str) -> JsonObject:
-        return {
-            "ok": False,
-            "tool": "test_reactor",
-            "error_type": "device_capability_unavailable",
-            "summary": f"Device does not configure the {capability} capability required by this action.",
-            "device": self.id,
-            "action": action,
-            "capability": capability,
-        }
 
     def _cleanup_call(self, tool: str, arguments: JsonObject | None = None) -> JsonObject:
         try:
@@ -390,42 +387,33 @@ class TestReactor:
         self.config = config
         self.service = service
         self._service_factory = service_factory
-        # A named debugger can only run on its own service; without a factory it
-        # would silently execute on the base service's top-level debugger (wrong
-        # board). Refuse that mismatch up front.
-        if service_factory is None and any(device.debugger not in (None, "default") for device in config.devices.values()):
-            raise ValueError("Multi-board devices use named debuggers and require a service_factory to build per-device services.")
-        # Per-device services built for named debuggers are owned here and closed
-        # by close(); the shared base service is owned by the caller.
+        # Services built for a probe other than the base service's bound one are
+        # owned here and closed by close(); the base service is the caller's.
         self._owned_services: list[AgenticHILToolService] = []
-        self.devices = {}
-        try:
-            for device_id, device in config.devices.items():
-                debugger = self._resolve_device_debugger(device)
-                self.devices[device_id] = Device(device_id, device, self._device_service(device, debugger), debugger)
-        except BaseException:
-            # A later device's service failed to build; the caller never gets a
-            # reactor to close, so already-built services must be closed here.
-            self._close_owned_services()
-            raise
+        self.runners: dict[str, DebuggerRunner] = {}
+        # port_id -> True while this plan holds the session it opened.
+        self._owned_uarts: dict[str, bool] = {}
+        self.cleanup_interrupts: list[BaseException] = []
 
-    def _resolve_device_debugger(self, device: DeviceConfig) -> DebuggerConfig | None:
-        if device.debugger is None:
-            return None
-        if device.debugger == "default":
-            return self.config.debugger
-        return self.config.debuggers[device.debugger]
+    def runner(self, debugger_id: str) -> DebuggerRunner:
+        """The runner for one named probe, built on first use.
 
-    def _device_service(self, device: DeviceConfig, debugger: DebuggerConfig | None) -> AgenticHILToolService:
-        # A device on the top-level debugger (or when no factory is supplied)
-        # shares the base service; a named debugger drives an independent board,
-        # so it gets its own service built for that debugger + target, sharing the
-        # base coordinator for project-level exclusivity.
-        if self._service_factory is None or device.debugger in (None, "default"):
-            return self.service
-        per_device_config = replace(self.config, debugger=debugger, target=device.target or self.config.target)
-        built = self._service_factory(per_device_config)
-        self._owned_services.append(built)
+        A probe other than the base service's bound one needs its own service:
+        without a factory the step would silently execute on whatever probe the
+        base service holds, which is the wrong board."""
+        existing = self.runners.get(debugger_id)
+        if existing is not None:
+            return existing
+        debugger = self.config.debuggers[debugger_id]
+        if debugger_id == self.config.debugger_id or self._service_factory is None:
+            service = self.service
+        else:
+            bound = bind_debugger(self.config, debugger_id)
+            # bind_debugger() already applies this probe's target override.
+            service = self._service_factory(bound)
+            self._owned_services.append(service)
+        built = DebuggerRunner(debugger_id, debugger, service)
+        self.runners[debugger_id] = built
         return built
 
     def _close_owned_services(self) -> list[BaseException]:
@@ -433,7 +421,7 @@ class TestReactor:
         for built in self._owned_services:
             try:
                 built.close()
-            except BaseException as error:  # noqa: BLE001 - aggregate per-device close errors
+            except BaseException as error:  # noqa: BLE001 - aggregate per-probe close errors
                 errors.append(error)
         self._owned_services = []
         return errors
@@ -446,7 +434,47 @@ class TestReactor:
         if interrupts:
             raise interrupts[0]
         detail = "; ".join(f"{type(error).__name__}: {error}" for error in errors)
-        raise RuntimeError(f"Per-device service cleanup failed: {detail}") from errors[0]
+        raise RuntimeError(f"Per-debugger service cleanup failed: {detail}") from errors[0]
+
+    def execute_step(self, step: TestStep) -> JsonObject:
+        if step.action in UART_ACTIONS:
+            return self._execute_uart(step)
+        return self.runner(str(self.step_debugger_id(step))).execute(step.action, step.arguments)
+
+    def _execute_uart(self, step: TestStep) -> JsonObject:
+        port_id = str(step.port_id)
+        if step.action == "uart_open":
+            result = self.service.call("com_session_start", {"port_id": port_id, "clear_buffer": step.arguments.get("clear_buffer", True)})
+            self._owned_uarts[port_id] = result.get("ok") is True and not result.get("already_active", False)
+            return result
+        if not self._owned_uarts.get(port_id):
+            return {
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "uart_session_not_owned",
+                "summary": "A test plan cannot close a UART session it did not open.",
+                "port_id": port_id,
+            }
+        result = self.service.call("com_session_stop", {"port_id": port_id})
+        if result.get("ok") is True:
+            self._owned_uarts[port_id] = False
+        return result
+
+    def _cleanup_uarts(self) -> list[JsonObject]:
+        results: list[JsonObject] = []
+        for port_id, owned in list(self._owned_uarts.items()):
+            if not owned:
+                continue
+            try:
+                result = self.service.call("com_session_stop", {"port_id": port_id})
+            except BaseException as error:
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    self.cleanup_interrupts.append(error)
+                result = exception_result("com_session_stop", "cleanup_exception", "Cleanup action raised an exception.", error)
+            results.append({"port_id": port_id, "action": "uart_close", "result": result})
+            if result.get("ok") is True:
+                self._owned_uarts[port_id] = False
+        return results
 
     def run(self, test_config: TestConfig) -> JsonObject:
         try:
@@ -479,35 +507,27 @@ class TestReactor:
         primary_error: BaseException | None = None
         try:
             for index, step in enumerate(test_config.steps, start=1):
-                device = self.devices.get(step.device)
-                if device is None:
-                    result: JsonObject = {
-                        "ok": False,
-                        "tool": "test_reactor",
-                        "error_type": "unknown_device",
-                        "summary": "Test step references a device that is not configured in devices.",
-                        "device": step.device,
-                    }
-                else:
-                    try:
-                        result = device.execute(step.action, step.arguments)
-                    except Exception as error:
-                        result = exception_result(
-                            "test_reactor",
-                            "step_exception",
-                            "Test reactor step raised an exception.",
-                            error,
-                        )
-                completed.append({"index": index, "device": step.device, "action": step.action, "result": result})
+                try:
+                    result: JsonObject = self.execute_step(step)
+                except Exception as error:
+                    result = exception_result(
+                        "test_reactor",
+                        "step_exception",
+                        "Test reactor step raised an exception.",
+                        error,
+                    )
+                completed.append({"index": index, "route": step.route, "action": step.action, "result": result})
                 if result_failed(result):
                     failed_step = index
                     break
         except BaseException as error:
             primary_error = error
         finally:
-            cleanup = [result for device in reversed(list(self.devices.values())) for result in device.cleanup()]
+            # Debug sessions close before UARTs: a still-attached debugger can
+            # keep writing to the serial line this plan is about to close.
+            cleanup = [*(result for runner in reversed(list(self.runners.values())) for result in runner.cleanup()), *self._cleanup_uarts()]
 
-        cleanup_interrupts = [error for device in self.devices.values() for error in device.cleanup_interrupts]
+        cleanup_interrupts = [*self.cleanup_interrupts, *(error for runner in self.runners.values() for error in runner.cleanup_interrupts)]
         if primary_error is not None:
             primary_error.agentic_hil_cleanup = cleanup
             if cleanup_interrupts:
@@ -543,95 +563,95 @@ class TestReactor:
         return result
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
-        debug_active = False
-        active_uarts: dict[str, str] = {}
-        permissions = self.config.permissions
+        debug_active: str | None = None
+        active_uarts: set[str] = set()
 
         for index, step in enumerate(test_config.steps, start=1):
-            device = self.devices.get(step.device)
-            if device is None:
-                return preflight_error(index, step, "device", "Test step references an unknown device.")
             contract_error = self._preflight_tool_contract(index, step)
             if contract_error is not None:
                 return contract_error
-            if step.action in DEBUGGER_DEVICE_ACTIONS and not device.config.has_debugger:
-                return preflight_error(index, step, "device", "Device does not configure the debugger capability.")
-            if step.action in {"uart_open", "uart_close"}:
-                uart = device.config.uart
-                if uart is None:
-                    return preflight_error(index, step, "device", "Device does not configure a UART capability.")
-                if uart not in self.config.com_ports:
-                    return preflight_error(
-                        index,
-                        step,
-                        "device",
-                        "Device UART is not available in the authoritative config.",
-                        {"uart": uart},
-                    )
+
+            if step.action in UART_ACTIONS:
+                port_id = str(step.port_id)
+                port = self.config.com_ports.get(port_id)
+                if port is None:
+                    return preflight_error(index, step, "port_id", "Test step references a COM port that is not in the authoritative config.", {"configured_com_ports": sorted(self.config.com_ports)})
                 if step.action == "uart_open":
-                    if not permissions.allow_com_read:
-                        return preflight_error(index, step, "action", "UART opening is disabled by the authoritative config.")
-                    if uart in active_uarts:
+                    if not port.permissions.allow_read:
+                        return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
+                    if port_id in active_uarts:
                         return preflight_error(index, step, "action", "UART session is already open in this test plan.")
-                    active_uarts[uart] = step.device
+                    active_uarts.add(port_id)
+                elif port_id not in active_uarts:
+                    return preflight_error(index, step, "action", "UART session must be opened before it can be closed.")
                 else:
-                    if uart not in active_uarts:
-                        return preflight_error(index, step, "action", "UART session must be opened before it can be closed.")
-                    if active_uarts[uart] != step.device:
-                        return preflight_error(
-                            index,
-                            step,
-                            "action",
-                            "UART session may only be closed by the device that opened it.",
-                            {"uart": uart, "owner_device": active_uarts[uart]},
-                        )
-                    active_uarts.pop(uart)
+                    active_uarts.discard(port_id)
                 continue
 
+            debugger_error = self._preflight_debugger_name(index, step)
+            if debugger_error is not None:
+                return debugger_error
+            debugger_id = str(self.step_debugger_id(step))
+            debugger = self.config.debuggers[debugger_id]
+            permissions = debugger.permissions
+
             if step.action == "flash":
-                if debug_active:
-                    return preflight_error(index, step, "action", "Firmware cannot be flashed while a debug session is active.")
+                if debug_active is not None:
+                    return preflight_error(index, step, "action", "Firmware cannot be flashed while a debug session is active.", {"debug_session_debugger": debug_active})
                 if not permissions.allow_flash:
-                    return preflight_error(index, step, "action", "Flashing is disabled by the authoritative config.")
+                    return preflight_error(index, step, "action", "Flashing is disabled for this debugger by the authoritative config.")
                 if step.arguments.get("reset_after_flash", False) and not permissions.allow_reset:
-                    return preflight_error(index, step, "reset_after_flash", "Post-flash reset is disabled by the authoritative config.")
-                if permissions.allow_raw_debugger_commands or permissions.allow_mass_erase:
-                    return preflight_error(index, step, "action", "Flashing conflicts with the authoritative raw-debugger permission.")
+                    return preflight_error(index, step, "reset_after_flash", "Post-flash reset is disabled for this debugger by the authoritative config.")
+                if permissions.allow_raw_debugger_commands:
+                    return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
+                if permissions.allow_mass_erase:
+                    return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
                 artifact_error = self._preflight_artifact(index, step, require_elf=False)
                 if artifact_error is not None:
                     return artifact_error
                 continue
 
-            device_debugger = device.debugger or self.config.debugger
-            if step.action in DEBUG_ACTIONS and device_debugger.type != "openocd":
+            if step.action in DEBUG_ACTIONS and debugger.type != "openocd":
                 return preflight_error(
                     index,
                     step,
                     "action",
-                    "Typed debug actions currently require debugger.type 'openocd'.",
-                    {"debugger_type": device_debugger.type},
+                    "Typed debug actions currently require a debugger of type 'openocd'.",
+                    {"debugger_type": debugger.type},
                 )
             if step.action == "debug_start":
-                if debug_active:
-                    return preflight_error(index, step, "action", "A debug session is already active in this test plan.")
+                if debug_active is not None:
+                    return preflight_error(index, step, "action", "A debug session is already active in this test plan.", {"debug_session_debugger": debug_active})
                 mode = str(step.arguments.get("mode", "attach"))
-                if not permissions.allow_probe or permissions.allow_raw_debugger_commands:
-                    return preflight_error(index, step, "action", "Debug sessions are disabled by the authoritative config.")
+                # Preflight is the only diagnosis the operator gets: it runs
+                # before any tool call, so the backend's per-flag messages are
+                # never reached. Name the flag that actually fired rather than
+                # pointing at a permission the config plainly shows as false.
+                if not permissions.allow_probe:
+                    return preflight_error(index, step, "action", "Debug sessions require allow_probe on this debugger.", {"permission": "allow_probe"})
+                if permissions.allow_raw_debugger_commands:
+                    return preflight_error(index, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
                 if mode != "attach" and not permissions.allow_reset:
-                    return preflight_error(index, step, "mode", f"Debug mode '{mode}' requires reset permission.")
-                if mode == "load" and (not permissions.allow_flash or permissions.allow_mass_erase):
-                        return preflight_error(index, step, "mode", "Debug load mode is disabled by the authoritative config.")
+                    return preflight_error(index, step, "mode", f"Debug mode '{mode}' requires allow_reset on this debugger.", {"permission": "allow_reset"})
+                if mode == "load" and not permissions.allow_flash:
+                    return preflight_error(index, step, "mode", "Debug load mode requires allow_flash on this debugger.", {"permission": "allow_flash"})
+                if mode == "load" and permissions.allow_mass_erase:
+                    return preflight_error(index, step, "mode", "Debug load mode is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
                 artifact_error = self._preflight_artifact(index, step, require_elf=True)
                 if artifact_error is not None:
                     return artifact_error
-                debug_active = True
+                debug_active = debugger_id
             elif step.action == "debug_stop":
-                if not debug_active:
+                if debug_active is None:
                     return preflight_error(index, step, "action", "A debug session must be started before it can be stopped.")
-                debug_active = False
+                if debug_active != debugger_id:
+                    return preflight_error(index, step, "debugger", "A debug session may only be stopped on the debugger that started it.", {"debug_session_debugger": debug_active})
+                debug_active = None
             elif step.action in {"run_until_breakpoint", "dump_memory"}:
-                if not debug_active:
+                if debug_active is None:
                     return preflight_error(index, step, "action", "A debug session must be started before this action.")
+                if debug_active != debugger_id:
+                    return preflight_error(index, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": debug_active})
                 symbol = breakpoint_symbol(step.arguments.get("location")) if step.action == "run_until_breakpoint" else step.arguments.get("symbol")
                 if symbol is None and not self.config.debug.allow_all_symbols:
                     return preflight_error(index, step, "location", "File/line breakpoints require debug.allow_all_symbols.")
@@ -650,14 +670,38 @@ class TestReactor:
                         )
         return None
 
+    def _preflight_debugger_name(self, index: int, step: TestStep) -> JsonObject | None:
+        """Resolve which probe a debugger step runs on, or refuse the plan.
+
+        A plan that omits the name while several probes are configured is not
+        defaulted to one: picking a board for the author is how the wrong board
+        gets flashed. Steps carry the resolved name from here on."""
+        debugger_id = self.step_debugger_id(step)
+        if debugger_id is None:
+            if not self.config.debuggers:
+                return preflight_error(index, step, "debugger", "The authoritative config declares no debuggers, so this step cannot run.")
+            return preflight_error(index, step, "debugger", "Name the debugger this step runs on; the authoritative config declares several.", {"configured_debuggers": sorted(self.config.debuggers)})
+        if debugger_id not in self.config.debuggers:
+            return preflight_error(index, step, "debugger", "Test step references a debugger that is not in the authoritative config.", {"configured_debuggers": sorted(self.config.debuggers)})
+        if debugger_id != self.config.debugger_id and self._service_factory is None:
+            return preflight_error(index, step, "debugger", "Running a step on another debugger needs a service factory to build that probe's service; the reactor would otherwise execute it on the bound probe.", {"bound_debugger": self.config.debugger_id})
+        return None
+
+    def step_debugger_id(self, step: TestStep) -> str | None:
+        """The probe a debugger step runs on: the name the plan gave, or the only
+        configured one. None means the plan must name it — with several probes
+        configured, picking one for the author is how the wrong board gets
+        flashed."""
+        if step.debugger is not None:
+            return step.debugger
+        return next(iter(self.config.debuggers)) if len(self.config.debuggers) == 1 else None
+
     def _preflight_tool_contract(self, index: int, step: TestStep) -> JsonObject | None:
         # Validate each step's plan-supplied tool arguments against the exact MCP
         # contract validators, so a step the reactor schema accepted but the tool
         # contract rejects (e.g. a traversal path) fails before any backend call
-        # builds hardware or process state. (uart_open/uart_close carry no
-        # plan-supplied arguments — their port_id is device-config-derived and
-        # already validated at config load — so they have nothing to pre-check
-        # here beyond the semantic device checks above.)
+        # builds hardware or process state. (uart_open/uart_close are checked
+        # against the config's own com_ports names instead, above.)
         for tool, arguments in step_tool_arguments(step):
             error = validate_tool_arguments(tool, arguments)
             if error is not None:
@@ -685,8 +729,8 @@ class TestReactor:
 def step_tool_arguments(step: TestStep) -> list[tuple[str, JsonObject]]:
     """The plan-supplied tool calls a step will make, as (tool, arguments), so
     preflight can validate them against the same contracts the dispatcher
-    enforces. uart_open/uart_close are omitted: their only argument (port_id) is
-    device-config-derived, not plan-supplied, and validated at config load."""
+    enforces. uart_open/uart_close are omitted: preflight checks their port_id
+    against the authoritative config's own com_ports names instead."""
     action = step.action
     arguments = step.arguments
     if action == "flash":
@@ -722,7 +766,7 @@ def preflight_error(index: int, step: TestStep, field: str, summary: str, detail
     return {
         "step": index,
         "field": f"steps[{index - 1}].{field}",
-        "device": step.device,
+        "route": step.route,
         "action": step.action,
         "summary": summary,
         **(details or {}),

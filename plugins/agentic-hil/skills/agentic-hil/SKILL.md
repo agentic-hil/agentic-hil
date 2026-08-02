@@ -1,6 +1,6 @@
 ---
 name: agentic-hil
-description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, driving bench adapters, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
+description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
 metadata:
   origin: Agentic HIL
   agentic_hil_version: "0.4.0"
@@ -24,7 +24,6 @@ serial, or CAN invocation bypasses that gate.
 | Read a variable, symbol, or memory region | `debug_symbol_info`, `debug_dump_symbol_ihex` |
 | Serial console, boot log, UART traffic | `com_ports_list`, `com_session_start`, `com_read`, `com_write`, `com_session_stop` |
 | CAN frames | `can_buses_list`, `can_read`, `can_send`, `can_session_start`, `can_session_stop` |
-| Stimulus and measurement through a bench adapter | `adapters_list`, `adapter_session_start`, `adapter_measure`, `adapter_set_value`, `adapter_inject_fault`, `adapter_clear_fault`, `adapter_session_stop` |
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 

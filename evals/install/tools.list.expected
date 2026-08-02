@@ -1,10 +1,3 @@
-adapter_clear_fault
-adapter_inject_fault
-adapter_measure
-adapter_session_start
-adapter_session_stop
-adapter_set_value
-adapters_list
 artifact_upload
 can_buses_list
 can_read

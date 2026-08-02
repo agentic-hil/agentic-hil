@@ -14,7 +14,6 @@ import pytest
 import yaml
 from conftest import write_config
 
-from agentic_hil.adapters import AdapterService
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames
 from agentic_hil.cli import debugger_probes, entrypoint
@@ -188,7 +187,6 @@ def test_process_cleanup_is_scoped_to_service_owner() -> None:
     ("service_type", "patch_target"),
     [
         (CanBusService, "agentic_hil.can.cleanup_registered_processes"),
-        (AdapterService, "agentic_hil.adapters.cleanup_registered_processes"),
     ],
 )
 def test_direct_process_service_reaps_owned_orphans_before_close(
@@ -425,7 +423,7 @@ def test_nonfinite_config_timeout_is_rejected(tmp_path: Path, value: str) -> Non
         load_config(str(path))
 
     assert excinfo.value.error_type == "config_invalid"
-    assert excinfo.value.details["field"] == "debugger.timeout_s"
+    assert excinfo.value.details["field"] == "debuggers.dut.timeout_s"
     json.dumps(excinfo.value.to_dict(), allow_nan=False)
 
 
@@ -540,29 +538,6 @@ def test_normalize_received_frames_accepts_python_can_id_hex() -> None:
 
     assert frames is not None
     assert frames[0]["id"] == 0x123
-
-
-def test_adapter_malformed_measurement_quarantines_and_shutdown_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    executable = Path(__file__).resolve().parents[1] / "examples" / "adapters" / "sim_ntc_adapter.py"
-    config = config_for(tmp_path, adapters_yaml=f'adapters:\n  ntc:\n    executable: "{executable.as_posix()}"\n    channels: ["temperature"]\n')
-    service = AdapterService(config)
-    try:
-        assert service.session_start("ntc")["ok"] is True
-        bridge = service.sessions["ntc"].bridge
-        request = bridge.request
-        monkeypatch.setattr(bridge, "request", lambda method, params, timeout: {"ok": False, "error_type": "adapter_bridge_invalid_response", "summary": "missing boolean ok"} if method == "measure" else request(method, params, timeout))
-
-        result = service.measure("ntc", {"channel": "temperature"})
-
-        assert result["error_type"] == "adapter_bridge_invalid_response"
-        assert result["cleanup_required"] is True
-    finally:
-        with pytest.raises(RuntimeError):
-            service.close()
-        service.coordinator.close()
-    report = read_last_report(config)
-    assert report["tool"] == "adapter_session_stop"
-    assert report["lease_state"] == "cleanup_required"
 
 
 def test_pyocd_does_not_reset_after_flash_audit_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -686,7 +661,7 @@ def test_service_close_is_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_dispatch_depth_is_thread_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = config_for(tmp_path, permissions_yaml="permissions:\n  allow_probe: true\n  allow_reset: false\n")
+    config = config_for(tmp_path, permissions={"allow_probe": True, "allow_reset": False})
     service = AgenticHILToolService(config)
     calls = 0
 
@@ -885,7 +860,6 @@ def test_discovery_stops_when_audit_is_unavailable(tmp_path: Path, monkeypatch: 
     [
         ("com_ports", "write", "com_write", {"port_id": "dut", "text": "x"}),
         ("can_buses", "send", "can_send", {"bus_id": "bench", "frame_id": "0x123", "data_hex": "01"}),
-        ("adapters", "set_value", "adapter_set_value", {"adapter_id": "fixture", "channel": "input", "value": 1.0}),
     ],
 )
 def test_unknown_hardware_exception_poisons_active_lease(
@@ -901,7 +875,6 @@ def test_unknown_hardware_exception_poisons_active_lease(
         tmp_path,
         com_ports_yaml='com_ports:\n  dut:\n    device: "COM_TEST"\n',
         can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n',
-        adapters_yaml=f'adapters:\n  fixture:\n    executable: "{Path(sys.executable).as_posix()}"\n    channels: ["input"]\n',
     )
     service = AgenticHILToolService(config)
     lease = service.coordinator.acquire("physical:exception")

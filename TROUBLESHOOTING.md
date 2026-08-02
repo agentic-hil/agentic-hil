@@ -8,7 +8,7 @@ Always inspect structured JSON first. The most useful fields are `ok`, `error_ty
 
 ## Windows Quick Notes
 
-- If OpenOCD is installed but not on `PATH`, set `debugger.executable` explicitly, for example `C:/Program Files/OpenOCD/bin/openocd.exe`.
+- If OpenOCD is installed but not on `PATH`, set `debuggers.<name>.executable` explicitly, for example `C:/Program Files/OpenOCD/bin/openocd.exe`.
 - Use forward slashes in YAML paths to avoid accidental escape sequences.
 - Run `agentic-hil com-ports` after reconnecting USB serial hardware.
 - Configure Windows COM devices such as `COM5` under named `com_ports` ids, then use those ids from MCP COM tools.
@@ -62,9 +62,9 @@ Fix: stop and ask the human operator. The operator reviews the external config c
 
 Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
 
-Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or configured `debugger.executable` could not be pinned.
+Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debugger.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
 
 ## 5. `debugger_config_not_found`
 
@@ -110,9 +110,9 @@ Fix: build first and flash `.elf`, `.hex`, or `.bin` from an allowed root, usual
 
 Symptom: probe works, but flashing, verification, reset, or a debugger action times out.
 
-Likely cause: the image does not match the target memory layout, flash is locked, the target is unstable, reset wiring is wrong, the wrong OpenOCD target config is used, or `debugger.timeout_s` is too low.
+Likely cause: the image does not match the target memory layout, flash is locked, the target is unstable, reset wiring is wrong, the wrong OpenOCD target config is used, or `debuggers.<name>.timeout_s` is too low.
 
-Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debugger.timeout_s` only when the operation is valid but consistently slow.
+Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debuggers.<name>.timeout_s` only when the operation is valid but consistently slow.
 
 ## 11. COM Port Does Not Work
 
@@ -128,7 +128,7 @@ Linux permission note: if opening the device fails with a permission error, the 
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
 
-Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, `allow_can_read`/`allow_can_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, that bus's `permissions.allow_read`/`permissions.allow_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
 

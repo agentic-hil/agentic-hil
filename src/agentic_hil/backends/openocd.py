@@ -31,7 +31,7 @@ OPENOCD_NOT_FOUND: JsonObject = {
     "error_type": "debugger_not_found",
     "backend_error_type": "openocd_not_found",
     "summary": "Debugger executable could not be found.",
-    "likely_causes": ["debugger.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
+    "likely_causes": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -64,7 +64,7 @@ class OpenOCDBackend:
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
-        debug_permission_revoked = not config.permissions.allow_probe or config.permissions.allow_raw_debugger_commands
+        debug_permission_revoked = not config.debugger.permissions.allow_probe or config.debugger.permissions.allow_raw_debugger_commands
         if debugger_changed or debug_permission_revoked:
             self._debug.close()
         self.config = config
@@ -111,7 +111,7 @@ class OpenOCDBackend:
         }
 
     def list_probes(self) -> JsonObject:
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
         return {
             "ok": False,
@@ -122,7 +122,7 @@ class OpenOCDBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.permissions.allow_probe:
+        if not self.config.debugger.permissions.allow_probe:
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
@@ -132,11 +132,11 @@ class OpenOCDBackend:
         return self._write_action_report(result)
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
-        if not self.config.permissions.allow_flash:
+        if not self.config.debugger.permissions.allow_flash:
             return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
-        if self.config.permissions.allow_raw_debugger_commands:
+        if self.config.debugger.permissions.allow_raw_debugger_commands:
             return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
-        if self.config.permissions.allow_mass_erase:
+        if self.config.debugger.permissions.allow_mass_erase:
             return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
 
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
@@ -361,7 +361,7 @@ class OpenOCDBackend:
             "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],
             "reset_failed": ["reset line wiring issue", "target is not responding", "wrong reset configuration"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
-            "debugger_not_found": ["debugger.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
+            "debugger_not_found": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
             "debugger_config_not_found": ["debugger interface configuration is missing", "debugger target configuration is missing", "debugger search path is incomplete"],
         }.get(error_type, ["inspect the debugger log for details"])
 

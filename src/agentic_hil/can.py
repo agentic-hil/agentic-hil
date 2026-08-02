@@ -94,9 +94,11 @@ class CanBusService:
         self.sessions: dict[str, CanBusSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
+        # The bus config carries its own permissions, so an inequality here also
+        # covers a revoked grant: a session may not outlive the permission that
+        # authorized it.
         for bus_id, session in list(self.sessions.items()):
-            permissions_revoked = not config.permissions.allow_can_read and not config.permissions.allow_can_write
-            if permissions_revoked or config.can_buses.get(bus_id) != session.bus_config:
+            if config.can_buses.get(bus_id) != session.bus_config:
                 self._stop_session(session, "config_reloaded")
                 self.sessions.pop(bus_id, None)
         self.config = config
@@ -111,10 +113,11 @@ class CanBusService:
         bus = self._configured_bus(bus_id, "can_session_start")
         if not bus["ok"]:
             return self._write_report(bus)
-        if not self.config.permissions.allow_can_read and not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_session_start", "CAN reading and writing are disabled by the authoritative config.", bus_id))
-        if clear_rx_queue and not self.config.permissions.allow_can_read:
-            return self._write_report(self._permission_denied("can_session_start", "Clearing the CAN receive queue requires allow_can_read.", bus_id))
+        bus_permissions = bus["bus_config"].permissions
+        if not bus_permissions.allow_read and not bus_permissions.allow_write:
+            return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN bus are disabled by the authoritative config.", bus_id))
+        if clear_rx_queue and not bus_permissions.allow_read:
+            return self._write_report(self._permission_denied("can_session_start", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", bus_id))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
             if clear_rx_queue:
@@ -173,7 +176,7 @@ class CanBusService:
         discharge_provisional_handle(adapter_provisional)
         self.sessions[bus_id] = session
         cleared: JsonObject = {"ok": True, "frames_drained": 0}
-        if clear_rx_queue and self.config.permissions.allow_can_read:
+        if clear_rx_queue and bus_config.permissions.allow_read:
             try:
                 cleared = self._drain_rx_queue(session)
                 if not overall_success(cleared):
@@ -234,8 +237,8 @@ class CanBusService:
         bus = self._configured_bus(bus_id, "can_send")
         if not bus["ok"]:
             return self._write_report(bus)
-        if not self.config.permissions.allow_can_write:
-            return self._write_report(self._permission_denied("can_send", "CAN writing is disabled by the authoritative config.", bus_id))
+        if not bus["bus_config"].permissions.allow_write:
+            return self._write_report(self._permission_denied("can_send", "Writing to this CAN bus is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_send")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -264,8 +267,8 @@ class CanBusService:
         bus = self._configured_bus(bus_id, "can_read")
         if not bus["ok"]:
             return self._write_report(bus)
-        if not self.config.permissions.allow_can_read:
-            return self._write_report(self._permission_denied("can_read", "CAN reading is disabled by the authoritative config.", bus_id))
+        if not bus["bus_config"].permissions.allow_read:
+            return self._write_report(self._permission_denied("can_read", "Reading this CAN bus is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_read")
         if not session_result["ok"]:
             return self._write_report(session_result)

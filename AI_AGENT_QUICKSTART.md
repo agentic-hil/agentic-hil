@@ -68,7 +68,7 @@ Agent names: `claude-code`/`claude`, `codex`, `opencode`. For another skill-capa
 
 One command instead of `init`, `skill-install`, MCP registration and `doctor` separately. It returns one JSON result with a per-step breakdown; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
 
-The config it writes lives outside the repository, sets `workspace_root` to this project, and denies every hardware permission. **It is complete as written.** Adding devices, COM ports or CAN buses is not part of installing, and neither is granting a permission — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it.
+The config it writes lives outside the repository, sets `workspace_root` to this project, and denies every hardware permission. **It is complete as written.** Adding debuggers, COM ports or CAN buses is not part of installing, and neither is granting a permission on one — both are the operator's, and a guessed port describes hardware that may not exist. Name what is needed and why; let the operator add it.
 
 **`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
 

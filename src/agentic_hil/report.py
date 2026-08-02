@@ -500,8 +500,7 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
 def mark_side_effect(result: JsonObject) -> JsonObject:
     if result.get("tool") not in {
         "flash_firmware", "reset_target", "debug_start_session", "debug_set_breakpoint", "debug_continue",
-        "com_session_start", "com_write", "can_session_start", "can_send", "adapter_session_start",
-        "adapter_set_value", "adapter_inject_fault",
+        "com_session_start", "com_write", "can_session_start", "can_send",
     }:
         return result
     enriched = dict(result)

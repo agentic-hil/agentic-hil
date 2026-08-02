@@ -46,7 +46,46 @@ class DebuggerBackend(Protocol):
     def close(self) -> None: ...
 
 
+class UnboundDebuggerBackend:
+    """Stands in when no single probe is bound.
+
+    With zero or several debuggers configured there is no board a bare call
+    could mean. Refusing every call here keeps a default from silently picking
+    a board — the failure mode this rework exists to remove."""
+
+    def __init__(self, config: AgenticHILConfig):
+        self.config = config
+
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        self.config = config
+
+    def close(self) -> None:
+        return None
+
+    def classify_last_error(self) -> JsonObject:
+        """Classify the last recorded failure even with no probe bound.
+
+        The record is written by whichever tool failed, so a UART-only or
+        multi-board project must still be able to ask what went wrong. Only the
+        probe-specific likely_causes lookup is unavailable here."""
+        from agentic_hil.report import classify_failure_report
+
+        return classify_failure_report(self.config, lambda error_type: ["inspect the report and log for details"])
+
+    def _refuse(self, tool: str) -> JsonObject:
+        from agentic_hil.tools import unbound_debugger_error
+
+        return unbound_debugger_error(tool, self.config)
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return lambda *args, **kwargs: self._refuse(name)
+
+
 def create_debugger_backend(config: AgenticHILConfig) -> DebuggerBackend:
+    if config.debugger is None:
+        return UnboundDebuggerBackend(config)
     if config.debugger.type == "openocd":
         from agentic_hil.backends.openocd import OpenOCDBackend
 
@@ -62,5 +101,5 @@ def create_debugger_backend(config: AgenticHILConfig) -> DebuggerBackend:
     raise ConfigError(
         "config_invalid",
         "Unsupported debugger.type.",
-        {"field": "debugger.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+        {"field": f"debuggers.{config.debugger_id}.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink", "pyocd"]},
     )

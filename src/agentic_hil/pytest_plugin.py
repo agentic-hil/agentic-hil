@@ -131,7 +131,7 @@ def agentic_hil(_agentic_hil_service: AgenticHILToolService) -> Iterator[Agentic
                 errors.append(f"debug: {type(error).__name__}: {error}")
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses), ("adapter", _agentic_hil_service.adapters)]:
+        for name, resource in [("COM", _agentic_hil_service.com_ports), ("CAN", _agentic_hil_service.can_buses)]:
             try:
                 resource.close()
             except BaseException as error:

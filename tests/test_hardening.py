@@ -14,14 +14,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FAKE_OPENOCD, SIM_NTC_ADAPTER, write_authoritative_config, write_config
+from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 
-from agentic_hil.adapters import AdapterService
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, CanBusSession, parse_can_id, payload_frame
+from agentic_hil.cli import debugger_probes
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
@@ -35,6 +35,7 @@ from agentic_hil.config import (
     trusted_state_directory,
     validated_state_root,
 )
+from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import (
@@ -45,6 +46,7 @@ from agentic_hil.report import (
     canonical_audit_log_path,
     ensure_audit_ready,
     logs_directory,
+    overall_success,
     read_last_failure,
     read_last_report,
     report_lock_path,
@@ -823,7 +825,7 @@ def test_com_ports_list_hides_host_ports_without_read_permission(tmp_path: Path)
     config = load_test_config(
         tmp_path,
         com_ports_yaml=COM_PORT_YAML,
-        permissions_yaml="permissions:\n  allow_com_read: false\n",
+        permissions={"allow_com_read": False},
     )
     service = ComPortService(config)
 
@@ -883,46 +885,6 @@ def test_bridge_close_propagates_reap_failure(monkeypatch: pytest.MonkeyPatch) -
     assert excinfo.value.result["process_reaped"] is False
 
 
-def test_adapter_service_retains_session_after_bridge_reap_failure(tmp_path: Path) -> None:
-    adapters_yaml = f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n    channels: ["temperature"]\n'
-    config = load_test_config(tmp_path, adapters_yaml=adapters_yaml)
-    service = AdapterService(config)
-
-    def fail_close() -> None:
-        raise subprocess.TimeoutExpired("bridge", 1)
-
-    bridge = SimpleNamespace(close=fail_close, status=lambda: {"active": True})
-    lease = SimpleNamespace(state="active", audit_ok=True)
-
-    def quarantine(*_args, **_kwargs) -> None:
-        lease.state = "cleanup_required"
-
-    lease.quarantine = quarantine
-    lease.status = lambda: {"lease_status": lease.state, "cleanup_required": lease.state != "active"}
-    session = SimpleNamespace(
-        adapter_id="ntc",
-        adapter_config=config.adapters["ntc"],
-        bridge=bridge,
-        log_path=str(tmp_path / ".agentic-hil" / "logs" / "adapter.jsonl"),
-        started_at="now",
-        active=True,
-        audit_broken=False,
-        lease=lease,
-        safe_state_confirmed=False,
-        process_reaped=False,
-    )
-    service.sessions["ntc"] = session
-
-    result = service.session_stop("ntc")
-
-    assert result["ok"] is False
-    assert result["error_type"] == "adapter_bridge_close_failed"
-    assert service.sessions["ntc"] is session
-    assert session.active is False
-    assert result["cleanup_required"] is True
-    service.sessions.clear()
-
-
 def test_debug_set_breakpoint_requires_location(tmp_path: Path) -> None:
     service = AgenticHILToolService(load_test_config(tmp_path))
 
@@ -943,7 +905,7 @@ def test_flash_rejects_non_boolean_reset_after_flash(tmp_path: Path) -> None:
 
 def test_flash_requires_reset_permission_only_when_requested(tmp_path: Path) -> None:
     service = AgenticHILToolService(
-        load_test_config(tmp_path, permissions_yaml="permissions:\n  allow_flash: true\n  allow_reset: false\n")
+        load_test_config(tmp_path, permissions={"allow_flash": True, "allow_reset": False})
     )
 
     without_reset = service.call("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": False})
@@ -971,7 +933,7 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
         tmp_path,
         com_ports_yaml=COM_PORT_YAML,
         can_buses_yaml=CAN_BUS_YAML,
-        permissions_yaml=f"permissions:\n  {flag}: false\n",
+        permissions={flag: False},
     )
     service = AgenticHILToolService(config)
 
@@ -982,7 +944,7 @@ def test_disabled_permission_blocks_tool(tmp_path: Path, flag: str, tool: str, a
 
 
 def test_startup_config_is_frozen_when_file_permissions_change(tmp_path: Path) -> None:
-    config_path = write_config(tmp_path, permissions_yaml="permissions:\n  allow_probe: false\n")
+    config_path = write_config(tmp_path, permissions={"allow_probe": False})
     service = AgenticHILToolService(load_config(str(config_path)))
     try:
         config_text = config_path.read_text(encoding="utf-8")
@@ -1013,7 +975,7 @@ def test_startup_config_is_frozen_when_file_resources_change(tmp_path: Path) -> 
 
 def test_authoritative_config_falls_back_to_canonical_project_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    config_path = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    config_path = write_authoritative_config(workspace, monkeypatch, permissions={})
     monkeypatch.delenv("AGENTIC_HIL_CONFIG")
 
     config = load_authoritative_config(workspace)
@@ -1038,7 +1000,7 @@ def test_authoritative_config_accepts_absolute_external_override(
     config_path = write_config(
         workspace,
         config_path=tmp_path / "managed" / "bench.yaml",
-        permissions_yaml="permissions: {}\n",
+        permissions={},
     )
     monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path.resolve()))
 
@@ -1068,7 +1030,7 @@ def test_authoritative_config_requires_exact_workspace_binding(
     workspace = tmp_path / "workspace"
     other = tmp_path / "other"
     other.mkdir()
-    write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    write_authoritative_config(workspace, monkeypatch, permissions={})
 
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(other)
@@ -1080,7 +1042,7 @@ def test_authoritative_config_requires_exact_workspace_binding(
 
 def test_authoritative_config_override_need_not_use_canonical_workspace_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "workspace"
-    canonical = write_authoritative_config(workspace, monkeypatch, permissions_yaml="permissions: {}\n")
+    canonical = write_authoritative_config(workspace, monkeypatch, permissions={})
     alternate = canonical.parent.parent / "alternate" / "config.yaml"
     alternate.parent.mkdir()
     alternate.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1116,7 +1078,7 @@ def test_raw_config_rejects_duplicate_keys(tmp_path: Path) -> None:
     assert "valid YAML" in rejected.value.summary
 
 
-@pytest.mark.parametrize("section", ["devices", "com_ports", "can_buses", "adapters"])
+@pytest.mark.parametrize("section", ["com_ports", "can_buses"])
 @pytest.mark.parametrize("non_string_key", ["1", "true", "2026-07-18"])
 def test_raw_config_rejects_non_string_mapping_keys(tmp_path: Path, section: str, non_string_key: str) -> None:
     config_path = write_config(tmp_path)
@@ -1142,7 +1104,7 @@ def test_authoritative_config_pins_external_can_bridge(tmp_path: Path, monkeypat
             'can_buses:\n  bench:\n    adapter: "process"\n    channel: "test"\n'
             f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
         ),
-        permissions_yaml="permissions: {}\n",
+        permissions={},
     )
 
     config = load_authoritative_config(workspace)
@@ -1159,7 +1121,7 @@ def test_authoritative_config_rejects_workspace_can_bridge_executable(tmp_path: 
         workspace,
         monkeypatch,
         can_buses_yaml=f'can_buses:\n  injected:\n    adapter: "process"\n    channel: "test"\n    executable: "{bridge.as_posix()}"\n',
-        permissions_yaml="permissions: {}\n",
+        permissions={},
     )
 
     with pytest.raises(ConfigError) as rejected:
@@ -1181,7 +1143,7 @@ def test_authoritative_config_rejects_process_bridge_arguments(tmp_path: Path, m
             'can_buses:\n  injected:\n    adapter: "process"\n    channel: "test"\n'
             f'    executable: "{FAKE_OPENOCD.as_posix()}"\n    args: ["{bridge.as_posix()}"]\n'
         ),
-        permissions_yaml="permissions: {}\n",
+        permissions={},
     )
 
     with pytest.raises(ConfigError) as rejected:
@@ -1189,61 +1151,6 @@ def test_authoritative_config_rejects_process_bridge_arguments(tmp_path: Path, m
 
     assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "can_buses.injected.args"
-
-
-def test_authoritative_config_pins_external_adapter_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    write_authoritative_config(
-        workspace,
-        monkeypatch,
-        adapters_yaml=(
-            f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n'
-            '    channels: ["temperature"]\n    faults: ["open"]\n'
-        ),
-        permissions_yaml="permissions: {}\n",
-    )
-
-    config = load_authoritative_config(workspace)
-
-    assert config.adapters["ntc"].executable == str(SIM_NTC_ADAPTER.resolve())
-
-
-def test_authoritative_config_rejects_workspace_adapter_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    bridge = workspace / "adapter.py"
-    bridge.parent.mkdir(parents=True)
-    bridge.write_text("print('untrusted')\n", encoding="utf-8")
-    write_authoritative_config(
-        workspace,
-        monkeypatch,
-        adapters_yaml=f'adapters:\n  injected:\n    executable: "{bridge.as_posix()}"\n',
-        permissions_yaml="permissions: {}\n",
-    )
-
-    with pytest.raises(ConfigError) as rejected:
-        load_authoritative_config(workspace)
-
-    assert rejected.value.error_type == "config_invalid"
-    assert rejected.value.details["field"] == "adapters.injected.executable"
-
-
-def test_authoritative_config_rejects_adapter_bridge_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    write_authoritative_config(
-        workspace,
-        monkeypatch,
-        adapters_yaml=(
-            f'adapters:\n  injected:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n'
-            '    args: ["workspace-script.py"]\n'
-        ),
-        permissions_yaml="permissions: {}\n",
-    )
-
-    with pytest.raises(ConfigError) as rejected:
-        load_authoritative_config(workspace)
-
-    assert rejected.value.error_type == "config_invalid"
-    assert rejected.value.details["field"] == "adapters.injected.args"
 
 
 def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1258,7 +1165,7 @@ def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, 
         workspace,
         monkeypatch,
         debugger_executable=FAKE_OPENOCD,
-        permissions_yaml="permissions:\n  allow_probe: true\n",
+        permissions={"allow_probe": True},
     )
     config_text = config_path.read_text(encoding="utf-8")
     config_path.write_text(
@@ -1278,9 +1185,10 @@ def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, 
 def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Configured values differ (absolute path vs. bare PATH name), so the
-    # pre-pin collision check passes — but both pin onto the same binary with no
-    # probe_id, i.e. the same physical probe. Pinned validation must reject it.
+    # Two pyocd entries reached through different spellings of one binary (an
+    # absolute path and a bare PATH name), both naming the same probe serial.
+    # Distinct executables never made these distinct boards, and pinning
+    # collapses them onto one file, so the config is refused.
     toolchain = tmp_path / "toolchain"
     toolchain.mkdir()
     shim = toolchain / "pyocd-shim.bat"
@@ -1292,9 +1200,11 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
         monkeypatch,
         debugger_type="pyocd",
         debugger_executable=shim,
-        debuggers_yaml='debuggers:\n  probe_b:\n    type: pyocd\n    executable: "pyocd-shim.bat"\n',
-        devices_yaml="devices:\n  dut_a:\n    debugger: true\n  dut_b:\n    debugger: probe_b\n",
-        permissions_yaml="permissions:\n  allow_probe: true\n",
+        debugger_name="dut_a",
+        probe_id="PROBE-A",
+        auto_probe_ids=False,
+        debuggers_yaml='debuggers:\n  probe_b:\n    type: pyocd\n    probe_id: "PROBE-A"\n    executable: "pyocd-shim.bat"\n',
+        permissions={"allow_probe": True},
     )
     monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
 
@@ -1302,8 +1212,8 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
         load_authoritative_config(workspace)
 
     assert rejected.value.error_type == "config_invalid"
-    assert "after executable pinning" in rejected.value.summary
-    assert rejected.value.details["other_device"] == "dut_a"
+    assert rejected.value.details["field"] == "debuggers.probe_b.probe_id"
+    assert rejected.value.details["other_debugger"] == "dut_a"
 
 
 def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(
@@ -1314,7 +1224,7 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
         workspace,
         monkeypatch,
         debugger_executable=FAKE_OPENOCD,
-        permissions_yaml="permissions:\n  allow_probe: true\n",
+        permissions={"allow_probe": True},
     )
     text = config_path.read_text(encoding="utf-8")
     config_path.write_text(
@@ -1325,7 +1235,7 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
         load_authoritative_config(workspace)
 
     assert rejected.value.error_type == "config_invalid"
-    assert rejected.value.details["field"] == "debugger.interface_cfg"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
 
 
 def test_artifact_root_symlink_cannot_pivot_after_startup(tmp_path: Path) -> None:
@@ -1534,21 +1444,6 @@ def test_can_log_path_failure_does_not_open_adapter(tmp_path: Path, monkeypatch:
     service = CanBusService(load_test_config(tmp_path, can_buses_yaml=CAN_BUS_YAML))
 
     result = service.session_start("bench")
-
-    assert result["error_type"] == "audit_unavailable"
-    assert opened == []
-    assert service.sessions == {}
-
-
-def test_adapter_log_path_failure_does_not_spawn_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    opened: list[str] = []
-    adapters_yaml = f'adapters:\n  ntc:\n    executable: "{SIM_NTC_ADAPTER.as_posix()}"\n    channels: ["temperature"]\n'
-
-    monkeypatch.setattr("agentic_hil.adapters.logs_directory", lambda config: (_ for _ in ()).throw(ConfigError("unsafe_configured_path", "bad log path")))
-    monkeypatch.setattr("agentic_hil.adapters.open_adapter_bridge", lambda *args, **kwargs: opened.append("bridge") or {"ok": True})
-    service = AdapterService(load_test_config(tmp_path, adapters_yaml=adapters_yaml))
-
-    result = service.session_start("ntc")
 
     assert result["error_type"] == "audit_unavailable"
     assert opened == []
@@ -2050,3 +1945,417 @@ def test_report_api_surfaces_canonical_audit_evidence(tmp_path: Path) -> None:
     Path(workspace_log).write_text("tampered\n", encoding="utf-8")
     retampered = attach_canonical_audit_evidence(config, result)
     assert retampered["canonical_audit"]["workspace_log_verified"] is False
+
+
+def test_unbound_debugger_refusal_does_not_demand_an_impossible_argument(tmp_path: Path) -> None:
+    # No MCP tool schema carries a probe name, so a refusal telling the caller to
+    # "name the debugger" would ask for something the protocol cannot express —
+    # the shape of refusal this codebase records as having driven a model to
+    # reach for st-flash instead.
+    config = load_test_config(
+        tmp_path,
+        probe_id="PROBE-A",
+        debuggers_yaml='debuggers:\n  probe_b:\n    type: openocd\n    probe_id: "PROBE-B"\n',
+    )
+    assert config.debugger is None
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert result["retry_safe"] is False
+    assert result["side_effect_committed"] is False
+    assert "test-reactor" in result["summary"]
+    assert sorted(result["configured_debuggers"]) == ["dut", "probe_b"]
+    assert validate_tool_arguments("probe_target", {"debugger": "dut"}) is not None
+
+
+def test_zero_debugger_refusal_does_not_claim_several_are_configured(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.debuggers == {}
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("debugger_info")
+    finally:
+        service.close()
+
+    assert result["error_type"] == "not_supported"
+    assert result["configured_debuggers"] == []
+    assert "several" not in result["summary"]
+    assert result["retry_safe"] is False
+
+
+def test_staging_refusal_before_any_backend_call_does_not_quarantine_the_lease(tmp_path: Path) -> None:
+    # require_existing_file: false lets validation pass on a file that is not
+    # there yet, so nothing about those bytes was checked. Staging must refuse —
+    # but the refusal happened before the backend ran, so it must not be
+    # recorded as an unconfirmed hardware effect and poison the bench.
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_existing_file: false\nlogs:\n", 1), encoding="utf-8")
+    config = load_config(str(config_path))
+    service = AgenticHILToolService(config)
+    try:
+        (tmp_path / "build").mkdir(parents=True, exist_ok=True)
+        validated = service.artifacts.validate_local_path("build/app.elf")
+        assert validated["ok"] is True
+        assert validated["artifact"]["integrity_sha256"] is None
+
+        (tmp_path / "build" / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+        staged = service.artifacts.stage_for_backend(validated["artifact"], "flash_firmware")
+
+        assert staged["ok"] is False
+        assert staged["error_type"] == "artifact_changed"
+        assert staged["side_effect_committed"] is False
+        assert service._result_requires_quarantine(staged) is False
+    finally:
+        service.close()
+
+
+def test_dump_output_path_outside_the_workspace_is_refused_up_front(tmp_path: Path) -> None:
+    # The mirror of the artifact read check: without it a symlinked directory
+    # inside the workspace only failed after the plan had already flashed and
+    # halted the board.
+    config = load_test_config(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        outside = tmp_path.parent / "escaped.hex"
+        result = service.artifacts.validate_output_path(str(outside), "debug_dump_symbol_ihex")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "output_validation_failed"
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+
+
+def test_two_debuggers_naming_one_probe_id_are_rejected_despite_distinct_resource_ids(tmp_path: Path) -> None:
+    # resource_id only renames the coordination lease. probe_id is what the
+    # backends turn into `adapter serial` / `sn=` / `--uid`, so two entries on
+    # one serial are one board however their leases are named.
+    with pytest.raises(ConfigError) as rejected:
+        load_config(
+            str(
+                write_config(
+                    tmp_path,
+                    debugger_name="board_a",
+                    probe_id="SN-001",
+                    debuggers_yaml='debuggers:\n  board_b:\n    type: openocd\n    probe_id: "SN-001"\n    resource_id: "bench-b"\n',
+                )
+            )
+        )
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.board_b.probe_id"
+    assert rejected.value.details["other_debugger"] == "board_a"
+
+
+def test_classify_last_error_works_without_any_debugger(tmp_path: Path) -> None:
+    # The failure record is written by whichever tool failed, so a project with
+    # no probe must still be able to ask what went wrong.
+    config_path = write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        service.call("com_session_start", {"port_id": "dut_uart"})
+        result = service.call("classify_last_error")
+    finally:
+        service.close()
+
+    assert result["error_type"] != "not_supported"
+    assert result["tool"] == "classify_last_error"
+
+
+def test_write_only_com_port_can_actually_be_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # allow_write without allow_read used to be a grant that could never be
+    # used: the session is the only way to reach the port, and opening it was
+    # gated on allow_read alone.
+    config = load_test_config(
+        tmp_path,
+        com_ports_yaml='com_ports:\n  reset_line:\n    device: "COM_TEST"\n    permissions:\n      allow_read: false\n      allow_write: true\n',
+    )
+    service = ComPortService(config)
+    written: list[bytes] = []
+    monkeypatch.setattr(
+        service,
+        "_open_serial",
+        lambda port_id, port_config, log_path, lease: {
+            "ok": True,
+            "session": ComPortSession(port_id, port_config, _RecordingSerial(written), log_path, lease, start_reader=False),
+        },
+    )
+    try:
+        started = service.session_start("reset_line")
+        assert started["ok"] is True, started
+        assert service.sessions["reset_line"].reader is None
+
+        result = service.write("reset_line", {"text": "reset\n"})
+        assert result["ok"] is True, result
+        assert written == [b"reset\n"]
+
+        denied = service.read("reset_line")
+        assert denied["error_type"] == "permission_denied"
+    finally:
+        service.close()
+
+
+class _RecordingSerial:
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, sink: list[bytes]) -> None:
+        self._sink = sink
+
+    def write(self, data: bytes) -> int:
+        self._sink.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_artifact_that_never_existed_is_reported_as_not_found(tmp_path: Path) -> None:
+    # With require_existing_file: false the file may be absent at validation.
+    # Reporting that as "changed after validation" sends the caller back to
+    # re-validate, which keeps succeeding; the artifact has to be built.
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_existing_file: false\nlogs:\n", 1), encoding="utf-8")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        (tmp_path / "build").mkdir(parents=True, exist_ok=True)
+        validated = service.artifacts.validate_local_path("build/app.elf")
+        assert validated["ok"] is True
+
+        staged = service.artifacts.stage_for_backend(validated["artifact"], "flash_firmware")
+    finally:
+        service.close()
+
+    assert staged["error_type"] == "artifact_not_found"
+    assert "Build it first" in staged["summary"]
+    assert staged["side_effect_committed"] is False
+
+
+def test_probe_discovery_without_any_debugger_does_not_blame_a_permission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nothing is switched off when nothing is configured, and the CLI must not
+    # contradict the MCP surface for the same config.
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    config_path = Path(os.environ["AGENTIC_HIL_CONFIG"])
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    result = debugger_probes()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert result["configured_debuggers"] == []
+    assert "permission" not in result["summary"].lower()
+
+
+def test_multi_probe_discovery_fails_when_any_probe_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One probe answering must not report the run as healthy while another
+    # failed: the CLI exit code is derived from this verdict alone, and a
+    # containment marker on any probe has to reach the top level.
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_name="probe_a",
+        probe_id="PROBE-A",
+        debuggers_yaml=(
+            'debuggers:\n  probe_b:\n    type: openocd\n    probe_id: "PROBE-B"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
+        ),
+    )
+    monkeypatch.chdir(workspace)
+
+    answers = {
+        "probe_a": {"ok": True, "tool": "debugger_probes_list", "probes": []},
+        "probe_b": {"ok": False, "tool": "debugger_probes_list", "error_type": "debugger_not_found", "cleanup_required": True, "quarantined": True, "quarantine_id": "q-1"},
+    }
+
+    class FakeService:
+        def __init__(self, config, *args, **kwargs) -> None:
+            self._name = config.debugger_id
+
+        def call(self, name: str, arguments: dict | None = None) -> dict:
+            return answers[self._name]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_module, "AgenticHILToolService", FakeService)
+
+    result = cli_module.debugger_probes()
+
+    assert result["ok"] is False
+    assert "probe_b" in result["summary"]
+    assert result["cleanup_required"] is True
+    assert result["quarantined"] is True
+    assert result["quarantine_id"] == "q-1"
+    assert overall_success(result) is False
+
+
+def test_debug_load_refusal_names_the_permission_that_fired(tmp_path: Path) -> None:
+    # Preflight is the only diagnosis on this path — the backend's per-flag
+    # messages are never reached — so it must not point at a flag the operator
+    # can see is false.
+    from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+
+    config = load_test_config(tmp_path, permissions={"allow_probe": True, "allow_reset": True, "allow_flash": True, "allow_mass_erase": True})
+    firmware = tmp_path / "build" / "app.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(config)
+    try:
+        plan = TestConfig(path=str(tmp_path / "plan.yaml"), name="load", steps=[TestStep("debug_start", {"image_path": "build/app.elf", "mode": "load"}, debugger="dut")])
+        result = TestReactor(config, service).run(plan)
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation_error"]["permission"] == "allow_mass_erase"
+    assert "mass erase" in result["validation_error"]["summary"]
+
+
+def test_artifact_outside_the_workspace_is_refused_with_the_real_reason(tmp_path: Path) -> None:
+    # With require_allowed_root off, the allowed-roots refusal no longer fires
+    # first and this is the path that used to answer "must be a single-link
+    # regular file" with a backend_error about an *output* file. No permission
+    # relaxes workspace containment, so a caller told "regular file" keeps
+    # retrying a path that can never work.
+    config_path = write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_allowed_root: false\nlogs:\n", 1), encoding="utf-8")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        outside = tmp_path.parent / "elsewhere.elf"
+        outside.write_bytes(b"\x7fELF" + b"\x00" * 12)
+        result = service.artifacts.validate_local_path(str(outside))
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+    assert "single-link regular file" not in result["summary"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows construct")
+def test_artifact_behind_a_link_that_leaves_the_workspace_is_named_too(tmp_path: Path) -> None:
+    # A lexical containment check reports this path as contained, so the
+    # refusal fell back to the misleading "single-link regular file" wording on
+    # exactly the case where naming the reason matters most.
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True)
+    (outside / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+    config_path = write_config(workspace)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_allowed_root: false\nlogs:\n", 1), encoding="utf-8")
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(workspace / "build"), str(outside)], check=True, capture_output=True)
+
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("build/app.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows construct")
+def test_dump_into_an_allowed_root_that_is_a_link_is_not_falsely_refused(tmp_path: Path) -> None:
+    # validate_output_path resolves symlinks while the allowed roots are built
+    # lexically, so an allowed root that is itself a link inside the workspace
+    # refused every legitimate dump into it.
+    workspace = tmp_path / "ws"
+    config_path = write_config(workspace)
+    (workspace / "real").mkdir(parents=True, exist_ok=True)
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(workspace / "build"), str(workspace / "real")], check=True, capture_output=True)
+
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_output_path("build/dump.hex", "debug_dump_symbol_ihex")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["validation"]["allowed_root"] is True
+    assert result["validation"]["within_workspace"] is True
+
+
+def _pyocd_service(tmp_path: Path, probe_id: str | None):
+    config = load_test_config(tmp_path, debugger_type="pyocd", probe_id=probe_id)
+    return AgenticHILToolService(config)
+
+
+def test_pyocd_probe_selector_is_canonicalized_to_a_full_uid(tmp_path: Path) -> None:
+    # pyOCD matches --uid as a case-insensitive SUBSTRING, so a partial value
+    # must be resolved against the enumerated probes and the full UID passed on,
+    # or the configured name does not mean one board.
+    service = _pyocd_service(tmp_path, "pyocd123")
+    try:
+        result = service.call("probe_target")
+        assert result["ok"] is True, result
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+        assert service.backend._connection_args()[:2] == ["--uid", "PYOCD123"]
+    finally:
+        service.close()
+
+
+def test_pyocd_ambiguous_probe_selector_is_refused_before_touching_a_board(tmp_path: Path) -> None:
+    # "PYOCD" is a substring of both connected probes, so pyOCD would silently
+    # take the first one.
+    service = _pyocd_service(tmp_path, "PYOCD")
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert sorted(result["candidate_probe_ids"]) == ["PYOCD123", "PYOCD456"]
+
+
+def test_pyocd_probe_selector_that_matches_nothing_is_refused(tmp_path: Path) -> None:
+    service = _pyocd_service(tmp_path, "NOT-CONNECTED")
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert result["configured_probe_id"] == "NOT-CONNECTED"
+
+
+def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
+    service = _pyocd_service(tmp_path, None)
+    try:
+        assert service.call("probe_target")["ok"] is True
+        assert "--uid" not in service.backend._connection_args()
+    finally:
+        service.close()
