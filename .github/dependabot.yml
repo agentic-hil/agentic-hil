@@ -13,6 +13,17 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    # wrapt is not a dependency this project declares. It arrives through
+    # python-can, which requires wrapt~=1.10, so anything from 2.0 up cannot
+    # resolve. python-can 4.6.1 is the newest release and predates wrapt 2.0.0
+    # by two months, so there is no version to move to; the ceiling is upstream,
+    # not here. Mirror that ceiling instead of reopening the same unmergeable
+    # pull request every month, and keep 1.x patches flowing. Drop this once
+    # python-can ships a release that accepts wrapt 2.
+    ignore:
+      - dependency-name: "wrapt"
+        update-types:
+          - version-update:semver-major
     groups:
       python-dependencies:
         patterns:
