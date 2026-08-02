@@ -1,5 +1,10 @@
 version: 2
 updates:
+  # This entry covers pyproject.toml and the lock files under requirements/.
+  # The pip ecosystem already looks into a requirements/ subdirectory from the
+  # configured directory, so a second entry pointing at "/requirements" does not
+  # add coverage - it produces a duplicate pull request against the same file
+  # for every update, which is what it did.
   - package-ecosystem: pip
     directory: "/"
     schedule:
@@ -10,22 +15,6 @@ updates:
     open-pull-requests-limit: 5
     groups:
       python-dependencies:
-        patterns:
-          - "*"
-
-  # The hash-pinned lock files under requirements/ pin the release pipeline's
-  # build tooling. Without their own entry they never get updated, and a pinned
-  # dependency that never moves is a stale dependency.
-  - package-ecosystem: pip
-    directory: "/requirements"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:15"
-      timezone: Europe/Berlin
-    open-pull-requests-limit: 5
-    groups:
-      release-tooling:
         patterns:
           - "*"
 
