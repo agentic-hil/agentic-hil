@@ -924,14 +924,45 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "migrated": has_managed, "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
 
 
-def _replaceable_agentic_hil_command(configured: object) -> bool:
-    """Whether a stale absolute command can be attributed to this installation.
+def _managed_mcp_record_path(agent_id: str) -> Path:
+    """Where this installation records the JSON entry it wrote for an agent.
+
+    Codex config.toml carries managed markers in the file itself; JSON agent
+    configs cannot, because both entry shapes are matched on an exact key set
+    and an extra key would be written into a file the agent owns. The receipt
+    lives beside the rest of the user state instead."""
+    return user_state_root() / "managed-mcp" / f"{agent_id}.json"
+
+
+def _record_managed_mcp_entry(agent_id: str, entry: JsonObject) -> None:
+    """Record what we just wrote, after the config write succeeded.
+
+    Ordering matters: a receipt written first would claim ownership of an entry
+    that never landed."""
+    path = _managed_mcp_record_path(agent_id)
+    secure_user_directory(path.parent)
+    secure_atomic_write_text(path, json.dumps({"entry": entry}, indent=2, sort_keys=True) + "\n")
+
+
+def _recorded_managed_command(agent_id: str) -> str | None:
+    record = _load_json_object(_managed_mcp_record_path(agent_id))
+    entry = record.get("entry") if isinstance(record, dict) else None
+    command = entry.get("command") if isinstance(entry, dict) else None
+    if isinstance(command, list):
+        command = command[0] if command else None
+    return command if isinstance(command, str) else None
+
+
+def _replaceable_agentic_hil_command(configured: object, agent_id: str) -> bool:
+    """Whether this installation can prove it wrote the stale command.
 
     A JSON agent config carries no managed marker, so shape alone cannot tell our
-    own earlier entry from one an operator wrote. A workspace-local command is
-    replaceable by definition, and anything else must pass the same trust check
-    as a new command. An operator's own absolute path satisfies neither and is
-    reported as a conflict instead of being silently repointed.
+    own earlier entry from one an operator wrote — and neither can a trust check:
+    an operator's reviewed root-owned wrapper is exactly as trustworthy as our
+    launcher, which is the point of writing one. Ownership is therefore read from
+    the receipt this installation left, never inferred. A workspace-local command
+    is replaceable by definition. Anything else is a conflict, so an operator's
+    deliberate hardware gate is reported instead of being silently repointed.
     """
     if not isinstance(configured, str):
         return False
@@ -941,11 +972,12 @@ def _replaceable_agentic_hil_command(configured: object) -> bool:
     with suppress(OSError, ValueError):
         if is_path_within_frozen(path, Path.cwd().resolve()):
             return True
-    try:
-        _trusted_mcp_command(str(path))
-    except (ConfigError, OSError, ValueError):
+    recorded = _recorded_managed_command(agent_id)
+    if recorded is None:
         return False
-    return True
+    # normcase/abspath so a Windows drive-letter or case difference does not turn
+    # our own entry into a false conflict.
+    return os.path.normcase(os.path.abspath(recorded)) == os.path.normcase(os.path.abspath(configured))
 
 
 def _claude_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
@@ -963,7 +995,7 @@ def _claude_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
         and set(entry) == {"type", "command", "args"}
         and entry.get("type") == "stdio"
         and entry.get("args") == ["mcp-stdio"]
-        and _replaceable_agentic_hil_command(entry.get("command"))
+        and _replaceable_agentic_hil_command(entry.get("command"), "claude-code")
     ):
         return "managed"
     return None
@@ -980,7 +1012,7 @@ def _opencode_mcp_entry_kind(entry: object, desired: JsonObject) -> str | None:
         return "legacy"
     if isinstance(entry, dict) and set(entry) == {"type", "command", "enabled"} and entry.get("type") == "local" and entry.get("enabled") is True:
         configured = entry.get("command")
-        if isinstance(configured, list) and len(configured) == 2 and configured[1] == "mcp-stdio" and _replaceable_agentic_hil_command(configured[0]):
+        if isinstance(configured, list) and len(configured) == 2 and configured[1] == "mcp-stdio" and _replaceable_agentic_hil_command(configured[0], "opencode"):
             return "managed"
     return None
 
@@ -1003,6 +1035,7 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     data.setdefault("$schema", "https://opencode.ai/config.json")
     servers["agentic-hil"] = desired_entry
     secure_atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    _record_managed_mcp_entry("opencode", desired_entry)
     return {"ok": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "migrated": kind in {"legacy", "managed"}, "summary": "Registered agentic-hil MCP server in the opencode user config."}
 
 
@@ -1023,6 +1056,7 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
     servers["agentic-hil"] = desired_entry
     secure_atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    _record_managed_mcp_entry("claude-code", desired_entry)
     return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "migrated": kind in {"legacy", "managed"}, "summary": "Registered agentic-hil MCP server in ~/.claude.json (user scope)."}
 
 

@@ -20,7 +20,7 @@ from conftest import (
     write_authoritative_config,
     write_config,
 )
-from support import trusted_launcher
+from support import trusted_launcher, trusted_operator_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
@@ -975,15 +975,26 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+@pytest.mark.parametrize("wrapper_name", ["agentic-hil-gate", "agentic-hil"])
+@pytest.mark.parametrize("force", [False, True])
 def test_register_agent_mcp_never_repoints_an_operator_owned_absolute_command(
     agent: str,
+    wrapper_name: str,
+    force: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The operator's wrapper is a real, reviewed, owner-owned executable outside
+    # the workspace and the caches: it passes the same trust rule our own
+    # launcher does, because that is the whole point of writing one. Inferring
+    # ownership from trust therefore hands the hardware gate to a different
+    # program. It is also tried under our own console-script name, so a fix that
+    # only checks the basename cannot pass.
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
-    operator_command = tmp_path / "operator" / "agentic-hil"
+    operator_command = trusted_operator_launcher(wrapper_name)
+    assert operator_command.is_file()
     relative_path = Path(".claude.json") if agent == "claude-code" else Path(".config/opencode/opencode.json")
     entry = (
         {"type": "stdio", "command": str(operator_command), "args": ["mcp-stdio"]}
@@ -996,13 +1007,48 @@ def test_register_agent_mcp_never_repoints_an_operator_owned_absolute_command(
     existing = json.dumps({container: {"agentic-hil": entry}})
     path.write_text(existing, encoding="utf-8")
 
-    result = register_agent_mcp(agent)
+    result = register_agent_mcp(agent, force=force)
 
-    # A JSON config carries no managed marker, so an absolute command outside the
-    # workspace that is not a trusted launcher belongs to the operator.
+    # A JSON config carries no managed marker, so ownership is read from the
+    # receipt this installation leaves — and there is none for this entry.
     assert result["ok"] is False
     assert result["error_type"] == "mcp_config_conflict"
     assert path.read_text(encoding="utf-8") == existing
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "opencode"])
+def test_register_agent_mcp_migrates_the_entry_it_recorded_writing(
+    agent: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other side of the same rule: an entry this installation can prove it
+    # wrote must still migrate when the launcher path moves, or every upgrade
+    # would report a conflict against itself.
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    first_command = _trusted_test_mcp_command(monkeypatch)
+    # The same installation after a reinstall moved its console script.
+    moved_command = str(trusted_operator_launcher("agentic-hil-moved"))
+    relative_path = Path(".claude.json") if agent == "claude-code" else Path(".config/opencode/opencode.json")
+    container = "mcpServers" if agent == "claude-code" else "mcp"
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({container: {}}), encoding="utf-8")
+
+    def registered_command() -> str:
+        entry = json.loads(path.read_text(encoding="utf-8"))[container]["agentic-hil"]
+        configured = entry["command"]
+        return configured[0] if isinstance(configured, list) else configured
+
+    assert register_agent_mcp(agent, command=first_command)["ok"] is True
+    assert registered_command() == first_command
+
+    migrated = register_agent_mcp(agent, command=moved_command)
+
+    assert migrated["ok"] is True, migrated
+    assert migrated["migrated"] is True
+    assert registered_command() == moved_command
 
 
 @pytest.mark.parametrize(

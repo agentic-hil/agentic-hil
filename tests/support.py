@@ -32,5 +32,21 @@ def trusted_launcher() -> Path:
     return launcher
 
 
+def trusted_operator_launcher(name: str = "agentic-hil-gate") -> Path:
+    """An executable the product's trust rule accepts that we did NOT install.
+
+    The point of the operator wrapper case: it is exactly as trustworthy as our
+    own launcher — reviewed, owner-owned, outside the workspace and the caches —
+    which is why a trust check can never tell the two apart. Only a record of
+    what this installation wrote can.
+    """
+    launcher = LAUNCHER_ROOT / "operator" / (f"{name}.exe" if os.name == "nt" else name)
+    if not launcher.is_file():
+        launcher.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        launcher.chmod(0o700)
+    return launcher
+
+
 def remove_trusted_launcher() -> None:
     shutil.rmtree(LAUNCHER_ROOT, ignore_errors=True)
