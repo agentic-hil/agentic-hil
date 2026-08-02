@@ -6,9 +6,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-02
+
+Getting a bench running and keeping it current no longer needs a person transcribing hardware identifiers or install commands. Setup reads the attached hardware, and the installation upgrades itself through whichever manager owns it.
+
 ### Added
 
 - With `agentic-hil.config.example.yaml`, `setup` and `init` locate STM32CubeProgrammer, require one ST-Link, identify it via HOTPLUG, match its COM port by USB serial, and write host values externally. This pre-policy path cannot reset, halt, erase, flash, run raw commands, or access serial I/O.
+- **`agentic-hil upgrade`** upgrades the installation running the command, then verifies it. It selects the manager that owns this interpreter — `uv tool`, `pipx`, `uv pip`, or `pip` — rather than whichever `agentic-hil` resolves first on `PATH`, so a second copy is never upgraded by mistake. `--agent <agent>` (repeatable) reinstalls that agent's skill afterwards from the new code, in a temporary directory so no project config is read. The result reports `previous_version`, `version`, `manager`, and `restart_required`; agent hosts must be restarted to load the new MCP server.
 
 ### Changed
 
