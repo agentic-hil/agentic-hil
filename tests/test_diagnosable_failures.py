@@ -154,18 +154,32 @@ def test_no_module_imports_winreg_at_import_time() -> None:
     run cannot import winreg at all and a Windows run has it loaded already, so
     neither platform would notice the mistake at runtime.
     """
+    def imports_winreg(node: ast.AST) -> bool:
+        if isinstance(node, ast.Import):
+            return any(alias.name.split(".")[0] == "winreg" for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            return (node.module or "").split(".")[0] == "winreg"
+        return False
+
     package = Path(windows_principals.__file__).parent
     offenders: list[str] = []
+    found_any = False
     for source in sorted(package.rglob("*.py")):
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        deferred = {
+            id(node)
+            for function in ast.walk(tree)
+            if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef)
+            for node in ast.walk(function)
+        }
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Import | ast.ImportFrom):
+            if not imports_winreg(node):
                 continue
-            names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-            if not any(name.split(".")[0] == "winreg" for name in names):
-                continue
-            if node.col_offset == 0:
+            found_any = True
+            if id(node) not in deferred:
                 offenders.append(f"{source.name}:{node.lineno}")
+
+    assert found_any, "no winreg import found at all: this guard would pass vacuously"
     assert offenders == [], f"winreg imported at module level in: {', '.join(offenders)}"
 
 
@@ -211,6 +225,8 @@ def test_a_capability_sid_registered_on_this_machine_resolves_to_its_package() -
                 package_sid, _ = winreg.QueryValueEx(package_key, "PackageSid")
     except OSError:
         pytest.skip("this host registers no packaged application capability SIDs")
+    if not isinstance(package_sid, str) or not package_sid.startswith(windows_principals.PACKAGE_SID_PREFIX):
+        pytest.skip(f"the first registered package carries no package SID to invert: {package_sid!r}")
 
     capability_sid = windows_principals.CAPABILITY_SID_PREFIX + package_sid[len(windows_principals.PACKAGE_SID_PREFIX) :]
     described = describe_principal(capability_sid)
