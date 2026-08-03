@@ -16,6 +16,7 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -82,7 +83,7 @@ class STLinkBackend:
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
         resolved = self._resolve_executable()
         if not resolved["ok"]:
@@ -113,7 +114,7 @@ class STLinkBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):
@@ -246,8 +247,12 @@ class STLinkBackend:
         return args
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, operation_result: JsonObject | None = None) -> JsonObject:
+        # likely_causes says what may be wrong; remediation says what to check
+        # next, scoped to this backend, because the checks differ per tool: an
+        # ST-Link transport is chosen with `interface`, an OpenOCD one with
+        # interface_cfg. Same catalogue the MCP reference serves.
         error_type = self._public_error_type(backend_error_type)
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), "log_path": display_path(self.config, log_path)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
         if operation_result is not None:
             result["operation_result"] = operation_result
         return result

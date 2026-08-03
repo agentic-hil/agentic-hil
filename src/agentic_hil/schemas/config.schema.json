@@ -2,18 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
   "title": "Agentic HIL configuration",
-  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Permissions are declared per device: on the debugger that may be probed or flashed, and on each COM port and CAN bus that may be read or written.",
+  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations stay deny-by-default and are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written.",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
     "debugger_permissions": {
       "type": "object",
-      "description": "What this debug probe is allowed to do. Deny-by-default; scoped to this debugger alone.",
+      "description": "What this debug probe may do beyond reading it. Deny-by-default; scoped to this debugger alone. allow_probe is a version 1 field and is refused in a version 2 file.",
       "additionalProperties": false,
       "properties": {
         "allow_probe": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "deprecated": true,
+          "description": "Version 1 only. Reading a target needs no permission from version 2 on; remove the key and bump version."
         },
         "allow_flash": {
           "type": "boolean",
@@ -36,12 +38,14 @@
     },
     "io_permissions": {
       "type": "object",
-      "description": "What this COM port or CAN bus is allowed to do. Deny-by-default; scoped to this device alone.",
+      "description": "What this COM port or CAN bus may do beyond reading it. Deny-by-default; scoped to this device alone. allow_read is a version 1 field and is refused in a version 2 file.",
       "additionalProperties": false,
       "properties": {
         "allow_read": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "deprecated": true,
+          "description": "Version 1 only. Reading a device needs no permission from version 2 on; remove the key and bump version."
         },
         "allow_write": {
           "type": "boolean",
@@ -56,6 +60,15 @@
     "state_root"
   ],
   "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ],
+      "default": 1,
+      "description": "Which permission model this file is read under. Absent means version 1: reading is gated by allow_probe and allow_read, which is how every file written before this release behaves and keeps behaving. Version 2 has no read permission at all; migrating means removing those keys and setting version: 2 in one edit."
+    },
     "workspace_root": {
       "type": "string",
       "minLength": 1,
@@ -65,6 +78,45 @@
       "type": "string",
       "minLength": 1,
       "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
+    },
+    "permissions": {
+      "type": "object",
+      "description": "Project-scoped permissions. Deny-by-default like every other write permission in this file, and like those it is only ever widened by a human editing this file.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_config_write": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether an agent may write this configuration through the MCP server. False in every configuration an agent generated for itself, which is what makes agent provisioning one-time: an agent can enable itself up to observation, never up to modification. Set it true by hand to let the agent regenerate this file from hardware discovery afterwards; even then the agent supplies no permission value, only the discovered hardware facts."
+        }
+      },
+      "default": {}
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Who wrote this file. Informational only: nothing reads it as policy and it grants nothing. It exists so a later reader does not have to guess whether a person intended these contents.",
+      "additionalProperties": false,
+      "properties": {
+        "created_by": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "human"
+          ],
+          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission false."
+        },
+        "created_via": {
+          "type": "string",
+          "description": "The interface that wrote it, e.g. mcp:project_config_create."
+        },
+        "created_at": {
+          "type": "string",
+          "description": "UTC ISO-8601 timestamp of the write."
+        },
+        "agentic_hil_version": {
+          "type": "string"
+        }
+      }
     },
     "target": {
       "type": "object",
@@ -82,7 +134,7 @@
     },
     "debuggers": {
       "type": "object",
-      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id \u2014 it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one.",
+      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id — it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -252,7 +304,7 @@
     },
     "com_ports": {
       "type": "object",
-      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback.",
+      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback. Reading needs no permission; assert_dtr and assert_rts decide whether opening the port touches the target.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -284,6 +336,16 @@
           "encoding": {
             "type": "string",
             "default": "utf-8"
+          },
+          "assert_dtr": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether DTR is asserted when the port is opened. pyserial asserts it by default, and on boards that wire DTR to reset that restarts the target on every open. Set false to observe a target provably undisturbed; leave true when the peer needs DTR to talk."
+          },
+          "assert_rts": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether RTS is asserted when the port is opened. Same reasoning as assert_dtr; some boards wire RTS to reset or boot mode."
           },
           "max_buffer_bytes": {
             "type": "integer",
@@ -480,5 +542,56 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "debuggers": {
+            "additionalProperties": {
+              "properties": {
+                "permissions": {
+                  "properties": {
+                    "allow_probe": false
+                  }
+                }
+              }
+            }
+          },
+          "com_ports": {
+            "additionalProperties": {
+              "properties": {
+                "permissions": {
+                  "properties": {
+                    "allow_read": false
+                  }
+                }
+              }
+            }
+          },
+          "can_buses": {
+            "additionalProperties": {
+              "properties": {
+                "permissions": {
+                  "properties": {
+                    "allow_read": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

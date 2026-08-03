@@ -33,10 +33,23 @@ pip install --user agentic-hil
 agentic-hil setup                 # add --agent codex or --agent opencode for those
 ```
 
-`setup` creates the deny-by-default policy outside the repository, installs the
-agent skill, registers the MCP server with a verified absolute executable path,
-and runs `doctor`. It prints where the policy file landed — review it before
-enabling anything.
+`setup` installs the agent skill, registers the MCP server with a verified
+absolute executable path, creates the deny-by-default policy outside the
+repository, and runs `doctor`. It prints where the policy file landed — review it
+before enabling anything.
+
+Those are two scopes, and `setup` composes the commands that own them:
+
+```bash
+agentic-hil agent-install --agent <agent>   # skill + user-level MCP registration; once per user and agent
+agentic-hil init --agent <agent>            # this project's policy + doctor; once per project, from its root
+```
+
+`agent-install` writes only under the invoking user's home — user-wide, per user
+and per machine, not shared with other OS users — and needs no project and no
+configuration. Each half rolls back only its own writes, so a project that will
+not configure still leaves a working agent, and the next repository for this
+user needs `init` alone.
 
 If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
 up on `PATH`, install it persistently with a tool installer instead and rerun
@@ -85,15 +98,18 @@ Every MCP host starts the same local stdio server from the firmware project root
 /absolute/path/to/persistent/agentic-hil mcp-stdio
 ```
 
-Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil setup --agent <agent>` performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
+Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil agent-install --agent <agent>` — which `agentic-hil setup --agent <agent>` runs first — performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
 `mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` only when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
 
 ## Configuration
 
-`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses — each with its own deny-by-default permissions:
+`agentic-hil setup` already created this file; `agentic-hil init` creates it on its own, without the user-wide skill and MCP registration that `agentic-hil agent-install` owns. Either way it lands outside the repository with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses.
+
+Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state — flash, reset, serial and CAN sends, mass erase, raw debugger commands — stays deny-by-default, per device:
 
 ```yaml
+version: 2                   # reading needs no permission; see Migration below
 workspace_root: "/absolute/path/to/firmware-project"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
@@ -101,8 +117,8 @@ target:
   name: "sensor-board"
   controller: "stm32f4"
 
-# Every device is named, and every device carries its own permissions. Test
-# plan steps address a device by that name. The MCP tool surface drives the
+# Every device is named, and every device carries its own write permissions.
+# Test plan steps address a device by that name. The MCP tool surface drives the
 # single configured probe, so a project with several probes runs multi-board
 # work through `agentic-hil test-reactor`.
 debuggers:
@@ -114,7 +130,6 @@ debuggers:
     target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
-      allow_probe: true
       allow_flash: true
       allow_reset: true
       allow_raw_debugger_commands: false
@@ -127,7 +142,6 @@ debuggers:
     target:                  # optional per-probe override of the project target
       name: "sensor-node"
     permissions:
-      allow_probe: true
       allow_flash: false     # this board is read-only for now
 
 debug:
@@ -142,8 +156,9 @@ com_ports:
   dut_uart:
     device: "/dev/ttyACM0"  # Windows example: "COM5"
     baudrate: 115200
+    assert_dtr: false        # opening the port must not reset this board
+    assert_rts: false
     permissions:
-      allow_read: true
       allow_write: true
 
 can_buses:
@@ -151,12 +166,16 @@ can_buses:
     adapter: "socketcan"     # or "peak", or "process" for a custom bridge
     channel: "can0"
     bitrate: 500000
+    listen_only: true        # receive without sending dominant ACK bits
     permissions:
-      allow_read: true
       allow_write: false
 ```
 
-The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
+### Migration
+
+A configuration written before this release has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Nothing infers the new model from a missing key, so an update never widens what a bench already allows. Migrating is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.
+
+The operator reviews this file and explicitly enables only the required resources and permissions. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. A `resource_id` names hardware rather than a file, so it is matched case-insensitively on every platform, and two entries that spell one id in two cases are refused rather than merged — make them identical if they are one unit, or different by more than case if they are two. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 
@@ -171,9 +190,13 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
 | Diagnostics | `get_last_report`, `classify_last_error` | structured error classification with likely causes |
+| Project setup | `project_config_create` | generates this workspace's configuration from attached hardware when it has none; takes no arguments and writes every permission `false`, including `permissions.allow_config_write`, so it succeeds once and then refuses itself |
 | Debug sessions | `debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
+| Run boundary | `bench_run_start`, `bench_run_stop`, `bench_run_status` | declares the devices of a multi-call run and holds them for its whole duration; without it each call holds its device only for its own duration |
 
-A typical loop: build firmware → `flash_firmware` with `reset_after_flash: true` when a fresh boot is required → `com_session_start` → stimulate via `com_write`/`can_send` → assert on `com_read`/`can_read` → on failure, `classify_last_error`.
+A typical loop: build firmware → `bench_run_start` naming the probe and the port → `flash_firmware` with `reset_after_flash: true` when a fresh boot is required → `com_session_start` → stimulate via `com_write`/`can_send` → assert on `com_read`/`can_read` → `bench_run_stop` → on failure, `classify_last_error`.
+
+Devices are named as `{"kind": "debugger" | "uart" | "can", "id": "<config entry>"}`. The lock is keyed on the hardware behind the entry, so two entries describing one physical unit — a probe and its virtual COM port under a shared `resource_id` — collapse to one lock. The DUT is not a device: it is what the devices drive.
 
 ## Test Reactor
 
@@ -228,10 +251,12 @@ Every hardware action, from every entry point, walks the same gate:
   <img alt="Action gate: tool call → deny-by-default permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery" src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/action-gate.svg">
 </picture>
 
-- Deny-by-default permission switches per action class, with deliberate interlocks — flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
+- Deny-by-default permission switches for everything that writes or changes state, with deliberate interlocks — flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
+- Reading needs no permission, and exclusivity carries that load instead. The risk in a HIL tool is not damage but a false green: a test disturbed unnoticed produces a result nobody should trust. Whoever holds a board cannot be disturbed, and whoever reads while no run holds it disturbs nobody. `listen_only` for CAN and a DTR/RTS-free port open remain the way to observe a target provably undisturbed.
 - Configured executables and OpenOCD scripts are pinned at startup and must resolve outside the workspace; firmware artifacts are validated, hashed, and staged in a private process directory before any backend consumes them.
 - Serial/CAN writes and reads are size- and buffer-capped; debugger calls run with timeouts and OpenOCD's TCP servers disabled.
-- One live owner per project and physical probe/port/bus across all entry points; a second process gets `resource_busy`, and crashes or unknown effects quarantine the resource until explicit operator recovery ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#13-resource_busy-or-quarantined-hardware)).
+- One live owner per project and physical probe/port/bus across all entry points; a second process gets `resource_busy`, and crashes or unknown effects quarantine the resource until explicit operator recovery ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#13-device_busy-resource_busy-or-quarantined-hardware)).
+- Exclusivity per physical device is machine-wide and held for the whole run, kept in one agreed place (`~/.agentic-hil/device-locks`) rather than beside a configuration — two sessions with different `state_root` values are still one bench. A contender is refused with `device_busy` naming the holder; waiting happens only when asked for (`--wait-s`) and is bounded. Ownership is the operating system's lock, so a crashed run frees its devices immediately, with no quarantine and no manual recovery.
 - Canonical reports and the tamper-evident audit chain live under the operator-pinned `state_root`; workspace logs and reports are untrusted mirrors, verified against the chain on read.
 
 The complete threat model and design rationale: [docs/security-design.md](docs/security-design.md).
@@ -245,8 +270,9 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 ## Common Commands
 
 ```text
-agentic-hil setup --agent <claude-code|codex|opencode>
-agentic-hil init
+agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
+agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
+agentic-hil init [--agent <agent>]                             # project half
 agentic-hil doctor
 agentic-hil debugger-probes
 agentic-hil com-ports

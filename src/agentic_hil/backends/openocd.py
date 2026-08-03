@@ -14,6 +14,7 @@ from agentic_hil.backends.common import (
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -64,7 +65,7 @@ class OpenOCDBackend:
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
-        debug_permission_revoked = not config.debugger.permissions.allow_probe or config.debugger.permissions.allow_raw_debugger_commands
+        debug_permission_revoked = not config.probe_allowed() or config.debugger.permissions.allow_raw_debugger_commands
         if debugger_changed or debug_permission_revoked:
             self._debug.close()
         self.config = config
@@ -111,7 +112,7 @@ class OpenOCDBackend:
         }
 
     def list_probes(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
         return {
             "ok": False,
@@ -122,7 +123,7 @@ class OpenOCDBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
@@ -282,8 +283,12 @@ class OpenOCDBackend:
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
+        # likely_causes says what may be wrong; remediation says what to check
+        # next, scoped to this backend, because the checks differ per tool: an
+        # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
+        # Same catalogue the MCP reference serves, so the two cannot diverge.
         error_type = self._public_error_type(backend_error_type)
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), "log_path": display_path(self.config, log_path)}
+        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
         backend_error_type = self._classify_output(output, tool)

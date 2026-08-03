@@ -837,12 +837,21 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
     debuggers = data.get("debuggers")
     if not isinstance(debuggers, dict) or not debuggers:
         return False, "debuggers missing"
-    # Permissions belong to the device they authorize, so deny-by-default has to
-    # hold on every named device rather than on one shared block.
-    for section, entries, required_flags in (
-        ("debuggers", debuggers, {"allow_probe", "allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"}),
-        ("com_ports", data.get("com_ports") or {}, {"allow_read", "allow_write"}),
-        ("can_buses", data.get("can_buses") or {}, {"allow_read", "allow_write"}),
+    # Which permission model this file is written under decides which flags must
+    # be there. Version 2 has no read permission at all -- exclusivity for the
+    # duration of a run replaced it -- so allow_probe and allow_read must be
+    # ABSENT there, while a file with no `version:` key is still read under
+    # version 1 and must carry them.
+    version = data.get("version", 1)
+    if version not in (1, 2):
+        return False, f"unsupported config version: {version!r}"
+    read_free = version == 2
+    if not read_free and "version" in data:
+        return False, "install wrote a superseded config version"
+    for section, entries, required_flags, forbidden_flag in (
+        ("debuggers", debuggers, {"allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"}, "allow_probe"),
+        ("com_ports", data.get("com_ports") or {}, {"allow_write"}, "allow_read"),
+        ("can_buses", data.get("can_buses") or {}, {"allow_write"}, "allow_read"),
     ):
         if not isinstance(entries, dict):
             return False, f"{section} is not an object"
@@ -852,9 +861,14 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
             permissions = entry.get("permissions")
             if not isinstance(permissions, dict):
                 return False, f"{section}.{name}.permissions missing"
-            missing = sorted(required_flags - permissions.keys())
+            expected = required_flags if read_free else required_flags | {forbidden_flag}
+            missing = sorted(expected - permissions.keys())
             if missing:
                 return False, f"{section}.{name}.permissions missing: {missing}"
+            if read_free and forbidden_flag in permissions:
+                return False, f"{section}.{name}.permissions carries the removed {forbidden_flag}"
+            # Deny-by-default is about what writes: every flag that IS declared
+            # has to be off, whichever model the file uses.
             enabled = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and value is not False)
             if enabled:
                 return False, f"{section}.{name}.permissions not deny-by-default: {enabled}"

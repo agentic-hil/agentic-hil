@@ -21,11 +21,14 @@ from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
+    DEFAULT_CONFIG_TEMPLATE,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
+    authoritative_config_target,
     bind_debugger,
     config_schema_text,
+    debugger_access_enabled,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
@@ -46,79 +49,9 @@ from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
-from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
-
-DEFAULT_CONFIG_TEMPLATE = """target:
-  name: "example-target"
-  controller: "unknown-controller"
-
-# Every debug probe is a named entry, and each carries its own
-# deny-by-default permissions. Test-reactor plan steps address a probe by that
-# name. The MCP tools drive one probe: with exactly one entry it is bound
-# automatically, and with several they refuse rather than pick a board, so
-# multi-board work runs through `agentic-hil test-reactor`.
-debuggers:
-  dut:
-    type: "openocd"
-    executable: null
-    probe_id: null
-    target_type: null
-    interface_cfg: "interface/stlink.cfg"
-    target_cfg: "target/stm32f4x.cfg"
-    timeout_s: 60
-    permissions:
-      allow_probe: false
-      allow_flash: false
-      allow_reset: false
-      allow_raw_debugger_commands: false
-      allow_mass_erase: false
-
-debug:
-  gdb_executable: null
-  allowed_symbols: []
-  allow_all_symbols: false
-  max_dump_size_bytes: 1048576
-
-artifacts:
-  allowed_roots:
-    - "build"
-  upload_directory: ".agentic-hil/artifacts"
-  allowed_extensions:
-    - ".elf"
-    - ".hex"
-    - ".bin"
-  max_upload_size_mb: 64
-  allow_upload: false
-
-com_ports: {}
-
-can_buses: {}
-
-validation:
-  require_existing_file: true
-  require_allowed_root: true
-  require_allowed_extension: true
-  compute_sha256: true
-  inspect_known_formats: true
-
-reports:
-  directory: ".agentic-hil/reports"
-
-logs:
-  directory: ".agentic-hil/logs"
-
-# How far this bench lets the owning process clear its own hardware
-# quarantines. "off" always defers to the operator. "readonly" may reap
-# leftover debugger processes and re-read the probe, which touches nothing
-# physical. "reset_halt" may additionally drive a reset-into-halt, which is
-# what settles an unconfirmed flash or reset without a person — set
-# "readonly" instead if anything on this bench reacts to a target reset.
-recovery:
-  auto_recover: "reset_halt"
-  max_attempts: 3
-"""
 
 SKILL_NAME = "agentic-hil"
 # Earlier releases installed the same skill under these names. Leaving one in
@@ -194,8 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="write a deny-by-default authoritative config for the current workspace")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's deny-by-default authoritative config and verify it with doctor")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
 
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
@@ -217,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     reactor_parser = subparsers.add_parser("test-reactor", help="run a validated hardware test sequence")
     reactor_parser.add_argument("--test-config", default=DEFAULT_TEST_CONFIG_PATH)
+    reactor_parser.add_argument(
+        "--wait-s",
+        type=float,
+        default=0.0,
+        help="wait up to this many seconds for a device another run holds, instead of refusing immediately; bounded and never implicit",
+    )
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
@@ -241,7 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
-    setup_parser = subparsers.add_parser("setup", help="one-shot project setup: config + agent skill + user-level MCP registration + doctor")
+    agent_install_parser = subparsers.add_parser("agent-install", help="user half, once per user and agent: install the agent skill and register the MCP server at user level; needs no workspace and no config")
+    agent_install_parser.add_argument("--agent", default="claude-code")
+    agent_install_parser.add_argument("--force", action="store_true")
+
+    setup_parser = subparsers.add_parser("setup", help="first run in one command: agent-install (user half) then init (project half)")
     setup_parser.add_argument("--agent", default="claude-code")
     setup_parser.add_argument("--force", action="store_true")
 
@@ -253,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "init":
-        return init_config(args.config, args.force)
+        return init_project(args.config, args.agent, args.force)
     if args.command == "doctor":
         return doctor(args.config)
     if args.command == "debugger-probes":
@@ -261,12 +205,12 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
-        return run_stdio_server(load_cli_authoritative_config(args.config))
+        return run_mcp_stdio(args.config)
     if args.command == "com-stdio":
         config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
-        return run_test_reactor(args.test_config)
+        return run_test_reactor(args.test_config, wait_s=args.wait_s)
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -279,6 +223,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
         return install_skill(args.agent, args.target, args.force)
+    if args.command == "agent-install":
+        return install_agent(args.agent, args.force)
     if args.command == "setup":
         return setup_project(args.agent, args.force)
     if args.command == "upgrade":
@@ -415,16 +361,12 @@ def _external_user_path(path: Path, label: str) -> Path:
     return absolute
 
 
-def _setup_mutation_paths(agent: SkillAgent, config_path: Path) -> list[Path]:
-    skill_path = _external_user_path(Path(agent.default_target_path), "Default agent skill")
-    paths = [config_path, skill_path, _agent_mcp_config_path(agent.id)]
-    permission_path = _agent_permission_config_path(agent.id)
-    if permission_path is not None:
-        paths.append(permission_path)
-    if agent.registration == "agents-md":
-        paths.append(Path(skill_install_root(str(skill_path))) / "AGENTS.md")
-    # opencode keeps its MCP entry and its permissions in one file. Locking a
-    # path twice deadlocks on its own sidecar, so each one appears once.
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    """One entry per real path.
+
+    opencode keeps its MCP entry and its permissions in one file. Locking a path
+    twice deadlocks on its own sidecar, so each one appears once.
+    """
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths:
@@ -433,6 +375,44 @@ def _setup_mutation_paths(agent: SkillAgent, config_path: Path) -> list[Path]:
             seen.add(identity)
             unique.append(path)
     return unique
+
+
+def _agent_skill_target(agent: SkillAgent) -> Path:
+    return _external_user_path(Path(agent.default_target_path), "Default agent skill")
+
+
+def _user_mutation_paths(agent: SkillAgent) -> list[Path]:
+    """Everything the user-wide half may write.
+
+    The agent's skill, its user-level MCP registration, and — for an agents-md
+    agent — the file that registers the skill. No project path appears here, so
+    a project step that fails can never roll one of these back.
+    """
+    skill_path = _agent_skill_target(agent)
+    paths = [skill_path, _agent_mcp_config_path(agent.id)]
+    if agent.registration == "agents-md":
+        paths.append(Path(skill_install_root(str(skill_path))) / "AGENTS.md")
+    return _unique_paths(paths)
+
+
+def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list[Path]:
+    """Everything the project half may write.
+
+    This workspace's authoritative config, and the agent's own write-permission
+    rules — which name this project's config directory and state root, so they
+    are project content even though the file is user-level.
+
+    For opencode that permission file is also the file the user-wide half
+    registered the MCP server in. Snapshots are taken when this half starts,
+    after the user-wide half has finished, so restoring it restores the
+    registration rather than removing it.
+    """
+    paths = [config_path]
+    if agent is not None:
+        permission_path = _agent_permission_config_path(agent.id)
+        if permission_path is not None:
+            paths.append(permission_path)
+    return _unique_paths(paths)
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -476,17 +456,12 @@ def _skipped_setup_step(summary: str) -> JsonObject:
     return {"ok": False, "skipped": True, "summary": summary}
 
 
-def _smooth_setup_permissions(config_path: Path, mutation_paths: list[Path]) -> list[str]:
+def _smooth_permissions(targets: list[Path]) -> list[str]:
     """Silently tighten the current user's own group/other-writable directories
-    (state, authoritative config, per-agent MCP config, and the MCP launcher
-    chains) so the fail-closed trust validators accept a umask-002 / private-group
-    home without the operator hand-fixing permissions. Only user-owned components
-    are ever changed. POSIX only; on Windows this is a no-op."""
-    targets: list[Path] = [user_state_root(), config_path, *mutation_paths]
-    for candidate in _mcp_command_candidates():
-        targets.append(Path(candidate))
-        with suppress(OSError):
-            targets.append(Path(os.path.realpath(candidate)))
+    along these chains so the fail-closed trust validators accept a umask-002 /
+    private-group home without the operator hand-fixing permissions. Only
+    user-owned components are ever changed. POSIX only; on Windows this is a
+    no-op."""
     actions: list[str] = []
     seen: set[str] = set()
     for target in targets:
@@ -498,54 +473,150 @@ def _smooth_setup_permissions(config_path: Path, mutation_paths: list[Path]) -> 
     return actions
 
 
-def setup_project(agent: str, force: bool = False) -> JsonObject:
-    """Set up one project transactionally without replacing hardware policy."""
-    workspace = Path.cwd().resolve()
+def _smooth_user_permissions(mutation_paths: list[Path]) -> list[str]:
+    """Smooth only what the user-wide half needs: the agent skill, the
+    user-level MCP config, and the launcher chains the executable trust check
+    walks. It never touches the authoritative config or the state root, so a
+    profile that refuses those is not this half's problem."""
+    targets: list[Path] = [*mutation_paths]
+    for candidate in _mcp_command_candidates():
+        targets.append(Path(candidate))
+        with suppress(OSError):
+            targets.append(Path(os.path.realpath(candidate)))
+    return _smooth_permissions(targets)
+
+
+def _smooth_project_permissions(config_path: Path, mutation_paths: list[Path]) -> list[str]:
+    """Smooth only what the project half needs: the state root, this workspace's
+    authoritative config, and the agent's permission file."""
+    return _smooth_permissions([user_state_root(), config_path, *mutation_paths])
+
+
+def _unsupported_agent(agent: str, summary: str) -> JsonObject:
+    return {"ok": False, "error_type": "unsupported_agent", "summary": summary, "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
+
+
+def install_agent(agent: str, force: bool = False) -> JsonObject:
+    """Install what is user-wide, once per user and agent.
+
+    Everything here lands under the invoking user's home directory, so the scope
+    is per user, per machine: every process of this OS user on this host, and no
+    other OS user on it.
+
+    The agent's skill, its user-level MCP registration, and the check that there
+    is a persistent trusted executable to register. None of that is project
+    state, so this runs with no workspace and no readable authoritative config —
+    and it has to. On a stock Windows profile the configuration location fails
+    the ancestor trust check, and while both halves shared one transaction that
+    refusal took the skill and the MCP entry down with it, leaving the operator
+    with nothing rather than with a working agent.
+
+    Rollback covers these paths and no others.
+    """
     resolved_agent = resolve_skill_agent(agent)
     if resolved_agent is None:
-        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's setup paths.", "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
+        return _unsupported_agent(agent, "Agentic HIL does not know this agent's setup paths.")
 
-    config_path = initialized_config_path(workspace)
-    config_exists = _path_entry_exists(config_path)
-    mutation_paths = _setup_mutation_paths(resolved_agent, config_path)
+    mutation_paths = _user_mutation_paths(resolved_agent)
     # Smooth the common umask-002 friction before the fail-closed validators run,
     # tightening only the operator's own writable dirs.
-    permission_changes = _smooth_setup_permissions(config_path, mutation_paths)
-    state_actions = ensure_safe_state_root()
+    permission_changes = _smooth_user_permissions(mutation_paths)
     command = mcp_server_command()
-    config_result: JsonObject
     skill_result = _skipped_setup_step("Skill installation was not reached.")
     mcp_result = _skipped_setup_step("MCP registration was not reached.")
-    doctor_result = _skipped_setup_step("Doctor was not reached.")
-    permission_result = _skipped_setup_step("Agent write restriction was not reached.")
 
-    if config_exists:
-        mutation_paths.remove(config_path)
     with ExitStack() as locks:
         for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
             locks.enter_context(secure_user_file_lock(path))
         # Same as install_skill: rollback covers the superseded skill, the lock
         # does not, so removing it can take its empty directory too.
-        legacy_paths = legacy_skill_paths(_external_user_path(Path(resolved_agent.default_target_path), "Default agent skill"))
+        legacy_paths = legacy_skill_paths(_agent_skill_target(resolved_agent))
         snapshots = _capture_file_snapshots([*mutation_paths, *legacy_paths])
         try:
-            if config_exists:
-                config_result = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept; setup never replaces operator policy.", "path": str(config_path)}
+            skill_result = install_skill(agent, None, force, _locked=True)
+            if overall_success(skill_result):
+                mcp_result = register_agent_mcp(agent, force=force, command=command, _locked=True)
+        except BaseException as error:
+            rollback_errors = _restore_file_snapshots(snapshots)
+            if isinstance(error, ConfigError) and rollback_errors:
+                error.details["rollback_errors"] = rollback_errors
+            raise
+
+        ok = all(overall_success(result) for result in (skill_result, mcp_result))
+        rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
+        result: JsonObject = {
+            "ok": ok and not rollback_errors,
+            "tool": "agentic_hil_agent_install",
+            "scope": "user",
+            "summary": "Agentic HIL agent integration installed for this user account." if ok else "Agentic HIL agent installation failed; committed file changes were rolled back.",
+            "agent": agent,
+            "command": command,
+            "permission_changes": permission_changes,
+            "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
+            "steps": {"skill_install": skill_result, "mcp_config": mcp_result},
+            "next_step": "Bind a project to it with `agentic-hil init` from that project root. This half never has to run again for this user on this machine.",
+        }
+        if not result["ok"]:
+            surviving = _skill_rollback_did_not_own(snapshots, _agent_skill_target(resolved_agent))
+            if surviving is not None:
+                result["left_behind"] = surviving
+        return result
+
+
+def init_project(config_path: str | None = None, agent: str | None = None, force: bool = False) -> JsonObject:
+    """Set up one project: its authoritative config, verified by doctor.
+
+    Everything here is project state, so it reuses `init_config` rather than
+    repeating it, and its rollback covers this workspace's config plus the
+    agent's write-permission rules — never the user-wide skill or MCP
+    registration. Naming an agent is optional: without one the config is still
+    written and verified, and only the step that asks that agent to refuse its
+    own write tools is left out.
+    """
+    workspace = Path.cwd().resolve()
+    resolved_agent: SkillAgent | None = None
+    if agent is not None:
+        resolved_agent = resolve_skill_agent(agent)
+        if resolved_agent is None:
+            return _unsupported_agent(agent, "Agentic HIL does not know this agent's setup paths.")
+
+    target_path = initialized_config_path(workspace)
+    validate_legacy_config_selector(config_path, workspace, target_path)
+    config_exists = _path_entry_exists(target_path)
+    mutation_paths = _project_mutation_paths(resolved_agent, target_path)
+    permission_changes = _smooth_project_permissions(target_path, mutation_paths)
+    state_actions = ensure_safe_state_root()
+    config_result: JsonObject
+    doctor_result = _skipped_setup_step("Doctor was not reached.")
+    permission_result: JsonObject
+    if resolved_agent is None:
+        permission_result = {"ok": True, "skipped": True, "summary": "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."}
+    else:
+        permission_result = _skipped_setup_step("Agent write restriction was not reached.")
+
+    # An existing config that is being kept is not this run's to write, so it
+    # stays out of the rollback set: an operator's read-only policy file must
+    # neither be locked nor restored by a later step that fails.
+    keep_existing = config_exists and not force
+    if keep_existing:
+        mutation_paths.remove(target_path)
+    with ExitStack() as locks:
+        for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
+            locks.enter_context(secure_user_file_lock(path))
+        snapshots = _capture_file_snapshots(mutation_paths)
+        try:
+            if keep_existing:
+                config_result = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept; this never replaces operator policy.", "path": str(target_path)}
             else:
-                config_result = init_config(None, force=False, _locked=True)
+                config_result = init_config(config_path, force=force, _locked=True)
 
             if overall_success(config_result):
-                # Validate policy before mutating global agent files.
-                doctor_result = doctor(None)
-            if overall_success(config_result) and overall_success(doctor_result):
-                skill_result = install_skill(agent, None, force, _locked=True)
-            if all(overall_success(result) for result in (config_result, doctor_result, skill_result)):
-                mcp_result = register_agent_mcp(agent, force=force, command=command, _locked=True)
-            if all(overall_success(result) for result in (config_result, doctor_result, skill_result, mcp_result)):
-                # Last, because it forbids writing the very files the steps
-                # above had to create.
+                doctor_result = doctor(config_path)
+            if resolved_agent is not None and all(overall_success(result) for result in (config_result, doctor_result)):
+                # Last, because it forbids writing the very file the steps above
+                # had to create.
                 permission_result = restrict_agent_write_access(
-                    resolved_agent.id, config_path, Path(load_config(str(config_path)).state_root)
+                    resolved_agent.id, target_path, Path(load_config(str(target_path)).state_root)
                 )
         except BaseException as error:
             rollback_errors = _restore_file_snapshots(snapshots)
@@ -553,38 +624,130 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
                 error.details["rollback_errors"] = rollback_errors
             raise
 
-        ok = all(overall_success(result) for result in (config_result, skill_result, mcp_result, doctor_result, permission_result))
+        ok = all(overall_success(result) for result in (config_result, doctor_result, permission_result))
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
-        result = {
+        return {
             "ok": ok and not rollback_errors,
-            "tool": "agentic_hil_setup",
-            "summary": "Agentic HIL project set up." if ok else "Agentic HIL setup failed; committed file changes were rolled back.",
+            "tool": "agentic_hil_init",
+            "scope": "project",
+            "summary": "Agentic HIL project configured." if ok else "Agentic HIL project setup failed; its own committed file changes were rolled back.",
             "agent": agent,
+            "config_path": str(target_path),
             "state_root_changes": state_actions,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
             "steps": {
                 "config": config_result,
-                "skill_install": skill_result,
-                "mcp_config": mcp_result,
                 "doctor": doctor_result,
                 "agent_write_restriction": permission_result,
             },
         }
-        if not result["ok"]:
-            skill_target = _external_user_path(Path(resolved_agent.default_target_path), "Default agent skill")
-            surviving = _skill_rollback_did_not_own(snapshots, skill_target)
-            if surviving is not None:
-                result["left_behind"] = surviving
-        return result
+
+
+def _unreached_project_scope(summary: str) -> JsonObject:
+    return {
+        "ok": False,
+        "skipped": True,
+        "tool": "agentic_hil_init",
+        "scope": "project",
+        "summary": summary,
+        "state_root_changes": [],
+        "permission_changes": [],
+        "rollback": {"attempted": False, "ok": True, "errors": []},
+        "steps": {
+            "config": _skipped_setup_step("Authoritative config was not reached."),
+            "doctor": _skipped_setup_step("Doctor was not reached."),
+            "agent_write_restriction": _skipped_setup_step("Agent write restriction was not reached."),
+        },
+    }
+
+
+def _refused_project_scope(error: ConfigError) -> JsonObject:
+    """Report a project half that was refused before it changed anything.
+
+    Raising here would leave the operator reading a configuration refusal with
+    no word about the user-wide half that just succeeded — which is the whole
+    thing they get to keep on a profile that refuses the configuration location.
+    """
+    refusal = error.to_dict()
+    scope = _unreached_project_scope(str(refusal.get("summary") or "The project half was refused."))
+    scope["steps"]["config"] = refusal
+    return scope
+
+
+def setup_project(agent: str, force: bool = False) -> JsonObject:
+    """First run in one command: the user-wide half, then the project half.
+
+    A composition of two independently runnable commands, not one transaction
+    across both. Each half owns its rollback set, so a project step that fails
+    leaves the installed skill and the MCP registration standing — which is the
+    point where the configuration location is refused and the user-wide half
+    has nothing to do with it. The second project for this user needs
+    `agentic-hil init` alone.
+
+    `--force` reaches the user-wide half only. It repairs a managed skill or
+    MCP entry; it never rewrites an authoritative config, which is operator
+    policy and only `agentic-hil init --force` touches.
+    """
+    user_result = install_agent(agent, force)
+    if "steps" not in user_result:
+        return user_result
+    if overall_success(user_result):
+        try:
+            project_result = init_project(agent=agent)
+        except ConfigError as error:
+            project_result = _refused_project_scope(error)
+    else:
+        project_result = _unreached_project_scope("Project setup was not reached; the user-wide half did not complete, and nothing project-local was changed.")
+
+    user_ok = overall_success(user_result)
+    ok = user_ok and overall_success(project_result)
+    if ok:
+        summary = "Agentic HIL project set up."
+    elif user_ok:
+        summary = "Agentic HIL is installed for this agent under this user account; the project half failed and only its own file changes were rolled back."
+    else:
+        summary = "Agentic HIL user-wide agent installation failed and was rolled back; nothing project-local was changed."
+    rollback_errors = [*user_result["rollback"]["errors"], *project_result["rollback"]["errors"]]
+    result: JsonObject = {
+        "ok": ok,
+        "tool": "agentic_hil_setup",
+        "summary": summary,
+        "agent": agent,
+        "state_root_changes": project_result["state_root_changes"],
+        "permission_changes": [*user_result["permission_changes"], *project_result["permission_changes"]],
+        "rollback": {
+            "attempted": user_result["rollback"]["attempted"] or project_result["rollback"]["attempted"],
+            "ok": not rollback_errors,
+            "errors": rollback_errors,
+        },
+        "scopes": {"user": user_result, "project": project_result},
+        "steps": {
+            "config": project_result["steps"]["config"],
+            "skill_install": user_result["steps"]["skill_install"],
+            "mcp_config": user_result["steps"]["mcp_config"],
+            "doctor": project_result["steps"]["doctor"],
+            "agent_write_restriction": project_result["steps"]["agent_write_restriction"],
+        },
+    }
+    if user_ok and not ok:
+        result["next_step"] = (
+            "The agent is installed for this user and stays installed; only the project half was rolled back. "
+            "Fix what its `config` or `doctor` step reports, then run "
+            f"`agentic-hil init --agent {agent}` from this project root. "
+            "`agentic-hil agent-install` does not have to run again."
+        )
+    if "left_behind" in user_result:
+        result["left_behind"] = user_result["left_behind"]
+    return result
 
 
 def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Path) -> JsonObject | None:
-    """Name a skill a failed setup restored rather than removed.
+    """Name a skill a failed installation restored rather than removed.
 
-    Rollback puts every file back the way setup found it, so a skill an earlier
-    `skill-install` had already written survives on purpose: setup only takes
-    back what setup wrote. That leaves the operator with a skill that routes
+    Rollback puts every file back the way this half found it, so a skill an
+    earlier `skill-install` had already written survives on purpose: it only
+    takes back what it wrote. That leaves the operator with a skill that routes
     hardware work to tools no longer registered, which is inert but easy to
     miss, so the refusal says so instead of leaving it to be discovered.
     """
@@ -668,23 +831,42 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
 
 
 def initialized_config_path(workspace: Path) -> Path:
-    configured = os.environ.get(CONFIG_ENV)
-    if configured:
-        requested = Path(configured).expanduser()
-        if not requested.is_absolute():
-            raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
-        target = absolute_without_symlinks(requested)
-    else:
-        target = project_config_path(workspace)
-    if is_path_within_frozen(target, workspace):
-        raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
-    return target
+    """Where `init` writes. The same rule the agent provisioning path follows, so
+    the two cannot disagree about which file is authoritative."""
+    return authoritative_config_target(workspace)
 
 
-def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
+def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
     service = AgenticHILToolService(config, frontend="reactor")
+    # The plan's devices are held from before its first step to after its last,
+    # not around each call: between two steps there would otherwise be no lock at
+    # all, and an observation from outside could reach the board exactly where
+    # the plan assumes nothing moved. The same declaration fixes what this run
+    # may touch, so a step reaching past the plan is refused rather than
+    # silently widening what the plan says it does.
+    plan = plan_devices(config, test_config)
+    devices = plan.lock_keys
+    if devices:
+        try:
+            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s)
+        except CoordinationError as error:
+            service.close()
+            return write_report(
+                config,
+                {
+                    "tool": "test_reactor",
+                    "name": test_config.name,
+                    "test_config_path": test_config.path,
+                    "steps": [],
+                    "cleanup": [],
+                    "cleanup_ok": True,
+                    "declared_devices": devices,
+                    **error.result,
+                    "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
+                },
+            )
     # A step naming another probe gets its own service driving that debugger,
     # sharing the base coordinator so the whole project stays one owner.
     def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
@@ -771,10 +953,10 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
     next_steps = [
-        f"Review the deny-by-default config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
+        f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Grant only the permissions the board needs under debuggers.<name>.permissions; every flag is deny-by-default.",
+        "Reading needs nothing granted: probing, serial reads and CAN reads work as written. Grant only what writes or changes state under debuggers.<name>.permissions; those flags stay deny-by-default.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
@@ -1185,17 +1367,23 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
-    # Check every probe the operator granted, not only a bound one. Reporting a
-    # green doctor because nothing was bound would hide an unplugged board, a
-    # wrong probe_id, or a broken toolchain on exactly the multi-board bench
-    # that most needs the check.
-    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if entry.permissions.allow_probe}
+    # Check every probe whose toolchain this configuration required to resolve,
+    # not only a bound one. Reporting a green doctor because nothing was bound
+    # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
+    # exactly the multi-board bench that most needs the check.
+    #
+    # Reading needs no permission any more, so "may be probed" no longer says
+    # anything about what this bench is meant to drive; a config that granted
+    # nothing would otherwise demand a debugger toolchain from every operator
+    # the moment `init` wrote it. What the config did pin is the honest signal,
+    # and it is the same set config load already insisted on resolving.
+    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger grants allow_probe.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
     }
     all_ok = all(result.get("ok") is True for result in checks.values())
     if not checked:
@@ -1304,7 +1492,7 @@ def debugger_probes() -> JsonObject:
         # MCP surface does for the same config, so the two do not send an
         # operator hunting for a flag that has no entry to live on.
         return unbound_debugger_error("debugger_probes_list", config)
-    granted = [name for name, entry in config.debuggers.items() if entry.permissions.allow_probe]
+    granted = [name for name, entry in config.debuggers.items() if config.probe_allowed(entry)]
     if not granted:
         return {
             "ok": False,
@@ -1353,6 +1541,27 @@ def load_cli_authoritative_config(config_path: str | None = None) -> AgenticHILC
     expected_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(workspace)).expanduser().resolve()
     validate_legacy_config_selector(config_path, workspace, expected_path)
     return load_authoritative_config(workspace)
+
+
+def run_mcp_stdio(config_path: str | None = None) -> int:
+    """Serve MCP for the current workspace, configured or not.
+
+    A missing configuration used to end the server before it started, which left
+    an agent with `config_file_not_found` and no way forward that did not involve
+    a person at a terminal. It now starts bound to the workspace instead, with
+    every tool refusing except the one that generates a configuration once.
+
+    Only an absent file takes that route. A configuration that exists and does
+    not load — invalid, or in a location the trust check rejects — is still a
+    hard stop: reading "broken" as "absent" would let a damaged file be replaced
+    by a generated one, silently discarding the policy an operator wrote."""
+    try:
+        config = load_cli_authoritative_config(config_path)
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        return run_stdio_server(None, tools=UnprovisionedToolService(Path.cwd().resolve()))
+    return run_stdio_server(config)
 
 
 def validate_legacy_config_selector(config_path: str | None, workspace: Path, expected_path: Path) -> None:

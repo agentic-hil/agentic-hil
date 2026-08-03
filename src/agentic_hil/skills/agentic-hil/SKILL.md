@@ -26,6 +26,13 @@ serial, or CAN invocation bypasses that gate.
 | CAN frames | `can_buses_list`, `can_read`, `can_send`, `can_session_start`, `can_session_stop` |
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
+| A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
+
+Declare a multi-step sequence before its first call: `bench_run_start` with
+`devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds
+those devices until `bench_run_stop`. Without it each call holds its device only
+for its own duration, and between flash and read the board is free for anything
+else on the machine. Inside a run only the declared devices may be touched.
 
 Do not substitute `openocd`, `pyocd`, `st-flash`, `st-util`, `JLinkExe`, `gdb`,
 `screen`, `minicom`, `picocom`, `cansend`, or `candump` for these tools, and do
@@ -41,7 +48,11 @@ tool that matches the question — `probe_target`, `debugger_probes_list`,
 `com_ports_list`, `get_last_report` — and report what it returns.
 
 A refusal is an answer, and it is not the end of the job. When the authoritative
-configuration denies an action the tool returns `permission_denied`. Do not stop
+configuration denies an action the tool returns `permission_denied`. Reading a
+device needs no permission, so a refusal is about writing or changing state.
+A busy-device refusal is different again: the board is held by another run for
+its whole duration, and the result names who has it. Wait for that run or ask
+its owner; the hold is not something to clear. Do not stop
 there: finish through the gate. `get_last_report` and `classify_last_error` say
 what the attempt recorded and why it failed, and `debugger_info` or
 `probe_target` say whether the hardware would have been reachable at all.
@@ -59,9 +70,18 @@ when they start, so when the server is missing — typically in the session that
 just installed it — say so and ask the user to restart the agent rather than
 answering the hardware question another way.
 
-The CLI installs, configures, and diagnoses: `agentic-hil init`, `agentic-hil
-setup`, and `agentic-hil doctor` report what is configured and whether hardware
-access is permitted. None of them is a hardware call.
+The CLI installs, configures, and diagnoses: `agentic-hil agent-install`,
+`agentic-hil init`, `agentic-hil setup`, and `agentic-hil doctor` report what is
+configured and whether hardware access is permitted. None of them is a hardware
+call.
+
+Installation and project binding are separate commands with separate scopes.
+`agent-install` installs this skill and the user-level MCP registration once per
+user and agent — per user, per machine, so no other OS user on the host sees
+either — and needs no project. `init` writes and verifies one project's
+authoritative configuration. `setup` runs both. A later project for the same
+user needs `init` alone, and a failing project step never removes the user-wide
+installation.
 
 ## Configuration and regression runs
 
@@ -70,6 +90,17 @@ resources, permissions, and limits. It lives under the current user's Agentic
 HIL projects directory, never inside the repository; `AGENTIC_HIL_CONFIG` may
 give an explicit absolute-path override. `agentic-hil init` creates it and
 prints its path; ask the operator to review any permission change.
+
+When a project has none, every tool answers `config_file_not_found` and
+`project_config_create` is the way out. It takes no arguments and generates the
+file from the hardware attached to this machine, with every permission `false` —
+including the one that would let it write the file again, so it succeeds once
+and then refuses itself. That refusal lives in the configuration, so what holds
+is what the operator reads there. Report where the file is and that an agent
+generated it, and ask the operator for anything the task needs beyond reading
+the bench. Never edit the file to grant yourself a permission, and never delete
+or move a configuration to get a different one: regenerating only produces the
+same restrictive file and throws the operator's settings away.
 
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
