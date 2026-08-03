@@ -47,6 +47,13 @@ Rules that hold whichever line you use:
 - **`uvx` and `pipx run` are not installations.** They leave nothing to register as a long-lived server command.
 - **Missing `pip`, `uv` or `pipx` is not a reason to install one system-wide.** No `ensurepip`, no `get-pip`, no `apt install python3-pip`, no package manager at all — the `uv` line above needs none of them and is the answer to a machine that has nothing.
 
+Two Linux failures look like a broken machine and are not. Recognise them by what the terminal printed:
+
+- **`error: externally-managed-environment`** — the pip line refusing under PEP 668, which Debian and Ubuntu ship. `--user` does not get around it. Three of the four remedies the message itself proposes are ruled out above — an `apt` package, a virtual environment, `--break-system-packages` — and the fourth is `pipx`, already the fourth line here. Go to the next line; `uv` above it needs nothing preinstalled either.
+- **`invalid peer certificate: UnknownIssuer`** from `uv`, or `self-signed certificate in certificate chain` — a TLS-intercepting proxy: the machine trusts its CA, uv's bundled roots do not. Rerun *the same* line with `--system-certs`, which makes uv read the operating system's trust store: `uv tool install --system-certs --upgrade agentic-hil`. Older uv releases spell it `--native-tls`. This is the one failure to retry rather than move past.
+
+`--system-certs` belongs against a certificate error and nowhere else. It changes nothing for `Could not connect, are you offline?` with no certificate cause under it, for a proxy demanding authentication, or for a timeout, and it buries the real one. The check is that `curl` and `apt` reach the network from the same shell while `uv` alone fails — they read the system trust store, uv does not until told to. If `--system-certs` still reports `UnknownIssuer`, that store does not have the proxy's CA either; installing it there is the operator's job, and never `--allow-insecure-host` or anything else that switches verification off.
+
 If every line fails, stop and report which one failed and what it printed. An honest report of a blocked prerequisite beats an installation nobody can reach.
 
 Then confirm, opening a new shell if asked:
@@ -59,6 +66,10 @@ agentic-hil setup --help
 Not on `PATH`? `uv tool update-shell` or `pipx ensurepath`, then a new shell — never admin rights.
 
 ## Set up the project
+
+Expect the host to stop you here. `setup` writes the agent's own skill file and its user-level MCP registration, and a permission classifier is built to catch exactly that — rightly, because a program that can edit an agent's configuration can change what the agent may do. Say so before you run it and ask the operator for the grant, instead of letting them find out from a refusal: either an approval of the prompt when it appears, or a standing rule for the command prefix — in Claude Code, `Bash(agentic-hil setup:*)` in user or project settings; other hosts take the same prefix in whatever allowlist they keep. The same applies to `agent-install`, the half that does the writing.
+
+This is the host's permission system, not Agentic HIL's: it produces no `permission_denied` result, no report and no log, and it refuses before the command runs. That refusal stands until the operator lifts it. Do not reach for another shell, another user, or a flag that skips permission checks, and do not write the rule into the host's settings yourself — that file is what the rule protects.
 
 From the firmware project root:
 

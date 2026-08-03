@@ -23,6 +23,12 @@ Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil
 
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand.
 
+Your agent's host will ask you to approve `agentic-hil setup`, because it writes
+the agent's own skill file and MCP registration. That prompt is expected:
+approve it once, or add a standing rule for the command prefix
+(`Bash(agentic-hil setup:*)` in Claude Code). Nothing asks when you install by
+hand in your own terminal.
+
 ### Installing it yourself
 
 Two commands: install the package user-locally, then set up the project from its
