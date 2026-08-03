@@ -26,9 +26,9 @@ from agentic_hil.config import (
     provisionable_state_root,
     user_state_root,
 )
+from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.contracts import MCP_TOOL_NAMES, TOOL_SCHEMAS
 from agentic_hil.mcp import handle_mcp_message
-from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file

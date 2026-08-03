@@ -30,6 +30,7 @@ path parser is a boundary defended only as well as the parser is right.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from agentic_hil.config import (
+    CONFIG_ENV,
     GENERATED_WRITE_PERMISSIONS,
     ConfigError,
     UniqueKeyLoader,
@@ -143,6 +145,27 @@ def deny_all_permissions(section: str) -> JsonObject:
 
 # ---------------------------------------------------------------------------
 # The document on disk.
+
+
+def _authoritative_path(workspace: Path, existing: AgenticHILConfig) -> Path:
+    """The file this call may touch, or a refusal.
+
+    Two rules have to agree: this workspace's authoritative location, and the
+    file this server actually loaded its policy from. If they differ, the server
+    is serving a configuration that is not the one in force here — and writing
+    either of them would be wrong. Changing the authoritative file would move a
+    policy this server is not running under; changing the loaded one would move a
+    file nothing reads. "Validate before replacing" is worth nothing if the thing
+    replaced is the wrong file, so this refuses instead of choosing."""
+    target = authoritative_config_target(workspace)
+    if os.path.normcase(str(target)) != os.path.normcase(str(Path(existing.config_path))):
+        raise ConfigError(
+            "config_invalid",
+            "This server loaded its configuration from a file that is not this workspace's authoritative one, so a "
+            "change here would move a file that is not in force. Nothing was written.",
+            {"path": existing.config_path, "authoritative_path": str(target), "workspace_root": str(workspace), "environment_variable": CONFIG_ENV},
+        )
+    return target
 
 
 def _load_document(target_path: Path) -> tuple[str, JsonObject]:
@@ -276,7 +299,7 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
     if isinstance(requested, dict):
         return requested
 
-    target_path = authoritative_config_target(workspace)
+    target_path = _authoritative_path(workspace, existing)
     with secure_user_file_lock(target_path):
         previous_text, document = _load_document(target_path)
         rights = granted_rights(existing, document)
@@ -540,7 +563,7 @@ def project_config_describe(workspace: Path, existing: AgenticHILConfig | None, 
 def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None, *, open_holds: JsonObject | None) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to describe.", {"workspace_root": str(workspace)})
-    target_path = authoritative_config_target(workspace)
+    target_path = _authoritative_path(workspace, existing)
     _, document = _load_document(target_path)
     rights = granted_rights(existing, document)
 
