@@ -32,7 +32,7 @@ links to relevant docs
 
 ## Distribution Channels
 
-PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`) — no long-lived PyPI API tokens. Before publishing, the workflow validates the release tag and the synchronized package, registry, marketplace, plugin, changelog, and bundled-skill contracts. It then builds sdist and wheel and validates them with twine.
+PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`) — no long-lived PyPI API tokens. The synchronized package, registry, marketplace, plugin, changelog, install-eval, troubleshooting, and bundled-skill contracts are already settled before the merge by `tools/check_version_consistency.py` in CI; the release job runs the same module again with `--release-tag`, which is the one comparison a pull request cannot make. It then builds sdist and wheel and validates them with twine.
 
 After PyPI accepts a release, the same workflow verifies the package's `mcp-name` ownership marker and publishes `server.json` to the preview MCP Registry through GitHub Actions OIDC. No MCP Registry secret is stored. The release tag, Python package version, top-level server version, and package version in `server.json` must match exactly. The registry is an additional discovery channel; the documented local CLI and MCP configuration path remains authoritative and host-independent.
 
@@ -47,17 +47,54 @@ Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge — ad
 Before creating a release:
 
 ```text
-1. Update `pyproject.toml`, `src/agentic_hil/__init__.py`, `server.json`, `CHANGELOG.md`, `.claude-plugin/marketplace.json`, the Claude plugin manifest, and both packaged/plugin skill versions together.
-2. Run ruff check src tests examples and pytest.
+1. Bump the version in every position `python tools/check_version_consistency.py --list` prints, then run `python tools/check_version_consistency.py` until it is silent.
+2. Run ruff check src tests evals tools and pytest.
 3. Run python -m build (or uv build) and inspect the packaged files.
-4. Merge to master and let the CI matrix pass.
+4. Open a pull request and let Required CI pass; the same check runs there, so a forgotten position is red before a release exists.
 5. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
-6. Let the publish workflow validate every local release contract before it builds, checks, and publishes to PyPI.
+6. Let the publish workflow re-run the same check with the release tag before it builds, checks, and publishes to PyPI.
 7. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
 8. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
 9. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
 10. Start from GitHub auto-generated release notes, then edit for clarity.
 ```
+
+## What the Release Gate Checks, and When
+
+Step 1 deliberately names no files. An enumeration kept by hand in this document
+drifted: it listed seven positions while the release carried a version in twelve
+files, and the two install-eval matrices it omitted sat at a stale version for
+two releases, aborting every run before it started. The list now lives in
+`tools/check_version_consistency.py`, which is the check that enforces it, so
+this document cannot fall behind it. `--list` prints every position and what
+carries the version there; a file that starts carrying the version and is named
+in neither the check nor its declared exceptions is itself an error.
+
+That check is the single enforcement point for version agreement. It reads files
+and compares strings — no secret, no OIDC, no tag — so it runs pre-merge as the
+`Release metadata consistency` job of `.github/workflows/ci.yml`, on every push
+and every pull request, with no `paths:` filter: the failure it exists to catch
+is a change that *forgets* a file, and a paths filter keys on the files a pull
+request touched. `Required CI` depends on it, so a version that does not agree
+with itself cannot reach `master`.
+
+Three things still cannot be established before the merge, and no rearrangement
+of the workflow changes that:
+
+```text
+release tag vs pyproject.toml   the tag does not exist until the release is created;
+                                checked at release with --release-tag, and again by
+                                publish-mcp-registry before it publishes server.json
+PyPI mcp-name ownership marker  needs the artifact PyPI has accepted
+MCP Registry acceptance         needs the published PyPI release to verify against
+```
+
+Everything else the release job used to discover for the first time at
+`release: published` — every position `--list` prints, the three JSON manifests
+byte for byte against their contracts, and the sweep that refuses a file
+carrying the version that no check covers — is now settled before the merge.
+That matters because publishing is the point of no return: a PyPI version
+cannot be re-uploaded.
 
 ## Repository Protection
 
