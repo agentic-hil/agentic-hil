@@ -124,7 +124,10 @@ agentic-hil --version
 The version check must report exactly `0.7.0`. If `uv` is unavailable or a
 different `agentic-hil` resolves on `PATH`, stop and ask the operator to
 establish the trusted user-local prerequisite; do not substitute `uvx`, a
-workspace virtual environment, or an unversioned package. Then, from the
+workspace virtual environment, or an unversioned package. `invalid peer
+certificate: UnknownIssuer` is not `uv` being unavailable: it is a
+TLS-intercepting proxy, and the same command with `--system-certs` reads the
+operating system's trust store instead of uv's bundled roots. Then, from the
 firmware project directory:
 
 ```bash
@@ -136,3 +139,12 @@ the verified absolute persistent console-script path, and creates the
 deny-by-default project configuration. The first two are available alone as
 `agentic-hil agent-install --agent claude` (user scope), the last as
 `agentic-hil init` (project scope).
+
+Writing the agent's own skill directory and MCP registration is what a host's
+permission system is built to stop, so expect it to ask before `setup` runs.
+Say so before you call it and let the operator approve the prompt or add a
+standing rule for the command prefix — `Bash(agentic-hil setup:*)`. That
+refusal is the host's, not Agentic HIL's: it carries no `permission_denied`
+result and no report, and it stands until the operator lifts it. Never route
+around it with another shell or a permission-skipping flag, and never write the
+rule into the host's settings yourself.
