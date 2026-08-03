@@ -22,7 +22,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.contracts import validate_tool_arguments
-from agentic_hil.coordination import com_resource, debugger_resource
+from agentic_hil.devices import Device, DeviceSet, debugger_device, uart_device
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
@@ -731,24 +731,33 @@ def step_debugger_id(config: AgenticHILConfig, step: TestStep) -> str | None:
     return next(iter(config.debuggers)) if len(config.debuggers) == 1 else None
 
 
-def declared_devices(config: AgenticHILConfig, test_config: TestConfig) -> list[str]:
-    """Every physical device this plan says it touches.
+def plan_devices(config: AgenticHILConfig, test_config: TestConfig) -> DeviceSet:
+    """Every device this plan says it touches, in acquisition order.
 
     This is what the run locks before its first step, and what every call inside
     it is checked against, so the plan stays the honest record of what a test
     reaches for. A name the config does not know is left out on purpose:
     preflight refuses that step with a message about the name, which is a better
-    answer than a lock failure about a device nobody configured."""
-    devices: list[str] = []
+    answer than a lock failure about a device nobody configured.
+
+    Two steps naming one physical unit — a probe and its virtual COM port under
+    one resource_id, the same port under two config entries — yield one device,
+    because DeviceSet keys on the hardware and not on what the plan called it."""
+    devices: list[Device] = []
     for step in test_config.steps:
         if step.action in UART_ACTIONS:
             if step.port_id in config.com_ports:
-                devices.append(com_resource(config, str(step.port_id)))
+                devices.append(uart_device(config, str(step.port_id)))
             continue
         debugger_id = step_debugger_id(config, step)
         if debugger_id in config.debuggers:
-            devices.append(debugger_resource(bind_debugger(config, str(debugger_id))))
-    return sorted(set(devices))
+            devices.append(debugger_device(bind_debugger(config, str(debugger_id)), str(debugger_id)))
+    return DeviceSet.of(devices)
+
+
+def declared_devices(config: AgenticHILConfig, test_config: TestConfig) -> list[str]:
+    """The lock keys of `plan_devices`, which is what the mutex takes."""
+    return plan_devices(config, test_config).lock_keys
 
 
 def step_tool_arguments(step: TestStep) -> list[tuple[str, JsonObject]]:

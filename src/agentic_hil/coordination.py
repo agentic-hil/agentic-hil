@@ -316,7 +316,17 @@ class HardwareCoordinator:
             self.bench.owner = replace(self.bench.owner, label=None)
             if declared:
                 self.bench.release(declared)
-            return {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active, "summary": f"{len(declared)} device(s) were released."}
+            # A lease still open — a COM or CAN session the run left running —
+            # keeps its own hold on the device, so ending the run here does not
+            # pull a board out from under a live session. Say so rather than
+            # letting the caller infer a release that did not happen.
+            open_leases = sorted(lease.lease_id for lease in self.leases.values())
+            result: JsonObject = {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active, "summary": f"{len(declared)} device(s) were released."}
+            if open_leases:
+                result["open_leases"] = open_leases
+                result["still_held_devices"] = sorted(self.bench.held_resources())
+                result["summary"] = f"The run ended, but {len(open_leases)} lease(s) are still open and keep their devices held; stop those sessions to free them."
+            return result
 
     def run_status(self) -> JsonObject:
         """What this owner is holding for a run right now.
