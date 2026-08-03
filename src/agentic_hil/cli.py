@@ -1111,7 +1111,7 @@ def _posix_filesystem_path(path: PurePath) -> str:
 def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[str]:
     """What earlier releases wrote here and this one has to take back.
 
-    Up to 0.7.0 both rules were built straight from the absolute path: a
+    Earlier releases built both rules straight from the absolute path: a
     `Write(...)` that Claude Code never consults, and an `Edit(...)` whose single
     leading slash anchored it under `~/.claude` instead of at the filesystem root.
     The first is loud — a yellow warning at every start (hardci-hq#81) — and the
