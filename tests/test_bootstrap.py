@@ -152,6 +152,20 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     assert "allow_read" not in written["com_ports"]["dut_uart"]["permissions"]
 
 
+def test_a_generated_configuration_permits_the_whole_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The new default reaches an operator through generation, not through a
+    # changed reading of a file that already exists. A project set up today
+    # flashes out of cmake-build-debug without curating a list first.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    written = yaml.safe_load(Path(init_config()["path"]).read_text(encoding="utf-8"))
+
+    assert written["artifacts"]["allowed_roots"] == ["."]
+    assert yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)["artifacts"]["allowed_roots"] == ["."]
+
+
 def test_cube_clt_programmer_paths_find_versioned_install(tmp_path: Path) -> None:
     executable = tmp_path / "STM32CubeCLT_1.22.0" / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe"
     executable.parent.mkdir(parents=True)

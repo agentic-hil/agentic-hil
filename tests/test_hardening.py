@@ -2382,6 +2382,201 @@ def test_dump_into_an_allowed_root_that_is_a_link_is_not_falsely_refused(tmp_pat
     assert result["validation"]["within_workspace"] is True
 
 
+def _without_the_root_check(config_path: Path) -> Path:
+    """Switch `validation.require_allowed_root` off in a written config.
+
+    The widest a configuration can be. What still refuses after this is what was
+    never the root list's job in the first place."""
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(text.replace("logs:\n", "validation:\n  require_allowed_root: false\nlogs:\n", 1), encoding="utf-8")
+    return config_path
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A directory link at `link` pointing at `target`, on either platform."""
+    if os.name == "nt":
+        # A junction needs no privilege; a Windows symlink does.
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def test_an_artifact_anywhere_in_the_workspace_is_accepted(tmp_path: Path) -> None:
+    # The case the whole change is for: CLion builds into cmake-build-debug,
+    # PlatformIO into .pio/build/<env>. Neither is "build", and with "." neither
+    # has to be named before the first flash.
+    config_path = write_config(tmp_path, allowed_roots=["."])
+    firmware = tmp_path / "cmake-build-debug" / "nested" / "app.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("cmake-build-debug/nested/app.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["validation"]["allowed_root"] is True
+    assert result["validation"]["within_workspace"] is True
+    # Nothing else was skipped on the way: the content was still read and hashed.
+    assert result["validation"]["sha256_computed"] is True
+    assert result["validation"]["elf_header"] is True
+
+
+def test_the_whole_workspace_is_still_only_the_workspace(tmp_path: Path) -> None:
+    # With the root list at its widest *and* switched off, containment is the
+    # only thing left holding — which is the claim this change rests on.
+    workspace = tmp_path / "ws"
+    config_path = _without_the_root_check(write_config(workspace, allowed_roots=["."]))
+    outside = tmp_path / "elsewhere.elf"
+    outside.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path(str(outside))
+        traversed = service.artifacts.validate_local_path("../elsewhere.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+    assert traversed["ok"] is False
+    assert traversed["validation"]["path_traversal_safe"] is False
+
+
+def test_a_link_out_of_the_whole_workspace_is_still_refused(tmp_path: Path) -> None:
+    # A build directory that is a link to somewhere else is contained lexically
+    # and not in fact. Widening the roots must not make that the accepted case.
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True)
+    (outside / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+    config_path = _without_the_root_check(write_config(workspace, allowed_roots=["."]))
+    _link_directory(workspace / "cmake-build-debug", outside)
+
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("cmake-build-debug/app.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["within_workspace"] is False
+    assert "workspace_root" in result["summary"]
+
+
+def test_the_whole_workspace_still_refuses_a_foreign_extension(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path, allowed_roots=["."])
+    artifact = tmp_path / "cmake-build-debug" / "notes.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("cmake-build-debug/notes.txt")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["allowed_extension"] is False
+    assert "extension" in result["summary"]
+
+
+def test_the_whole_workspace_still_inspects_the_format(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path, allowed_roots=["."])
+    artifact = tmp_path / "cmake-build-debug" / "app.elf"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"this is not an ELF file")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        result = service.artifacts.validate_local_path("cmake-build-debug/app.elf")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["validation"]["elf_header"] is False
+    assert "plausibility" in result["summary"]
+
+
+def test_a_configuration_that_names_its_roots_keeps_exactly_those(tmp_path: Path) -> None:
+    # The anti-widening rule, from the operator's side: a file saying "build"
+    # still means build, and a build directory of another shape is still refused.
+    config_path = write_config(tmp_path, allowed_roots=["build"])
+    config = load_config(str(config_path))
+    assert config.artifacts.allowed_roots == ["build"]
+
+    for name in ("build", "cmake-build-debug"):
+        artifact = tmp_path / name / "app.elf"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(config)
+    try:
+        named = service.artifacts.validate_local_path("build/app.elf")
+        unnamed = service.artifacts.validate_local_path("cmake-build-debug/app.elf")
+    finally:
+        service.close()
+
+    assert named["ok"] is True, named
+    assert unnamed["ok"] is False
+    assert unnamed["validation"]["allowed_root"] is False
+
+
+def test_a_configuration_that_never_named_the_roots_still_means_build(tmp_path: Path) -> None:
+    # The other half of the same rule: what the *absence* of the key means may
+    # not change either, or every file written before this release widens on
+    # update without anyone editing it.
+    config = load_config(str(write_config(tmp_path, omit_allowed_roots=True)))
+    assert config.artifacts.allowed_roots == ["build"]
+
+
+def test_an_empty_allowed_roots_list_is_refused_by_name(tmp_path: Path) -> None:
+    # An empty list is the other plausible spelling for "the whole project", and
+    # here it has always meant the opposite. It is refused rather than left to
+    # mean whichever of the two the reader assumed.
+    config_path = write_config(tmp_path, allowed_roots=[])
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(config_path))
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.details["field"] == "artifacts.allowed_roots"
+    assert '["."]' in excinfo.value.details["migration"]["whole_workspace"]
+
+
+def test_widening_the_roots_does_not_move_where_uploads_are_stored(tmp_path: Path) -> None:
+    # allowed_roots also governs the upload path. Widening it must not relocate
+    # the store: that is artifacts.upload_directory and nothing else.
+    config_path = write_config(tmp_path, allowed_roots=["."])
+    firmware = tmp_path / "cmake-build-debug" / "app.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(config_path))
+    service = AgenticHILToolService(config)
+    try:
+        result = service.artifacts.upload({"image_path": "cmake-build-debug/app.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert Path(result["artifact"]["resolved_path"]).parent == Path(config.work_dir) / ".agentic-hil" / "artifacts"
+
+
+def test_a_dump_into_the_whole_workspace_still_obeys_the_extension(tmp_path: Path) -> None:
+    # The same list decides where a debug dump may land. It moves with the
+    # artifact roots by design; the extension check on that path does not.
+    config_path = write_config(tmp_path, allowed_roots=["."])
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        accepted = service.artifacts.validate_output_path("cmake-build-debug/memory.hex", "debug_dump_symbol_ihex")
+        refused = service.artifacts.validate_output_path("cmake-build-debug/memory.elf", "debug_dump_symbol_ihex")
+    finally:
+        service.close()
+
+    assert accepted["ok"] is True, accepted
+    assert accepted["validation"]["allowed_root"] is True
+    assert refused["ok"] is False
+    assert refused["validation"]["allowed_extension"] is False
+
+
 def _pyocd_service(tmp_path: Path, probe_id: str | None):
     config = load_test_config(tmp_path, debugger_type="pyocd", probe_id=probe_id)
     return AgenticHILToolService(config)

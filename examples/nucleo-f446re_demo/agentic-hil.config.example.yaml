@@ -27,7 +27,7 @@ debuggers:
       allow_mass_erase: false
 
 artifacts:
-  allowed_roots: ["build"]
+  allowed_roots: ["."]       # the whole workspace, recursively; name directories to narrow it
   allowed_extensions: [".elf", ".hex", ".bin"]
 
 com_ports:
