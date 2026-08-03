@@ -26,6 +26,13 @@ serial, or CAN invocation bypasses that gate.
 | CAN frames | `can_buses_list`, `can_read`, `can_send`, `can_session_start`, `can_session_stop` |
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
+| A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
+
+Declare a multi-step sequence before its first call: `bench_run_start` with
+`devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds
+those devices until `bench_run_stop`. Without it each call holds its device only
+for its own duration, and between flash and read the board is free for anything
+else on the machine. Inside a run only the declared devices may be touched.
 
 Do not substitute `openocd`, `pyocd`, `st-flash`, `st-util`, `JLinkExe`, `gdb`,
 `screen`, `minicom`, `picocom`, `cansend`, or `candump` for these tools, and do
