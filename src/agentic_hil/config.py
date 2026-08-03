@@ -182,6 +182,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
     reject_bridge_args(raw, resolved_config_path)
     reject_removed_sections(raw, resolved_config_path)
+    reject_empty_allowed_roots(raw, resolved_config_path)
     config_version = configured_version(raw, resolved_config_path)
     reject_read_permissions(raw, resolved_config_path, config_version)
     validate_config_schema(raw, resolved_config_path)
@@ -1179,8 +1180,16 @@ debug:
   max_dump_size_bytes: 1048576
 
 artifacts:
+  # "." is the whole workspace, recursively: firmware may be flashed from any
+  # directory under workspace_root. Build layouts differ per toolchain —
+  # cmake-build-debug, .pio/build/<env>, out, Debug, zephyr/build — and
+  # enumerating them here restricts a project against its own operator, not
+  # against an attacker: containment in workspace_root, the extension list and
+  # the format check are what actually refuse a foreign artifact, and none of
+  # them depends on this list. Name directories instead of "." to narrow it.
+  # A configuration that omits this key keeps the older ["build"].
   allowed_roots:
-    - "build"
+    - "."
   upload_directory: ".agentic-hil/artifacts"
   allowed_extensions:
     - ".elf"
@@ -1359,6 +1368,12 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
     artifacts = document.get("artifacts")
     if isinstance(artifacts, dict):
         artifacts["allow_upload"] = existing.artifacts.allow_upload
+        # Where firmware may be flashed from belongs to the operator exactly as a
+        # grant does. The skeleton names the whole workspace, so a regeneration
+        # that kept the skeleton's value would widen a file that had narrowed it
+        # — silently, on a path a person opened for a hardware refresh. Config
+        # load pins these to absolute paths; write them back as they were read.
+        artifacts["allowed_roots"] = [display_path(existing, root) for root in existing.artifacts.allowed_roots]
     debug = document.get("debug")
     if isinstance(debug, dict):
         debug["allow_all_symbols"] = existing.debug.allow_all_symbols
@@ -2244,9 +2259,21 @@ def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
     )
 
 
+# One root that names ``workspace_root`` itself, so every directory under it is
+# permitted. It needs no special case anywhere: it pins to the workspace and the
+# ordinary containment comparison then matches every path inside it.
+WHOLE_WORKSPACE_ARTIFACT_ROOT = "."
+# What an omitted ``artifacts.allowed_roots`` has always meant, and still means.
+# Generated configurations name WHOLE_WORKSPACE_ARTIFACT_ROOT explicitly rather
+# than relying on this: changing what the *absence* of the key means would widen
+# every existing file that never named it, and an update does not broaden what an
+# operator set (decision 0018).
+LEGACY_ARTIFACT_ROOTS = ["build"]
+
+
 def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
     return ArtifactsConfig(
-        allowed_roots=string_list(raw.get("allowed_roots"), ["build"]),
+        allowed_roots=string_list(raw.get("allowed_roots"), LEGACY_ARTIFACT_ROOTS),
         upload_directory=str(raw.get("upload_directory", ".agentic-hil/artifacts")),
         allowed_extensions=[item.lower() for item in string_list(raw.get("allowed_extensions"), [".elf", ".hex", ".bin"])],
         max_upload_size_mb=int(raw.get("max_upload_size_mb", 64)),
@@ -2408,6 +2435,36 @@ def configured_version(raw: JsonObject, config_path: str) -> int:
             {"path": config_path, "field": "version", "value": value, "supported_versions": [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION]},
         )
     return value
+
+
+def reject_empty_allowed_roots(raw: JsonObject, config_path: str) -> None:
+    """Refuse an empty ``artifacts.allowed_roots``, because it reads both ways.
+
+    An empty list is one obvious way to write "no restriction" and equally the
+    obvious way to write "nothing at all". Here it has always meant the second —
+    ``debug.allowed_symbols: []`` denies every symbol — so a reader who writes it
+    meaning the first gets the exact opposite in silence. There is one spelling
+    for the whole workspace and this is not it; say so by name rather than let
+    the two readings share a key."""
+    artifacts = raw.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    roots = artifacts.get("allowed_roots")
+    if not isinstance(roots, list) or roots:
+        return
+    raise ConfigError(
+        "config_invalid",
+        "artifacts.allowed_roots must name at least one directory; an empty list is ambiguous.",
+        {
+            "path": config_path,
+            "field": "artifacts.allowed_roots",
+            "migration": {
+                "whole_workspace": f'["{WHOLE_WORKSPACE_ARTIFACT_ROOT}"] permits every directory under workspace_root, recursively',
+                "narrower": 'Name the directories firmware may be flashed from, for example ["build", "cmake-build-debug"]',
+                "uploads_only": "Name artifacts.upload_directory to permit uploaded artifacts and nothing else",
+            },
+        },
+    )
 
 
 # The permission each section used to spell "may read", and where it went.

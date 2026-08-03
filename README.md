@@ -168,7 +168,7 @@ debug:
   allow_all_symbols: false
 
 artifacts:
-  allowed_roots: ["build"]   # firmware may only be flashed from here
+  allowed_roots: ["."]       # the whole workspace, recursively; see Artifact Roots below
   allowed_extensions: [".elf", ".hex", ".bin"]
 
 com_ports:
@@ -189,6 +189,21 @@ can_buses:
     permissions:
       allow_write: false
 ```
+
+### Artifact Roots
+
+`artifacts.allowed_roots` lists the directories under `workspace_root` that firmware may be flashed from and debug dumps written to, each including its subdirectories. There is exactly one spelling for the whole project:
+
+| Written | Means |
+|---|---|
+| `["."]` | every directory under `workspace_root`, recursively. What `agentic-hil init` and `project_config_create` generate. |
+| `["build", "cmake-build-debug"]` | those directories and their subdirectories, and nothing else. |
+| key omitted | `["build"]`. What a configuration written before 0.8.0 means, and it keeps meaning that. |
+| `[]` | refused at load, naming both replacements. It reads as "no restriction" to one reader and as "nothing at all" to another, and here it always meant the second. |
+
+Build layouts differ per toolchain — CLion writes to `cmake-build-debug`, PlatformIO to `.pio/build/<env>`, others to `out`, `Debug`, or `zephyr/build` — so a list of directories has to be curated before the first flash while protecting nothing an attacker was stopped by. What refuses a foreign artifact is elsewhere and unchanged: the path must resolve inside `workspace_root`, which no configuration key relaxes and which a symlink or junction leaving the workspace does not satisfy; the extension must be in `allowed_extensions`; and the content is inspected for its format and hashed before a backend sees it. Narrowing the roots restricts a project against its own operator, so it is available and no longer the way in.
+
+An update never widens this. What is generated changed; what an existing file means did not, whether it names its roots or omits the key. `project_config_create` carries an existing `allowed_roots` over into the file it regenerates, the same way it carries every permission over.
 
 ### Migration
 
