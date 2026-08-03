@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
@@ -46,6 +47,8 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
+from agentic_hil.knowledge import remediation_fields
+from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
@@ -54,6 +57,11 @@ from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, u
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SKILL_NAME = "agentic-hil"
+# How far up the process tree the upgrade guard follows launchers before it
+# stops looking, and how many holding processes a refusal names before the
+# count carries the rest.
+_ANCESTOR_WALK_LIMIT = 16
+_REPORTED_HOLDER_LIMIT = 10
 # Earlier releases installed the same skill under these names. Leaving one in
 # place would offer the agent two skills for the same job.
 LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
@@ -242,9 +250,73 @@ def _distribution_installer() -> str | None:
     return installer.strip().lower() if installer else None
 
 
+def _normalized_location(path: str | Path) -> str:
+    return os.path.normcase(str(Path(path).resolve())).replace("\\", "/").casefold()
+
+
+def _dedicated_environment_root() -> Path | None:
+    """The environment this distribution owns alone, or None when it shares one.
+
+    A uv tool environment and a pipx venv hold Agentic HIL and its dependencies
+    and nothing else, so every executable under them belongs to this
+    installation. A `pip install --user` prefix or a system Python holds every
+    other Python program on the machine as well, and reading its executables as
+    ours would refuse an upgrade because some unrelated script is running.
+    """
+    prefix = Path(sys.prefix)
+    location = _normalized_location(prefix)
+    if any(marker in location for marker in ("/uv/tools/agentic-hil", "/pipx/venvs/agentic-hil")):
+        return prefix
+    return None
+
+
+def _installed_extras() -> tuple[str, ...]:
+    """Declared extras whose every requirement is installed alongside this package.
+
+    `uv tool upgrade` and `pipx upgrade` reinstall from the requirement their
+    own receipt records, and that requirement already names the extras. The pip
+    and `uv pip` paths take the requirement from the command line instead, so
+    one that names the bare distribution re-resolves without the extras and
+    leaves whatever they installed pinned at whatever version it already had.
+    """
+    from importlib.metadata import PackageNotFoundError, distribution, version
+
+    try:
+        metadata = distribution("agentic-hil").metadata
+    except Exception:
+        return ()
+    declared = [name.strip() for name in metadata.get_all("Provides-Extra") or [] if isinstance(name, str) and name.strip()]
+    requirements = [item for item in metadata.get_all("Requires-Dist") or [] if isinstance(item, str)]
+    installed: list[str] = []
+    for extra in declared:
+        marker = re.compile(rf"""extra\s*==\s*['"]{re.escape(extra)}['"]""")
+        required = [_requirement_name(item) for item in requirements if ";" in item and marker.search(item.split(";", 1)[1])]
+        names = [name for name in required if name]
+        if not names:
+            continue
+        for name in names:
+            try:
+                version(name)
+            except PackageNotFoundError:
+                break
+        else:
+            installed.append(extra)
+    return tuple(sorted(installed))
+
+
+def _requirement_name(requirement: str) -> str | None:
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    return match.group(1) if match else None
+
+
+def _upgrade_requirement() -> str:
+    extras = _installed_extras()
+    return f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
+
+
 def _upgrade_command() -> tuple[str, list[str]]:
     """Select the manager that owns the running installation, never another PATH copy."""
-    prefix = os.path.normcase(str(Path(sys.prefix).resolve())).replace("\\", "/").casefold()
+    prefix = _normalized_location(sys.prefix)
     installer = _distribution_installer()
     if "/uv/tools/agentic-hil" in prefix:
         uv = shutil.which("uv")
@@ -260,8 +332,93 @@ def _upgrade_command() -> tuple[str, list[str]]:
         uv = shutil.which("uv")
         if uv is None:
             raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
-        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", "agentic-hil"]
-    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
+        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", _upgrade_requirement()]
+    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade", _upgrade_requirement()]
+
+
+def _installation_console_scripts() -> tuple[str, ...]:
+    """Where this distribution's own console script can sit for this interpreter.
+
+    A virtual environment puts it beside the interpreter; a system or `--user`
+    installation puts it in that scheme's script directory instead. Only these
+    exact files are attributable to this distribution, which is what a shared
+    prefix needs: the interpreter there runs every other Python program on the
+    machine too.
+    """
+    name = "agentic-hil.exe" if os.name == "nt" else "agentic-hil"
+    directories = [Path(sys.executable).parent, Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")]
+    for scheme in (None, f"{os.name}_user"):
+        with suppress(KeyError, OSError):
+            directories.append(Path(sysconfig.get_path("scripts") if scheme is None else sysconfig.get_path("scripts", scheme)))
+    return tuple(dict.fromkeys(_normalized_location(directory / name) for directory in directories))
+
+
+def _belongs_to_installation(image: str, owned_prefix: str | None, scripts: tuple[str, ...]) -> bool:
+    location = _normalized_location(image)
+    if owned_prefix is not None and location.startswith(owned_prefix):
+        return True
+    return location in scripts
+
+
+def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefix: str | None, scripts: tuple[str, ...]) -> set[int]:
+    """This process, plus the parents inside the installation that started it.
+
+    `agentic-hil upgrade` runs out of the very installation it replaces, so it
+    would otherwise report itself and refuse every upgrade there is. Measured on
+    Windows: the interpreter executing this code has its image at the base
+    Python outside the environment, and the process that actually holds
+    `Scripts\\python.exe` open is its parent -- a launcher the environment
+    installs, with the console script another level above it. Excluding only
+    `os.getpid()` would therefore still find a holder every single time.
+
+    Walking up is what makes this safe rather than merely permissive. A second
+    Agentic HIL -- the MCP server the agent host started, which is the process
+    this check exists to find -- is a sibling of this one, never one of its
+    parents, so no ancestor walk can reach it.
+    """
+    excluded = {os.getpid()}
+    current = by_pid.get(os.getpid())
+    for _ in range(_ANCESTOR_WALK_LIMIT):
+        if current is None:
+            break
+        parent = by_pid.get(current.parent_pid)
+        if parent is None or parent.pid in excluded:
+            break
+        if not _belongs_to_installation(parent.image, owned_prefix, scripts):
+            break
+        if parent.created_ns > current.created_ns:
+            # A pid is reused once its process exits. Nothing can be younger
+            # than the child it started, so this entry is an unrelated process
+            # that inherited the number, not the launcher we came through.
+            break
+        excluded.add(parent.pid)
+        current = parent
+    return excluded
+
+
+def _processes_holding_installation() -> list[JsonObject]:
+    """Processes running out of the installation an upgrade is about to replace.
+
+    Empty on every platform but Windows, and deliberately so. Elsewhere a
+    package manager unlinks the old files while the processes using them keep
+    reading their own copies, so the upgrade completes and nothing is lost.
+    Windows refuses to delete a file that is mapped as a running image, and a
+    manager that removes the environment before it rebuilds it then leaves
+    neither the old installation nor the new one.
+    """
+    snapshot = snapshot_process_images()
+    if snapshot is None:
+        return []
+    owned_root = _dedicated_environment_root()
+    owned_prefix = _normalized_location(owned_root).rstrip("/") + "/" if owned_root is not None else None
+    scripts = _installation_console_scripts()
+    excluded = _upgrading_process_and_its_launchers({entry.pid: entry for entry in snapshot}, owned_prefix, scripts)
+    holders = [
+        {"pid": entry.pid, "image": entry.image}
+        for entry in snapshot
+        if entry.pid not in excluded and _belongs_to_installation(entry.image, owned_prefix, scripts)
+    ]
+    return sorted(holders, key=lambda holder: holder["pid"])
 
 
 def _run_upgrade_process(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -283,6 +440,20 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     invalid = [agent for agent in requested_agents if resolve_skill_agent(agent) is None]
     if invalid:
         return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
+
+    holders = _processes_holding_installation()
+    if holders:
+        return {
+            "ok": False,
+            "error_type": "installation_in_use",
+            "summary": "Another process is running out of this installation, so upgrading it now would leave no working installation at all. Nothing was changed.",
+            "python": sys.executable,
+            "installation_root": str(Path(sys.prefix)),
+            "held_by": holders[:_REPORTED_HOLDER_LIMIT],
+            "held_by_count": len(holders),
+            "installed_version": __version__,
+            **remediation_fields("installation_in_use"),
+        }
 
     manager, command = _upgrade_command()
     previous_version = __version__

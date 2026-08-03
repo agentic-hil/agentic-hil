@@ -166,3 +166,34 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 `reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
 For the operator case, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.
+
+## 14. Upgrading, And Adding `[pyocd]` Or `[can]` Later
+
+Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it — `uv tool`, `pipx`, `uv pip`, or `pip` — instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.
+
+**Stop the agent host before upgrading.** The host starts the Agentic HIL MCP server itself, so the server runs for as long as the host does — a working setup is exactly the state an upgrade fails in. On Windows a file that is mapped as a running image cannot be deleted, and `uv` removes a tool environment before it rebuilds it. When that removal fails, the rebuild never happens, and neither the old installation nor the new one is left:
+
+```text
+error: failed to remove directory ...\uv\tools\agentic-hil\Scripts: Zugriff verweigert (os error 5)
+Failed find package agentic-hil in tool environment
+ModuleNotFoundError: No module named 'agentic_hil'
+```
+
+`agentic-hil upgrade` refuses with `installation_in_use` before anything is removed, naming each holding process by pid and image path, and leaves the installation working. Close the host and run it again. Running `uv tool install --upgrade` or `uv tool install --force` by hand is what the refusal is protecting against — those have no such check.
+
+If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras, and take the environment name from the error message:
+
+```bash
+uv tool install --force "agentic-hil[pyocd]"     # or pipx install --force "agentic-hil[pyocd]"
+```
+
+Adding an extra is a different operation from upgrading, and there are two ways to do it:
+
+- **Permanently, with the host stopped.** Close the agent host, then `uv tool install --upgrade "agentic-hil[pyocd]"` (or `pipx install --force "agentic-hil[pyocd]"`), then start the host. Name every extra you want on that command line: `uv` records the requirement literally, so `uv tool install --upgrade agentic-hil` on an installation made with `agentic-hil[can]` re-resolves without the extra and uninstalls `python-can`. `agentic-hil upgrade` does not have this problem — `uv tool upgrade` and `pipx upgrade` both reinstall from the requirement the manager already recorded, extras included.
+- **Without stopping the host, `uv` only.** This adds the extra's dependencies to the existing environment and removes nothing, so no locked file is in the way:
+
+  ```bash
+  uv pip install --python "$(uv tool dir)/agentic-hil/Scripts/python.exe" "agentic-hil[pyocd]"   # bin/python3 on Linux and macOS
+  ```
+
+  The MCP server picks the new packages up when the host restarts. This does not update `uv`'s record of the tool, so name the extra again the next time the tool itself is reinstalled or upgraded.
