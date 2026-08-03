@@ -95,6 +95,20 @@ class IoPermissions:
 
 
 @dataclass(frozen=True)
+class ProjectPermissions:
+    """What may be done to this project's configuration itself.
+
+    ``allow_config_write`` belongs to the write class of decision 0018 and is
+    deny-by-default like the rest of it: reading the configuration needs no
+    grant, writing it does. It is the permission that makes agent provisioning a
+    one-way step — a configuration an agent generated carries it false, so the
+    same agent cannot widen anything it wrote, and only a human editing the file
+    can open it."""
+
+    allow_config_write: bool = False
+
+
+@dataclass(frozen=True)
 class DebuggerConfig:
     type: Literal["openocd", "stlink", "pyocd"]
     executable: str | None
@@ -230,6 +244,9 @@ class AgenticHILConfig:
     debugger: DebuggerConfig | None = None
     # Which permission model this file is read under; see the constants above.
     config_version: int = LEGACY_CONFIG_VERSION
+    # Project-scoped grants. Not per device, because writing this file is not a
+    # property of any one board.
+    permissions: ProjectPermissions = field(default_factory=ProjectPermissions)
 
     @property
     def read_free(self) -> bool:

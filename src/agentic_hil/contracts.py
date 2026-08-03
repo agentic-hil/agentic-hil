@@ -129,6 +129,12 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # No parameters, and that is the contract. The configuration is generated for
+    # the workspace this server is bound to, out of what is attached to this
+    # machine: a workspace_root argument would let a caller provision a project
+    # this server was never pointed at, and a content argument would let it
+    # decide its own permissions.
+    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments and writes no permission: every write permission in the generated file is false, including allow_config_write, so it succeeds once and then refuses itself. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

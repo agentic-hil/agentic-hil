@@ -100,6 +100,27 @@ def _substitutions() -> dict[str, str]:
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "config_file_not_found": ErrorRemedy(
+        meaning=(
+            "This workspace has no authoritative configuration, so there is no bench, no permission and no state "
+            "directory for the call to use. It is the first wall a new project hits, not a fault."
+        ),
+        remediation=(
+            "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
+            "the hardware attached to this machine, and writes every permission false — including the one that would "
+            "let it write the file again.",
+            "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
+            "Then ask the operator to set the permissions the task actually needs; nothing but a human edit turns one "
+            "of them true.",
+        ),
+        do_not=(
+            "Do not write the configuration by hand to give yourself a permission, and do not drive the hardware "
+            "another way while the project has none. A missing configuration is the absence of policy, not permission "
+            "to act without it.",
+            "Do not delete or move an existing configuration to reach this state. Generating a replacement produces "
+            "the deny-by-default skeleton again, so it throws the operator's settings away and gives you nothing.",
+        ),
+    ),
     "unsafe_configured_path": ErrorRemedy(
         meaning=(
             "A configured path, or one of its ancestor directories, can be replaced or re-permissioned by a principal "
@@ -688,6 +709,7 @@ Rules that hold on both platforms:
 - Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment. Never in a repository-controlled file (`.vscode/mcp.json`, `.mcp.json`, `.codex/config.toml`, `opencode.json`).
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the deny-by-default skeleton again, so the round trip costs a human their customised permissions and gains an agent nothing.
 
 ## Do not
 

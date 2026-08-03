@@ -58,7 +58,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
@@ -1268,8 +1268,9 @@ def test_gateway_tool_descriptions_name_what_they_replace() -> None:
 def test_skill_only_names_tools_the_server_exposes() -> None:
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
-    # Underscored identifiers in backticks are tool names; these two are not.
-    not_a_tool = {"agentic_hil", "permission_denied"}
+    # Underscored identifiers in backticks are tool names; these are the import
+    # name and two error types, not tools.
+    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found"}
 
     referenced = {
         token
@@ -1593,20 +1594,38 @@ def test_setup_smooths_group_writable_home_and_succeeds(
     assert not (workspace / ".mcp.json").exists()
 
 
-def test_mcp_stdio_reports_missing_discovered_config(
+def test_mcp_stdio_serves_a_workspace_that_has_no_config_yet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A missing configuration used to end the server before it started.
+
+    That left an agent holding config_file_not_found with no route that did not
+    involve a person at a terminal. The server now starts bound to the workspace,
+    every hardware tool answers with the same error type, and the answer names
+    the one tool that can do something about it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
+    served: dict = {}
 
-    exit_code = entrypoint(["mcp-stdio"])
+    def fake_server(config, *args, **kwargs):
+        served["config"] = config
+        served["tools"] = kwargs.get("tools")
+        return 0
 
-    result = json.loads(capsys.readouterr().out)
-    assert exit_code == 1
-    assert result["error_type"] == "config_file_not_found"
+    monkeypatch.setattr("agentic_hil.cli.run_stdio_server", fake_server)
+
+    assert entrypoint(["mcp-stdio"]) == 0
+    assert served["config"] is None
+    service = served["tools"]
+    assert isinstance(service, UnprovisionedToolService)
+    assert service.workspace == workspace.resolve()
+
+    refused = service.call("probe_target", {})
+
+    assert refused["error_type"] == "config_file_not_found"
+    assert "project_config_create" in refused["next_step"]
 
 
 def test_mcp_stdio_passes_authoritative_config_to_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2106,8 +2125,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 32
-    assert len(set(MCP_TOOL_NAMES)) == 32
+    assert len(MCP_TOOL_NAMES) == 33
+    assert len(set(MCP_TOOL_NAMES)) == 33
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a
