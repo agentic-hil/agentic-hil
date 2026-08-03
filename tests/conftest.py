@@ -28,6 +28,7 @@ FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed
 FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"
 FAKE_STLINK_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
+FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 

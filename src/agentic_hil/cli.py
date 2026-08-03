@@ -1340,12 +1340,19 @@ def _load_json_object(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> JsonObject:
-    """Run debugger_info against one named probe."""
+def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> tuple[JsonObject, JsonObject]:
+    """Run debugger_info and the target-support check against one named probe.
+
+    Both use the one service, so the toolchain is resolved once and neither
+    check touches the hardware: target support is a question about what this
+    host's toolchain resolves, not about what is plugged in.
+    """
     service = AgenticHILToolService(bind_debugger(config, debugger_id), frontend="doctor")
     primary_error: BaseException | None = None
+    support: JsonObject = {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the debugger check did not complete."}
     try:
         result = service.call("debugger_info")
+        support = _doctor_target_support(service)
     except BaseException as error:
         primary_error = error
         result = {"ok": False, "tool": "debugger_info", "summary": "Debugger check raised an exception.", "backend_error": str(error)}
@@ -1357,7 +1364,23 @@ def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> JsonObjec
         primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
     if primary_error is not None:
         raise primary_error
-    return result
+    return result, support
+
+
+def _doctor_target_support(service: AgenticHILToolService) -> JsonObject:
+    """Ask the bound backend whether it resolves the configured target type.
+
+    A backend that raises here has told us nothing, so the answer is
+    "undetermined" and not a failure. `doctor` going red decides whether
+    `setup` rolls back, and a host that simply has no CMSIS pack cache yet
+    must not look like a broken configuration.
+    """
+    try:
+        # Broad on purpose: a diagnostic must never become the failure it reports.
+        support = service.backend.target_support()
+    except Exception as error:
+        return {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": f"the target-support check raised {type(error).__name__}: {error}"}
+    return support if isinstance(support, dict) else {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the backend returned no target-support report."}
 
 
 def doctor(config_path: str | None = None) -> JsonObject:
@@ -1377,7 +1400,9 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
     # and it is the same set config load already insisted on resolving.
-    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    checks = {name: result for name, (result, _) in probed.items()}
+    target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
@@ -1385,14 +1410,27 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "skipped": True,
         "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
     }
-    all_ok = all(result.get("ok") is True for result in checks.values())
+    # Only a definite negative is a failure. A target-support check that could
+    # not run said nothing about this configuration, and reporting it as broken
+    # would make `doctor` red — and `setup` roll back — on any host that has no
+    # debugger toolchain installed yet.
+    unsupported = sorted(name for name, support in target_support.items() if support.get("ok") is not True)
+    undetermined = sorted(name for name, support in target_support.items() if support.get("status") == "undetermined")
+    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported
     if not checked:
         summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
     elif all_ok:
         summary = f"Agentic HIL configuration loaded and {len(checked)} debugger(s) checked."
     else:
         failed = sorted(name for name, result in checks.items() if result.get("ok") is not True)
-        summary = f"Agentic HIL configuration loaded, but the debugger check failed for: {', '.join(failed)}."
+        parts = []
+        if failed:
+            parts.append(f"the debugger check failed for: {', '.join(failed)}")
+        if unsupported:
+            parts.append(f"the configured target_type is not resolvable for: {', '.join(unsupported)}")
+        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}."
+    if undetermined:
+        summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
     return {
         "ok": all_ok,
         "tool": "agentic_hil_doctor",
@@ -1408,6 +1446,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "bound": name == config.debugger_id,
                 "permissions": asdict(entry.permissions),
                 **({"check": checks[name]} if name in checks else {}),
+                **({"target_support": target_support[name]} if name in target_support else {}),
             }
             for name, entry in config.debuggers.items()
         },
