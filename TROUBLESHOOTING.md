@@ -52,7 +52,18 @@ Fix: run `agentic-hil init`, review the deny-by-default file outside the reposit
 
 `init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
-If the refusal is `unsafe_configured_path` on the location rather than the file contents — a stock Windows profile rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+If the refusal is `unsafe_configured_path` on the location rather than the file contents — a Windows profile where an installed packaged application holds an app-capability ACE on `AppData` rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+
+On Windows the refusal names who holds the right, in `untrusted_principals`: the SID, plus the application package it belongs to when the SID resolves. A capability SID `S-1-15-3-<sub-authorities>` is resolved through the package SID `S-1-15-2-<the same sub-authorities>`, which Windows registers under `HKLM\SOFTWARE\Microsoft\SecurityManager\CapAuthz\ApplicationsEx` and in the AppContainer mappings under `HKEY_CLASSES_ROOT`. That turns "an unknown principal has rights here" into a decision you can actually take: use a permitted location, or have the operator remove that application's grant through the application itself. A SID that resolves to nothing is still reported as `sid`, and the refusal is unchanged.
+
+`AGENTIC_HIL_CONFIG` and a chosen `state_root` are the supported answer to a refused location, not a workaround for it. Nothing about a project is second class for using them: a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions — and `state_root` may be any absolute directory that passes the check and does not overlap `workspace_root`.
+
+```text
+AGENTIC_HIL_CONFIG=C:\Users\<user>\.agentic-hil\projects\<workspace-name>\config.yaml
+state_root:        C:\Users\<user>\.agentic-hil\state
+```
+
+Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment — never in a repository-controlled file, because an agent that can edit the file selecting the configuration can select a configuration it wrote.
 
 ## 3. `config_invalid` / Workspace Binding Failure
 
@@ -68,7 +79,7 @@ Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_no
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins the CMSIS pack is a second, separate step — see 5a below.
 
 ## 5. `debugger_config_not_found`
 
@@ -77,6 +88,26 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
 Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
+
+## 5a. `target_type_invalid` (pyOCD) — the CMSIS pack is missing
+
+Symptom: a pyOCD call returns `error_type: "target_type_invalid"`, or `agentic-hil doctor` reports `debuggers.<name>.target_support.status: "unsupported"`. pyOCD's own message is `Target type <name> not recognized`.
+
+Likely cause: the configured `target_type` comes from a CMSIS device-family pack that is not installed on this host. Most vendor parts — including the whole STM32F4 family — are not built into pyOCD; `pyocd list --targets` shows `pack` in its Source column for them.
+
+Fix: run the commands the result carries in `install_commands`, as a deliberate host setup step:
+
+```bash
+pyocd pack find stm32f446         # GLOB; shorten it to widen the search
+pyocd pack install stm32f446retx  # downloads the pack from the vendor index
+pyocd pack show                   # what is installed now
+```
+
+Agentic HIL never runs these. `pyocd pack install` fetches over the network, and a background download nobody asked for is precisely what this documentation gap once caused. Do not reconstruct a pack from hand-downloaded `.pdsc` files.
+
+Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\cmsis-pack-manager\cmsis-pack-manager` on Windows, `~/.local/share/cmsis-pack-manager` on Linux). `CMSIS_PACK_ROOT` is a different thing — pyOCD reads it only for CMSIS-Toolbox `cbuild-run` projects — and does not relocate that cache.
+
+`doctor` distinguishes three answers, and only one is a failure: `unsupported` means the backend enumerated its target types and this one is absent; `undetermined` means this host could not answer at all — no toolchain, or the enumeration failed — and stays green with `undetermined_reason` saying why. Full detail: `agentic-hil://reference/target-support`.
 
 ## 6. `adapter_not_found`
 
@@ -117,6 +148,8 @@ Symptom: probe works, but flashing, verification, reset, or a debugger action ti
 Likely cause: the image does not match the target memory layout, flash is locked, the target is unstable, reset wiring is wrong, the wrong OpenOCD target config is used, or `debuggers.<name>.timeout_s` is too low.
 
 Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debuggers.<name>.timeout_s` only when the operation is valid but consistently slow.
+
+Not this: `error_type: "debugger_command_rejected"`, which carries `target_contacted: false` and the `rejected_commands` OpenOCD would not run. OpenOCD stopped inside its own interpreter, before it opened the probe, so the board was never driven and there is nothing on it to inspect, power-cycle or recover. The named commands are either unknown to the installed OpenOCD or belong to its run stage and were reached before `init`; check the version `debugger_info` reports, and the scripts named by `interface_cfg` and `target_cfg`.
 
 ## 11. COM Port Does Not Work
 
