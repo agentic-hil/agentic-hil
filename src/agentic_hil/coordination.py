@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import threading
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,6 +24,14 @@ from agentic_hil.config import (
     safe_read_bytes,
     safe_read_text,
     trusted_state_directory,
+)
+from agentic_hil.devices import (
+    CanDevice,
+    DebuggerDevice,
+    Device,
+    DeviceSet,
+    UartDevice,
+    lock_keys,
 )
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -201,7 +210,12 @@ class HardwareCoordinator:
         # is what lets the mutex know what to lock and what makes a touch of an
         # undeclared device a refusal rather than a silent widening.
         self.declared_resources: frozenset[str] | None = None
+        # The Device objects behind those keys, when the caller declared devices
+        # rather than bare resource names. Only for reporting: the lock is on the
+        # key, and two entries naming one unit share it.
+        self.declared_devices: DeviceSet = DeviceSet()
         self.run_label: str | None = None
+        self.run_started_at: str | None = None
         self.leases: dict[str, HardwareLease] = {}
         self.blocked = False
         self.quarantine_id: str | None = None
@@ -237,28 +251,39 @@ class HardwareCoordinator:
     def run_active(self) -> bool:
         return self.declared_resources is not None
 
-    def begin_run(self, resources: list[str] | tuple[str, ...], *, label: str | None = None, wait_s: float = 0.0) -> JsonObject:
+    def begin_run(self, resources: Sequence[Device | str] | DeviceSet, *, label: str | None = None, wait_s: float = 0.0) -> JsonObject:
         """Lock every declared device for the whole run.
 
         The lease taken per hardware call is not exclusivity: it is released the
         moment the call ends, so a second session slipping in between two steps
         of a run met no lock at all. The run holds its devices from here until
-        end_run, and every call inside it borrows that hold."""
+        end_run, and every call inside it borrows that hold.
+
+        Accepts Device objects or already-derived resource names. Devices are the
+        intended form — they carry the hardware identity and collapse two config
+        entries naming one unit onto one lock before anything is taken."""
         with self._guard:
             self._require_open()
             if self.run_active:
-                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "retry_safe": False, "side_effect_committed": False})
-            declared = physical_resources(resources)
+                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False})
+            device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of([item for item in resources if isinstance(item, Device)])
+            declared = physical_resources(lock_keys(resources if not isinstance(resources, DeviceSet) else resources.devices))
             if not declared:
                 raise CoordinationError({"ok": False, "error_type": "invalid_argument", "summary": "A run must declare at least one physical device; the declaration is what the mutex locks and what every later call is checked against.", "retry_safe": False, "side_effect_committed": False})
             try:
+                # One call for the whole set: sorted order and the unwind of a
+                # partial acquisition both live in BenchMutex.acquire, so a run
+                # that fails on its third device has already given back its first
+                # two by the time this raises.
                 self.bench.acquire(declared, wait_s=wait_s)
             except DeviceBusyError as error:
                 raise CoordinationError({**error.result, "declared_devices": declared}) from error
             except ConfigError as error:
                 raise CoordinationError({"ok": False, "error_type": error.error_type, "summary": error.summary, **error.details}) from error
             self.declared_resources = frozenset(declared)
+            self.declared_devices = device_set
             self.run_label = label
+            self.run_started_at = utc_now_iso()
             self.bench.owner = replace(self.bench.owner, label=label)
             self.bench.heartbeat()
             reclaimed = [detail for detail in (self.bench.reclaimed(resource) for resource in declared) if detail is not None]
@@ -267,9 +292,15 @@ class HardwareCoordinator:
                 "tool": "bench_run_start",
                 "declared_devices": declared,
                 "run_label": label,
+                "run_started_at": self.run_started_at,
                 "owner": self.bench.owner.as_json(),
                 "summary": f"{len(declared)} device(s) are held for this run and released when it ends.",
             }
+            if device_set:
+                result["devices"] = device_set.as_json()
+                warnings = device_set.warnings()
+                if warnings:
+                    result["warnings"] = warnings
             if reclaimed:
                 result["reclaimed"] = reclaimed
             return result
@@ -277,12 +308,43 @@ class HardwareCoordinator:
     def end_run(self) -> JsonObject:
         with self._guard:
             declared = sorted(self.declared_resources or ())
+            was_active = self.run_active
             self.declared_resources = None
+            self.declared_devices = DeviceSet()
             self.run_label = None
+            self.run_started_at = None
             self.bench.owner = replace(self.bench.owner, label=None)
             if declared:
                 self.bench.release(declared)
-            return {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "summary": f"{len(declared)} device(s) were released."}
+            return {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active, "summary": f"{len(declared)} device(s) were released."}
+
+    def run_status(self) -> JsonObject:
+        """What this owner is holding for a run right now.
+
+        An agent that lost track of its own run reads this instead of guessing:
+        a run holds its devices until it is closed or the owning process ends,
+        and nothing times it out — dropping a board that may be mid-operation is
+        the silent failure the mutex exists to prevent."""
+        with self._guard:
+            declared = sorted(self.declared_resources or ())
+            result: JsonObject = {
+                "ok": True,
+                "tool": "bench_run_status",
+                "run_active": self.run_active,
+                "declared_devices": declared,
+                "run_label": self.run_label,
+                "run_started_at": self.run_started_at,
+                "owner": self.bench.owner.as_json(),
+                "held_devices": sorted(self.bench.held_resources()),
+                "summary": (
+                    f"A run holds {len(declared)} device(s); they stay held until bench_run_stop or until this process ends."
+                    if self.run_active
+                    else "No run is open; each hardware call takes and releases its own device."
+                ),
+            }
+            if self.declared_devices:
+                result["devices"] = self.declared_devices.as_json()
+            return result
 
     def _undeclared(self, resources: list[str]) -> list[str]:
         """Physical devices this run may not touch.
@@ -773,9 +835,14 @@ class HardwareCoordinator:
             self.leases.clear()
             # A closed owner holds nothing, run or no run: the machine-wide hold
             # must not outlive the process that took it, or a clean shutdown
-            # would block the bench exactly the way a crash must not.
+            # would block the bench exactly the way a crash must not. This is the
+            # path a lost MCP client takes — stdin reaches EOF, the server closes
+            # its service, and an unclosed run is released here rather than
+            # waiting for the operating system to reap the process.
             self.declared_resources = None
+            self.declared_devices = DeviceSet()
             self.run_label = None
+            self.run_started_at = None
             self.bench.release_all()
             self._state = "closed"
 
@@ -975,14 +1042,15 @@ def project_resource(config: AgenticHILConfig) -> str:
     return f"project:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 
+# The four functions below are the coordination layer's view of a device's lock
+# key. They derive nothing themselves any more: agentic_hil.devices owns the
+# identity, so a backend, the reactor's declaration and a run over MCP cannot
+# disagree about which lock a board falls under.
 def debugger_resource(config: AgenticHILConfig) -> str:
     debugger = config.debugger
     if debugger is None:
         raise CoordinationError({"ok": False, "error_type": "invalid_argument", "summary": "No debugger is bound, so no probe resource can be leased.", "configured_debuggers": sorted(config.debuggers), "retry_safe": True})
-    if debugger.resource_id:
-        return f"physical:{os.path.normcase(debugger.resource_id)}"
-    identity = debugger.probe_id or debugger.executable or debugger.type
-    return f"probe:{os.path.normcase(str(identity))}"
+    return DebuggerDevice(config_id=str(config.debugger_id), debugger=debugger).lock_key
 
 
 def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, str]:
@@ -990,13 +1058,11 @@ def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, str]:
 
 
 def com_resource(config: AgenticHILConfig, port_id: str) -> str:
-    port = config.com_ports[port_id]
-    return f"physical:{os.path.normcase(port.resource_id)}" if port.resource_id else f"com:{os.path.normcase(port.device)}"
+    return UartDevice(config_id=port_id, port=config.com_ports[port_id]).lock_key
 
 
 def can_resource(config: AgenticHILConfig, bus_id: str) -> str:
-    bus = config.can_buses[bus_id]
-    return f"physical:{os.path.normcase(bus.resource_id)}" if bus.resource_id else f"can:{bus.adapter}:{os.path.normcase(bus.channel)}"
+    return CanDevice(config_id=bus_id, bus=config.can_buses[bus_id]).lock_key
 
 
 def resource_digest(resource: str) -> str:
