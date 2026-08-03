@@ -367,8 +367,13 @@ class HardwareCoordinator:
             return []
         return [resource for resource in resources if is_physical_resource(resource) and resource not in declared]
 
-    def acquire(self, *resources: str) -> HardwareLease:
-        normalized = sorted(set(resource for resource in resources if resource))
+    def acquire(self, *resources: Device | str) -> HardwareLease:
+        """Take a lease on the named devices for the length of one call.
+
+        Backends hand devices, not derived names: the lock reference belongs in
+        one place, and a backend that spelled its own key could disagree with
+        the run that declared it."""
+        normalized = sorted(set(resource for resource in lock_keys(resources) if resource))
         if not normalized:
             raise ValueError("At least one physical resource is required.")
         with self._guard:
@@ -1064,6 +1069,8 @@ def debugger_resource(config: AgenticHILConfig) -> str:
 
 
 def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, str]:
+    # The discovery pseudo-resource is not a device: it names a host-wide
+    # enumeration, and locking it machine-wide would serialize unrelated benches.
     return DEBUGGER_DISCOVERY_RESOURCE, debugger_resource(config)
 
 
