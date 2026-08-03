@@ -217,7 +217,9 @@ Add this server to the operator-controlled `~/.config/opencode/opencode.json` an
 
 OpenCode uses `mcp`, `type: "local"`, and one command array. For an operator-controlled registration, use `~/.config/opencode/opencode.json`; its `cwd` enables automatic config discovery. If an override is needed, inherit `AGENTIC_HIL_CONFIG` from the parent environment rather than placing its machine-specific value in project configuration. Managed configuration is preferable on unattended benches because project configuration has higher precedence than normal global configuration.
 
-Sources: [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/) and [OpenCode configuration locations](https://opencode.ai/docs/config/).
+`agentic-hil setup --agent opencode` writes into this same file once more at the end: two `permission.edit` patterns that deny OpenCode's own file-writing tools on the authoritative config's directory and on `state_root`. Both begin with `*` on purpose. OpenCode compares an `edit` pattern against the path relative to its worktree, and both protected trees lie outside the workspace by design, so an absolute pattern there matches nothing; the leading `*` absorbs the `../` segments such a relative path starts with. The patterns are appended behind whatever the file already contains, because the last matching rule wins, and reading either tree stays allowed. This is a lock on the front door, not a wall: a shell writes those files regardless, which is why SECURITY.md asks for a separate identity where that matters.
+
+Sources: [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/), [OpenCode configuration locations](https://opencode.ai/docs/config/) and [OpenCode permissions](https://opencode.ai/docs/permissions/).
 
 ## Generic MCP Host
 

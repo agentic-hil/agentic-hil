@@ -785,9 +785,12 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
                 doctor_result = doctor(config_path)
             if resolved_agent is not None and all(overall_success(result) for result in (config_result, doctor_result)):
                 # Last, because it forbids writing the very file the steps above
-                # had to create.
+                # had to create. The workspace comes out of the config that was
+                # just validated against it, rather than out of the process, so
+                # the rules are built from the binding the file itself carries.
+                configured = load_config(str(target_path))
                 permission_result = restrict_agent_write_access(
-                    resolved_agent.id, target_path, Path(load_config(str(target_path)).state_root)
+                    resolved_agent.id, target_path, Path(configured.state_root), workspace_root=Path(configured.workspace_root)
                 )
         except BaseException as error:
             rollback_errors = _restore_file_snapshots(snapshots)
@@ -1296,7 +1299,84 @@ def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[st
     return {f"{form}({glob})" for form in ("Edit", "Write") for glob in _protected_write_globs(config_path, state_root)}
 
 
-def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Path) -> JsonObject:
+def _opencode_deny_patterns(config_path: Path, state_root: Path, workspace_root: Path) -> list[str]:
+    """The same two trees, written the way opencode actually compares a path.
+
+    https://opencode.ai/docs/permissions says a rule is matched "by pattern
+    match, with the last matching rule winning", but never says what the pattern
+    is matched *against* — and its one worked example for exactly this case, an
+    external directory allowed with `edit` denied under it, is written with an
+    absolute pattern that cannot match. So this comes out of opencode's source,
+    read on the 1.18 line, in four steps:
+
+    `packages/opencode/src/tool/write.ts`, `edit.ts` and `apply_patch.ts` ask for
+    `permission: "edit"` with `patterns: [path.relative(instance.worktree,
+    filepath)]`. `packages/opencode/src/session/tools.ts` hands that string on
+    unchanged, together with the ruleset built from this file. `evaluate` in
+    `packages/opencode/src/permission/index.ts` compares the two with
+    `Wildcard.match(pattern, rule.pattern)` — the tool's string first, the
+    configured pattern second — and takes the last match. And
+    `packages/core/src/util/wildcard.ts` anchors that pattern between `^` and
+    `$`, turning `*` into `.*` under the `s` flag, so a `*` crosses `/`.
+
+    What opencode compares a pattern against is therefore a path relative to the
+    worktree — `../../.config/agentic-hil/...` for either tree protected here,
+    since neither is ever inside the workspace. The absolute patterns earlier
+    releases wrote could never match that string (hardci-hq#84).
+
+    A pattern that survives the relativisation begins with `*` and continues with
+    the part of the tree below the deepest directory it shares with the
+    workspace. Whichever worktree opencode picks — the workspace root, a git root
+    above it, the home directory, or `/` for a project that is not a git
+    repository — the subject ends with exactly that tail, and the leading `*`
+    absorbs the `..` segments or the prefix in front of it.
+
+    Not used, deliberately: `external_directory`, opencode's own key for paths
+    outside the project. `packages/opencode/src/tool/read.ts` asserts it too, so
+    denying it would take reading the operator's policy away as well, which the
+    Claude Code branch deliberately keeps — and it would be a key an operator has
+    to know about rather than a correction to one already written.
+
+    Where workspace and tree sit close together the tail is short and the rule
+    denies more than the tree it names. That is the direction this trade is
+    deliberately made in: a deny that is broader than intended announces itself
+    the moment it fires, while a pattern that never fires is silent, and being
+    silent is what made the absolute form worth an issue.
+    """
+    return [f"*{_opencode_relative_tail(tree, workspace_root)}/**" for tree in (config_path.parent, state_root)]
+
+
+def _opencode_relative_tail(tree: Path, workspace_root: Path) -> str:
+    """The end of `tree` that no `path.relative` against the workspace can eat."""
+    try:
+        shared = Path(os.path.commonpath([tree, workspace_root]))
+    except ValueError:
+        # Different drives share no directory at all, and there `path.relative`
+        # hands the tool the absolute target, which the leading `*` covers.
+        shared = Path(tree.anchor)
+    if shared == tree:
+        shared = Path(tree.anchor)
+    return tree.relative_to(shared).as_posix()
+
+
+def _stale_opencode_deny_rules(config_path: Path, state_root: Path) -> set[str]:
+    """What earlier releases wrote under `permission.edit` and this one takes back.
+
+    Earlier releases wrote the absolute path of each tree. opencode compares an
+    `edit` pattern against a worktree-relative path, so those keys matched no file
+    in either tree: they sat in the operator's own configuration reading as
+    protection, and were none.
+
+    Identifying them needs no heuristic, for the same reason as in
+    `_stale_claude_code_deny_rules`: the globs are derived from this project's
+    config path and state root, so a rule is ours exactly when its key is one of
+    these strings and its action is the `deny` this wrote. A rule of the
+    operator's carrying another action under the same key is left alone.
+    """
+    return set(_protected_write_globs(config_path, state_root))
+
+
+def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Path, *, workspace_root: Path | None = None) -> JsonObject:
     """Ask the agent CLI to refuse its own write tools on the policy files.
 
     Installation and use need opposite things: setup must be able to create the
@@ -1309,8 +1389,16 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     which is why SECURITY.md asks for a separate identity where that matters.
 
     Which rule form a host actually evaluates is read out of that host's own
-    documentation rather than expected — see `_claude_code_deny_patterns` and the
-    opencode branch below, each of which cites what it is built on.
+    documentation, or out of its source where the documentation does not say —
+    see `_claude_code_deny_patterns` and `_opencode_deny_patterns`, each of which
+    cites what it is built on. Both deny writing and leave reading alone: an
+    agent that may not change the operator's policy may still be asked to look
+    at it.
+
+    `workspace_root` is the project this configuration belongs to; the two
+    protected trees are always outside it, and how far outside decides the shape
+    of the opencode patterns. It defaults to the working directory, which is the
+    workspace `setup` and `init` run in.
     """
     path = _agent_permission_config_path(agent_id)
     if path is None:
@@ -1349,22 +1437,32 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         # an object of pattern -> action, it covers "all file modifications
         # (covers edit, write, patch)" so there is no second key to write, and
         # "the last matching rule winning" is why an operator's own patterns are
-        # kept and the denials appended after them.
-        #
-        # Open, and deliberately not answered here: that page does not say what
-        # the patterns are matched against. If it is the worktree-relative path,
-        # an absolute pattern never matches — neither tree protected here is ever
-        # inside the worktree — and the key for paths outside it is
-        # `external_directory`. Establish it before relying on this branch.
-        globs = _protected_write_globs(config_path, state_root)
+        # kept and the denials appended after them. What that page does not say
+        # is what a pattern is compared against, and that decides its shape —
+        # see _opencode_deny_patterns, which reads it out of opencode's source.
         rules: dict[str, object] = {"*": existing} if isinstance(existing, str) else dict(existing) if isinstance(existing, dict) else {}
-        added = [glob for glob in globs if rules.get(glob) != "deny"]
-        for glob in globs:
-            rules[glob] = "deny"
+        stale = _stale_opencode_deny_rules(config_path, state_root)
+        removed = [glob for glob, action in rules.items() if glob in stale and action == "deny"]
+        for glob in removed:
+            del rules[glob]
+        added: list[str] = []
+        for pattern in _opencode_deny_patterns(config_path, state_root, workspace_root or Path.cwd()):
+            if rules.get(pattern) == "deny":
+                continue
+            rules.pop(pattern, None)
+            rules[pattern] = "deny"
+            added.append(pattern)
         permission["edit"] = rules
     if not added and not removed:
         return {"ok": True, "mode": "tool-permissions", "summary": "The agent already refuses to write the policy files.", "path": str(path), "added": [], "removed": []}
-    secure_atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    # Written in the order it was built. Under `permission.edit` the key order is
+    # the rule order and the last matching rule wins, so sorting the keys put
+    # these denials in front of the operator's own patterns instead of after
+    # them — every one of ours starts with `*`, which sorts before `.` and `/`
+    # and every letter. opencode parses the file with Effect's
+    # `propertyOrder: "original"` for that exact reason, as
+    # `packages/core/src/v1/config/permission.ts` says in as many words.
+    secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
     summary = f"{agent_id} will refuse its own write tools on the authoritative config and state root."
     if removed:
         summary += " The inert deny rules an earlier setup wrote were dropped."
