@@ -942,7 +942,10 @@ MCP_RESOURCE_TEMPLATES: list[JsonObject] = [
 
 
 def _json_content(uri: str, payload: JsonObject) -> JsonObject:
-    return {"uri": uri, "mimeType": JSON_MIME, "text": json.dumps(payload, indent=2, ensure_ascii=False)}
+    # These reference documents are declared application/json and are read by an
+    # agent, which parses them; the Markdown resources are the ones written to be
+    # read. Serialize compactly for the same reason the tool result text block is.
+    return {"uri": uri, "mimeType": JSON_MIME, "text": json.dumps(payload, separators=(",", ":"), ensure_ascii=False)}
 
 
 def _markdown_content(uri: str, text: str) -> JsonObject:
