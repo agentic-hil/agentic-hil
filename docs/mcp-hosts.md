@@ -21,13 +21,15 @@ complete install chain. The hosts below are the ones `setup` does not cover.
 be run on its own:
 
 ```bash
-agentic-hil agent-install --agent claude-code   # skill + user-level registration; once per machine and agent
+agentic-hil agent-install --agent claude-code   # skill + user-level registration; once per user and agent
 agentic-hil init --agent claude-code            # this project's policy + doctor; from the project root
 ```
 
-`agent-install` needs no project and reads no configuration, so a second
-firmware repository on the same machine needs only `init`, and a configuration
-location this machine refuses cannot take the registration down with it.
+`agent-install` writes only under the invoking user's home, so it is user-wide —
+per user, per machine, and another OS user on the same host gets none of it. It
+needs no project and reads no configuration, so a second firmware repository for
+this user needs only `init`, and a configuration location this profile refuses
+cannot take the registration down with it.
 
 Every host configuration below represents this launch contract:
 

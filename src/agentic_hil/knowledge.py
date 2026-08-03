@@ -523,11 +523,13 @@ Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configur
 
 | Command | Scope | Touches | On a profile that rejects the paths above |
 |---|---|---|---|
-| `agentic-hil agent-install --agent <agent>` | machine and agent, once per machine | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; it reads and writes no configuration and no `state_root` |
+| `agentic-hil agent-install --agent <agent>` | user and agent, once per user | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; it reads and writes no configuration and no `state_root` |
 | `agentic-hil init [--agent <agent>]` | this workspace, once per project | the authoritative configuration and `state_root`, then `doctor` | refuses, because those are exactly the rejected paths |
-| `agentic-hil setup --agent <agent>` | both, in that order | both of the above | the machine half completes and stays; the project half refuses and rolls back only itself |
+| `agentic-hil setup --agent <agent>` | both, in that order | both of the above | the user half completes and stays; the project half refuses and rolls back only itself |
 
-So a rejected configuration location leaves the agent installed and working. Fix the location as below and run `agentic-hil init` alone; `agent-install` does not have to run again, on this project or any other on this machine.
+User scope is per user, per machine: every process of one OS user on one host, and no other OS user on it.
+
+So a rejected configuration location leaves the agent installed and working. Fix the location as below and run `agentic-hil init` alone; `agent-install` does not have to run again, for this user, on this project or any other.
 
 ## Where to put things instead
 

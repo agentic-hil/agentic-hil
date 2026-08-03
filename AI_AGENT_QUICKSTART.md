@@ -6,15 +6,15 @@ This file is for agents. Humans start with `README.md`; `TROUBLESHOOTING.md` is 
 
 Two steps: install the package, then run `setup` in the firmware project. `setup` does the rest — skill, MCP registration, config, doctor.
 
-`setup` is two commands in one, split by scope. `agent-install` is machine-wide and runs once per machine and agent; `init` binds one project and runs once per project. First time, run `setup` and get both. Second firmware repository on the same machine, run `init` alone.
+`setup` is two commands in one, split by scope. `agent-install` is user-wide and runs once per user and agent; `init` binds one project and runs once per project. First time, run `setup` and get both. Second firmware repository under the same user, run `init` alone.
 
 ## What this changes on the machine
 
 Not project-local. The whole of it, before you start:
 
 - A user-local package and console script in your home directory. No admin rights, ever.
-- An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches. *(machine-wide, `agent-install`)*
-- A skill file in your agent's skill directory. *(machine-wide, `agent-install`)*
+- An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches. *(user-wide, `agent-install`)*
+- A skill file in your agent's skill directory. *(user-wide, `agent-install`)*
 - One external config per project: deny-by-default unless `agentic-hil.config.example.yaml` declares bootstrap hardware requirements. *(per project, `init`)*
 - Nothing inside the firmware project, nothing committed — no `.mcp.json`, no config, no checkout. `setup` needs none of them, and writing one puts the hardware gate in a file anyone with repository access can change.
 
@@ -68,20 +68,20 @@ agentic-hil setup --agent <agent>
 
 Agent names: `claude-code`/`claude`, `codex`, `opencode`. For another skill-capable agent add `--target <its user-level skill directory>`.
 
-One command instead of `agent-install`, `init` and `doctor` separately. It returns one JSON result with a per-step breakdown under `steps`, and each half's own outcome under `scopes.machine` and `scopes.project`; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
+One command instead of `agent-install`, `init` and `doctor` separately. It returns one JSON result with a per-step breakdown under `steps`, and each half's own outcome under `scopes.user` and `scopes.project`; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config — outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
 
 ## The two halves, and when to run which
 
 ```bash
-agentic-hil agent-install --agent <agent>   # machine-wide, once per machine and agent
+agentic-hil agent-install --agent <agent>   # user-wide, once per user and agent
 agentic-hil init --agent <agent>            # one project, from its root
 ```
 
-`agent-install` installs the agent's skill and registers the MCP server at user level, and checks that there is a persistent trusted executable to register. It needs no project: no workspace, no configuration, and it creates neither. Run it from anywhere.
+`agent-install` installs the agent's skill and registers the MCP server at user level, and checks that there is a persistent trusted executable to register. Everything it writes lands under the invoking user's home, so its scope is per user, per machine: every process of that OS user on this host, and no other OS user on it. It needs no project: no workspace, no configuration, and it creates neither. Run it from anywhere.
 
 `init` writes this workspace's deny-by-default authoritative config and verifies it with `doctor`. With `--agent` it also asks that agent to refuse its own write tools on the config and the state root. Run it from the firmware project root.
 
-Each half rolls back only what it wrote. **A failing project half never removes an installed skill or MCP registration** — so where the configuration location is refused (a stock Windows profile rejects `%APPDATA%`; see MCP resource `agentic-hil://reference/platform-paths`), `setup` reports `ok: false` while `scopes.machine.ok` is `true`, and the agent stays installed and working. Fix the location that `steps.config` names, then run `init` alone. Do not rerun `agent-install`, and do not read the refusal as "nothing was installed".
+Each half rolls back only what it wrote. **A failing project half never removes an installed skill or MCP registration** — so where the configuration location is refused (a stock Windows profile rejects `%APPDATA%`; see MCP resource `agentic-hil://reference/platform-paths`), `setup` reports `ok: false` while `scopes.user.ok` is `true`, and the agent stays installed and working. Fix the location that `steps.config` names, then run `init` alone. Do not rerun `agent-install`, and do not read the refusal as "nothing was installed".
 
 `--force` on `setup` and `agent-install` repairs a managed skill or MCP entry. It never rewrites an authoritative config; only `agentic-hil init --force` does, and that is operator policy — ask first.
 

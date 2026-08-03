@@ -66,10 +66,11 @@ call.
 
 Installation and project binding are separate commands with separate scopes.
 `agent-install` installs this skill and the user-level MCP registration once per
-machine and agent, and needs no project. `init` binds one project by writing its
+user and agent — per user, per machine, so no other OS user on the host sees
+either — and needs no project. `init` binds one project by writing its
 authoritative configuration and verifying it. `setup` runs both, so a first run
-stays one command. A second project on the same machine needs `init` alone, and
-a project step that fails never removes the machine-wide installation.
+stays one command. A second project for the same user needs `init` alone, and
+a project step that fails never removes the user-wide installation.
 
 ## Configuration and regression runs
 

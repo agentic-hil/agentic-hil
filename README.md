@@ -46,11 +46,12 @@ agentic-hil agent-install --agent <agent>   # skill + user-level MCP registratio
 agentic-hil init --agent <agent>            # this project's policy + doctor
 ```
 
-`agent-install` is machine-wide: once per machine and agent, from anywhere, with
-no project and no configuration involved. `init` is per project, from its root.
-Each rolls back only its own writes, so a project that will not configure leaves
-a working agent behind, and the second firmware repository on this machine needs
-`init` alone.
+`agent-install` is user-wide: once per user and agent, from anywhere, with no
+project and no configuration involved. Everything it writes lands under the
+invoking user's home, so it is per user, per machine — another OS user on the
+same host gets none of it. `init` is per project, from its root. Each rolls back
+only its own writes, so a project that will not configure leaves a working agent
+behind, and the second firmware repository for this user needs `init` alone.
 
 If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
 up on `PATH`, install it persistently with a tool installer instead and rerun
@@ -105,7 +106,7 @@ Host configuration schemas are not portable: VS Code uses `servers`, Claude Code
 
 ## Configuration
 
-`agentic-hil setup` already created this file; `agentic-hil init` creates it on its own, without the machine-wide skill and MCP registration that `agentic-hil agent-install` owns. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses — each with its own deny-by-default permissions:
+`agentic-hil setup` already created this file; `agentic-hil init` creates it on its own, without the user-wide skill and MCP registration that `agentic-hil agent-install` owns. Either way it lands outside the repository, deny-by-default, with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses — each with its own deny-by-default permissions:
 
 ```yaml
 workspace_root: "/absolute/path/to/firmware-project"
@@ -260,7 +261,7 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 
 ```text
 agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
-agentic-hil agent-install --agent <claude-code|codex|opencode> # machine-wide half
+agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
 agentic-hil init [--agent <agent>]                             # project half
 agentic-hil doctor
 agentic-hil debugger-probes

@@ -438,7 +438,7 @@ def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The machine-wide half is machine state and nothing else.
+    """The user-wide half is user state and nothing else.
 
     It has to run before any project exists, so it may not read a config, and it
     may not create one — nor the state root a config would have to name.
@@ -451,7 +451,7 @@ def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
     result = install_agent(agent="claude-code")
 
     assert result["ok"] is True, result
-    assert result["scope"] == "machine"
+    assert result["scope"] == "user"
     assert result["steps"]["skill_install"]["ok"] is True
     assert result["steps"]["mcp_config"]["ok"] is True
     assert _claude_skill_path().is_file()
@@ -507,7 +507,7 @@ def test_agent_install_completes_where_the_config_location_is_refused(
 
     Before the split both halves shared one transaction, so this refusal took
     the skill installation and the MCP registration with it and the operator was
-    left with nothing. The machine-wide half never reads or writes a config, so
+    left with nothing. The user-wide half never reads or writes a config, so
     it has to finish here.
     """
     workspace = _isolated_workspace(tmp_path, monkeypatch)
@@ -541,7 +541,7 @@ def test_setup_keeps_the_installed_agent_when_the_config_location_is_refused(
     result = setup_project(agent="claude-code")
 
     assert result["ok"] is False
-    assert result["scopes"]["machine"]["ok"] is True
+    assert result["scopes"]["user"]["ok"] is True
     assert result["scopes"]["project"]["ok"] is False
     assert result["steps"]["skill_install"]["ok"] is True
     assert result["steps"]["mcp_config"]["ok"] is True
@@ -553,7 +553,7 @@ def test_setup_keeps_the_installed_agent_when_the_config_location_is_refused(
     assert _registered_claude_command() == command
 
 
-def test_a_failed_project_half_leaves_the_machine_wide_installation_intact(
+def test_a_failed_project_half_leaves_the_user_wide_installation_intact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -561,9 +561,9 @@ def test_a_failed_project_half_leaves_the_machine_wide_installation_intact(
 
     opencode is the case that can go wrong: its MCP entry and its permission
     rules live in one file, so a project half that restored that file from a
-    snapshot taken before the machine half ran would delete the registration.
+    snapshot taken before the user half ran would delete the registration.
     Each half snapshots when it starts, so the project baseline already holds
-    the machine half's write.
+    the user half's write.
     """
     from agentic_hil import cli as cli_module
 
@@ -589,12 +589,12 @@ def test_a_failed_project_half_leaves_the_machine_wide_installation_intact(
     # The project half took back its own two writes...
     assert not initialized_config_path(workspace).exists()
     assert "permission" not in json.loads(opencode_json.read_text(encoding="utf-8"))
-    # ...and neither of the machine half's.
+    # ...and neither of the user half's.
     assert json.loads(opencode_json.read_text(encoding="utf-8"))["mcp"]["agentic-hil"] == registered
     assert skill_path.is_file()
 
 
-def test_a_failed_machine_half_leaves_an_existing_project_config_intact(
+def test_a_failed_user_half_leaves_an_existing_project_config_intact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -622,11 +622,11 @@ def test_a_failed_machine_half_leaves_an_existing_project_config_intact(
     assert config_path.read_bytes() == before
 
 
-def test_one_agent_install_serves_every_project_on_the_machine(
+def test_one_agent_install_serves_every_project_of_this_user(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Install once per machine, bind once per project.
+    """Install once per user, bind once per project.
 
     The whole reason for the split: the second firmware repository must not
     reinstall the skill or re-register the MCP server.
@@ -636,7 +636,7 @@ def test_one_agent_install_serves_every_project_on_the_machine(
     monkeypatch.chdir(outside)
     _trusted_test_mcp_command(monkeypatch)
     assert install_agent(agent="claude-code")["ok"] is True
-    machine_files = {path: path.read_bytes() for path in (_claude_skill_path(), Path.home() / ".claude.json")}
+    user_files = {path: path.read_bytes() for path in (_claude_skill_path(), Path.home() / ".claude.json")}
 
     configs = []
     for name in ("firmware-a", "firmware-b"):
@@ -650,7 +650,7 @@ def test_one_agent_install_serves_every_project_on_the_machine(
         configs.append(config_path)
 
     assert configs[0] != configs[1]
-    for path, content in machine_files.items():
+    for path, content in user_files.items():
         assert path.read_bytes() == content, f"{path} was rewritten by a project step"
 
 
@@ -664,10 +664,10 @@ def test_setup_is_the_two_halves_and_says_which_is_which(
     result = setup_project(agent="claude-code")
 
     assert result["ok"] is True, result
-    assert result["scopes"]["machine"]["ok"] is True
-    assert result["scopes"]["machine"]["scope"] == "machine"
+    assert result["scopes"]["user"]["ok"] is True
+    assert result["scopes"]["user"]["scope"] == "user"
     assert result["scopes"]["project"]["scope"] == "project"
-    assert set(result["scopes"]["machine"]["steps"]) == {"skill_install", "mcp_config"}
+    assert set(result["scopes"]["user"]["steps"]) == {"skill_install", "mcp_config"}
     assert set(result["scopes"]["project"]["steps"]) == {"config", "doctor", "agent_write_restriction"}
     # Each half rolls back only itself, so neither may hold the other's paths.
     assert result["rollback"]["attempted"] is False
@@ -684,8 +684,8 @@ def test_both_halves_are_reachable_from_the_command_line(
     _trusted_test_mcp_command(monkeypatch)
 
     assert entrypoint(["agent-install", "--agent", "claude-code"]) == 0
-    machine = json.loads(capsys.readouterr().out)
-    assert machine["scope"] == "machine"
+    user_scope = json.loads(capsys.readouterr().out)
+    assert user_scope["scope"] == "user"
 
     workspace = tmp_path / "firmware"
     workspace.mkdir()
