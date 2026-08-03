@@ -2,7 +2,7 @@
 
 Agentic Hardware-in-the-Loop (Agentic HIL) is a safe, bounded gate between AI agents and real embedded hardware. Anything that lets an MCP client exceed the discovered authoritative project configuration or its explicit `AGENTIC_HIL_CONFIG` override is a security vulnerability, not just a bug. That includes:
 
-- flashing or reading artifacts outside `artifacts.allowed_roots`
+- flashing or reading artifacts outside `workspace_root`, or outside `artifacts.allowed_roots` where those are narrower
 - reaching serial devices, CAN channels, or executables that are not named in the config
 - executing actions whose permission switch is disabled
 - command or path injection through MCP tool arguments or config values

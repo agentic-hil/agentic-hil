@@ -141,7 +141,9 @@ Symptom: `flash_firmware` returns `artifact_not_found` or `artifact_validation_f
 
 Likely cause: the firmware was not built, the path is wrong, the artifact is outside configured `artifacts.allowed_roots`, the extension is not allowed, or the file is not a valid firmware artifact.
 
-Fix: build first and flash `.elf`, `.hex`, or `.bin` from an allowed root, usually `build/firmware.elf`. Only extend `allowed_extensions` if the project intentionally produces that format.
+Fix: build first and flash `.elf`, `.hex`, or `.bin` from an allowed root. On `allowed_root: false`, read what the configuration lists: a generated one says `["."]` and permits the whole workspace recursively, while a configuration written before 0.8.0, or one that omits the key, permits `build` alone — which no CLion, PlatformIO, or Zephyr tree builds into. Setting `allowed_roots: ["."]` is the one edit that covers every build layout; it is not a permission and it does not reach outside `workspace_root`. Only extend `allowed_extensions` if the project intentionally produces that format.
+
+A refusal with `allowed_root: true` and `within_workspace: false` is a different fault: the build directory is a symlink or junction pointing outside `workspace_root`, so the path only looks contained. Build inside the workspace, or move `workspace_root` to where the build really lands. No configuration key relaxes containment, so widening `allowed_roots` will not help here.
 
 ## 10. `flash_failed`, `verify_failed`, `reset_failed`, Or `timeout`
 
