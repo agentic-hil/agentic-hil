@@ -183,6 +183,26 @@ def test_the_execution_shape_is_the_same_for_debugger_uart_and_can(tmp_path: Pat
     assert "flash" in unknown["summary"]
 
 
+def test_the_mutex_is_reachable_from_the_device_itself(tmp_path: Path) -> None:
+    """The base class carries the lock, so no backend has to spell one."""
+    config = four_device_config(tmp_path)
+    device = uart_device(config, "port_a")
+    bench = BenchMutex(frontend="owner", label="single-device")
+    contender = BenchMutex(frontend="contender")
+    try:
+        assert device.is_held(bench) is False
+        assert device.acquire(bench) is True
+        # Re-taking a device this owner holds is a no-op, not a second lock.
+        assert device.acquire(bench) is False
+        assert device.is_held(bench) is True
+        assert device.holder(bench)["owner"]["label"] == "single-device"
+        with pytest.raises(DeviceBusyError):
+            device.acquire(contender)
+    finally:
+        bench.release_all()
+    assert device.is_held(bench) is False
+
+
 def test_a_debugger_action_is_refused_by_a_service_bound_to_another_probe(tmp_path: Path) -> None:
     """No debugger tool schema carries a probe name, so a wrong binding would
     silently drive the wrong board."""
