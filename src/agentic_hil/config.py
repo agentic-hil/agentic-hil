@@ -1374,6 +1374,20 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
         # — silently, on a path a person opened for a hardware refresh. Config
         # load pins these to absolute paths; write them back as they were read.
         artifacts["allowed_roots"] = [display_path(existing, root) for root in existing.artifacts.allowed_roots]
+        # And which formats may reach a backend, for the same reason and more
+        # sharply: with the roots naming the whole workspace, the extension list
+        # is one of the checks that still refuse a foreign artifact. A bench
+        # narrowed to [".bin"] would come back out of a hardware refresh
+        # accepting .elf and .hex again — three format parsers where its owner
+        # had permitted one.
+        #
+        # upload_directory and max_upload_size_mb are deliberately not here.
+        # They place a directory and size a payload rather than say what may be
+        # flashed, and regeneration re-derives placement from the environment on
+        # purpose — state_root above is recomputed the same way. debug carries
+        # allowed_symbols and leaves max_dump_size_bytes beside it alone; this
+        # is that line, in the section next to it.
+        artifacts["allowed_extensions"] = list(existing.artifacts.allowed_extensions)
     debug = document.get("debug")
     if isinstance(debug, dict):
         debug["allow_all_symbols"] = existing.debug.allow_all_symbols
