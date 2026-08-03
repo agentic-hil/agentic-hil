@@ -480,12 +480,20 @@ def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
     """
     from agentic_hil.cli import _processes_holding_installation
 
-    shared = "C:/Python313"
-    unrelated = _fake_process(400, 999, f"{shared}/python.exe", created_ns=5)
-    ours = _fake_process(401, 999, f"{shared}/Scripts/agentic-hil.exe", created_ns=5)
-    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, unrelated, ours), prefix=shared, executable=f"{shared}/python.exe")
+    # A shared prefix has a real shape per platform, and the console script only
+    # sits where that platform puts it: `<prefix>/Scripts/agentic-hil.exe` beside
+    # a Windows interpreter at the prefix root, `<prefix>/bin/agentic-hil` beside
+    # a POSIX one already inside `bin`.
+    shared, interpreter, script = (
+        ("C:/Python313", "C:/Python313/python.exe", "C:/Python313/Scripts/agentic-hil.exe")
+        if os.name == "nt"
+        else ("/opt/python313", "/opt/python313/bin/python3", "/opt/python313/bin/agentic-hil")
+    )
+    unrelated = _fake_process(400, 999, interpreter, created_ns=5)
+    ours = _fake_process(401, 999, script, created_ns=5)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, unrelated, ours), prefix=shared, executable=interpreter)
 
-    assert _processes_holding_installation() == [{"pid": 401, "image": f"{shared}/Scripts/agentic-hil.exe"}]
+    assert _processes_holding_installation() == [{"pid": 401, "image": script}]
 
 
 def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
