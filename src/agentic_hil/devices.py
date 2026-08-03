@@ -11,6 +11,10 @@ mutex locks, and it is built from what the config says about the *unit* — a
 from the name of the config entry. Two entries describing one physical unit
 therefore produce one key and collapse to one lock, which is the whole point: a
 board reachable as ``dut_uart`` and as ``bootloader_uart`` is still one board.
+Case follows what the component *is*, not what the host happens to do with it:
+opaque hardware ids fold identically everywhere and path-like values fold as
+their own filesystem does — see ``types.fold_hardware_id`` and
+``types.fold_device_path``, which say why that distinction is load-bearing.
 
 **One mutex.** ``Device.acquire`` / ``DeviceSet.acquire`` are the only way a
 device is taken. Backends no longer each reach for the lock in their own shape,
@@ -24,13 +28,20 @@ free-form so a device kind can grow a tool without a new plumbing path.
 """
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
 from agentic_hil.bench import BenchMutex, is_physical_resource
-from agentic_hil.types import AgenticHILConfig, CanBusConfig, ComPortConfig, DebuggerConfig, JsonObject
+from agentic_hil.types import (
+    AgenticHILConfig,
+    CanBusConfig,
+    ComPortConfig,
+    DebuggerConfig,
+    JsonObject,
+    fold_device_path,
+    fold_hardware_id,
+)
 
 DEVICE_KINDS = ("debugger", "uart", "can")
 
@@ -214,9 +225,17 @@ class DebuggerDevice(Device):
     @property
     def lock_key(self) -> str:
         if self.debugger.resource_id:
-            return f"physical:{os.path.normcase(self.debugger.resource_id)}"
-        identity = self.debugger.probe_id or self.debugger.executable or self.debugger.type
-        return f"probe:{os.path.normcase(str(identity))}"
+            return f"physical:{fold_hardware_id(self.debugger.resource_id)}"
+        if self.debugger.probe_id:
+            # A probe serial is an opaque hardware id and never a path: one
+            # ST-Link is 0669FF… to STM32CubeProgrammer and 0669ff… to udev, and
+            # it is one probe on Windows and on Linux alike.
+            return f"probe:{fold_hardware_id(self.debugger.probe_id)}"
+        if self.debugger.executable:
+            # The fallback that genuinely is a path, and the only component of a
+            # debugger key whose case rule belongs to the host.
+            return f"probe:{fold_device_path(self.debugger.executable)}"
+        return f"probe:{fold_hardware_id(self.debugger.type)}"
 
     @property
     def identity_source(self) -> str:
@@ -278,8 +297,10 @@ class UartDevice(Device):
     @property
     def lock_key(self) -> str:
         if self.port.resource_id:
-            return f"physical:{os.path.normcase(self.port.resource_id)}"
-        return f"com:{os.path.normcase(self.port.device)}"
+            return f"physical:{fold_hardware_id(self.port.resource_id)}"
+        # A serial device is a host path: COM7 and com7 are one port on Windows,
+        # /dev/ttyACM0 and /dev/ttyacm0 are two names on Linux.
+        return f"com:{fold_device_path(self.port.device)}"
 
     @property
     def identity_source(self) -> str:
@@ -307,8 +328,11 @@ class CanDevice(Device):
     @property
     def lock_key(self) -> str:
         if self.bus.resource_id:
-            return f"physical:{os.path.normcase(self.bus.resource_id)}"
-        return f"can:{self.bus.adapter}:{os.path.normcase(self.bus.channel)}"
+            return f"physical:{fold_hardware_id(self.bus.resource_id)}"
+        # Neither part is a path. The adapter is a fixed keyword and the channel
+        # is the adapter's own name for a port (PCAN_USBBUS1, can0), so both fold
+        # the same way wherever the bench runs.
+        return f"can:{fold_hardware_id(self.bus.adapter)}:{fold_hardware_id(self.bus.channel)}"
 
     @property
     def identity_source(self) -> str:

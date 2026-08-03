@@ -41,6 +41,8 @@ from agentic_hil.types import (
     ReportsConfig,
     TargetConfig,
     ValidationConfig,
+    fold_device_path,
+    fold_hardware_id,
 )
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
@@ -218,6 +220,12 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
 
     target = target_config(target_raw)
     debuggers = {name: named_debugger_config(name, value, target) for name, value in debuggers_raw.items()}
+    com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
+    can_buses = {name: can_bus_config(name, value) for name, value in can_buses_raw.items()}
+    # Before validate_debuggers, so a pair of debuggers differing only in the
+    # case of their resource_id is named as the case collision it is instead of
+    # as two probes that happen to resolve to one resource.
+    validate_resource_ids(debuggers, com_ports, can_buses)
     validate_debuggers(debuggers)
     # One configured probe has no ambiguity to resolve, so bind it and let the
     # single-board path stay free of a name it could only get wrong once.
@@ -237,8 +245,8 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         debuggers=debuggers,
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
-        com_ports={name: com_port_config(name, value) for name, value in com_ports_raw.items()},
-        can_buses={name: can_bus_config(name, value) for name, value in can_buses_raw.items()},
+        com_ports=com_ports,
+        can_buses=can_buses,
         validation=validation_config(validation_raw),
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
@@ -336,6 +344,47 @@ def probe_selector_key(debugger: DebuggerConfig) -> str | None:
     if debugger.type == "pyocd" and ":" in selector:
         selector = selector.split(":", 1)[1]
     return selector.lower()
+
+
+def validate_resource_ids(
+    debuggers: dict[str, DebuggerConfig],
+    com_ports: dict[str, ComPortConfig],
+    can_buses: dict[str, CanBusConfig],
+) -> None:
+    """Entries may share a resource_id; they may not spell one two ways.
+
+    Sharing is the feature. An identical ``resource_id`` on a debugger and on a
+    COM port is how an operator says an ST-Link and its virtual COM port are one
+    unit, and those entries collapse to one lock exactly as intended.
+
+    Values that differ only in case are the opposite situation and cannot be
+    resolved from the text: either it is a typo for one unit, or the operator
+    is distinguishing two units by case alone. A lock key folds an opaque
+    hardware id on every platform (``types.fold_hardware_id``), so the second
+    reading would quietly become the first — two boards sharing one lock,
+    serialised against each other with nothing anywhere saying why. Refuse the
+    pair and let the operator say which they meant: identical if it is one unit,
+    distinct by more than case if it is two.
+
+    Pinning cannot introduce such a pair — it rewrites executables and script
+    paths, never resource_id — so unlike validate_debuggers this runs once."""
+    first_spelling: dict[str, tuple[str, str]] = {}
+    entries: list[tuple[str, str | None]] = [(f"debuggers.{name}", entry.resource_id) for name, entry in debuggers.items()]
+    entries += [(f"com_ports.{name}", entry.resource_id) for name, entry in com_ports.items()]
+    entries += [(f"can_buses.{name}", entry.resource_id) for name, entry in can_buses.items()]
+    for field, resource_id in entries:
+        if not resource_id:
+            continue
+        folded = fold_hardware_id(resource_id)
+        seen = first_spelling.get(folded)
+        if seen is None:
+            first_spelling[folded] = (field, resource_id)
+        elif seen[1] != resource_id:
+            raise ConfigError(
+                "config_invalid",
+                "Two entries spell one resource_id in two cases. A resource_id names hardware, so its lock key folds case on every platform and these two would share one lock: make them identical if they are one physical unit, or distinct by more than case if they are two.",
+                {"field": f"{field}.resource_id", "resource_id": resource_id, "other_entry": seen[0], "other_resource_id": seen[1]},
+            )
 
 
 def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: bool = False) -> None:
@@ -1809,11 +1858,18 @@ def target_config(raw: JsonObject) -> TargetConfig:
 
 
 def debugger_resource_identity(debugger: DebuggerConfig) -> str:
-    # Mirror coordination.debugger_resource() so config validation rejects exactly
+    # Mirror devices.DebuggerDevice.lock_key so config validation rejects exactly
     # the collisions the coordinator would (and OpenOCD would silently share).
+    # It stays a mirror rather than a call because devices.py sits above this
+    # module in the import graph; tests/test_devices.py asserts the two agree,
+    # case included, so they cannot drift.
     if debugger.resource_id:
-        return f"physical:{os.path.normcase(debugger.resource_id)}"
-    return f"probe:{os.path.normcase(str(debugger.probe_id or debugger.executable or debugger.type))}"
+        return f"physical:{fold_hardware_id(debugger.resource_id)}"
+    if debugger.probe_id:
+        return f"probe:{fold_hardware_id(debugger.probe_id)}"
+    if debugger.executable:
+        return f"probe:{fold_device_path(debugger.executable)}"
+    return f"probe:{fold_hardware_id(debugger.type)}"
 
 
 def named_debugger_config(name: str, value: Any, default_target: TargetConfig) -> DebuggerConfig:

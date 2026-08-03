@@ -8,15 +8,17 @@ and nothing left behind on a partial acquisition.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from conftest import write_config
 
 from agentic_hil.bench import BenchMutex, DeviceBusyError
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, can_resource, com_resource
 from agentic_hil.devices import (
     CanDevice,
@@ -55,6 +57,14 @@ TWO_NAMES_ONE_PORT = """com_ports:
   bootloader_uart:
     device: "COM_TEST"
 """
+
+# The key TWO_NAMES_ONE_PORT produces. A serial device is a host path, so its
+# case rule is the host's: derived here rather than spelled out, because what
+# the tests below pin is the collapse of two names to one key, not the platform
+# they happen to run on. The case rules themselves are pinned, without deferring
+# to the host, under "identity folds case the same way everywhere" — a test that
+# passes on one platform for the wrong reason is what let this drift in.
+ONE_PORT_KEY = f"com:{os.path.normcase('COM_TEST')}"
 
 # The real ST-Link shape: one USB unit that is both a debug probe and a virtual
 # COM port. Only resource_id can say that they are one thing.
@@ -124,7 +134,7 @@ def test_identity_comes_from_the_hardware_and_not_from_the_config_entry_name(tmp
     bootloader = uart_device(config, "bootloader_uart")
 
     assert dut.config_id != bootloader.config_id
-    assert dut.lock_key == bootloader.lock_key == "com:com_test"
+    assert dut.lock_key == bootloader.lock_key == ONE_PORT_KEY
     assert dut.identity_source == "device"
     # And the coordination layer derives the same key it always did.
     assert com_resource(config, "dut_uart") == dut.lock_key
@@ -144,6 +154,7 @@ def test_a_debugger_that_names_no_hardware_says_so(tmp_path: Path) -> None:
     assert "probe_id" in unnamed.identity_warning
     assert named.identity_source == "probe_id"
     assert named.identity_warning is None
+    # A serial is an opaque hardware id, so this literal holds on every platform.
     assert named.lock_key == "probe:0669ff"
 
 
@@ -236,18 +247,18 @@ def test_two_config_entries_on_one_physical_unit_collapse_to_one_lock(tmp_path: 
     declared = DeviceSet.of([uart_device(config, "dut_uart"), uart_device(config, "bootloader_uart")])
 
     assert len(declared) == 1
-    assert declared.lock_keys == ["com:com_test"]
+    assert declared.lock_keys == [ONE_PORT_KEY]
 
     coordinator = HardwareCoordinator(config, "owner")
     started = coordinator.begin_run(declared, label="two-names")
     try:
-        assert started["declared_devices"] == ["com:com_test"]
+        assert started["declared_devices"] == [ONE_PORT_KEY]
         # Both names are inside the declaration, so neither is undeclared.
         coordinator.acquire(com_resource(config, "dut_uart")).release()
         coordinator.acquire(com_resource(config, "bootloader_uart")).release()
         stranger = BenchMutex(frontend="stranger")
         with pytest.raises(DeviceBusyError):
-            stranger.acquire(["com:com_test"])
+            stranger.acquire([ONE_PORT_KEY])
     finally:
         coordinator.end_run()
         coordinator.close()
@@ -262,6 +273,87 @@ def test_a_probe_and_its_virtual_com_port_are_one_lock(tmp_path: Path) -> None:
 
     assert probe.lock_key == vcp.lock_key == "physical:usb-stlink-0669"
     assert DeviceSet.of([probe, vcp]).lock_keys == ["physical:usb-stlink-0669"]
+
+
+# --- identity folds case the same way everywhere -------------------------
+#
+# The rules these pin are deliberately asserted without asking the host what it
+# would do, because os.path.normcase() folds on Windows and does nothing on
+# POSIX: a suite that lets the platform supply the expectation agrees with the
+# code on both and notices nothing when the two disagree with each other.
+
+
+def test_an_opaque_hardware_id_folds_case_on_every_platform(tmp_path: Path) -> None:
+    """A probe serial, a resource_id and a CAN channel name hardware, not a file.
+
+    They name a unit that is one board wherever the bench runs, and two config
+    entries that spell one of them in two cases must collapse to one lock on
+    Windows and on Linux alike. Preserving case on POSIX only would leave the
+    same bench with two different exclusivity guarantees and no error on either:
+    two runs would each believe they held the board."""
+    upper = config_for(tmp_path / "upper", probe_id="0669FF", can_buses_yaml='can_buses:\n  main:\n    adapter: peak\n    channel: "PCAN_USBBUS1"\n')
+    lower = config_for(tmp_path / "lower", probe_id="0669ff", can_buses_yaml='can_buses:\n  main:\n    adapter: peak\n    channel: "pcan_usbbus1"\n')
+
+    # No platform branch: both must hold on every host this suite runs on.
+    assert debugger_device(upper).lock_key == debugger_device(lower).lock_key == "probe:0669ff"
+    assert can_device(upper, "main").lock_key == can_device(lower, "main").lock_key == "can:peak:pcan_usbbus1"
+
+    mixed = config_for(tmp_path / "mixed", com_ports_yaml='com_ports:\n  vcp:\n    device: "COM_VCP"\n    resource_id: "USB-STLink-0669"\n')
+    assert uart_device(mixed, "vcp").lock_key == "physical:usb-stlink-0669"
+    for device in (debugger_device(upper), can_device(upper, "main"), uart_device(mixed, "vcp")):
+        assert device.lock_key == device.lock_key.casefold(), device.lock_key
+
+
+def test_a_path_like_device_value_folds_the_way_its_own_host_does(tmp_path: Path) -> None:
+    """A serial device name and a debugger executable are host paths.
+
+    Here the platform dependence is the correct answer rather than an accident:
+    COM7 and com7 open one port on Windows, and /dev/ttyACM0 and /dev/ttyacm0
+    are two different devices on Linux. The expectation comes from which host
+    this is, not from the normalisation the code under test happens to call."""
+    upper = config_for(tmp_path / "upper", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    lower = config_for(tmp_path / "lower", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "com_test"\n')
+
+    one_name_on_this_host = os.name == "nt"
+
+    assert (uart_device(upper, "dut_uart").lock_key == uart_device(lower, "dut_uart").lock_key) is one_name_on_this_host
+    assert uart_device(lower, "dut_uart").lock_key == "com:com_test"
+    assert uart_device(upper, "dut_uart").lock_key == ("com:com_test" if one_name_on_this_host else "com:COM_TEST")
+
+    # The debugger's executable fallback is the other path-like component, and
+    # it is reached only when the entry names no hardware at all.
+    toolchain = replace(config_for(tmp_path / "exe").debugger, probe_id=None, resource_id=None)
+    as_written = DebuggerDevice(config_id="dut", debugger=replace(toolchain, executable="C:/Tools/OpenOCD/OpenOCD.exe"))
+    as_lowercased = DebuggerDevice(config_id="dut", debugger=replace(toolchain, executable="C:/Tools/openocd/openocd.exe"))
+
+    assert as_written.identity_source == "executable"
+    assert (as_written.lock_key == as_lowercased.lock_key) is one_name_on_this_host
+
+
+def test_config_load_refuses_one_resource_id_spelled_in_two_cases(tmp_path: Path) -> None:
+    """Folding must never merge two units behind the operator's back.
+
+    An identical resource_id on two entries is the feature — it is how an
+    ST-Link and its virtual COM port are declared one unit. Two spellings of one
+    id are either a typo or an operator distinguishing two boards by case alone,
+    and since the key folds everywhere the second reading would silently become
+    the first. Refuse the pair instead of picking one meaning."""
+    path = write_config(
+        tmp_path,
+        debuggers_yaml='debuggers:\n  probe_b:\n    type: openocd\n    probe_id: "SN-001"\n    resource_id: "bench-A"\n',
+        com_ports_yaml='com_ports:\n  vcp:\n    device: "COM_VCP"\n    resource_id: "bench-a"\n',
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(path))
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert "two cases" in excinfo.value.summary
+    assert excinfo.value.details["other_entry"] == "debuggers.probe_b"
+
+    # The identical spelling stays what it has always been: one unit, one lock.
+    shared = config_for(tmp_path / "shared", debuggers_yaml=PROBE_AND_ITS_VCP_DEBUGGER, com_ports_yaml=PROBE_AND_ITS_VCP_PORT)
+    assert debugger_device(shared, "second_probe").lock_key == uart_device(shared, "probe_vcp").lock_key
 
 
 def test_a_declaration_keeps_only_devices_and_the_order_is_the_key_order(tmp_path: Path) -> None:
@@ -509,7 +601,7 @@ def test_a_run_over_mcp_may_touch_only_what_it_declared(tmp_path: Path, monkeypa
 
         assert refused["ok"] is False
         assert refused["error_type"] == "undeclared_device"
-        assert refused["declared_devices"] == ["com:com_test"]
+        assert refused["declared_devices"] == [ONE_PORT_KEY]
     finally:
         mcp_call(service, "bench_run_stop")
         service.close()
@@ -621,9 +713,17 @@ def test_the_coordination_helpers_and_the_devices_agree(tmp_path: Path) -> None:
 
 def test_config_validation_and_the_device_layer_derive_the_same_probe_identity(tmp_path: Path) -> None:
     """Config load refuses two debuggers that resolve to one lock, using its own
-    copy of the derivation. The two must not drift."""
+    copy of the derivation. The two must not drift — case included, since the
+    two branches that survive here fold by different rules."""
     from agentic_hil.config import debugger_resource_identity
 
-    for kwargs in ({}, {"probe_id": "0669FF"}):
-        config = config_for(tmp_path / f"case{len(kwargs)}", **kwargs)
-        assert debugger_resource_identity(config.debugger) == debugger_device(config).lock_key
+    variants = (
+        {},  # executable, the one path-like fallback
+        {"probe_id": "0669FF"},
+        {"probe_id": "0669ff"},
+        {"debuggers_yaml": PROBE_AND_ITS_VCP_DEBUGGER},  # resource_id
+    )
+    for index, kwargs in enumerate(variants):
+        config = config_for(tmp_path / f"case{index}", **kwargs)
+        for name in config.debuggers:
+            assert debugger_resource_identity(config.debuggers[name]) == debugger_device(config, name).lock_key
