@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +27,7 @@ from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import (
+    _posix_filesystem_path,
     build_parser,
     debugger_probes,
     doctor,
@@ -1164,9 +1165,8 @@ def test_setup_asks_the_agent_to_refuse_writing_the_policy_files(
     restriction = result["steps"]["agent_write_restriction"]
     assert restriction["ok"] is True
     deny = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"]["deny"]
-    config_directory = Path(result["steps"]["config"]["path"]).parent.as_posix()
-    assert f"Edit({config_directory}/**)" in deny
-    assert f"Write({config_directory}/**)" in deny
+    config_directory = Path(result["steps"]["config"]["path"]).parent
+    assert f"Edit(/{_posix_filesystem_path(config_directory)}/**)" in deny
     # Running the CLI is untouched: setup, doctor and a rerun must keep working.
     assert not any(rule.startswith("Bash(") for rule in deny)
 
@@ -1200,6 +1200,165 @@ def test_the_write_restriction_is_left_to_the_sandbox_for_codex(tmp_path: Path) 
 
     assert restriction["ok"] is True
     assert restriction["mode"] == "sandboxed-by-the-agent"
+
+
+def _claude_settings(home: Path, deny: list[str]) -> Path:
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"permissions": {"deny": deny}}) + "\n", encoding="utf-8")
+    return settings
+
+
+def _deny_rules(settings: Path) -> list[str]:
+    return json.loads(settings.read_text(encoding="utf-8"))["permissions"]["deny"]
+
+
+def _superseded_claude_rules(config_path: Path, state_root: Path) -> list[str]:
+    """Exactly what releases up to 0.7.0 wrote into ~/.claude/settings.json."""
+    return [f"{form}({directory.as_posix()}/**)" for directory in (config_path.parent, state_root) for form in ("Edit", "Write")]
+
+
+def test_the_claude_deny_rules_use_only_the_form_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the shape, because nothing else does.
+
+    https://code.claude.com/docs/en/permissions: Claude Code "checks file
+    permissions against `Edit(path)` and `Read(path)` rules only", a `Write(...)`
+    path rule is "accepted but never consulted" and warned about at every start,
+    and a single leading slash "anchors at the settings source, not the
+    filesystem root" — which in user settings is `~/.claude`, not `/`.
+
+    Both halves were written from expectation once already (hardci-hq#81), so
+    the absence of the `Write` form is asserted explicitly rather than implied.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, [])
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+
+    deny = _deny_rules(settings)
+    assert deny == [f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]
+    # Anchored at the filesystem root, so it means the path it names...
+    assert all(rule.startswith("Edit(//") for rule in deny), deny
+    # ...and no inert twin comes along with it, in any spelling.
+    assert not any(rule.startswith("Write(") for rule in deny), deny
+
+
+def test_a_deny_pattern_names_a_filesystem_path_on_either_platform() -> None:
+    """Both branches, on whichever runner this lands on.
+
+    The defect was reported on Debian and the fix is written on Windows, so the
+    platform-dependent half of this would otherwise only ever run on one of them.
+    `C:\\Users\\alice` matches as `/c/Users/alice`, per
+    https://code.claude.com/docs/en/permissions.
+    """
+    assert _posix_filesystem_path(PureWindowsPath(r"C:\Users\alice\.agentic-hil")) == "/c/Users/alice/.agentic-hil"
+    assert _posix_filesystem_path(PurePosixPath("/home/hpauli/.config/agentic-hil")) == "/home/hpauli/.config/agentic-hil"
+    # A colon deeper in a POSIX path is not a drive letter.
+    assert _posix_filesystem_path(PurePosixPath("/home/h/a:b/state")) == "/home/h/a:b/state"
+
+
+def test_a_repeat_setup_takes_back_the_inert_rules_an_earlier_release_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.7.0 left a warning behind that no later start clears by itself.
+
+    Anyone who ran that setup carries the rules in ~/.claude/settings.json, so
+    removal has to happen here or the yellow warning is permanent.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    superseded = _superseded_claude_rules(config_path, state_root)
+    settings = _claude_settings(home, ["Bash(curl *)", *superseded])
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert sorted(restriction["removed"]) == sorted(superseded)
+    deny = _deny_rules(settings)
+    assert not any(rule in superseded for rule in deny), deny
+    assert deny == ["Bash(curl *)", *[f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]]
+
+
+def test_the_deny_rule_cleanup_leaves_an_operators_own_write_rule_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ours is identified by its exact text, never by its shape.
+
+    A `Write(...)` rule of the operator's is inert for the same reason ours was,
+    but it is not this tool's to delete — including one that covers a tree of
+    ours from further up.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    theirs = [
+        "Write(/etc/**)",
+        f"Write({tmp_path.as_posix()}/**)",
+        f"Write({config_path.parent.as_posix()}/*.yaml)",
+        f"Edit({state_root.as_posix()})",
+    ]
+    settings = _claude_settings(home, theirs)
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert _deny_rules(settings)[: len(theirs)] == theirs
+
+
+def test_the_deny_rule_cleanup_settles_after_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, _superseded_claude_rules(config_path, state_root))
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+    migrated = settings.read_text(encoding="utf-8")
+    second = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert (second["added"], second["removed"]) == ([], [])
+    assert settings.read_text(encoding="utf-8") == migrated
+
+
+def test_the_opencode_deny_rules_use_the_shape_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """https://opencode.ai/docs/permissions.
+
+    `edit` takes an object of pattern -> action and covers "all file
+    modifications (covers edit, write, patch)", so there is no second key to
+    write; "the last matching rule winning" is why the denials come after an
+    operator's own catch-all rather than before it.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    opencode_json = home / ".config" / "opencode" / "opencode.json"
+    opencode_json.parent.mkdir(parents=True, exist_ok=True)
+    opencode_json.write_text(json.dumps({"permission": {"edit": "ask"}}) + "\n", encoding="utf-8")
+
+    assert restrict_agent_write_access("opencode", config_path, state_root)["ok"] is True
+
+    permission = json.loads(opencode_json.read_text(encoding="utf-8"))["permission"]
+    assert list(permission["edit"].items()) == [
+        ("*", "ask"),
+        (f"{config_path.parent.as_posix()}/**", "deny"),
+        (f"{state_root.as_posix()}/**", "deny"),
+    ]
+    # One key does every file-writing tool; a second would be the same mistake.
+    assert set(permission) == {"edit"}
 
 
 def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
