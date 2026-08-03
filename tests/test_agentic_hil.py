@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -1537,34 +1538,162 @@ def test_the_deny_rule_cleanup_settles_after_one_run(
     assert settings.read_text(encoding="utf-8") == migrated
 
 
-def test_the_opencode_deny_rules_use_the_shape_that_host_evaluates(
+def _opencode_wildcard_match(subject: str, pattern: str, *, windows: bool = False) -> bool:
+    """`Wildcard.match` from opencode's `packages/core/src/util/wildcard.ts`.
+
+    Ported rather than paraphrased, so what these tests pin is the matcher the
+    host runs. `si` on win32, `s` elsewhere, and `*` -> `.*` crosses `/` because
+    `.` takes the separator like any other character.
+    """
+    escaped = re.sub(r"[.+^${}()|\[\]\\]", r"\\\g<0>", pattern.replace("\\", "/"))
+    escaped = escaped.replace("*", ".*").replace("?", ".")
+    if escaped.endswith(" .*"):
+        escaped = escaped[:-3] + "( .*)?"
+    flags = re.DOTALL | (re.IGNORECASE if windows else 0)
+    return re.fullmatch(escaped, subject.replace("\\", "/"), flags) is not None
+
+
+def _opencode_ruleset(document: dict) -> list[tuple[str, str, str]]:
+    """`fromConfig` from `packages/opencode/src/permission/index.ts`.
+
+    Its `~/` and `$HOME/` expansion is left out: it only fires on a pattern that
+    starts with either, and none written here does.
+    """
+    ruleset: list[tuple[str, str, str]] = []
+    for key, value in document.get("permission", {}).items():
+        if isinstance(value, str):
+            ruleset.append((key, "*", value))
+            continue
+        ruleset.extend((key, pattern, action) for pattern, action in value.items())
+    return ruleset
+
+
+def _opencode_evaluate(permission: str, subject: str, ruleset: list[tuple[str, str, str]], *, windows: bool = False) -> str:
+    """`evaluate` from the same file: `findLast`, hence the reverse walk, and
+    `ask` when nothing matches."""
+    for rule_permission, rule_pattern, action in reversed(ruleset):
+        if _opencode_wildcard_match(permission, rule_permission, windows=windows) and _opencode_wildcard_match(subject, rule_pattern, windows=windows):
+            return action
+    return "ask"
+
+
+def _opencode_edit_subject(worktree: str, filepath: str) -> str:
+    """What `write.ts`, `edit.ts` and `apply_patch.ts` ask with:
+    `path.relative(instance.worktree, filepath)`.
+
+    Held to POSIX semantics whatever the runner is, so the Debian layout the
+    defect was reported on is exercised on both. The one Windows departure is
+    modelled where it matters, in the cross-drive case below: Node hands the
+    target back unchanged when there is no relative route to it.
+    """
+    return posixpath.relpath(filepath, worktree)
+
+
+def _opencode_permission_file(home: Path) -> Path:
+    path = home / ".config" / "opencode" / "opencode.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_OPENCODE_HOME = PurePosixPath("/home/hpauli")
+_OPENCODE_CONFIG_DIR = _OPENCODE_HOME / ".config" / "agentic-hil" / "projects" / "stepper_module_s_3"
+
+
+def test_setup_writes_no_opencode_restriction_and_says_so(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """https://opencode.ai/docs/permissions.
+    """The operator's call, and the report has to read like one.
 
-    `edit` takes an object of pattern -> action and covers "all file
-    modifications (covers edit, write, patch)", so there is no second key to
-    write; "the last matching rule winning" is why the denials come after an
-    operator's own catch-all rather than before it.
+    On opencode a single "always" answer adds a session `allow` for pattern `*`
+    that outranks anything written here, so a rule from setup would be a lock one
+    click removes. Agentic HIL writes none, leaves the file untouched, and names
+    the file the operator sets this in — a silent no-op would read as protection.
     """
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
-    opencode_json = home / ".config" / "opencode" / "opencode.json"
-    opencode_json.parent.mkdir(parents=True, exist_ok=True)
-    opencode_json.write_text(json.dumps({"permission": {"edit": "ask"}}) + "\n", encoding="utf-8")
+    opencode_json = _opencode_permission_file(home)
+    opencode_json.write_text(json.dumps({"permission": {"edit": {"src/**": "allow"}}}) + "\n", encoding="utf-8")
+    before = opencode_json.read_text(encoding="utf-8")
+
+    restriction = restrict_agent_write_access("opencode", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["mode"] == "operator-managed"
+    assert (restriction["added"], restriction["removed"]) == ([], [])
+    assert "opencode.json" in restriction["summary"]
+    assert opencode_json.read_text(encoding="utf-8") == before
+
+
+def test_a_repeat_setup_takes_back_the_inert_opencode_patterns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What earlier releases wrote has to go, now that nothing replaces it.
+
+    Left alone those patterns read as protection and are none — the silent half
+    of hardci-hq#81 on a second host. An operator's own pattern over one of these
+    trees is not ours to drop, and neither is one of ours they have since set to
+    something other than `deny`.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    ours = f"{config_path.parent.as_posix()}/**"
+    initial = {
+        ours: "deny",  # ours, inert, and the only thing this may touch
+        f"{state_root.as_posix()}/**": "ask",  # ours once; theirs now, at their action
+        f"{config_path.parent.as_posix()}/*.yaml": "deny",  # theirs, over a tree of ours
+        "src/**": "allow",  # theirs
+    }
+    opencode_json = _opencode_permission_file(home)
+    opencode_json.write_text(json.dumps({"permission": {"edit": initial}}) + "\n", encoding="utf-8")
+
+    restriction = restrict_agent_write_access("opencode", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["added"] == []
+    assert restriction["removed"] == [ours]
+    rules = json.loads(opencode_json.read_text(encoding="utf-8"))["permission"]["edit"]
+    # Everything else survives, at its action and in the operator's own order,
+    # and nothing of ours takes the place of what went.
+    assert list(rules.items()) == [(pattern, action) for pattern, action in initial.items() if pattern != ours]
+
+
+def test_the_opencode_cleanup_settles_after_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    opencode_json = _opencode_permission_file(home)
+    opencode_json.write_text(json.dumps({"permission": {"edit": {f"{state_root.as_posix()}/**": "deny"}}}) + "\n", encoding="utf-8")
 
     assert restrict_agent_write_access("opencode", config_path, state_root)["ok"] is True
+    migrated = opencode_json.read_text(encoding="utf-8")
+    second = restrict_agent_write_access("opencode", config_path, state_root)
 
-    permission = json.loads(opencode_json.read_text(encoding="utf-8"))["permission"]
-    assert list(permission["edit"].items()) == [
-        ("*", "ask"),
-        (f"{config_path.parent.as_posix()}/**", "deny"),
-        (f"{state_root.as_posix()}/**", "deny"),
-    ]
-    # One key does every file-writing tool; a second would be the same mistake.
-    assert set(permission) == {"edit"}
+    assert (second["added"], second["removed"]) == ([], [])
+    assert opencode_json.read_text(encoding="utf-8") == migrated
+
+
+def test_the_absolute_opencode_pattern_matched_nothing() -> None:
+    """Why those patterns are removed rather than corrected (hardci-hq#84).
+
+    opencode matches `permission.edit` against the worktree-relative path, so the
+    absolute form earlier releases wrote could not match anything. Its own
+    matcher and rule evaluation are ported above and fed the subject the host
+    really produces: the answer is `ask`, from a rule written as `deny`.
+    """
+    stale = [("edit", f"{_OPENCODE_CONFIG_DIR}/**", "deny")]
+    subject = _opencode_edit_subject(str(_OPENCODE_HOME / "work" / "firmware"), str(_OPENCODE_CONFIG_DIR / "config.yaml"))
+
+    assert subject.startswith("../"), subject
+    assert _opencode_evaluate("edit", subject, stale) == "ask"
+    # And it is the relativisation that does it, not how the pattern is spelled.
+    assert _opencode_evaluate("edit", str(_OPENCODE_CONFIG_DIR / "config.yaml"), stale) == "deny"
 
 
 def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
