@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -33,6 +34,12 @@ OPENOCD_NOT_FOUND: JsonObject = {
     "backend_error_type": "openocd_not_found",
     "summary": "Debugger executable could not be found.",
     "likely_causes": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
+    # No executable means no process, so this call is not an unconfirmed outcome
+    # on the bench: nothing was ever started that could have touched it.
+    "target_contacted": False,
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "retry_safe": True,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -40,6 +47,7 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "interface_config_not_found": "debugger_config_not_found",
     "target_config_not_found": "debugger_config_not_found",
     "config_file_not_found": "debugger_config_not_found",
+    "command_rejected_before_init": "debugger_command_rejected",
 }
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
@@ -48,6 +56,21 @@ OPENOCD_SUCCESS_MARKERS = {
     "flash_firmware": "AGENTIC_HIL_RESULT:flash_firmware:ok",
     "reset_target": "AGENTIC_HIL_RESULT:reset_target:ok",
 }
+# OpenOCD has no `reset`, `targets` or `halt` until `init` has run: those live in
+# target_exec_command_handlers, which target_init registers while `init` executes,
+# so before that the Tcl interpreter answers `invalid command name "reset"` and
+# nothing reaches the adapter. `init` is safe to name explicitly - it neither
+# resets nor halts anything (openocd.c handle_init_command examines targets and
+# starts the servers), and it carries its own guard against running twice. The
+# echo behind it is this backend's evidence that the run stage was reached; a
+# failure without it never got that far.
+OPENOCD_INIT_STAGE_MARKER = "AGENTIC_HIL_STAGE:init:ok"
+OPENOCD_INIT_PREFIX = f'init; echo "{OPENOCD_INIT_STAGE_MARKER}"; '
+# Jim rejects a command OpenOCD has not registered yet; OpenOCD itself rejects one
+# that exists but belongs to the other stage. Both verdicts are reached inside the
+# interpreter, before handle_init_command opens the probe.
+OPENOCD_UNREGISTERED_COMMAND = re.compile(r'invalid command name "([^"]+)"', re.IGNORECASE)
+OPENOCD_WRONG_STAGE_COMMAND = re.compile(r"the '([^']+)' command must be used (?:after|before) 'init'", re.IGNORECASE)
 
 
 class OpenOCDBackend:
@@ -126,7 +149,7 @@ class OpenOCDBackend:
         if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
-        result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("probe_target", f'{OPENOCD_INIT_PREFIX}targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through OpenOCD."
@@ -156,7 +179,7 @@ class OpenOCDBackend:
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         marker = OPENOCD_SUCCESS_MARKERS["reset_target"]
-        result = self._run_openocd("reset_target", f'reset {mode}; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("reset_target", openocd_reset_command(mode, marker), marker)
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = f"Target reset with mode '{mode}'."
@@ -287,25 +310,36 @@ class OpenOCDBackend:
             return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
 
         output = f"{completed.stdout}{completed.stderr}"
+        rejected = rejected_openocd_commands(openocd_command, output)
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected), audit_error)
             if success_marker is not None and success_marker not in output:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, rejected), audit_error)
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
             return self._finish_log_audit(result, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, rejected), audit_error)
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
         # Same catalogue the MCP reference serves, so the two cannot diverge.
+        if rejected_commands:
+            backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        if rejected_commands:
+            # OpenOCD stopped inside its own interpreter, before it opened the
+            # probe: this call never reached the bench. That is a failed call,
+            # not an unconfirmed target, so it must not take the bench out of
+            # service - the board is exactly as the last call that did reach it
+            # left it.
+            result.update({"rejected_commands": rejected_commands, "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+        return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
         backend_error_type = self._classify_output(output, tool)
@@ -372,6 +406,7 @@ class OpenOCDBackend:
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
+            "debugger_command_rejected": "OpenOCD refused the command before it opened the debug probe, so the target was not touched.",
             "unknown_debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
 
@@ -385,7 +420,49 @@ class OpenOCDBackend:
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
             "debugger_config_not_found": ["debugger interface configuration is missing", "debugger target configuration is missing", "debugger search path is incomplete"],
+            "debugger_command_rejected": ["this OpenOCD build does not know the command that was sent", "a configuration script used a run-stage command before 'init'", "the installed OpenOCD is older or newer than the one the command was written for"],
         }.get(error_type, ["inspect the debugger log for details"])
+
+
+def openocd_reset_command(mode: str, marker: str) -> str:
+    """The one command line `reset_target` sends, for each of the three modes.
+
+    `run`, `halt` and `init` are OpenOCD's own reset modes: let the target run,
+    halt it immediately, or halt it and then run the target's reset-init event
+    script. `init; reset init` is therefore not the same word twice - the first
+    is the server leaving its configuration stage, the second is the reset mode -
+    and it is exactly the pair OpenOCD's own `program` proc issues before it
+    writes flash (src/flash/startup.tcl), which is why flashing works today
+    without a prefix and a bare `reset` does not."""
+    return f'{OPENOCD_INIT_PREFIX}reset {mode}; echo "{marker}"; shutdown'
+
+
+def rejected_openocd_commands(openocd_command: str, output: str) -> list[str]:
+    """The commands OpenOCD refused to evaluate, when it refused before `init`.
+
+    An empty list means: assume nothing. Two conditions have to hold together
+    before a failure may be read as one that never reached the target.
+
+    OpenOCD has to name a command, and the name has to be one this backend put on
+    the command line. `reset` does not exist in the interpreter until `init`
+    registers it and can never stop existing afterwards, so being told that
+    `reset` is not a command is proof that `init` had not completed - and a run
+    where `init` did not complete is a run where adapter_init never opened the
+    probe. A name we did not send is somebody else's script failing, and says
+    nothing about ours.
+
+    And our post-init marker has to be absent, so an evaluation error raised by a
+    configuration script after the adapter was already open cannot be read as an
+    untouched target.
+
+    Everything else stays unconfirmed and keeps quarantining: an adapter that
+    would not open, a target that would not answer, a reset that was issued and
+    not confirmed, a timeout. None of those can prove where they stopped."""
+    if OPENOCD_INIT_STAGE_MARKER in output:
+        return []
+    sent = {segment.strip().split(" ", 1)[0].strip() for segment in openocd_command.split(";")}
+    named = {match.group(1) for pattern in (OPENOCD_UNREGISTERED_COMMAND, OPENOCD_WRONG_STAGE_COMMAND) for match in pattern.finditer(output)}
+    return sorted(named & sent)
 
 
 def openocd_path_for_command(value: str) -> str:

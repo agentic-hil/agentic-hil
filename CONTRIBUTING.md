@@ -54,4 +54,4 @@ Agentic HIL is designed to let agents perform hardware actions through configure
 
 ## Releases
 
-See [docs/release-strategy.md](docs/release-strategy.md). In short: update `CHANGELOG.md` and the `pyproject.toml` version together, let CI pass, then create a GitHub Release with a `vX.Y.Z` tag that exactly matches the package version — the publish workflow validates the tag, builds, and publishes to PyPI through trusted publishing.
+See [docs/release-strategy.md](docs/release-strategy.md). In short: bump the version in every position `python tools/check_version_consistency.py --list` prints — do not work from a list you remember, that is what drifted — let CI pass, then create a GitHub Release with a `vX.Y.Z` tag that exactly matches the package version. The same check runs on every pull request, so a position left behind is red before the release exists; the publish workflow re-runs it with the tag, builds, and publishes to PyPI through trusted publishing.

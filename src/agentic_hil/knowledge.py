@@ -321,6 +321,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Close whatever else holds the probe.",
         ),
     ),
+    "debugger_command_rejected:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD refused a command in its own interpreter and stopped before it opened the debug probe. The named "
+            "command either does not exist in this OpenOCD build, or it belongs to the run stage and was reached before "
+            "`init`. Nothing was sent to the bench, so the target is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read `rejected_commands` in the result: those are the commands OpenOCD would not run.",
+            "Check `debuggers.<name>.interface_cfg` and `target_cfg` for a script that uses a run-stage command such as "
+            "`reset`, `halt` or `mww` before `init`. OpenOCD registers those only while `init` runs.",
+            "Confirm the installed OpenOCD is a release that knows the command: `debugger_info` reports the version.",
+            "Retry the call once the cause is fixed. The bench was not driven, so nothing has to be inspected or "
+            "recovered first.",
+        ),
+        do_not=(
+            "Do not inspect the hardware or run `agentic-hil recover` for this result. It is a rejected call, not an "
+            "unconfirmed target state, and the two must not be treated the same.",
+        ),
+    ),
     "target_type_invalid:pyocd": ErrorRemedy(
         meaning=(
             "pyOCD does not resolve `debuggers.<name>.target_type`. Most vendor parts are not built into pyOCD; they "

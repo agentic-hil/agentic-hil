@@ -14,15 +14,19 @@ from types import SimpleNamespace
 import pytest
 from conftest import (
     FAKE_OPENOCD,
+    FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
     FAKE_STLINK_UNCONFIRMED,
     write_authoritative_config,
     write_config,
 )
+from fixtures import fake_openocd
 from support import trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends import openocd as openocd_backend
+from agentic_hil.backends.common import command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
@@ -1858,6 +1862,136 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert with_reset["reset_after_flash"] is True
     reset_log = (tmp_path / with_reset["log_path"]).read_text(encoding="utf-8")
     assert "verify reset" in reset_log
+
+
+OPENOCD_RESET_COMMANDS = {
+    "run": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset run; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "halt": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset halt; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "init": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset init; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+}
+
+
+@pytest.mark.parametrize("mode", ["run", "halt", "init"])
+def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path, mode: str) -> None:
+    """The command line itself, not just the result.
+
+    0.7.0 sent `reset <mode>` with no `init`, which OpenOCD refuses with
+    `invalid command name "reset"` before it opens the probe, and no test looked
+    at what was sent. `init; reset init` is two different things in one line: the
+    server leaving its configuration stage, then OpenOCD's reset-init mode - the
+    same pair OpenOCD's own `program` proc issues."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert openocd_backend.openocd_reset_command(mode, "AGENTIC_HIL_RESULT:reset_target:ok") == OPENOCD_RESET_COMMANDS[mode]
+    assert result["ok"] is True, result
+    assert result["success_confirmed"] is True
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(command_for_log(["-c", OPENOCD_RESET_COMMANDS[mode]]))
+
+
+def test_openocd_probe_sends_init_before_the_target_query(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(
+        command_for_log(["-c", 'init; echo "AGENTIC_HIL_STAGE:init:ok"; targets; echo "AGENTIC_HIL_RESULT:probe_target:ok"; shutdown'])
+    )
+
+
+def test_a_command_openocd_refuses_before_init_does_not_take_the_bench_out_of_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 0.7.0 command line again, and what it may cost.
+
+    OpenOCD stopped in its interpreter, before it opened the adapter, so the
+    board is untouched. Reporting that as an unconfirmed target state is what
+    turned a mistyped command line into a work stoppage: the quarantine also
+    blocked the reset that would have cleared it."""
+    monkeypatch.setattr(
+        openocd_backend,
+        "openocd_reset_command",
+        lambda mode, marker: f'reset {mode}; echo "{marker}"; shutdown',
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+        still_usable = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "debugger_command_rejected"
+    assert refused["backend_error_type"] == "command_rejected_before_init"
+    assert refused["rejected_commands"] == ["reset"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_committed"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["retry_safe"] is True
+    assert refused.get("quarantined") is not True, refused
+    assert refused.get("cleanup_required") is not True, refused
+    # The operator is told not to go and look at the board for this one.
+    assert any("rejected_commands" in step for step in refused["remediation"])
+    assert still_usable["ok"] is True, still_usable
+
+
+def test_a_reset_that_may_have_reached_the_target_still_quarantines(tmp_path: Path) -> None:
+    """The other direction, which matters more.
+
+    This OpenOCD opened the adapter and then failed, so nothing on the host knows
+    what state the target is in. Only an abort that provably never got that far
+    may be waved through."""
+    config = load_config(str(write_config(tmp_path, debugger_executable=FAKE_OPENOCD_NO_TARGET)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result.get("rejected_commands") is None
+    assert result["side_effect_status"] == "unknown"
+    assert result["quarantined"] is True
+    assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+
+def test_an_openocd_that_is_not_installed_is_a_call_that_never_started(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_executable=tmp_path / "missing-openocd.exe")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "debugger_not_found"
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result.get("quarantined") is not True, result
+
+
+def test_the_openocd_fake_refuses_a_run_stage_command_the_way_openocd_does() -> None:
+    """The fake is the thing under test here.
+
+    Every OpenOCD test in this suite is only worth what this evaluator is worth,
+    and the one it accepted for three releases could not have run."""
+    refused, initialized, exit_code = fake_openocd.evaluate('reset halt; echo "done"; shutdown', initialized=False)
+    accepted, _, accepted_exit = fake_openocd.evaluate('init; reset halt; echo "done"; shutdown', initialized=False)
+
+    assert refused == ['Error: invalid command name "reset"']
+    assert initialized is False
+    assert exit_code == 1
+    assert accepted == ["done"]
+    assert accepted_exit == 0
 
 
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:
