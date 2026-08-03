@@ -203,7 +203,7 @@ can_buses:
 
 Build layouts differ per toolchain — CLion writes to `cmake-build-debug`, PlatformIO to `.pio/build/<env>`, others to `out`, `Debug`, or `zephyr/build` — so a list of directories has to be curated before the first flash while protecting nothing an attacker was stopped by. What refuses a foreign artifact is elsewhere and unchanged: the path must resolve inside `workspace_root`, which no configuration key relaxes and which a symlink or junction leaving the workspace does not satisfy; the extension must be in `allowed_extensions`; and the content is inspected for its format and hashed before a backend sees it. Narrowing the roots restricts a project against its own operator, so it is available and no longer the way in.
 
-An update never widens this. What is generated changed; what an existing file means did not, whether it names its roots or omits the key. `project_config_create` carries an existing `allowed_roots` over into the file it regenerates, the same way it carries every permission over.
+An update never widens this. What is generated changed; what an existing file means did not, whether it names its roots or omits the key. `project_config_create` carries an existing `allowed_roots` over into the file it regenerates, together with `allowed_extensions` — the check the wide roots lean on — the same way it carries every permission over.
 
 ### Changing it from an agent
 

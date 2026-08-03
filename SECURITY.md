@@ -33,6 +33,8 @@ Mutable canonical report and hardware-lease state is stored under the pinned `st
 
 This boundary assumes the agent cannot modify the authoritative config, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an external YAML config cannot sandbox an already equivalent host principal.
 
+`setup --agent claude-code` writes one deny rule per protected tree into that host's user settings, which is a lock on the front door and not a wall — a shell writes those files regardless. **For opencode, Agentic HIL writes no such rule, deliberately.** That host puts the decision in the operator's hands at the moment of the prompt: answering one permission prompt with "always" adds a session rule that allows every subsequent edit, and it outranks anything the configuration says. A rule written by setup would therefore be a lock a single click removes, and presenting it as protection would say something about this bench that is not true. Whether opencode's file tools may reach the authoritative config and `state_root` is set by the operator in `~/.config/opencode/opencode.json`, under `permission.edit`; `setup` reports that it wrote nothing, and removes the ineffective patterns earlier releases left there. Codex needs no rule: it sandboxes model-generated shell commands and leaves MCP servers outside that sandbox.
+
 Treat that as an expectation, not an edge case. Agentic HIL gates the tools it
 offers; it cannot gate a shell it does not own. The installation evaluation
 measured this with a small model: in two of five runs it reached for `st-flash`
