@@ -101,6 +101,28 @@ def _substitutions() -> dict[str, str]:
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "installation_in_use": ErrorRemedy(
+        meaning=(
+            "A process is running out of the installation this upgrade would replace, and on Windows a file mapped as "
+            "a running image cannot be deleted. A package manager that removes the environment before it rebuilds it "
+            "fails on that delete and stops in between, leaving neither the old installation nor the new one. The "
+            "refusal comes before anything is removed, so the installation is untouched and still works."
+        ),
+        remediation=(
+            "Close the agent host. It starts the Agentic HIL MCP server itself, so that server runs for as long as "
+            "the host does — which is why a working setup is exactly the state this fails in.",
+            "Run `agentic-hil upgrade` again, then start the host, which picks up the new server.",
+            "If no host is open, the refusal names each holding process by pid and image path. End those processes, "
+            "then run the upgrade again.",
+        ),
+        do_not=(
+            "Do not reach for `uv tool install --upgrade` or `uv tool install --force` to get past this. Those are "
+            "the commands the refusal protects you from: they remove the environment first, and that removal is what "
+            "fails while the server holds it.",
+            "Do not delete the environment by hand to unblock the upgrade. The running server is what holds it, and "
+            "an installation destroyed around a live process is the outcome being refused.",
+        ),
+    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "

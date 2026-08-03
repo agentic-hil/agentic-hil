@@ -73,6 +73,17 @@ optional because they carry platform-specific drivers that flashing and UART do
 not need; without them those tools refuse with `can_backend_not_available`
 rather than failing at import.
 
+Adding one of them to an installation that already exists means rewriting that
+environment, so stop the agent host first — it runs the MCP server out of that
+environment — and name every extra you want on the command line, because `uv`
+records the requirement literally and drops the extras it is not told about.
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the sequence and the way to add an
+extra without stopping the host.
+
+To upgrade later, run `agentic-hil upgrade`: it upgrades through the manager
+that owns the installation running it, keeps the extras, and refuses before it
+removes anything if the MCP server is still running.
+
 To check a version without installing anything, `uvx --from agentic-hil
 agentic-hil --version` is a diagnostic only.
 

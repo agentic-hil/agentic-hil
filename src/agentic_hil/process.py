@@ -16,6 +16,22 @@ _PROCESS_RECORDS_LOCK = threading.RLock()
 _PROCESS_OWNER: ContextVar[str | None] = ContextVar("agentic_hil_process_owner", default=None)
 
 
+@dataclass(frozen=True)
+class ProcessImage:
+    """One running process, by the executable file it was started from.
+
+    ``created_ns`` is the process creation time in 100-nanosecond ticks, or 0
+    where the platform did not report one. It exists so a parent link can be
+    checked: a pid is reused once its process exits, and a "parent" younger
+    than its child is a different process that inherited the number.
+    """
+
+    pid: int
+    parent_pid: int
+    image: str
+    created_ns: int = 0
+
+
 @dataclass
 class ManagedProcessRecord:
     child: subprocess.Popen
@@ -437,3 +453,121 @@ def _close_windows_handle(handle: int) -> None:
     close_handle.restype = wintypes.BOOL
     if not close_handle(wintypes.HANDLE(handle)):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def snapshot_process_images() -> tuple[ProcessImage, ...] | None:
+    """Every running process this user can query, with its executable image.
+
+    ``None`` means "this platform has no answer here", which is every platform
+    but Windows. That is not a gap: the caller is asking in order to find out
+    whether replacing an installed file would fail, and only Windows refuses to
+    delete a file that is mapped as a running image. Elsewhere the old file is
+    unlinked while the process that runs it keeps its own copy alive.
+
+    Processes that cannot be opened are left out rather than guessed at. They
+    belong to another user or are protected by the system, so they cannot be
+    running out of this user's local installation.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        return _windows_process_images()
+    except OSError:
+        # A snapshot that could not be taken must not read as "nothing holds
+        # this". The caller distinguishes None from an empty tuple.
+        return None
+
+
+def _windows_process_images() -> tuple[ProcessImage, ...]:
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    create_snapshot.restype = wintypes.HANDLE
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_first.restype = wintypes.BOOL
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_next.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    snapshot = create_snapshot(0x00000002, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    images: list[ProcessImage] = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = process_first(snapshot, ctypes.byref(entry))
+        while found:
+            pid = int(entry.th32ProcessID)
+            details = _windows_process_details(kernel32, pid)
+            if details is not None:
+                image, created_ns = details
+                images.append(ProcessImage(pid=pid, parent_pid=int(entry.th32ParentProcessID), image=image, created_ns=created_ns))
+            found = process_next(snapshot, ctypes.byref(entry))
+    finally:
+        close_handle(snapshot)
+    return tuple(images)
+
+
+def _windows_process_details(kernel32: Any, pid: int) -> tuple[str, int] | None:
+    """The full image path and creation time of one process, or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    query_image_name = kernel32.QueryFullProcessImageNameW
+    query_image_name.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    query_image_name.restype = wintypes.BOOL
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(FileTime)] * 4
+    get_process_times.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    # PROCESS_QUERY_LIMITED_INFORMATION: enough for the image path and the
+    # times, and granted for this user's own processes without any privilege.
+    handle = open_process(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not query_image_name(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        created = FileTime()
+        exited = FileTime()
+        kernel = FileTime()
+        user = FileTime()
+        created_ns = 0
+        if get_process_times(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            created_ns = (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        return buffer.value, created_ns
+    finally:
+        close_handle(handle)

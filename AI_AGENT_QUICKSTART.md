@@ -58,6 +58,8 @@ agentic-hil setup --help
 
 Not on `PATH`? `uv tool update-shell` or `pipx ensurepath`, then a new shell — never admin rights.
 
+Those lines are for a machine that has no Agentic HIL yet. **Once one exists, upgrade it with `agentic-hil upgrade`, never by rerunning an install line.** It upgrades through the manager that owns the installation, keeps `[can]` and `[pyocd]`, and refuses before it removes anything when the MCP server is still running. `uv tool install --upgrade` has no such check: on Windows it removes the tool environment first, the delete fails on the running server, and the rebuild never happens — leaving neither the old installation nor the new one. Adding an extra later is not an upgrade and does need the environment rewritten; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) has that sequence.
+
 ## Set up the project
 
 From the firmware project root:

@@ -62,7 +62,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
-from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 
@@ -272,6 +272,7 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
         return subprocess.CompletedProcess(command, 0, "installed\n", "")
 
     monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
     monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
 
     result = upgrade_installation(["opencode"])
@@ -290,6 +291,7 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
 ) -> None:
     command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
     monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", command))
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
     monkeypatch.setattr(
         "agentic_hil.cli._run_upgrade_process",
         lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
@@ -334,12 +336,212 @@ def test_upgrade_selects_manager_owning_running_installation(
     monkeypatch.setattr(sys, "prefix", prefix)
     monkeypatch.setattr(sys, "executable", "PYTHON")
     monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", tuple)
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
 
     selected_manager, command = _upgrade_command()
 
     assert selected_manager == manager
     assert command == expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "installer", "expected"),
+    [
+        ("C:/Users/op/venv", "uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil[can,pyocd]"]),
+        ("C:/Python313", "pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil[can,pyocd]"]),
+    ],
+)
+def test_upgrade_asks_for_the_extras_that_are_installed(
+    prefix: str,
+    installer: str,
+    expected: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pip paths take the requirement from here, so it has to name the extras.
+
+    Measured against a real installation: an upgrade requesting the bare
+    distribution re-resolves without `can` or `pyocd`, so whatever the extra
+    installed is never moved with the release that now depends on it. The uv
+    tool and pipx paths need nothing here because both reinstall from a
+    requirement their own receipt already records with its extras.
+    """
+    from agentic_hil.cli import _upgrade_command
+
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can", "pyocd"))
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+
+    _manager, command = _upgrade_command()
+
+    assert command == expected
+
+
+def test_installed_extras_names_only_the_extras_whose_requirements_are_present() -> None:
+    """Read against the real distribution metadata, not a fixture of it.
+
+    `can` is installed for the test suite and `pyocd` is not, so this also
+    proves the two are told apart rather than both being reported.
+    """
+    from agentic_hil.cli import _installed_extras
+
+    extras = _installed_extras()
+
+    assert "can" in extras
+    assert "pyocd" not in extras
+
+
+def _fake_process(pid: int, parent_pid: int, image: str, created_ns: int = 100) -> ProcessImage:
+    return ProcessImage(pid=pid, parent_pid=parent_pid, image=image, created_ns=created_ns)
+
+
+_TOOL_ENV = "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil"
+# The measured Windows shape of one `agentic-hil upgrade` run: the user-level
+# shim starts a launcher inside the tool environment, and that launcher starts
+# the interpreter whose image is the base Python outside it. The code runs in
+# the last one, so the process holding `Scripts/python.exe` open is its parent.
+_UPGRADE_ITSELF = (
+    _fake_process(100, 1, "C:/Users/op/.local/bin/agentic-hil.exe", created_ns=10),
+    _fake_process(200, 100, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=20),
+    _fake_process(300, 200, "C:/Users/op/AppData/Roaming/uv/python/cpython-3.13/python.exe", created_ns=30),
+)
+
+
+def _watch_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: tuple[ProcessImage, ...],
+    *,
+    prefix: str = _TOOL_ENV,
+    executable: str | None = None,
+) -> None:
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", executable or f"{prefix}/Scripts/python.exe")
+    monkeypatch.setattr("agentic_hil.cli.os.getpid", lambda: 300)
+    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: processes)
+
+
+def test_the_upgrading_process_does_not_report_itself_as_holding_the_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the guard refuses every upgrade there is, including valid ones.
+
+    `agentic-hil upgrade` runs out of the installation it replaces, and on
+    Windows it reaches its own code through a launcher inside that environment.
+    Excluding only the current pid would leave that launcher looking exactly
+    like a running MCP server.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    _watch_installation(monkeypatch, _UPGRADE_ITSELF)
+
+    assert _processes_holding_installation() == []
+
+
+def test_a_second_process_in_the_installation_is_reported_with_pid_and_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP server the agent host started is a sibling, never an ancestor."""
+    from agentic_hil.cli import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=5)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+
+    holders = _processes_holding_installation()
+
+    assert holders == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+def test_a_reused_parent_pid_does_not_hide_a_process_holding_the_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pid is reused once its process exits, and the walk must not follow it.
+
+    Here pid 200 is younger than the process that claims it as a parent, so it
+    cannot be the launcher this run came through — it is a different Agentic HIL
+    process that inherited the number, and hiding it is what would destroy the
+    installation.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    recycled = (
+        _fake_process(100, 1, "C:/Users/op/.local/bin/agentic-hil.exe", created_ns=10),
+        _fake_process(200, 100, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=90),
+        _fake_process(300, 200, "C:/Users/op/AppData/Roaming/uv/python/cpython-3.13/python.exe", created_ns=30),
+    )
+    _watch_installation(monkeypatch, recycled)
+
+    assert _processes_holding_installation() == [{"pid": 200, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `pip --user` or system prefix runs every other Python program too.
+
+    Reading each of those as a holder would refuse an upgrade because something
+    unrelated happens to be running, which is worse than the bug this guards.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    # A shared prefix has a real shape per platform, and the console script only
+    # sits where that platform puts it: `<prefix>/Scripts/agentic-hil.exe` beside
+    # a Windows interpreter at the prefix root, `<prefix>/bin/agentic-hil` beside
+    # a POSIX one already inside `bin`.
+    shared, interpreter, script = (
+        ("C:/Python313", "C:/Python313/python.exe", "C:/Python313/Scripts/agentic-hil.exe")
+        if os.name == "nt"
+        else ("/opt/python313", "/opt/python313/bin/python3", "/opt/python313/bin/agentic-hil")
+    )
+    unrelated = _fake_process(400, 999, interpreter, created_ns=5)
+    ours = _fake_process(401, 999, script, created_ns=5)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, unrelated, ours), prefix=shared, executable=interpreter)
+
+    assert _processes_holding_installation() == [{"pid": 401, "image": script}]
+
+
+def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX unlinks the old file and lets the running process keep reading it.
+
+    The upgrade completes and nothing is lost, so a refusal there would block a
+    valid upgrade over a failure that platform does not have.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    monkeypatch.setattr(sys, "prefix", _TOOL_ENV)
+    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: None)
+
+    assert _processes_holding_installation() == []
+
+
+def test_upgrade_refuses_before_removing_anything_when_the_installation_is_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point: no package manager runs, so both installations survive.
+
+    Windows refuses to delete a file mapped as a running image, and uv removes
+    the tool environment before it rebuilds it. Failing there leaves neither the
+    old installation nor the new one, so the only safe move is to stop first.
+    """
+    holder = {"pid": 4242, "image": f"{_TOOL_ENV}/Scripts/python.exe"}
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", lambda: [holder])
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: pytest.fail("must not select a manager"))
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "installation_in_use"
+    assert result["held_by"] == [holder]
+    assert result["held_by_count"] == 1
+    assert "Nothing was changed." in result["summary"]
+    # The refusal has to say what to do, or it reads as an obstacle to clear —
+    # and the wrong way through is the command that destroys the installation.
+    assert any("Close the agent host" in step for step in result["remediation"])
+    assert any("uv tool install --upgrade" in step for step in result["do_not"])
 
 
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
