@@ -45,6 +45,7 @@ from agentic_hil.types import (
     fold_device_path,
     fold_hardware_id,
 )
+from agentic_hil.windows_principals import untrusted_principal_details
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
@@ -656,8 +657,11 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
             trusted_owner = bool(equal_sid(owner_sid, candidate))
         if not trusted_owner:
             raise ConfigError("unsafe_configured_path", f"{label} must have a trusted Windows owner.", {"field": field, "path": str(root)})
-        if not dacl.value or windows_acl_grants_untrusted_access(advapi32, dacl, current_sid, 0x500D0116):
-            raise ConfigError("unsafe_configured_path", f"{label} must not grant write access to other Windows principals.", {"field": field, "path": str(root)})
+        # A NULL DACL grants everyone everything, so it is refused without being
+        # walked; walking it would only dereference nothing.
+        granted, offenders = windows_acl_untrusted_principals(advapi32, dacl, current_sid, 0x500D0116) if dacl.value else (True, [])
+        if not dacl.value or granted:
+            raise ConfigError("unsafe_configured_path", f"{label} must not grant write access to other Windows principals.", {"field": field, "path": str(root), **untrusted_principal_details(offenders)})
         for ancestor in root.parents:
             ancestor_dacl = ctypes.c_void_p()
             ancestor_descriptor = ctypes.c_void_p()
@@ -665,8 +669,14 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
             if result:
                 raise ConfigError("unsafe_configured_path", f"{label} ancestor ACL could not be inspected.", {"field": field, "path": str(ancestor), "winerror": result})
             try:
-                if not ancestor_dacl.value or windows_acl_grants_untrusted_access(advapi32, ancestor_dacl, current_sid, 0x100D0040, include_inherit_only=False):
-                    raise ConfigError("unsafe_configured_path", f"{label} has a replaceable Windows ancestor directory.", {"field": field, "path": str(ancestor)})
+                ancestor_granted, ancestor_offenders = (
+                    windows_acl_untrusted_principals(advapi32, ancestor_dacl, current_sid, 0x100D0040, include_inherit_only=False) if ancestor_dacl.value else (True, [])
+                )
+                if not ancestor_dacl.value or ancestor_granted:
+                    # Name the holder, not only the path. An opaque S-1-15-3-...
+                    # leaves the operator unable to decide between the permitted
+                    # location and revoking the grant, and that decision is theirs.
+                    raise ConfigError("unsafe_configured_path", f"{label} has a replaceable Windows ancestor directory.", {"field": field, "path": str(ancestor), **untrusted_principal_details(ancestor_offenders)})
             finally:
                 if ancestor_descriptor:
                     local_free(ancestor_descriptor)
@@ -679,7 +689,14 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
             local_free(security_descriptor)
 
 
-def windows_acl_grants_untrusted_access(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> bool:
+def windows_acl_untrusted_principals(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> tuple[bool, list[str]]:
+    """Whether the ACL grants access_mask to an untrusted principal, and to whom.
+
+    The boolean is the verdict and decides the refusal; the SID strings are only
+    what the refusal can say about it. Stringifying a SID is therefore allowed to
+    fail without changing the verdict — a principal nobody could name still holds
+    the right.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -711,6 +728,8 @@ def windows_acl_grants_untrusted_access(advapi32: object, dacl: object, current_
         if not create_well_known_sid(sid_type, None, sid, ctypes.byref(size)):
             raise ctypes.WinError(ctypes.get_last_error())
         trusted_sids.append(sid)
+    granted = False
+    offenders: list[str] = []
     for index in range(info.ace_count):
         ace = ctypes.c_void_p()
         if not get_ace(dacl, index, ctypes.byref(ace)):
@@ -731,8 +750,35 @@ def windows_acl_grants_untrusted_access(advapi32: object, dacl: object, current_
         sid = ctypes.c_void_p(address + sid_offset)
         if equal_sid(sid, current_sid) or any(equal_sid(sid, trusted_sid) for trusted_sid in trusted_sids):
             continue
-        return True
-    return False
+        granted = True
+        readable = windows_sid_to_string(advapi32, sid)
+        if readable and readable not in offenders:
+            offenders.append(readable)
+    return granted, offenders
+
+
+def windows_sid_to_string(advapi32: object, sid: object) -> str | None:
+    """``S-1-...`` for a SID pointer, or None when it cannot be converted."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        convert = advapi32.ConvertSidToStringSidW
+        convert.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        convert.restype = wintypes.BOOL
+        local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
+        local_free.argtypes = [wintypes.HLOCAL]
+        local_free.restype = wintypes.HLOCAL
+        buffer = wintypes.LPWSTR()
+        if not convert(sid, ctypes.byref(buffer)):
+            return None
+        try:
+            return buffer.value or None
+        finally:
+            if buffer:
+                local_free(buffer)
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def pin_configured_paths(config: AgenticHILConfig) -> AgenticHILConfig:

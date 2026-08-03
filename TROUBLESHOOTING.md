@@ -52,7 +52,18 @@ Fix: run `agentic-hil init`, review the deny-by-default file outside the reposit
 
 `init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
-If the refusal is `unsafe_configured_path` on the location rather than the file contents — a stock Windows profile rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+If the refusal is `unsafe_configured_path` on the location rather than the file contents — a Windows profile where an installed packaged application holds an app-capability ACE on `AppData` rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+
+On Windows the refusal names who holds the right, in `untrusted_principals`: the SID, plus the application package it belongs to when the SID resolves. A capability SID `S-1-15-3-<sub-authorities>` is resolved through the package SID `S-1-15-2-<the same sub-authorities>`, which Windows registers under `HKLM\SOFTWARE\Microsoft\SecurityManager\CapAuthz\ApplicationsEx` and in the AppContainer mappings under `HKEY_CLASSES_ROOT`. That turns "an unknown principal has rights here" into a decision you can actually take: use a permitted location, or have the operator remove that application's grant through the application itself. A SID that resolves to nothing is still reported as `sid`, and the refusal is unchanged.
+
+`AGENTIC_HIL_CONFIG` and a chosen `state_root` are the supported answer to a refused location, not a workaround for it. Nothing about a project is second class for using them: a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions — and `state_root` may be any absolute directory that passes the check and does not overlap `workspace_root`.
+
+```text
+AGENTIC_HIL_CONFIG=C:\Users\<user>\.agentic-hil\projects\<workspace-name>\config.yaml
+state_root:        C:\Users\<user>\.agentic-hil\state
+```
+
+Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment — never in a repository-controlled file, because an agent that can edit the file selecting the configuration can select a configuration it wrote.
 
 ## 3. `config_invalid` / Workspace Binding Failure
 

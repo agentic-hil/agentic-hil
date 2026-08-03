@@ -72,9 +72,10 @@ def _home() -> Path:
 def safe_user_root() -> str:
     """A directory whose every ancestor passes the trust check on both platforms.
 
-    Windows applies an app-capability ACE (``S-1-15-3-*``, FullControl) to
-    ``%USERPROFILE%\\AppData`` and inherits it into ``Roaming`` and ``Local``, so
-    both fail the ancestor check while the profile root itself passes.
+    On a Windows profile where an installed packaged application holds an
+    app-capability ACE (``S-1-15-3-*``, FullControl) on ``%USERPROFILE%\\AppData``,
+    ``Roaming`` and ``Local`` inherit it and both fail the ancestor check while
+    the profile root itself passes.
     """
     return str(_home() / ".agentic-hil")
 
@@ -128,22 +129,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Move the path under {safe_user_root}, whose every ancestor passes the check on a stock profile.",
-            "Windows: %USERPROFILE% passes; %APPDATA% and %LOCALAPPDATA% do not, because AppData carries an "
+            "Windows: %USERPROFILE% passes; %APPDATA% and %LOCALAPPDATA% do not on a profile where AppData carries an "
             "app-capability ACE (S-1-15-3-*, FullControl) that both inherit.",
+            "On Windows the refusal carries `untrusted_principals`: the SID that holds the right, and the application "
+            "package it belongs to when the SID resolves. That names who to ask, so the choice between moving the path "
+            "and having the operator revoke the grant is an informed one.",
             "Re-run the command that failed. Nothing else has to change.",
             "Full rules and the measured per-directory verdicts: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
         do_not=(
             "Do not change the ACL or the owner of the rejected path or any ancestor. That removes the protection the "
-            "check exists for instead of satisfying it, and on AppData Windows re-applies the ACE anyway.",
+            "check exists for instead of satisfying it.",
         ),
     ),
     "unsafe_configured_path:user_config": ErrorRemedy(
         meaning=(
-            "The directory or file holding the authoritative configuration has an untrusted ancestor. On a stock "
-            "Windows 11 profile the documented default under %APPDATA% is exactly this case."
+            "The directory or file holding the authoritative configuration has an untrusted ancestor. On a Windows 11 "
+            "profile where an installed packaged application holds an app-capability ACE on AppData, the documented "
+            "default under %APPDATA% is exactly this case. On Windows the refusal names the holder in "
+            "`untrusted_principals` when the SID resolves to a package."
         ),
         remediation=(
+            "AGENTIC_HIL_CONFIG is the supported answer here, not a workaround: it is how a project binds to a "
+            "configuration outside the discovered default, and a refused default is precisely what it is for.",
             "Create {safe_user_root}/projects/<workspace-name>/ and move config.yaml there.",
             "Point the server at it with an absolute path: AGENTIC_HIL_CONFIG={safe_user_config}",
             "Set AGENTIC_HIL_CONFIG in the host's user-level or managed environment, never in a repository-controlled "
@@ -151,8 +159,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Re-run `agentic-hil doctor` to confirm the new location loads.",
         ),
         do_not=(
-            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. Windows sets that ACE "
-            "for packaged applications and re-applies it; relaxing it weakens every application in the profile.",
+            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. The grant belongs to "
+            "an installed application, which re-applies it; relaxing it weakens every application in the profile.",
         ),
     ),
     "unsafe_configured_path:state_root": ErrorRemedy(
@@ -162,7 +170,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "local principal forge them."
         ),
         remediation=(
-            "Set `state_root: {safe_state_root}` in the authoritative configuration.",
+            "Set `state_root: {safe_state_root}` in the authoritative configuration. state_root is a first-class "
+            "setting with no fixed location: any absolute directory that passes the check is a supported value, and "
+            "choosing one is the answer to a refused default rather than a workaround for it.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
             "`agentic-hil init` derives the default state_root from %LOCALAPPDATA% on Windows and $XDG_STATE_HOME on "
             "POSIX, and validates before writing anything. On a stock Windows profile that default is rejected, so it "
@@ -663,9 +673,9 @@ Every configured path is checked before it is used, so that no other local princ
 | final directory, rights | no other principal holds `0x500D0116` (write, delete, WRITE_DAC, WRITE_OWNER) | not group- or other-writable |
 | every ancestor | no other principal holds `0x100D0040` (DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER); inherit-only ACEs are excluded | not group- or other-writable unless sticky (`01777`) |
 
-A failure raises `error_type: unsafe_configured_path` and names the offending component in `path` and the setting in `field`.
+A failure raises `error_type: unsafe_configured_path` and names the offending component in `path` and the setting in `field`. On Windows it also names *who* holds the right, in `untrusted_principals`.
 
-## Windows 11, stock user profile: measured verdicts
+## Windows 11: measured verdicts on an affected profile
 
 | Path | Verdict | Reason |
 |---|---|---|
@@ -676,10 +686,57 @@ A failure raises `error_type: unsafe_configured_path` and names the offending co
 | `%APPDATA%` = `...\\AppData\\Roaming` | **fail** | inherits the AppData ACE |
 | `%LOCALAPPDATA%` = `...\\AppData\\Local` | **fail** | inherits the AppData ACE |
 | `C:\\Users\\<user>\\.agentic-hil` | pass | no ancestor below the profile root |
+| `C:\\Users\\Default\\AppData` | pass | no capability ACE at all |
 
-`S-1-15-3-*` is an app-capability SID that Windows itself applies to `AppData` for packaged applications. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. This is the check working as specified, not a bug in the profile.
+`S-1-15-3-*` is an app-capability SID belonging to a packaged application. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. Two ACEs of that SID sit on `AppData`: one inherit-only, which the check correctly skips, and one effective on the directory itself, which really does carry DELETE and WRITE_DAC. The refusal is not a false positive.
 
-Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+It is also not a Windows default. `C:\\Users\\Default` is the template every new profile is copied from and it carries no such ACE, so the grant arrives later, with an installed application. Whether your profile is affected is therefore a property of what is installed on it.
+
+Consequence where it is present: the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+
+## The refusal names the holder
+
+An `unsafe_configured_path` refusal on Windows carries `untrusted_principals`, one entry per principal that holds the rejected right:
+
+```json
+{
+  "error_type": "unsafe_configured_path",
+  "field": "user_config",
+  "path": "C:\\\\Users\\\\<user>\\\\AppData\\\\Roaming",
+  "untrusted_principals": [
+    {
+      "sid": "S-1-15-3-3557520199-...",
+      "kind": "app_capability",
+      "package_sid": "S-1-15-2-3557520199-...",
+      "package_family": "<name>_<publisher-id>",
+      "display_name": "<application>",
+      "package": "<Name>_<version>_<arch>__<publisher-id>"
+    }
+  ]
+}
+```
+
+A capability SID `S-1-15-3-<sub-authorities>` shares its sub-authorities with the package SID `S-1-15-2-<the same sub-authorities>`, which Windows registers under `HKLM\\SOFTWARE\\Microsoft\\SecurityManager\\CapAuthz\\ApplicationsEx\\<PackageFullName>\\PackageSid` and under `HKEY_CLASSES_ROOT\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\<package SID>`. Both are readable without privileges.
+
+Resolution is best effort. A SID that resolves to nothing is still reported as `sid`, and the refusal is unchanged: the right exists whether or not anyone can put a name to it. The entry never carries a name that was guessed.
+
+Knowing the package turns "an unknown principal has rights here" into a decision the operator can actually take: use a permitted location, or remove that application's grant. Agentic HIL does neither on its own — it reads ACLs and never writes them.
+
+## The override is the supported answer, not a workaround
+
+`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case.
+
+```text
+# Windows, on a profile where %APPDATA% is refused
+AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<workspace-name>\\config.yaml
+
+# inside that config.yaml
+state_root: C:\\Users\\<user>\\.agentic-hil\\state
+```
+
+Using them costs nothing else: `state_root` has no fixed location beyond being absolute, non-overlapping with `workspace_root`, and passing the check, and a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions. Nothing about a project is second class for having taken this route.
+
+The one rule that does not bend: set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment, never in a repository-controlled file. An agent that can edit the file that selects the configuration can select a configuration it wrote.
 
 ## Which command touches which of these
 
@@ -713,7 +770,9 @@ Rules that hold on both platforms:
 
 ## Do not
 
-Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. The ancestor is rejected precisely because a second principal can replace it; changing that removes the guarantee rather than meeting it. On `AppData` it also does not work: Windows re-applies the inherited ACE.
+Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. The ancestor is rejected precisely because a second principal can replace it; changing that removes the guarantee rather than meeting it. On `AppData` it also does not hold: the application that made the grant re-applies it.
+
+Removing the grant is the operator's call, not the tool's, and it is made through the application that holds it — not by editing the ACL underneath it. Moving the configuration and `state_root` needs no privileges, changes nothing on the system, and is the answer this project supports.
 """
 
 
@@ -811,7 +870,7 @@ MCP_RESOURCES: list[JsonObject] = [
         PLATFORM_PATHS_URI,
         "platform-paths",
         "Path trust rules and permitted locations",
-        "What the ancestor check verifies, which Windows and POSIX locations pass it and why, where the configuration and state_root belong, and why changing an ACL is the wrong fix.",
+        "What the ancestor check verifies, which Windows and POSIX locations pass it and why, how a refusal names the Windows package that holds the right, why AGENTIC_HIL_CONFIG and a chosen state_root are the supported answer to a refused location, and why changing an ACL is the wrong fix.",
         MARKDOWN_MIME,
     ),
     _resource_descriptor(
