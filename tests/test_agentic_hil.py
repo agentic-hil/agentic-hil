@@ -32,7 +32,9 @@ from agentic_hil.cli import (
     doctor,
     entrypoint,
     init_config,
+    init_project,
     initialized_config_path,
+    install_agent,
     install_skill,
     is_agentic_hil_setup_skill,
     mcp_config,
@@ -42,6 +44,7 @@ from agentic_hil.cli import (
     setup_project,
     skill_version,
     test_schema,
+    upgrade_installation,
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
@@ -250,6 +253,90 @@ def test_doctor_calls_a_copied_installation_what_it_is(monkeypatch: pytest.Monke
     assert "summary" not in report
 
 
+def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], str | None]] = []
+
+    def run(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append((command, cwd))
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "9.9.9\n", "")
+        if "skill-install" in command:
+            return subprocess.CompletedProcess(command, 0, '{"ok": true}\n', "")
+        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert result["version"] == "9.9.9"
+    assert result["restart_required"] is True
+    assert calls[0][0][:3] == [sys.executable, "-m", "pip"]
+    assert calls[1] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
+    assert calls[2][0] == [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", "opencode"]
+    assert calls[2][1] is not None
+
+
+def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", command))
+    monkeypatch.setattr(
+        "agentic_hil.cli._run_upgrade_process",
+        lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert result["install"]["stderr"] == "network failed"
+
+
+def test_upgrade_rejects_unknown_agent_before_mutating_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+
+    result = upgrade_installation(["unknown"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsupported_agent"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "installer", "manager", "expected"),
+    [
+        ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]),
+        ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx", ["pipx.exe", "upgrade", "agentic-hil"]),
+        ("C:/Users/op/venv", "uv", "uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil"]),
+        ("C:/Python313", "pip", "pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil"]),
+    ],
+)
+def test_upgrade_selects_manager_owning_running_installation(
+    prefix: str,
+    installer: str,
+    manager: str,
+    expected: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentic_hil.cli import _upgrade_command
+
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+
+    selected_manager, command = _upgrade_command()
+
+    assert selected_manager == manager
+    assert command == expected
+
+
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
     """The block names the skill's absolute path, which on Windows has backslashes.
 
@@ -323,6 +410,296 @@ def test_setup_preserves_absolute_config_override_as_only_authority(
     assert result["steps"]["config"]["skipped"] is True
     assert override.read_bytes() == before
     assert not project_config_path(workspace).exists()
+
+
+def _claude_skill_path() -> Path:
+    return Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
+
+
+def _registered_claude_command() -> str | None:
+    entry = json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))["mcpServers"].get("agentic-hil")
+    return None if entry is None else entry["command"]
+
+
+def _default_state_root() -> Path:
+    """The state root without creating it; user_state_root() would."""
+    return Path(os.environ["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"]) / "agentic-hil"
+
+
+def _refuse_the_config_location(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the profile of hardci-hq#64.
+
+    There, `%APPDATA%` carries an app-capability ACE and the authoritative
+    config's own location fails the ancestor trust check before anything is
+    written. The ACL is not reproducible in a test on either platform; a
+    location the config rules refuse outright is, and it refuses at the same
+    point for the same reason — the location, not the content.
+    """
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(workspace / "in-the-repo.yaml"))
+
+
+def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user-wide half is user state and nothing else.
+
+    It has to run before any project exists, so it may not read a config, and it
+    may not create one — nor the state root a config would have to name.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scope"] == "user"
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+    assert not project_config_path(elsewhere).exists()
+    assert not _default_state_root().exists()
+
+
+def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    skill_before = _claude_skill_path().read_bytes()
+    registration_before = (Path.home() / ".claude.json").read_bytes()
+
+    again = install_agent(agent="claude-code")
+
+    assert again["ok"] is True, again
+    assert again["steps"]["skill_install"]["installed"] is False
+    assert _claude_skill_path().read_bytes() == skill_before
+    assert (Path.home() / ".claude.json").read_bytes() == registration_before
+
+
+def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    first = init_project(agent="claude-code")
+
+    assert first["ok"] is True, first
+    assert first["steps"]["config"]["ok"] is True
+    assert first["steps"]["doctor"]["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    second = init_project(agent="claude-code")
+
+    assert second["ok"] is True, second
+    assert second["steps"]["config"]["skipped"] is True
+    assert second["steps"]["agent_write_restriction"]["added"] == []
+    assert config_path.read_bytes() == before
+
+
+def test_agent_install_completes_where_the_config_location_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """hardci-hq#64: a refused config location is not the skill's problem.
+
+    Before the split both halves shared one transaction, so this refusal took
+    the skill installation and the MCP registration with it and the operator was
+    left with nothing. The user-wide half never reads or writes a config, so
+    it has to finish here.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    _refuse_the_config_location(workspace, monkeypatch)
+    with pytest.raises(ConfigError) as refusal:
+        init_project()
+    assert refusal.value.error_type == "config_invalid"
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
+def test_setup_keeps_the_installed_agent_when_the_config_location_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composed command must not lose the half that succeeded.
+
+    Reporting only the configuration refusal would tell the operator nothing
+    about the agent that is now installed, which is exactly what they get to
+    keep on such a profile.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    _refuse_the_config_location(workspace, monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["scopes"]["user"]["ok"] is True
+    assert result["scopes"]["project"]["ok"] is False
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["steps"]["config"]["error_type"] == "config_invalid"
+    assert result["rollback"]["ok"] is True
+    assert "agentic-hil init" in result["next_step"]
+    # The point of the split: the agent works even though the project does not.
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
+def test_a_failed_project_half_leaves_the_user_wide_installation_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback stays inside its own half.
+
+    opencode is the case that can go wrong: its MCP entry and its permission
+    rules live in one file, so a project half that restored that file from a
+    snapshot taken before the user half ran would delete the registration.
+    Each half snapshots when it starts, so the project baseline already holds
+    the user half's write.
+    """
+    from agentic_hil import cli as cli_module
+
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="opencode")["ok"] is True
+    opencode_json = Path.home() / ".config" / "opencode" / "opencode.json"
+    skill_path = Path.home() / ".config" / "opencode" / "skills" / "agentic-hil" / "SKILL.md"
+    registered = json.loads(opencode_json.read_text(encoding="utf-8"))["mcp"]["agentic-hil"]
+    real_restrict = cli_module.restrict_agent_write_access
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        written = real_restrict(*args, **kwargs)
+        assert written["ok"] is True
+        return {"ok": False, "error_type": "injected_failure", "summary": "late restriction failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.restrict_agent_write_access", write_then_fail)
+
+    result = init_project(agent="opencode")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    # The project half took back its own two writes...
+    assert not initialized_config_path(workspace).exists()
+    assert "permission" not in json.loads(opencode_json.read_text(encoding="utf-8"))
+    # ...and neither of the user half's.
+    assert json.loads(opencode_json.read_text(encoding="utf-8"))["mcp"]["agentic-hil"] == registered
+    assert skill_path.is_file()
+
+
+def test_a_failed_user_half_leaves_an_existing_project_config_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the same in the other direction."""
+    from agentic_hil import cli as cli_module
+
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+    real_register = cli_module.register_agent_mcp
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        real_register(*args, **kwargs)
+        return {"ok": False, "error_type": "injected_failure", "summary": "late MCP failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.register_agent_mcp", write_then_fail)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    assert not _claude_skill_path().exists()
+    assert config_path.read_bytes() == before
+
+
+def test_one_agent_install_serves_every_project_of_this_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install once per user, bind once per project.
+
+    The whole reason for the split: the second firmware repository must not
+    reinstall the skill or re-register the MCP server.
+    """
+    outside = tmp_path / "not-a-project"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    user_files = {path: path.read_bytes() for path in (_claude_skill_path(), Path.home() / ".claude.json")}
+
+    configs = []
+    for name in ("firmware-a", "firmware-b"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        result = init_project()
+        assert result["ok"] is True, result
+        config_path = initialized_config_path(workspace)
+        assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_path.read_text(encoding="utf-8")
+        configs.append(config_path)
+
+    assert configs[0] != configs[1]
+    for path, content in user_files.items():
+        assert path.read_bytes() == content, f"{path} was rewritten by a project step"
+
+
+def test_setup_is_the_two_halves_and_says_which_is_which(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scopes"]["user"]["ok"] is True
+    assert result["scopes"]["user"]["scope"] == "user"
+    assert result["scopes"]["project"]["scope"] == "project"
+    assert set(result["scopes"]["user"]["steps"]) == {"skill_install", "mcp_config"}
+    assert set(result["scopes"]["project"]["steps"]) == {"config", "doctor", "agent_write_restriction"}
+    # Each half rolls back only itself, so neither may hold the other's paths.
+    assert result["rollback"]["attempted"] is False
+
+
+def test_both_halves_are_reachable_from_the_command_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outside = tmp_path / "not-a-project"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    _trusted_test_mcp_command(monkeypatch)
+
+    assert entrypoint(["agent-install", "--agent", "claude-code"]) == 0
+    user_scope = json.loads(capsys.readouterr().out)
+    assert user_scope["scope"] == "user"
+
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    assert entrypoint(["init", "--agent", "claude-code"]) == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["scope"] == "project"
+    assert project["steps"]["doctor"]["ok"] is True
+    assert initialized_config_path(workspace).is_file()
 
 
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

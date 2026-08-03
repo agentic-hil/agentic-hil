@@ -127,6 +127,7 @@ def common_stm32_programmer_paths() -> list[str]:
         if root:
             candidates.append(str(Path(root) / "STMicroelectronics" / "STM32Cube" / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe"))
     candidates.extend(cube_ide_bundled_programmer_paths(Path("C:/ST")))
+    candidates.extend(cube_clt_programmer_paths(Path("C:/ST")))
     return candidates
 
 
@@ -147,3 +148,12 @@ def cube_ide_bundled_programmer_paths(root: Path) -> list[str]:
         for plugin_dir in plugin_dirs:
             candidates.append(str(plugin_dir / "tools" / "bin" / "STM32_Programmer_CLI.exe"))
     return sorted(candidates, reverse=True)
+
+
+def cube_clt_programmer_paths(root: Path) -> list[str]:
+    try:
+        installations = [item for item in root.iterdir() if item.name.startswith("STM32CubeCLT_")]
+    except OSError:
+        return []
+    candidates = [item / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe" for item in installations]
+    return [str(candidate) for candidate in sorted(candidates, reverse=True) if candidate.is_file()]

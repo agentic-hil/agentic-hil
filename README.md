@@ -33,10 +33,23 @@ pip install --user agentic-hil
 agentic-hil setup                 # add --agent codex or --agent opencode for those
 ```
 
-`setup` creates the deny-by-default policy outside the repository, installs the
-agent skill, registers the MCP server with a verified absolute executable path,
-and runs `doctor`. It prints where the policy file landed — review it before
-enabling anything.
+`setup` installs the agent skill, registers the MCP server with a verified
+absolute executable path, creates the deny-by-default policy outside the
+repository, and runs `doctor`. It prints where the policy file landed — review it
+before enabling anything.
+
+Those are two scopes, and `setup` composes the commands that own them:
+
+```bash
+agentic-hil agent-install --agent <agent>   # skill + user-level MCP registration; once per user and agent
+agentic-hil init --agent <agent>            # this project's policy + doctor; once per project, from its root
+```
+
+`agent-install` writes only under the invoking user's home — user-wide, per user
+and per machine, not shared with other OS users — and needs no project and no
+configuration. Each half rolls back only its own writes, so a project that will
+not configure still leaves a working agent, and the next repository for this
+user needs `init` alone.
 
 If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
 up on `PATH`, install it persistently with a tool installer instead and rerun
@@ -85,13 +98,13 @@ Every MCP host starts the same local stdio server from the firmware project root
 /absolute/path/to/persistent/agentic-hil mcp-stdio
 ```
 
-Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil setup --agent <agent>` performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
+Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil agent-install --agent <agent>` — which `agentic-hil setup --agent <agent>` runs first — performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
 `mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` only when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
 
 ## Configuration
 
-`agentic-hil setup` already created this file; `agentic-hil init` creates only it, without the skill and the MCP registration. Either way it lands outside the repository with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses.
+`agentic-hil setup` already created this file; `agentic-hil init` creates it on its own, without the user-wide skill and MCP registration that `agentic-hil agent-install` owns. Either way it lands outside the repository with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses.
 
 Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state — flash, reset, serial and CAN sends, mass erase, raw debugger commands — stays deny-by-default, per device:
 
@@ -253,8 +266,9 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 ## Common Commands
 
 ```text
-agentic-hil setup --agent <claude-code|codex|opencode>
-agentic-hil init
+agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
+agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
+agentic-hil init [--agent <agent>]                             # project half
 agentic-hil doctor
 agentic-hil debugger-probes
 agentic-hil com-ports
