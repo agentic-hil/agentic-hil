@@ -861,16 +861,19 @@ def config_permission_keys() -> tuple[str, ...]:
 # time. Two descriptions of one permission boundary drift, and the configuration
 # is the permission boundary.
 
-# What the schema cannot say about a section: why it is there. Keyed by section,
-# merged with the schema's own description rather than replacing it.
+# What the schema cannot say about a section: why it is there, and which other
+# resource already answers the per-field questions in depth. Keyed by section and
+# merged with the schema's own description rather than replacing it — where the
+# schema says nothing about a field, this document says nothing either, because
+# the alternative is a second description of the same field.
 _SECTION_PURPOSE: dict[str, str] = {
     "version": "Which permission model the file is read under. A new file should say `2`.",
     "workspace_root": "The project this configuration authorizes, and nothing else. A server started elsewhere refuses it.",
     "state_root": "Where leases, quarantine incidents and canonical reports live. Outside `workspace_root`, so repository content cannot forge them.",
     "permissions": "What may be done to this file itself.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
-    "target": "What board this is. Names in reports; `controller` is what a human recognises.",
-    "debuggers": "The debug probes. The entry name is the routing key a test plan addresses.",
+    "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
