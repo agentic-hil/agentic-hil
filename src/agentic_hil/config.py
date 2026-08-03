@@ -2324,6 +2324,13 @@ REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
 }
 
 
+# A top-level `permissions` block exists again, holding the one grant that is not
+# about a device. The refusal below therefore has to fire on the removed device
+# grants inside it rather than on the section's name, or every file written after
+# this release would be read as a pre-migration file.
+SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write"}}
+
+
 def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
     """Refuse config sections this release removed.
 
@@ -2332,8 +2339,13 @@ def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
     where each removed key went and fail closed rather than running a config
     whose grants and device bindings are no longer read by anything."""
     for section, (summary, migration) in REMOVED_SECTIONS.items():
-        if section in raw:
-            raise ConfigError("config_invalid", summary, {"path": config_path, "field": section, "migration": migration})
+        if section not in raw:
+            continue
+        surviving = SURVIVING_SECTION_KEYS.get(section)
+        value = raw[section]
+        if surviving is not None and isinstance(value, dict) and set(value) <= surviving:
+            continue
+        raise ConfigError("config_invalid", summary, {"path": config_path, "field": section, "migration": migration})
 
 
 def configured_version(raw: JsonObject, config_path: str) -> int:
