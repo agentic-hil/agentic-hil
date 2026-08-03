@@ -91,6 +91,7 @@ def test_the_refusal_names_the_package_and_offers_the_choice_without_touching_ac
     summary = details["untrusted_principals_summary"]
     assert PACKAGE_FULL_NAME in summary
     assert "permitted location" in summary
+    assert "the application that holds it" in summary
     assert "Do not edit the ACL" in summary
 
 

@@ -136,15 +136,19 @@ def untrusted_principal_details(sids: Sequence[str]) -> JsonObject:
     described = describe_principals(sids)
     if not described:
         return {}
-    labels = [principal_label(entry) for entry in described]
-    holders = ", ".join(labels)
+    holders = ", ".join(principal_label(entry) for entry in described)
+    packaged = any(entry.get("package") or entry.get("package_family") for entry in described)
+    revoke = (
+        "have the operator remove that grant through the application that holds it"
+        if packaged
+        else "have the operator remove that grant at its source"
+    )
     return {
         "untrusted_principals": described,
         "untrusted_principals_summary": (
-            f"Full control over this directory is held by {holders}. Choose one: put the configuration and "
-            "state_root in a permitted location, which needs no privileges and changes nothing on the system, "
-            "or have the operator remove that grant through the application that made it. Do not edit the ACL "
-            "to make the check pass."
+            f"The rights that make this path replaceable are held by {holders}. Choose one: put the "
+            f"configuration and state_root in a permitted location, which needs no privileges and changes "
+            f"nothing on the system, or {revoke}. Do not edit the ACL to make the check pass."
         ),
     }
 
