@@ -354,6 +354,47 @@ def test_two_runs_with_overlapping_devices_and_reversed_order_do_not_deadlock(tm
     assert set(outcomes) == {"forward", "reversed"}
 
 
+def test_a_device_whose_key_the_mutex_would_not_lock_refuses_the_run(tmp_path: Path) -> None:
+    """Silently not locking a declared board is worse than refusing the run.
+
+    BenchMutex only locks physical resource names and ignores the rest, which is
+    right for the host-wide probe enumeration and would be catastrophic for a
+    device: the run would believe it held a board it never took."""
+    config = four_device_config(tmp_path)
+
+    class Ungrounded(UartDevice):
+        @property
+        def lock_key(self) -> str:
+            return "project:not-a-device"
+
+    port = uart_device(config, "port_a")
+    declared = DeviceSet.of([Ungrounded(config_id=port.config_id, port=port.port)])
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        with pytest.raises(CoordinationError) as excinfo:
+            coordinator.begin_run(declared)
+
+        assert excinfo.value.result["error_type"] == "coordination_state_invalid"
+        assert excinfo.value.result["unlockable_lock_keys"] == ["project:not-a-device"]
+        assert coordinator.run_active is False
+        assert coordinator.bench.held_resources() == frozenset()
+    finally:
+        coordinator.close()
+
+
+def test_a_run_declared_with_bare_resource_names_still_works(tmp_path: Path) -> None:
+    """The reactor and the existing suite declare names; devices are additive."""
+    coordinator = HardwareCoordinator(four_device_config(tmp_path), "owner")
+    try:
+        started = coordinator.begin_run(["physical:board-b", "physical:board-a"], label="names-only")
+
+        assert started["declared_devices"] == ["physical:board-a", "physical:board-b"]
+        assert "devices" not in started
+    finally:
+        coordinator.end_run()
+        coordinator.close()
+
+
 def test_a_run_is_refused_before_it_holds_anything_when_a_device_is_unknown(tmp_path: Path) -> None:
     """Resolution finishes before acquisition starts."""
     config = four_device_config(tmp_path)

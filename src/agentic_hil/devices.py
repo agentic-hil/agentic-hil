@@ -209,7 +209,7 @@ class DebuggerDevice(Device):
         "dump_memory": "debug_dump_symbol_ihex",
     }
 
-    debugger: DebuggerConfig = field(repr=False, default=None)  # type: ignore[assignment]
+    debugger: DebuggerConfig = field(repr=False)
 
     @property
     def lock_key(self) -> str:
@@ -273,7 +273,7 @@ class UartDevice(Device):
         "uart_read": "com_read",
     }
 
-    port: ComPortConfig = field(repr=False, default=None)  # type: ignore[assignment]
+    port: ComPortConfig = field(repr=False)
 
     @property
     def lock_key(self) -> str:
@@ -302,7 +302,7 @@ class CanDevice(Device):
         "can_close": "can_session_stop",
     }
 
-    bus: CanBusConfig = field(repr=False, default=None)  # type: ignore[assignment]
+    bus: CanBusConfig = field(repr=False)
 
     @property
     def lock_key(self) -> str:
@@ -358,7 +358,32 @@ class DeviceSet:
         deadline and unwinds everything it already took when one of them is busy.
         Taking them here one device at a time would rebuild both, worse — and a
         partially acquired set is exactly what must never escape."""
+        self.require_lockable()
         return bench.acquire(self.lock_keys, wait_s=wait_s)
+
+    def unlockable_keys(self) -> list[str]:
+        """Keys the machine-wide mutex would ignore rather than lock.
+
+        BenchMutex locks physical resource names and silently passes over the
+        rest, which is right for the host-wide probe enumeration and
+        catastrophic for a device: the run would believe it held a board it
+        never took. Always empty for the three shipped kinds; this exists so a
+        fourth cannot introduce the gap quietly."""
+        return [key for key in self.lock_keys if not is_device_lock_key(key)]
+
+    def require_lockable(self) -> None:
+        unlockable = self.unlockable_keys()
+        if unlockable:
+            raise DeviceError(
+                {
+                    "ok": False,
+                    "error_type": "coordination_state_invalid",
+                    "summary": "A declared device produced a lock key the machine-wide mutex does not lock; the run would have believed it held a board it never took.",
+                    "unlockable_lock_keys": unlockable,
+                    "side_effect_committed": False,
+                    "retry_safe": False,
+                }
+            )
 
     def release(self, bench: BenchMutex) -> None:
         bench.release(self.lock_keys)

@@ -29,6 +29,7 @@ from agentic_hil.devices import (
     CanDevice,
     DebuggerDevice,
     Device,
+    DeviceError,
     DeviceSet,
     UartDevice,
     lock_keys,
@@ -266,17 +267,32 @@ class HardwareCoordinator:
             self._require_open()
             if self.run_active:
                 raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False})
-            device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of([item for item in resources if isinstance(item, Device)])
-            declared = physical_resources(lock_keys(resources if not isinstance(resources, DeviceSet) else resources.devices))
+            given = resources.devices if isinstance(resources, DeviceSet) else tuple(resources)
+            device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of([item for item in given if isinstance(item, Device)])
+            declared = physical_resources(lock_keys(given))
+            # Before the empty check, so a device that resolved to an unlockable
+            # key is named as such instead of read as "you declared nothing".
+            try:
+                device_set.require_lockable()
+            except DeviceError as error:
+                raise CoordinationError(error.result) from error
             if not declared:
                 raise CoordinationError({"ok": False, "error_type": "invalid_argument", "summary": "A run must declare at least one physical device; the declaration is what the mutex locks and what every later call is checked against.", "retry_safe": False, "side_effect_committed": False})
             try:
-                # One call for the whole set: sorted order and the unwind of a
+                # One call for the whole set: the sorted order and the unwind of a
                 # partial acquisition both live in BenchMutex.acquire, so a run
                 # that fails on its third device has already given back its first
-                # two by the time this raises.
-                self.bench.acquire(declared, wait_s=wait_s)
+                # two by the time this raises. A declaration made of devices goes
+                # through DeviceSet, which additionally refuses a key the mutex
+                # would not lock — silently not locking a declared board is the
+                # one outcome worse than refusing the run.
+                if device_set:
+                    device_set.acquire(self.bench, wait_s=wait_s)
+                else:
+                    self.bench.acquire(declared, wait_s=wait_s)
             except DeviceBusyError as error:
+                raise CoordinationError({**error.result, "declared_devices": declared}) from error
+            except DeviceError as error:
                 raise CoordinationError({**error.result, "declared_devices": declared}) from error
             except ConfigError as error:
                 raise CoordinationError({"ok": False, "error_type": error.error_type, "summary": error.summary, **error.details}) from error
