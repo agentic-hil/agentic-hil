@@ -1296,6 +1296,34 @@ def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[st
     return {f"{form}({glob})" for form in ("Edit", "Write") for glob in _protected_write_globs(config_path, state_root)}
 
 
+_OPENCODE_UNRESTRICTED = "Agentic HIL writes no write restriction for opencode; whether its file tools may reach the authoritative config and state root is the operator's to set, in ~/.config/opencode/opencode.json."
+
+
+def _stale_opencode_deny_patterns(config_path: Path, state_root: Path) -> set[str]:
+    """The absolute `permission.edit` patterns earlier releases wrote.
+
+    They match nothing at all. opencode compares that key against the
+    worktree-relative path, established from its source rather than from its
+    documentation, which does not say (hardci-hq#84): `write.ts`, `edit.ts` and
+    `apply_patch.ts` ask with `patterns: [path.relative(instance.worktree,
+    filepath)]`, `evaluate` in `permission/index.ts` matches the configured
+    pattern against that subject, and `Wildcard.match` anchors it `^...$`. Both
+    trees are required to live outside the workspace, so the subject always reads
+    `../../.config/agentic-hil/...` and nothing absolute can equal it.
+
+    They are taken back rather than corrected, because Agentic HIL no longer
+    writes a restriction for this host at all — see `restrict_agent_write_access`.
+    A rule that reads as protection and is not is worse than none, which is the
+    silent half of hardci-hq#81 over again.
+
+    Identifying them needs the same argument as `_stale_claude_code_deny_rules`:
+    the text is derived from this project's own paths, so an operator's own
+    pattern is never one of them, and one of ours they have since set to
+    something other than `deny` is theirs now and stays.
+    """
+    return set(_protected_write_globs(config_path, state_root))
+
+
 def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Path) -> JsonObject:
     """Ask the agent CLI to refuse its own write tools on the policy files.
 
@@ -1309,8 +1337,15 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     which is why SECURITY.md asks for a separate identity where that matters.
 
     Which rule form a host actually evaluates is read out of that host's own
-    documentation rather than expected — see `_claude_code_deny_patterns` and the
-    opencode branch below, each of which cites what it is built on.
+    documentation rather than expected — see `_claude_code_deny_patterns`.
+
+    Only claude-code gets a rule written. On opencode the operator decides for
+    themselves, and nothing is written on their behalf: its permission model
+    hands the decision to whoever answers the prompt anyway — one "always" adds a
+    session `allow` for pattern `*`, which `evaluate` reads after the configured
+    ruleset and which therefore outranks any denial written here. A rule that a
+    single click removes is not a lock, and offering it as one would say
+    something about this bench that is not true. Codex needs nothing.
     """
     path = _agent_permission_config_path(agent_id)
     if path is None:
@@ -1341,34 +1376,31 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         added = [f"Edit({pattern})" for pattern in _claude_code_deny_patterns(config_path, state_root) if f"Edit({pattern})" not in deny]
         deny.extend(added)
     else:
-        permission = document.setdefault("permission", {})
-        if not isinstance(permission, dict):
-            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permission entry; left untouched.", "path": str(path)}
-        existing = permission.get("edit")
-        # https://opencode.ai/docs/permissions: `edit` takes either an action or
-        # an object of pattern -> action, it covers "all file modifications
-        # (covers edit, write, patch)" so there is no second key to write, and
-        # "the last matching rule winning" is why an operator's own patterns are
-        # kept and the denials appended after them.
-        #
-        # Open, and deliberately not answered here: that page does not say what
-        # the patterns are matched against. If it is the worktree-relative path,
-        # an absolute pattern never matches — neither tree protected here is ever
-        # inside the worktree — and the key for paths outside it is
-        # `external_directory`. Establish it before relying on this branch.
-        globs = _protected_write_globs(config_path, state_root)
-        rules: dict[str, object] = {"*": existing} if isinstance(existing, str) else dict(existing) if isinstance(existing, dict) else {}
-        added = [glob for glob in globs if rules.get(glob) != "deny"]
-        for glob in globs:
-            rules[glob] = "deny"
-        permission["edit"] = rules
+        # opencode gets no restriction written for it, on purpose. What it does
+        # get is the removal of the absolute patterns earlier releases left,
+        # which protect nothing — see `_stale_opencode_deny_patterns`.
+        added = []
+        permission = document.get("permission")
+        existing = permission.get("edit") if isinstance(permission, dict) else None
+        if isinstance(existing, dict):
+            stale = _stale_opencode_deny_patterns(config_path, state_root)
+            removed = [pattern for pattern, action in existing.items() if pattern in stale and action == "deny"]
+            for pattern in removed:
+                del existing[pattern]
+    mode = "tool-permissions" if agent_id == "claude-code" else "operator-managed"
+    settled = "The agent already refuses to write the policy files." if agent_id == "claude-code" else _OPENCODE_UNRESTRICTED
     if not added and not removed:
-        return {"ok": True, "mode": "tool-permissions", "summary": "The agent already refuses to write the policy files.", "path": str(path), "added": [], "removed": []}
-    secure_atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
-    summary = f"{agent_id} will refuse its own write tools on the authoritative config and state root."
-    if removed:
-        summary += " The inert deny rules an earlier setup wrote were dropped."
-    return {"ok": True, "mode": "tool-permissions", "summary": summary, "path": str(path), "added": added, "removed": removed}
+        return {"ok": True, "mode": mode, "summary": settled, "path": str(path), "added": [], "removed": []}
+    # Not sorted, so an operator's own file comes back in the order they wrote it
+    # — which for opencode is also the order its rules are evaluated in.
+    secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
+    if added:
+        summary = f"{agent_id} will refuse its own write tools on the authoritative config and state root."
+        if removed:
+            summary += " The inert deny rules an earlier setup wrote were dropped."
+    else:
+        summary = f"{_OPENCODE_UNRESTRICTED} The inert deny patterns an earlier setup wrote were dropped."
+    return {"ok": True, "mode": mode, "summary": summary, "path": str(path), "added": added, "removed": removed}
 
 
 def register_agent_mcp(agent: str | None = None, force: bool = False, *, command: str | None = None, _locked: bool = False) -> JsonObject:
