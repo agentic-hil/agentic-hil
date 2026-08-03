@@ -1376,8 +1376,9 @@ def _doctor_target_support(service: AgenticHILToolService) -> JsonObject:
     must not look like a broken configuration.
     """
     try:
+        # Broad on purpose: a diagnostic must never become the failure it reports.
         support = service.backend.target_support()
-    except Exception as error:  # noqa: BLE001 - a diagnostic must not become the failure it reports
+    except Exception as error:
         return {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": f"the target-support check raised {type(error).__name__}: {error}"}
     return support if isinstance(support, dict) else {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the backend returned no target-support report."}
 

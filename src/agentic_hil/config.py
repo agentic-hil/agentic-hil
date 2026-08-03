@@ -776,8 +776,8 @@ def windows_sid_to_string(advapi32: object, sid: object) -> str | None:
             return buffer.value or None
         finally:
             if buffer:
-                local_free(buffer)
-    except (OSError, AttributeError, ValueError):
+                local_free(ctypes.cast(buffer, ctypes.c_void_p))
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
         return None
 
 

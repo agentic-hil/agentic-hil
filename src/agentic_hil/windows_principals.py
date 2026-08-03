@@ -76,8 +76,10 @@ def describe_principal(sid: str) -> JsonObject:
     if not sid or not _on_windows():
         return described
     try:
+        # Broad on purpose: naming the holder is a courtesy, refusing the path is
+        # the duty, and the courtesy must not be able to take the duty down.
         _resolve_into(sid, described)
-    except Exception:  # noqa: BLE001 - naming the holder is a courtesy; the refusal is the duty
+    except Exception:
         return {"sid": sid}
     return described
 
@@ -193,7 +195,7 @@ def _account_name(sid: str) -> str | None:
         finally:
             if binary:
                 local_free(binary)
-    except (OSError, AttributeError, ValueError):
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
         return None
 
 

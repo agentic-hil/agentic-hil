@@ -24,7 +24,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_PYOCD, write_authoritative_config, write_config
+from conftest import FAKE_PYOCD, FAKE_PYOCD_UNKNOWN_TARGET, write_authoritative_config, write_config
 
 from agentic_hil import windows_principals
 from agentic_hil.backends.pyocd import (
@@ -35,6 +35,7 @@ from agentic_hil.backends.pyocd import (
 )
 from agentic_hil.cli import doctor
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.windows_principals import (
     describe_principal,
     package_sid_for_capability,
@@ -374,6 +375,43 @@ def test_pack_install_commands_never_run_anything() -> None:
 
     assert commands[0].startswith("pyocd pack find ")
     assert commands == ["pyocd pack find stm32f446retx", "pyocd pack install stm32f446retx", "pyocd pack show"]
+
+
+def test_the_probe_refusal_carries_the_pack_command(tmp_path: Path) -> None:
+    """#66 stage 2: the fix belongs in the answer, not only in `doctor`.
+
+    Driven through the real backend against a pyOCD that emits the real message,
+    so the classifier, the catalogue lookup and the substituted command are
+    exercised together rather than asserted in isolation.
+    """
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD_UNKNOWN_TARGET, probe_id="PYOCD123", target_type="stm32f446retx")))
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "target_type_invalid"
+    assert refused["install_commands"] == ["pyocd pack find stm32f446retx", "pyocd pack install stm32f446retx", "pyocd pack show"]
+    assert any("pyocd pack install" in step for step in refused["remediation"])
+    assert any(".pdsc" in step for step in refused["do_not"])
+
+
+def test_the_flash_refusal_carries_the_pack_command(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD_UNKNOWN_TARGET, probe_id="PYOCD123", target_type="stm32f446retx")))
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "target_type_invalid"
+    assert "pyocd pack install stm32f446retx" in refused["install_commands"]
 
 
 def test_doctor_reports_target_support_beside_the_probe_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
