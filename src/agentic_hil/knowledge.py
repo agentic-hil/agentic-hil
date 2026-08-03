@@ -29,6 +29,7 @@ from agentic_hil.types import JsonObject
 RESOURCE_SCHEME = "agentic-hil"
 
 CONFIG_SCHEMA_URI = f"{RESOURCE_SCHEME}://reference/config-schema"
+CONFIG_SHAPE_URI = f"{RESOURCE_SCHEME}://reference/config-shape"
 DEBUGGER_BACKENDS_URI = f"{RESOURCE_SCHEME}://reference/debugger-backends"
 ERRORS_URI = f"{RESOURCE_SCHEME}://reference/errors"
 LEASE_LIFECYCLE_URI = f"{RESOURCE_SCHEME}://reference/lease-lifecycle"
@@ -142,6 +143,66 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "to act without it.",
             "Do not delete or move an existing configuration to reach this state. Generating a replacement produces "
             "the deny-by-default skeleton again, so it throws the operator's settings away and gives you nothing.",
+        ),
+    ),
+    "permission_denied:allow_config_description_write": ErrorRemedy(
+        meaning=(
+            "A field-wise configuration change reached a description key — what the bench is — and "
+            "`permissions.allow_config_description_write` is false in the authoritative configuration. `denied_keys` "
+            "lists exactly which keys were refused. Nothing was written."
+        ),
+        remediation=(
+            "Report the refusal, name `permissions.allow_config_description_write`, and say which file carries it "
+            "(`path` in the refusal). Then stop; an operator decides this.",
+            "Call `project_config_describe` to see which keys this configuration does leave open right now, so the "
+            "part of the task that is possible is not abandoned with the part that is not.",
+            "What this grant opens, and what the other one opens: MCP resource " + CONFIG_SHAPE_URI + ".",
+        ),
+        do_not=(
+            "Do not edit the configuration with your own file tools. `agentic-hil setup` writes host deny rules "
+            "against exactly that, and this refusal is the reason they exist.",
+            "Do not set the grant through `project_config_set` either. It is a permission, so it needs "
+            "`allow_config_permissions_write`, which no configuration hands out to close its own refusal.",
+        ),
+    ),
+    "permission_denied:allow_config_permissions_write": ErrorRemedy(
+        meaning=(
+            "A field-wise configuration change reached a `permissions:` block — what the bench may be told to do — and "
+            "`permissions.allow_config_permissions_write` is false. This is the deliberate half of the split: a "
+            "configuration may be open for describing the bench and closed for granting, and this refusal is that "
+            "state working as intended. `denied_keys` lists the refused keys. Nothing was written."
+        ),
+        remediation=(
+            "Report the refusal, name `permissions.allow_config_permissions_write`, and stop. Granting is an "
+            "operator's decision and this refusal is the answer to the request, not an obstacle in front of it.",
+            "If the task was to describe the bench rather than to widen it, re-send only the description keys; "
+            "`project_config_describe` says which ones are open.",
+        ),
+        do_not=(
+            "Do not route the change through another key to reach a permission — a whole subtree, a differently "
+            "spelled path. Values are scalars only and the permissions present in the document are compared before "
+            "and after every write, so it fails, and it is the thing this grant exists to prevent.",
+            "Do not carry out the action the permission would have allowed by another route. A debugger, serial "
+            "device or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
+        ),
+    ),
+    "config_write_in_open_run": ErrorRemedy(
+        meaning=(
+            "A configuration write was attempted while this server holds hardware: a declared run, an open COM or CAN "
+            "session, or a debug session. Those holds were taken under the policy this file states, so changing it "
+            "underneath them would move the rules during the run they govern. Nothing was written and the run is "
+            "untouched."
+        ),
+        remediation=(
+            "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
+            "`com_session_stop` / `can_session_stop` and any debug session with `debug_stop_session`, then repeat the "
+            "configuration change.",
+            "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
+            "same in `open_holds`.",
+        ),
+        do_not=(
+            "Do not end a run early only to get the write through. The run is holding a board for a reason, and a "
+            "configuration change is never urgent enough to abandon hardware in an unconfirmed state.",
         ),
     ),
     "unsafe_configured_path": ErrorRemedy(
@@ -554,6 +615,480 @@ def config_schema_text() -> str:
     return resources.files("agentic_hil").joinpath("schemas", "config.schema.json").read_text(encoding="utf-8")
 
 
+def config_schema_document() -> JsonObject:
+    document = json.loads(config_schema_text())
+    if not isinstance(document, dict):  # pragma: no cover - the shipped schema is an object
+        raise ValueError("The bundled configuration schema is not a JSON object.")
+    return document
+
+
+# ---------------------------------------------------------------------------
+# Which configuration keys an agent may set over MCP, and which grant opens each.
+#
+# Two rights, not one. One right for everything would be a master key: whoever
+# set it so an agent could enter a 24-character probe serial would have handed
+# over, in the same motion and without being told, the ability for that agent to
+# write `allow_flash: true` on itself.
+#
+#   description  what the bench IS   — target, probe identity, port parameters
+#   permissions  what the bench MAY  — every permissions: block in the file
+#
+# The model lives here, beside the error catalogue, for the same reason the
+# catalogue does: the refusal a caller reads, the reference it can fetch, and the
+# check that enforces the boundary all have to be one set of entries. A rights
+# description maintained next to the enforcement is a description that will one
+# day describe a boundary that is no longer there.
+#
+# Value shapes are NOT restated here. They are looked up in the shipped JSON
+# schema by `config_key_schema`, so the only statement this module makes is the
+# policy one: which key belongs to which right.
+CONFIG_DESCRIPTION_RIGHT = "allow_config_description_write"
+CONFIG_PERMISSIONS_RIGHT = "allow_config_permissions_write"
+CONFIG_WRITE_RIGHT = "allow_config_write"
+
+CONFIG_RIGHTS: dict[str, str] = {
+    CONFIG_DESCRIPTION_RIGHT: (
+        "Set the description of the bench field-wise: what hardware is there and how it is reached. "
+        "Never a permissions: block, so it cannot widen what may be done to the hardware."
+    ),
+    CONFIG_PERMISSIONS_RIGHT: (
+        "Set the permissions: blocks field-wise, including these two keys themselves. This is the grant "
+        "that hands over the granting."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ConfigKeyRule:
+    """One family of settable keys, and the right that opens it.
+
+    ``fields`` empty means "every field the schema declares for this section
+    except its permissions", which is how the decision phrases ``can_buses.<n>.*``
+    and ``target.*``. Derived rather than listed, so a field added to the schema
+    does not need a second edit here to become settable — and cannot be silently
+    forgotten either.
+    """
+
+    section: str
+    named: bool
+    under_permissions: bool
+    right: str
+    fields: tuple[str, ...] = ()
+
+    @property
+    def pattern(self) -> str:
+        entry = f"{self.section}.<name>" if self.named else self.section
+        return f"{entry}.permissions.<flag>" if self.under_permissions else f"{entry}.<field>"
+
+
+CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
+    # The description half. `target` and `can_buses` are whole sections in the
+    # decision; `debuggers` and `com_ports` are the named subsets, because the
+    # rest of those entries (type, flash_address, resource_id, timeouts, buffer
+    # limits, DTR/RTS) changes what a call does to the board rather than what the
+    # board is, and none of it is what an attached probe hands you.
+    ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
+    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate")),
+    ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
+    # The permissions half, every block of it.
+    ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
+    ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    ConfigKeyRule("com_ports", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    ConfigKeyRule("can_buses", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+)
+
+# Sections whose entries are named by the operator and may be added.
+CONFIG_NAMED_SECTIONS = ("debuggers", "com_ports", "can_buses")
+
+
+@dataclass(frozen=True)
+class ResolvedConfigKey:
+    """A dotted key resolved against the model above."""
+
+    key: str
+    section: str
+    entry: str | None
+    field: str
+    under_permissions: bool
+    right: str
+    pattern: str
+
+    @property
+    def path(self) -> tuple[str, ...]:
+        parts: list[str] = [self.section]
+        if self.entry is not None:
+            parts.append(self.entry)
+        if self.under_permissions:
+            parts.append("permissions")
+        parts.append(self.field)
+        return tuple(parts)
+
+
+def _dereference(schema: JsonObject, node: object) -> JsonObject:
+    if not isinstance(node, dict):
+        return {}
+    reference = node.get("$ref")
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        return node
+    resolved: object = schema
+    for part in reference[2:].split("/"):
+        if not isinstance(resolved, dict):
+            return {}
+        resolved = resolved.get(part)
+    return _dereference(schema, resolved)
+
+
+def _section_entry_schema(schema: JsonObject, rule: ConfigKeyRule) -> JsonObject:
+    """The schema node holding one entry's own properties."""
+    section = _dereference(schema, (schema.get("properties") or {}).get(rule.section))
+    if rule.named:
+        section = _dereference(schema, section.get("additionalProperties"))
+    if rule.under_permissions:
+        section = _dereference(schema, (section.get("properties") or {}).get("permissions"))
+    return section
+
+
+def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
+    """The field names this rule covers, read out of the shipped schema.
+
+    An explicit subset is returned as written. A rule that names none covers
+    everything the schema declares for that node except ``permissions`` (which
+    belongs to the other right) and except keys the schema marks deprecated —
+    ``allow_probe`` and ``allow_read`` exist only for version 1 files and are
+    refused outright in a version 2 one."""
+    if rule.fields:
+        return rule.fields
+    properties = _section_entry_schema(config_schema_document(), rule).get("properties")
+    if not isinstance(properties, dict):
+        return ()
+    return tuple(
+        sorted(
+            name
+            for name, node in properties.items()
+            if name != "permissions" and not (isinstance(node, dict) and node.get("deprecated") is True)
+        )
+    )
+
+
+def config_key_schema(rule: ConfigKeyRule, field: str) -> JsonObject | None:
+    """The shipped schema's own node for one settable key.
+
+    This is the whole answer to "what may I put here": type, enum, pattern,
+    minimum, default. Nothing about a value shape is written down twice, so the
+    reference, the refusal and the check cannot drift from the file the loader
+    validates against."""
+    schema = config_schema_document()
+    properties = _section_entry_schema(schema, rule).get("properties")
+    if not isinstance(properties, dict) or field not in properties:
+        return None
+    return _dereference(schema, properties[field])
+
+
+def resolve_config_key(key: str) -> ResolvedConfigKey | None:
+    """Resolve a dotted key, or None when nothing settable is spelled that way.
+
+    Entry names may contain dots (the schema allows ``[A-Za-z0-9_.-]+``), so the
+    key is read from the right: field names are a closed set and contain no dot,
+    which makes the last component — or the last ``.permissions.<flag>`` pair —
+    the only possible reading. ``debuggers.a.b.probe_id`` is therefore the entry
+    named ``a.b``, unambiguously, and an entry named ``a.probe_id`` is still
+    reachable as ``debuggers.a.probe_id.probe_id``."""
+    for rule in CONFIG_KEY_RULES:
+        prefix = f"{rule.section}."
+        if not key.startswith(prefix):
+            continue
+        remainder = key[len(prefix) :]
+        if rule.named:
+            separator = ".permissions." if rule.under_permissions else "."
+            entry, found, field = remainder.rpartition(separator)
+            if not found or not entry:
+                continue
+        elif rule.under_permissions:  # pragma: no cover - no unnamed permissions block exists
+            continue
+        else:
+            entry, field = None, remainder
+        if field not in config_rule_fields(rule):
+            continue
+        return ResolvedConfigKey(key, rule.section, entry, field, rule.under_permissions, rule.right, rule.pattern)
+    return None
+
+
+def config_key_catalogue() -> list[JsonObject]:
+    """Every settable key pattern, with its right and its value shape.
+
+    One list, read by the reference document and by the rights-aware answer a
+    caller gets from ``project_config_describe``."""
+    catalogue: list[JsonObject] = []
+    for rule in CONFIG_KEY_RULES:
+        for field in config_rule_fields(rule):
+            entry = f"{rule.section}.<name>" if rule.named else rule.section
+            key = f"{entry}.permissions.{field}" if rule.under_permissions else f"{entry}.{field}"
+            catalogue.append({"key": key, "right": rule.right, "value_schema": config_key_schema(rule, field) or {}})
+    return catalogue
+
+
+def config_permission_keys() -> tuple[str, ...]:
+    """Every key that names a permission, by pattern.
+
+    The complement of this set is the description half, and both halves come out
+    of the one model above rather than out of two lists."""
+    return tuple(str(entry["key"]) for entry in config_key_catalogue() if entry["right"] == CONFIG_PERMISSIONS_RIGHT)
+
+
+# ---------------------------------------------------------------------------
+# The shape of a configuration, as prose a caller can write from.
+#
+# `config-schema` already serves the shipped JSON Schema byte for byte. A schema
+# says what is *valid*; it does not say what the sections are for, which of them
+# a bench actually needs, or what a real one looks like filled in. Without that,
+# the write path below is operable only by guessing — write, be refused, guess
+# the next key — and every guess costs a round trip.
+#
+# So this document explains, and takes every value shape from the schema at read
+# time. Two descriptions of one permission boundary drift, and the configuration
+# is the permission boundary.
+
+# What the schema cannot say about a section: why it is there. Keyed by section,
+# merged with the schema's own description rather than replacing it.
+_SECTION_PURPOSE: dict[str, str] = {
+    "version": "Which permission model the file is read under. A new file should say `2`.",
+    "workspace_root": "The project this configuration authorizes, and nothing else. A server started elsewhere refuses it.",
+    "state_root": "Where leases, quarantine incidents and canonical reports live. Outside `workspace_root`, so repository content cannot forge them.",
+    "permissions": "What may be done to this file itself.",
+    "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
+    "target": "What board this is. Names in reports; `controller` is what a human recognises.",
+    "debuggers": "The debug probes. The entry name is the routing key a test plan addresses.",
+    "debug": "Typed GDB session settings: which symbols may be read and how much.",
+    "artifacts": "Which firmware files may be flashed, from where, and how large.",
+    "com_ports": "The serial lines. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "can_buses": "The CAN buses. `listen_only` is how a bus is observed without sending ACK bits.",
+    "validation": "How strictly a firmware artifact is checked before it is accepted.",
+    "reports": "Where structured reports are written, relative to `state_root`.",
+    "logs": "Where raw backend output is written, relative to `state_root`.",
+    "recovery": "How far the owning process may clear its own hardware quarantine before an operator is required.",
+}
+
+CONFIG_WORKED_EXAMPLE = """version: 2
+
+# Absolute, and this file is stored outside it.
+workspace_root: "C:/Users/dana/work/thermostat-fw"
+state_root: "C:/Users/dana/.agentic-hil/state"
+
+permissions:
+  # The agent may enter what it discovers about the bench …
+  allow_config_description_write: true
+  # … and may not grant itself anything.
+  allow_config_permissions_write: false
+  allow_config_write: false
+
+target:
+  name: "thermostat-dut"
+  controller: "stm32f446re"
+
+debuggers:
+  dut:
+    type: "openocd"
+    executable: null            # found on PATH
+    probe_id: "066AFF495451885087171450"
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+
+com_ports:
+  dut_uart:
+    device: "COM7"              # the ST-Link virtual COM port
+    baudrate: 115200
+    assert_dtr: false           # this board wires DTR to reset
+    assert_rts: false
+    permissions:
+      allow_write: true
+
+can_buses: {}
+
+artifacts:
+  allowed_roots: ["build"]
+  allowed_extensions: [".elf", ".hex", ".bin"]
+  allow_upload: false
+
+recovery:
+  auto_recover: "reset_halt"
+  max_attempts: 3
+"""
+
+
+def _schema_type_label(node: JsonObject) -> str:
+    declared = node.get("type")
+    if isinstance(declared, list):
+        label = " or ".join(str(item) for item in declared)
+    elif isinstance(declared, str):
+        label = declared
+    else:
+        label = "any"
+    enum = node.get("enum")
+    if isinstance(enum, list) and enum:
+        label += " — one of " + ", ".join(f"`{json.dumps(item)}`" for item in enum)
+    pattern = node.get("pattern")
+    if isinstance(pattern, str):
+        label += f", matching `{pattern}`"
+    for bound in ("minimum", "maximum", "minLength"):
+        if bound in node:
+            label += f", {bound} {node[bound]}"
+    return label
+
+
+def _schema_field_rows(schema: JsonObject, node: JsonObject) -> list[str]:
+    properties = node.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    required = {str(item) for item in node.get("required", []) if isinstance(item, str)}
+    rows: list[str] = []
+    for name, raw in properties.items():
+        field = _dereference(schema, raw)
+        default = f"`{json.dumps(field['default'])}`" if "default" in field else ("**required**" if name in required else "—")
+        description = str(field.get("description", "")).replace("\n", " ").replace("|", "\\|")
+        if field.get("deprecated") is True:
+            description = "**Deprecated.** " + description
+        rows.append(f"| `{name}` | {_schema_type_label(field)} | {default} | {description} |")
+    return rows
+
+
+def _config_section_documents(schema: JsonObject) -> list[str]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):  # pragma: no cover - the shipped schema has properties
+        return []
+    required = {str(item) for item in schema.get("required", []) if isinstance(item, str)}
+    blocks: list[str] = []
+    for name, raw in properties.items():
+        node = _dereference(schema, raw)
+        purpose = _SECTION_PURPOSE.get(name, "")
+        schema_description = str(node.get("description", "")).replace("\n", " ")
+        heading = f"### `{name}`" + (" — required" if name in required else "")
+        lines = [heading, ""]
+        if purpose:
+            lines.append(purpose)
+        if schema_description and schema_description != purpose:
+            lines.append("")
+            lines.append(schema_description)
+        entry_node = node
+        if name in CONFIG_NAMED_SECTIONS:
+            entry_node = _dereference(schema, node.get("additionalProperties"))
+            lines += ["", f"A mapping of operator-chosen names to entries. Each `{name}.<name>` entry takes:"]
+        rows = _schema_field_rows(schema, entry_node)
+        if rows:
+            lines += ["", "| Field | Value shape | Default | Meaning |", "|---|---|---|---|", *rows]
+        elif name not in CONFIG_NAMED_SECTIONS:
+            lines += ["", f"Value shape: {_schema_type_label(node)}."]
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def _config_write_key_rows() -> list[str]:
+    return [f"| `{entry['key']}` | `{entry['right']}` | {_schema_type_label(dict(entry['value_schema']))} |" for entry in config_key_catalogue()]
+
+
+def config_shape_document() -> str:
+    """The explanatory, rights-aware view of the configuration.
+
+    Every value shape in it is read out of the shipped schema when this is
+    called, so the two cannot disagree. What is written here is what a schema
+    cannot carry: what a section is for, which ones a bench needs, a filled-in
+    example, and how the file is changed over this connection."""
+    schema = config_schema_document()
+    sections = "\n\n".join(_config_section_documents(schema))
+    keys = "\n".join(_config_write_key_rows())
+    rights = "\n".join(f"| `permissions.{name}` | {purpose} |" for name, purpose in CONFIG_RIGHTS.items())
+    return f"""# The shape of an Agentic HIL configuration, and how to change it
+
+`{CONFIG_SCHEMA_URI}` serves the JSON Schema this file is validated against. A schema says what is **valid**; it does not say what a section is for, which ones a bench actually needs, or what a real one looks like filled in. This document is that, and it takes every value shape from the same schema at read time — there is no second list of types anywhere.
+
+## Where the file is
+
+One authoritative file per project, **outside** the workspace, so repository content can never rewrite policy. The server discovers it; `AGENTIC_HIL_CONFIG` may override the location with an absolute path. `{PLATFORM_PATHS_URI}` has the location rules.
+
+`workspace_root` and `state_root` are the only two required keys. Everything else has a default, and a configuration that names only those two is valid — it just describes a bench with no hardware on it.
+
+## The sections
+
+{sections}
+
+## A worked example
+
+A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. The operator has opened flashing and reset on this board, and has let the agent keep the bench description current without letting it grant itself anything:
+
+```yaml
+{CONFIG_WORKED_EXAMPLE}```
+
+`probe_id` is the value nobody can guess and nobody enjoys transcribing: `debugger_probes_list` reads it off the attached probe, and `project_config_set` enters it.
+
+## Changing it over MCP
+
+Two calls, and they are the only door. The file itself is protected by deny rules `agentic-hil setup` writes into the host, so an agent's own file tools cannot touch it — that is the precondition for this door, not a contradiction of it.
+
+| Call | Does |
+|---|---|
+| `project_config_describe` | answers, for **this** configuration in **this** state, which keys you may change right now, which you may not, and which grant would open a locked one. Needs no permission; reading is free. |
+| `project_config_set` | sets named keys, field-wise, after checking each value against the schema. |
+| `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. Contributes no permission value: the grants on disk are carried over unchanged. |
+
+### The two rights
+
+| Grant | Opens |
+|---|---|
+{rights}
+
+The split is the point. Somebody who opens the file so an agent can enter a probe serial has not, in the same motion and without being told, handed over the ability for that agent to write `allow_flash: true` on itself.
+
+### Which keys, and what may go in them
+
+| Key | Grant that opens it | Value shape (from the schema) |
+|---|---|---|
+{keys}
+
+`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server, so a new entry can never arrive pre-granted.
+
+Entry names may contain dots. Keys are therefore read from the right: the field name is the last component, so `debuggers.a.b.probe_id` is the entry named `a.b`.
+
+### The call
+
+```json
+{{"name": "project_config_set", "arguments": {{"changes": [
+  {{"key": "debuggers.dut.probe_id", "value": "066AFF495451885087171450"}},
+  {{"key": "com_ports.dut_uart.device", "value": "COM7"}}
+]}}}}
+```
+
+Every change in one call is applied together or not at all. The changed document is validated on a temporary file before it replaces the real one, so a change that would make the configuration unloadable leaves the working file exactly as it was.
+
+The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, `last_modified_at`, the keys that moved, and a running `modification_count`.
+
+## What deliberately cannot be done
+
+| Not possible | Why |
+|---|---|
+| writing the file with your own file tools | `setup` writes host deny rules against exactly that. One door, audited, locked by a grant inside the file. |
+| sending a whole document, or a whole `debuggers.dut` subtree | the agent does not author this file. `value` accepts a string, number, boolean or null and nothing else, so no subtree — and no `permissions:` block inside one — can arrive as a value. |
+| widening your own permissions with only the description grant | refused twice over: the key does not resolve to the description grant, and the permissions actually present in the document are compared before and after the change. A permission that changed without `{CONFIG_PERMISSIONS_RIGHT}` fails the write. |
+| changing anything while a run is open | a run holds devices under the policy this file states. Changing the policy underneath it is refused; close the run with `bench_run_stop` first. |
+| deleting a key, an entry, or the file | nothing on this surface removes configuration. Regenerating one costs an operator their settings. |
+| `version`, `workspace_root`, `state_root`, `artifacts`, `debug`, `validation`, `recovery` | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
+
+A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.
+
+## Getting from "board attached" to a valid change
+
+1. `project_config_describe` — what may this caller change right now.
+2. `debugger_probes_list` / `com_ports_list` — what is actually attached.
+3. `project_config_set` — enter it.
+4. The server keeps serving the configuration it loaded at startup; the result says `reload_required`. Ask the operator to restart the MCP server before relying on the change.
+"""
+
+
 LEASE_LIFECYCLE_DOCUMENT = """# Device exclusivity, hardware leases, and the quarantine lifecycle
 
 Two different things guard the hardware, and they live in two different places.
@@ -942,6 +1477,13 @@ MCP_RESOURCES: list[JsonObject] = [
         JSON_MIME,
     ),
     _resource_descriptor(
+        CONFIG_SHAPE_URI,
+        "config-shape",
+        "What a configuration looks like, and how to change it over MCP",
+        "Which sections a configuration has and what each is for, which are required, and a worked Nucleo-F446RE example; then how to change one field-wise over MCP, the two grants that open the description and the permissions halves, which key each grant opens, and what deliberately cannot be done. Value shapes are read from the shipped schema, not restated.",
+        MARKDOWN_MIME,
+    ),
+    _resource_descriptor(
         LEASE_LIFECYCLE_URI,
         "lease-lifecycle",
         "Device exclusivity, lease and quarantine lifecycle",
@@ -1001,6 +1543,8 @@ def read_resource(uri: str) -> JsonObject | None:
         return _json_content(uri, errors_document())
     if uri == CONFIG_SCHEMA_URI:
         return {"uri": uri, "mimeType": JSON_MIME, "text": config_schema_text()}
+    if uri == CONFIG_SHAPE_URI:
+        return _markdown_content(uri, config_shape_document())
     if uri == LEASE_LIFECYCLE_URI:
         return _markdown_content(uri, LEASE_LIFECYCLE_DOCUMENT)
     if uri == PLATFORM_PATHS_URI:

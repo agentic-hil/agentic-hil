@@ -1246,13 +1246,17 @@ recovery:
 # operator reads and blocked an operator who deliberately deletes a
 # configuration to start over.
 # Every permission an agent-generated configuration must carry as false. The
-# write class of decision 0018, per section, plus the project-scoped grant that
-# closes the configuration behind the agent.
+# write class of decision 0018, per section, plus the project-scoped grants that
+# close the configuration behind the agent.
 GENERATED_WRITE_PERMISSIONS = {
     "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
+# The project-scoped grants, all three of them. A generated configuration writes
+# every one false and a regenerated one carries every one over: whichever list is
+# short is the one that hands out a grant nobody set or drops one somebody did.
+GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
 
 
 def authoritative_config_target(workspace: Path) -> Path:
@@ -1330,7 +1334,7 @@ def deny_every_write(document: JsonObject) -> JsonObject:
     debug = document.get("debug")
     if isinstance(debug, dict):
         debug["allow_all_symbols"] = False
-    document["permissions"] = {"allow_config_write": False}
+    document["permissions"] = dict.fromkeys(GENERATED_PROJECT_PERMISSIONS, False)
     return document
 
 
@@ -1363,7 +1367,7 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
     if isinstance(debug, dict):
         debug["allow_all_symbols"] = existing.debug.allow_all_symbols
         debug["allowed_symbols"] = list(existing.debug.allowed_symbols)
-    document["permissions"] = {"allow_config_write": existing.permissions.allow_config_write}
+    document["permissions"] = {name: bool(getattr(existing.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS}
     return sorted(f"{section}.{name}" for section, entries in sources.items() for name in entries if name not in (document.get(section) or {}))
 
 
@@ -2228,7 +2232,11 @@ def io_permissions(raw: JsonObject) -> IoPermissions:
 
 
 def project_permissions(raw: JsonObject) -> ProjectPermissions:
-    return ProjectPermissions(allow_config_write=bool(raw.get("allow_config_write", False)))
+    return ProjectPermissions(
+        allow_config_write=bool(raw.get("allow_config_write", False)),
+        allow_config_description_write=bool(raw.get("allow_config_description_write", False)),
+        allow_config_permissions_write=bool(raw.get("allow_config_permissions_write", False)),
+    )
 
 
 def debugger_access_enabled(debugger: DebuggerConfig) -> bool:
@@ -2366,11 +2374,14 @@ REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
 }
 
 
-# A top-level `permissions` block exists again, holding the one grant that is not
+# A top-level `permissions` block exists again, holding the grants that are not
 # about a device. The refusal below therefore has to fire on the removed device
 # grants inside it rather than on the section's name, or every file written after
-# this release would be read as a pre-migration file.
-SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write"}}
+# this release would be read as a pre-migration file. Every project-scoped grant
+# the schema declares belongs in this set; a test compares the two, because a
+# grant added to the schema and forgotten here would make every file that uses it
+# unloadable with a migration error about a block from three releases ago.
+SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write", "allow_config_description_write", "allow_config_permissions_write"}}
 
 
 def reject_removed_sections(raw: JsonObject, config_path: str) -> None:

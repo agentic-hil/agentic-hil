@@ -28,6 +28,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.contracts import MCP_TOOL_NAMES, TOOL_SCHEMAS
 from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
@@ -122,7 +123,11 @@ def test_generated_configuration_grants_nothing_at_all(tmp_path: Path, monkeypat
         result = service.call(PROJECT_CONFIG_CREATE)
         document = written_document(result)
 
-        assert document["permissions"] == {"allow_config_write": False}
+        assert document["permissions"] == {
+            "allow_config_write": False,
+            "allow_config_description_write": False,
+            "allow_config_permissions_write": False,
+        }
         assert document["debuggers"]["dut"]["permissions"] == {
             "allow_flash": False,
             "allow_reset": False,
@@ -241,7 +246,11 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     # first, and the flash permission the person had set is simply gone.
     assert granted(regenerated) == set()
     assert regenerated["debuggers"]["dut"]["permissions"]["allow_flash"] is False
-    assert regenerated["permissions"] == {"allow_config_write": False}
+    assert regenerated["permissions"] == {
+        "allow_config_write": False,
+        "allow_config_description_write": False,
+        "allow_config_permissions_write": False,
+    }
     assert {key: value for key, value in regenerated.items() if key != "provenance"} == {
         key: value for key, value in original.items() if key != "provenance"
     }
@@ -273,12 +282,24 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
     """Nothing here removes or moves a configuration.
 
     Regenerating one costs a human their settings, so the surface offers no way
-    to bring that about: no delete, no move, no path argument anywhere, and the
-    one tool that writes a configuration takes no arguments at all.
+    to bring that about: no delete, no move, no path argument anywhere. The tool
+    that regenerates the file takes no arguments at all, and the one that changes
+    it takes named keys with scalar values — never a document, never a path.
     """
-    assert [name for name in MCP_TOOL_NAMES if "config" in name] == [PROJECT_CONFIG_CREATE]
+    assert sorted(name for name in MCP_TOOL_NAMES if "config" in name) == [
+        PROJECT_CONFIG_CREATE,
+        PROJECT_CONFIG_DESCRIBE,
+        PROJECT_CONFIG_SET,
+    ]
     assert not [name for name in MCP_TOOL_NAMES if any(verb in name for verb in ("delete", "remove", "move", "rename"))]
     assert TOOL_SCHEMAS[PROJECT_CONFIG_CREATE] == {"type": "object", "properties": {}, "additionalProperties": False}
+    assert TOOL_SCHEMAS[PROJECT_CONFIG_DESCRIBE] == {"type": "object", "properties": {}, "additionalProperties": False}
+    change = TOOL_SCHEMAS[PROJECT_CONFIG_SET]["properties"]["changes"]["items"]
+    assert sorted(change["properties"]) == ["key", "value"]
+    assert change["additionalProperties"] is False
+    # No object and no array: a subtree is content the agent authored, and a
+    # subtree can carry a permissions: block inside it.
+    assert set(change["properties"]["value"]["type"]) == {"string", "number", "integer", "boolean", "null"}
 
 
 def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

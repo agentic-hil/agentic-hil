@@ -98,14 +98,30 @@ class IoPermissions:
 class ProjectPermissions:
     """What may be done to this project's configuration itself.
 
-    ``allow_config_write`` belongs to the write class of decision 0018 and is
+    Every flag belongs to the write class of decision 0018 and is
     deny-by-default like the rest of it: reading the configuration needs no
-    grant, writing it does. It is the permission that makes agent provisioning a
-    one-way step — a configuration an agent generated carries it false, so the
-    same agent cannot widen anything it wrote, and only a human editing the file
-    can open it."""
+    grant, writing it does. A configuration an agent generated carries all three
+    false, so the same agent cannot widen anything it wrote, and only a human
+    editing the file can open one.
+
+    Three grants rather than one, because one would be a master key. Somebody who
+    opens the file so an agent can enter a probe serial must not thereby have
+    handed over ``allow_flash`` and ``allow_mass_erase``:
+
+    ``allow_config_write``
+        regenerate the whole file from hardware discovery
+        (``project_config_create``). Contributes no permission value of its own —
+        the grants already on disk are carried over unchanged.
+    ``allow_config_description_write``
+        set named description keys field-wise (``project_config_set``): what the
+        bench *is*. Never reaches a ``permissions:`` block.
+    ``allow_config_permissions_write``
+        set the ``permissions:`` blocks field-wise: what the bench may be told to
+        do. This is the grant that hands over the granting."""
 
     allow_config_write: bool = False
+    allow_config_description_write: bool = False
+    allow_config_permissions_write: bool = False
 
 
 @dataclass(frozen=True)
