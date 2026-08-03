@@ -89,14 +89,14 @@ class AgenticHILToolService:
     def debugger_info(self) -> JsonObject:
         if self.config.debugger is None:
             return unbound_debugger_error("debugger_info", self.config)
-        if not self.debugger_permissions.allow_probe:
+        if not self.config.probe_allowed():
             return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
         return self.backend.info()
 
     def debugger_probes_list(self) -> JsonObject:
         if self._dispatch_depth == 0:
             return self.call("debugger_probes_list")
-        if not self.debugger_permissions.allow_probe:
+        if not self.config.probe_allowed():
             return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.")
         result = self.backend.list_probes()
         if result.get("cleanup_required") is not True and result.get("side_effect_status") not in {"unknown", "partial"}:
@@ -406,7 +406,7 @@ class AgenticHILToolService:
         recoverable or a predicate did not confirm the safe state."""
         allowed = self.coordinator.recoverable_reasons()
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
-        if reason is None or not self.debugger_permissions.allow_probe:
+        if reason is None or not self.config.probe_allowed():
             return None
         if not self._machine_recovery_attempt_allowed():
             return None
@@ -508,15 +508,15 @@ class AgenticHILToolService:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
         if name == "reset_target" and not self.debugger_permissions.allow_reset:
             return self._invoke_dispatch(lambda: self.reset_target(args.get("mode", "run")))
-        if name == "probe_target" and not self.debugger_permissions.allow_probe:
+        if name == "probe_target" and not self.config.probe_allowed():
             return self._invoke_dispatch(self.probe_target)
-        if name == "debugger_probes_list" and not self.debugger_permissions.allow_probe:
+        if name == "debugger_probes_list" and not self.config.probe_allowed():
             return self._invoke_dispatch(self.debugger_probes_list)
         if name == "debug_start_session":
             mode = args.get("mode", "attach")
             permissions = self.debugger_permissions
             denied = (
-                not permissions.allow_probe
+                not self.config.probe_allowed()
                 or (mode != "attach" and not permissions.allow_reset)
                 or permissions.allow_raw_debugger_commands
                 or (mode == "load" and (not permissions.allow_flash or permissions.allow_mass_erase))

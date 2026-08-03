@@ -132,13 +132,19 @@ Linux permission note: if opening the device fails with a permission error, the 
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
 
-Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, that bus's `permissions.allow_read`/`permissions.allow_write` is disabled, `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, sending is refused because `permissions.allow_write` is disabled (reading needs no permission, and on a version 1 file — one with no `version:` key — it still needs `permissions.allow_read`), `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
 
-## 13. `resource_busy` Or Quarantined Hardware
+## 13. `device_busy`, `resource_busy` Or Quarantined Hardware
 
-Symptom: tools return `resource_busy`, `cleanup_required`, or `quarantined`, and results carry a `quarantine_id`.
+Symptom: a call returns `device_busy` and names a `holder`, or tools return `resource_busy`, `cleanup_required`, or `quarantined` with a `quarantine_id`.
+
+`device_busy` is not a fault. Another run holds that physical device for its whole duration, which is the exclusivity that replaced the read permission. The refusal carries `holder` (pid, host, frontend, and the run label when there is one) and `held_since`; nothing was touched. Wait for that run, or ask its owner to finish. If waiting is right, ask for it explicitly and bounded: `agentic-hil test-reactor --wait-s <seconds>`. Never delete a lock file under `~/.agentic-hil/device-locks` — the hold belongs to a live process, and removing it lets two runs drive one board.
+
+A holder reported with `holder_heartbeat_stale: true` is hung rather than busy; stop that process. A crashed one needs nothing at all: the operating system drops the lock when the process dies, and the next run reports what it reclaimed.
+
+`undeclared_device` is separate: a run reached for a device its test plan does not name. Add the device to the plan and rerun — the plan is what the mutex locks before the first step, so a device it does not name was never locked.
 
 Likely cause: another live process owns the project or resource lease, or a previous owner crashed / left an unknown hardware effect, which quarantines the resource instead of silently releasing it.
 

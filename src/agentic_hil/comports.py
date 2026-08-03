@@ -153,7 +153,7 @@ class ComPortService:
             ports[port_id] = self._port_status(port_config, self.sessions.get(port_id))
         # Host discovery is not scoped to one configured port, so it needs at
         # least one port the operator allowed reading from.
-        if any(port_config.permissions.allow_read for port_config in self.config.com_ports.values()):
+        if any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
             available = list_available_com_ports()
         else:
             available = {
@@ -181,9 +181,9 @@ class ComPortService:
         # only way to reach the port at all — gating the open on allow_read alone
         # made allow_write without allow_read a grant that could never be used.
         port_permissions = port["port_config"].permissions
-        if not port_permissions.allow_read and not port_permissions.allow_write:
+        if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
             return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id))
-        if clear_buffer and not port_permissions.allow_read:
+        if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
 
@@ -246,7 +246,7 @@ class ComPortService:
         try:
             # The background reader buffers incoming bytes, so it only runs for
             # a port the operator allowed reading from.
-            if port_permissions.allow_read:
+            if self.config.com_read_allowed(port["port_config"]):
                 session.start_reader()
         except BaseException as error:
             try:
@@ -346,7 +346,7 @@ class ComPortService:
         port = self._configured_port(port_id, tool)
         if not port["ok"]:
             return port
-        if not port["port_config"].permissions.allow_read:
+        if not self.config.com_read_allowed(port["port_config"]):
             return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
@@ -407,7 +407,22 @@ class ComPortService:
         except ImportError:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
         try:
-            serial_handle = serial.Serial(port_config.device, port_config.baudrate, timeout=port_config.timeout_s, write_timeout=port_config.write_timeout_s)
+            # Built unopened so the modem lines are decided BEFORE the port is
+            # opened. Passing the device to the constructor opens it immediately
+            # with pyserial's own defaults, which raise DTR and RTS — and on a
+            # board that wires DTR to reset, listening to a target restarts it.
+            # pyserial applies the requested states as part of open(); a driver
+            # that pulses a line during the open itself is beyond what any host
+            # can suppress, which is why listen_only and this pair are described
+            # as evidence of intent, not as a hardware guarantee.
+            serial_handle = serial.Serial()
+            serial_handle.port = port_config.device
+            serial_handle.baudrate = port_config.baudrate
+            serial_handle.timeout = port_config.timeout_s
+            serial_handle.write_timeout = port_config.write_timeout_s
+            serial_handle.dtr = port_config.assert_dtr
+            serial_handle.rts = port_config.assert_rts
+            serial_handle.open()
             provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
             try:
                 session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
@@ -449,7 +464,10 @@ class ComPortService:
         return {"ok": True, "session": session}
 
     def _port_status(self, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
-        result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "session_active": False}
+        # assert_dtr/assert_rts are reported because they decide whether merely
+        # opening this port touches the target; a reader judging whether an
+        # observation was passive needs to see them without opening the config.
+        result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "assert_dtr": port_config.assert_dtr, "assert_rts": port_config.assert_rts, "session_active": False}
         if session is not None:
             result.update(self._session_status(session))
         return result

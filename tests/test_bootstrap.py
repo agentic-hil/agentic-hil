@@ -101,15 +101,18 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["target"] == {"name": "demo", "controller": "stm32f446ret6"}
     assert configured["debuggers"]["dut"]["type"] == "stlink"
     assert configured["debuggers"]["dut"]["probe_id"] == "STLINK123"
+    # The profile above still requests the version 1 read grants. The document
+    # this writes is version 2, where reading needs none and the keys are
+    # refused by name, so the request is satisfied by dropping it.
+    assert configured["version"] == 2
     assert configured["debuggers"]["dut"]["permissions"] == {
-        "allow_probe": True,
         "allow_flash": True,
         "allow_reset": True,
         "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
-    assert configured["com_ports"]["dut_uart"]["permissions"]["allow_read"] is True
+    assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
 
 
 def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,6 +145,11 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     assert written["debuggers"]["dut"]["type"] == "stlink"
     assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert written["com_ports"]["dut_uart"]["device"] == "COM3"
+    # A bootstrapped config is a version 2 config: it loads, which it could not
+    # do while carrying a read permission this version refuses by name.
+    assert written["version"] == 2
+    assert "allow_probe" not in written["debuggers"]["dut"]["permissions"]
+    assert "allow_read" not in written["com_ports"]["dut_uart"]["permissions"]
 
 
 def test_cube_clt_programmer_paths_find_versioned_install(tmp_path: Path) -> None:

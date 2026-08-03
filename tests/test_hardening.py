@@ -463,7 +463,9 @@ def test_new_com_session_clears_os_and_memory_buffers(tmp_path: Path, monkeypatc
 def test_com_session_constructor_failure_closes_raw_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
-    handle = SimpleNamespace(closed=False, close=lambda: setattr(handle, "closed", True))
+    # open() is a no-op here: the port is now configured before it is opened,
+    # so the modem lines are decided rather than left to pyserial's defaults.
+    handle = SimpleNamespace(closed=False, close=lambda: setattr(handle, "closed", True), open=lambda: None)
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
     monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
 
@@ -499,7 +501,7 @@ def test_com_double_failure_keeps_raw_handle_reachable_for_retry(tmp_path: Path,
         if close_calls["count"] == 1:
             raise OSError("first close failed")
 
-    handle = SimpleNamespace(close=flaky_close)
+    handle = SimpleNamespace(close=flaky_close, open=lambda: None)
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
     monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
 

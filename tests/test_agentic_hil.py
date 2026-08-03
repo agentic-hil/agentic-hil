@@ -84,7 +84,11 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
     assert result["path"] == str(config_path)
     config_text = config_path.read_text(encoding="utf-8")
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
-    assert "allow_probe: false" in config_text
+    # Born on the read-free model: reading has no key to set, so every
+    # permission line a fresh config carries is about writing.
+    assert "version: 2" in config_text
+    assert "allow_probe: " not in config_text
+    assert "allow_flash: false" in config_text
     assert "allow_reset: false" in config_text
     assert "allow_upload: false" in config_text
     assert initialized_config_path(workspace) == config_path

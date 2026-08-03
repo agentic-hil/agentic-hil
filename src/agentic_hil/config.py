@@ -25,6 +25,8 @@ from yaml.resolver import BaseResolver
 
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import (
+    LEGACY_CONFIG_VERSION,
+    READ_FREE_CONFIG_VERSION,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
@@ -176,6 +178,8 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
     reject_bridge_args(raw, resolved_config_path)
     reject_removed_sections(raw, resolved_config_path)
+    config_version = configured_version(raw, resolved_config_path)
+    reject_read_permissions(raw, resolved_config_path, config_version)
     validate_config_schema(raw, resolved_config_path)
 
     workspace_value = str(raw["workspace_root"])
@@ -241,6 +245,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         recovery=recovery_config(recovery_raw),
         debugger_id=single[0],
         debugger=single[1],
+        config_version=config_version,
     )
 
 
@@ -1895,6 +1900,8 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         encoding=str(raw.get("encoding", "utf-8")),
         max_buffer_bytes=int(raw.get("max_buffer_bytes", 65536)),
         max_write_bytes=int(raw.get("max_write_bytes", 4096)),
+        assert_dtr=bool(raw.get("assert_dtr", True)),
+        assert_rts=bool(raw.get("assert_rts", True)),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )
@@ -2005,6 +2012,65 @@ def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
     for section, (summary, migration) in REMOVED_SECTIONS.items():
         if section in raw:
             raise ConfigError("config_invalid", summary, {"path": config_path, "field": section, "migration": migration})
+
+
+def configured_version(raw: JsonObject, config_path: str) -> int:
+    """Which permission model this file is read under.
+
+    A file with no ``version:`` was written when reading needed a grant, and it
+    keeps that meaning. Nothing infers the new model from the absence of a key:
+    that inference is exactly the silent widening this marker exists to stop."""
+    value = raw.get("version")
+    if value is None:
+        return LEGACY_CONFIG_VERSION
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError("config_invalid", "version must be an integer.", {"path": config_path, "field": "version", "value": value})
+    if value not in {LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION}:
+        raise ConfigError(
+            "config_invalid",
+            f"Unsupported configuration version; this release reads version {LEGACY_CONFIG_VERSION} and {READ_FREE_CONFIG_VERSION}.",
+            {"path": config_path, "field": "version", "value": value, "supported_versions": [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION]},
+        )
+    return value
+
+
+# The permission each section used to spell "may read", and where it went.
+READ_PERMISSIONS = {
+    "debuggers": "allow_probe",
+    "com_ports": "allow_read",
+    "can_buses": "allow_read",
+}
+
+
+def reject_read_permissions(raw: JsonObject, config_path: str, version: int) -> None:
+    """Refuse a read permission in a version 2 file, by name.
+
+    Version 2 has no read permission to set, so a file that still carries one is
+    either half-migrated or written against the old model. Both are worth a
+    refusal that names the key: silently ignoring it would leave an operator
+    believing a flag still gates something."""
+    if version < READ_FREE_CONFIG_VERSION:
+        return
+    for section, flag in READ_PERMISSIONS.items():
+        entries = raw.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, value in entries.items():
+            permissions = value.get("permissions") if isinstance(value, dict) else None
+            if isinstance(permissions, dict) and flag in permissions:
+                raise ConfigError(
+                    "config_invalid",
+                    f"Version {READ_FREE_CONFIG_VERSION} has no read permission: reading needs no grant, and exclusivity for the duration of a run replaced it. Remove this key.",
+                    {
+                        "path": config_path,
+                        "field": f"{section}.{name}.permissions.{flag}",
+                        "migration": {
+                            "remove": f"{section}.<name>.permissions.{flag}",
+                            "keep": "allow_flash, allow_reset, allow_write, allow_mass_erase and allow_raw_debugger_commands are unchanged and still deny-by-default",
+                            "instead": "Declare the device in the test description; it is locked for the whole run, and a device the description does not name is refused.",
+                        },
+                    },
+                )
 
 
 def reject_bridge_args(raw: JsonObject, config_path: str) -> None:

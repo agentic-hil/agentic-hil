@@ -78,7 +78,7 @@ class PyOCDBackend:
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
         return self._enumerate_probes(tool)
 
@@ -110,7 +110,7 @@ class PyOCDBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         selected = self._resolve_probe_selector("probe_target")
         if not selected["ok"]:

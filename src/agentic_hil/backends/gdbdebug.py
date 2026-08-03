@@ -508,7 +508,7 @@ class GdbDebugSessions:
 
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.debugger.permissions
-        if not permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied(tool, "Debug sessions require allow_probe in the authoritative config.")
         if mode != "attach" and not permissions.allow_reset:
             return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the authoritative config.")
