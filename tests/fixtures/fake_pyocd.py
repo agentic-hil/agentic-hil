@@ -11,6 +11,23 @@ def main() -> int:
         print("0.36.0")
         return 0
     if args and args[0] == "json":
+        if args[1:] == ["--targets", "--no-config"]:
+            # Same envelope pyOCD 0.45.1 emits, trimmed: one builtin and one
+            # pack-provided target, so a test can tell the two apart.
+            print(
+                json.dumps(
+                    {
+                        "pyocd_version": "0.36.0",
+                        "status": 0,
+                        "targets": [
+                            {"name": "cortex_m", "vendor": "Generic", "part_number": "CoreSightTarget", "source": "builtin"},
+                            {"name": "stm32f446re", "vendor": "STMicroelectronics", "part_number": "STM32F446RE", "source": "pack"},
+                            {"name": "stm32f446retx", "vendor": "STMicroelectronics", "part_number": "STM32F446RETx", "source": "pack"},
+                        ],
+                    }
+                )
+            )
+            return 0
         if args[1:] != ["--probes", "--no-config"]:
             print("unsafe probe discovery arguments", file=sys.stderr)
             return 2

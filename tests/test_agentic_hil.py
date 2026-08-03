@@ -8,25 +8,30 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
 from conftest import (
     FAKE_OPENOCD,
+    FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
     FAKE_STLINK_UNCONFIRMED,
     write_authoritative_config,
     write_config,
 )
+from fixtures import fake_openocd
 from support import trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends import openocd as openocd_backend
+from agentic_hil.backends.common import command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import (
+    _posix_filesystem_path,
     build_parser,
     debugger_probes,
     doctor,
@@ -57,7 +62,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
-from agentic_hil.process import process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 
@@ -267,6 +272,7 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
         return subprocess.CompletedProcess(command, 0, "installed\n", "")
 
     monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
     monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
 
     result = upgrade_installation(["opencode"])
@@ -285,6 +291,7 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
 ) -> None:
     command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
     monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", command))
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
     monkeypatch.setattr(
         "agentic_hil.cli._run_upgrade_process",
         lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
@@ -329,12 +336,212 @@ def test_upgrade_selects_manager_owning_running_installation(
     monkeypatch.setattr(sys, "prefix", prefix)
     monkeypatch.setattr(sys, "executable", "PYTHON")
     monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", tuple)
     monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
 
     selected_manager, command = _upgrade_command()
 
     assert selected_manager == manager
     assert command == expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "installer", "expected"),
+    [
+        ("C:/Users/op/venv", "uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil[can,pyocd]"]),
+        ("C:/Python313", "pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil[can,pyocd]"]),
+    ],
+)
+def test_upgrade_asks_for_the_extras_that_are_installed(
+    prefix: str,
+    installer: str,
+    expected: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pip paths take the requirement from here, so it has to name the extras.
+
+    Measured against a real installation: an upgrade requesting the bare
+    distribution re-resolves without `can` or `pyocd`, so whatever the extra
+    installed is never moved with the release that now depends on it. The uv
+    tool and pipx paths need nothing here because both reinstall from a
+    requirement their own receipt already records with its extras.
+    """
+    from agentic_hil.cli import _upgrade_command
+
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can", "pyocd"))
+    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+
+    _manager, command = _upgrade_command()
+
+    assert command == expected
+
+
+def test_installed_extras_names_only_the_extras_whose_requirements_are_present() -> None:
+    """Read against the real distribution metadata, not a fixture of it.
+
+    `can` is installed for the test suite and `pyocd` is not, so this also
+    proves the two are told apart rather than both being reported.
+    """
+    from agentic_hil.cli import _installed_extras
+
+    extras = _installed_extras()
+
+    assert "can" in extras
+    assert "pyocd" not in extras
+
+
+def _fake_process(pid: int, parent_pid: int, image: str, created_ns: int = 100) -> ProcessImage:
+    return ProcessImage(pid=pid, parent_pid=parent_pid, image=image, created_ns=created_ns)
+
+
+_TOOL_ENV = "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil"
+# The measured Windows shape of one `agentic-hil upgrade` run: the user-level
+# shim starts a launcher inside the tool environment, and that launcher starts
+# the interpreter whose image is the base Python outside it. The code runs in
+# the last one, so the process holding `Scripts/python.exe` open is its parent.
+_UPGRADE_ITSELF = (
+    _fake_process(100, 1, "C:/Users/op/.local/bin/agentic-hil.exe", created_ns=10),
+    _fake_process(200, 100, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=20),
+    _fake_process(300, 200, "C:/Users/op/AppData/Roaming/uv/python/cpython-3.13/python.exe", created_ns=30),
+)
+
+
+def _watch_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: tuple[ProcessImage, ...],
+    *,
+    prefix: str = _TOOL_ENV,
+    executable: str | None = None,
+) -> None:
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", executable or f"{prefix}/Scripts/python.exe")
+    monkeypatch.setattr("agentic_hil.cli.os.getpid", lambda: 300)
+    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: processes)
+
+
+def test_the_upgrading_process_does_not_report_itself_as_holding_the_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the guard refuses every upgrade there is, including valid ones.
+
+    `agentic-hil upgrade` runs out of the installation it replaces, and on
+    Windows it reaches its own code through a launcher inside that environment.
+    Excluding only the current pid would leave that launcher looking exactly
+    like a running MCP server.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    _watch_installation(monkeypatch, _UPGRADE_ITSELF)
+
+    assert _processes_holding_installation() == []
+
+
+def test_a_second_process_in_the_installation_is_reported_with_pid_and_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP server the agent host started is a sibling, never an ancestor."""
+    from agentic_hil.cli import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=5)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+
+    holders = _processes_holding_installation()
+
+    assert holders == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+def test_a_reused_parent_pid_does_not_hide_a_process_holding_the_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pid is reused once its process exits, and the walk must not follow it.
+
+    Here pid 200 is younger than the process that claims it as a parent, so it
+    cannot be the launcher this run came through — it is a different Agentic HIL
+    process that inherited the number, and hiding it is what would destroy the
+    installation.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    recycled = (
+        _fake_process(100, 1, "C:/Users/op/.local/bin/agentic-hil.exe", created_ns=10),
+        _fake_process(200, 100, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=90),
+        _fake_process(300, 200, "C:/Users/op/AppData/Roaming/uv/python/cpython-3.13/python.exe", created_ns=30),
+    )
+    _watch_installation(monkeypatch, recycled)
+
+    assert _processes_holding_installation() == [{"pid": 200, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `pip --user` or system prefix runs every other Python program too.
+
+    Reading each of those as a holder would refuse an upgrade because something
+    unrelated happens to be running, which is worse than the bug this guards.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    # A shared prefix has a real shape per platform, and the console script only
+    # sits where that platform puts it: `<prefix>/Scripts/agentic-hil.exe` beside
+    # a Windows interpreter at the prefix root, `<prefix>/bin/agentic-hil` beside
+    # a POSIX one already inside `bin`.
+    shared, interpreter, script = (
+        ("C:/Python313", "C:/Python313/python.exe", "C:/Python313/Scripts/agentic-hil.exe")
+        if os.name == "nt"
+        else ("/opt/python313", "/opt/python313/bin/python3", "/opt/python313/bin/agentic-hil")
+    )
+    unrelated = _fake_process(400, 999, interpreter, created_ns=5)
+    ours = _fake_process(401, 999, script, created_ns=5)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, unrelated, ours), prefix=shared, executable=interpreter)
+
+    assert _processes_holding_installation() == [{"pid": 401, "image": script}]
+
+
+def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX unlinks the old file and lets the running process keep reading it.
+
+    The upgrade completes and nothing is lost, so a refusal there would block a
+    valid upgrade over a failure that platform does not have.
+    """
+    from agentic_hil.cli import _processes_holding_installation
+
+    monkeypatch.setattr(sys, "prefix", _TOOL_ENV)
+    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: None)
+
+    assert _processes_holding_installation() == []
+
+
+def test_upgrade_refuses_before_removing_anything_when_the_installation_is_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point: no package manager runs, so both installations survive.
+
+    Windows refuses to delete a file mapped as a running image, and uv removes
+    the tool environment before it rebuilds it. Failing there leaves neither the
+    old installation nor the new one, so the only safe move is to stop first.
+    """
+    holder = {"pid": 4242, "image": f"{_TOOL_ENV}/Scripts/python.exe"}
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", lambda: [holder])
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: pytest.fail("must not select a manager"))
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "installation_in_use"
+    assert result["held_by"] == [holder]
+    assert result["held_by_count"] == 1
+    assert "Nothing was changed." in result["summary"]
+    # The refusal has to say what to do, or it reads as an obstacle to clear —
+    # and the wrong way through is the command that destroys the installation.
+    assert any("Close the agent host" in step for step in result["remediation"])
+    assert any("uv tool install --upgrade" in step for step in result["do_not"])
 
 
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
@@ -1164,9 +1371,8 @@ def test_setup_asks_the_agent_to_refuse_writing_the_policy_files(
     restriction = result["steps"]["agent_write_restriction"]
     assert restriction["ok"] is True
     deny = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"]["deny"]
-    config_directory = Path(result["steps"]["config"]["path"]).parent.as_posix()
-    assert f"Edit({config_directory}/**)" in deny
-    assert f"Write({config_directory}/**)" in deny
+    config_directory = Path(result["steps"]["config"]["path"]).parent
+    assert f"Edit(/{_posix_filesystem_path(config_directory)}/**)" in deny
     # Running the CLI is untouched: setup, doctor and a rerun must keep working.
     assert not any(rule.startswith("Bash(") for rule in deny)
 
@@ -1200,6 +1406,165 @@ def test_the_write_restriction_is_left_to_the_sandbox_for_codex(tmp_path: Path) 
 
     assert restriction["ok"] is True
     assert restriction["mode"] == "sandboxed-by-the-agent"
+
+
+def _claude_settings(home: Path, deny: list[str]) -> Path:
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"permissions": {"deny": deny}}) + "\n", encoding="utf-8")
+    return settings
+
+
+def _deny_rules(settings: Path) -> list[str]:
+    return json.loads(settings.read_text(encoding="utf-8"))["permissions"]["deny"]
+
+
+def _superseded_claude_rules(config_path: Path, state_root: Path) -> list[str]:
+    """Exactly what releases up to 0.7.0 wrote into ~/.claude/settings.json."""
+    return [f"{form}({directory.as_posix()}/**)" for directory in (config_path.parent, state_root) for form in ("Edit", "Write")]
+
+
+def test_the_claude_deny_rules_use_only_the_form_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the shape, because nothing else does.
+
+    https://code.claude.com/docs/en/permissions: Claude Code "checks file
+    permissions against `Edit(path)` and `Read(path)` rules only", a `Write(...)`
+    path rule is "accepted but never consulted" and warned about at every start,
+    and a single leading slash "anchors at the settings source, not the
+    filesystem root" — which in user settings is `~/.claude`, not `/`.
+
+    Both halves were written from expectation once already (hardci-hq#81), so
+    the absence of the `Write` form is asserted explicitly rather than implied.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, [])
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+
+    deny = _deny_rules(settings)
+    assert deny == [f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]
+    # Anchored at the filesystem root, so it means the path it names...
+    assert all(rule.startswith("Edit(//") for rule in deny), deny
+    # ...and no inert twin comes along with it, in any spelling.
+    assert not any(rule.startswith("Write(") for rule in deny), deny
+
+
+def test_a_deny_pattern_names_a_filesystem_path_on_either_platform() -> None:
+    """Both branches, on whichever runner this lands on.
+
+    The defect was reported on Debian and the fix is written on Windows, so the
+    platform-dependent half of this would otherwise only ever run on one of them.
+    `C:\\Users\\alice` matches as `/c/Users/alice`, per
+    https://code.claude.com/docs/en/permissions.
+    """
+    assert _posix_filesystem_path(PureWindowsPath(r"C:\Users\alice\.agentic-hil")) == "/c/Users/alice/.agentic-hil"
+    assert _posix_filesystem_path(PurePosixPath("/home/hpauli/.config/agentic-hil")) == "/home/hpauli/.config/agentic-hil"
+    # A colon deeper in a POSIX path is not a drive letter.
+    assert _posix_filesystem_path(PurePosixPath("/home/h/a:b/state")) == "/home/h/a:b/state"
+
+
+def test_a_repeat_setup_takes_back_the_inert_rules_an_earlier_release_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.7.0 left a warning behind that no later start clears by itself.
+
+    Anyone who ran that setup carries the rules in ~/.claude/settings.json, so
+    removal has to happen here or the yellow warning is permanent.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    superseded = _superseded_claude_rules(config_path, state_root)
+    settings = _claude_settings(home, ["Bash(curl *)", *superseded])
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert sorted(restriction["removed"]) == sorted(superseded)
+    deny = _deny_rules(settings)
+    assert not any(rule in superseded for rule in deny), deny
+    assert deny == ["Bash(curl *)", *[f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]]
+
+
+def test_the_deny_rule_cleanup_leaves_an_operators_own_write_rule_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ours is identified by its exact text, never by its shape.
+
+    A `Write(...)` rule of the operator's is inert for the same reason ours was,
+    but it is not this tool's to delete — including one that covers a tree of
+    ours from further up.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    theirs = [
+        "Write(/etc/**)",
+        f"Write({tmp_path.as_posix()}/**)",
+        f"Write({config_path.parent.as_posix()}/*.yaml)",
+        f"Edit({state_root.as_posix()})",
+    ]
+    settings = _claude_settings(home, theirs)
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert _deny_rules(settings)[: len(theirs)] == theirs
+
+
+def test_the_deny_rule_cleanup_settles_after_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, _superseded_claude_rules(config_path, state_root))
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+    migrated = settings.read_text(encoding="utf-8")
+    second = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert (second["added"], second["removed"]) == ([], [])
+    assert settings.read_text(encoding="utf-8") == migrated
+
+
+def test_the_opencode_deny_rules_use_the_shape_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """https://opencode.ai/docs/permissions.
+
+    `edit` takes an object of pattern -> action and covers "all file
+    modifications (covers edit, write, patch)", so there is no second key to
+    write; "the last matching rule winning" is why the denials come after an
+    operator's own catch-all rather than before it.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    opencode_json = home / ".config" / "opencode" / "opencode.json"
+    opencode_json.parent.mkdir(parents=True, exist_ok=True)
+    opencode_json.write_text(json.dumps({"permission": {"edit": "ask"}}) + "\n", encoding="utf-8")
+
+    assert restrict_agent_write_access("opencode", config_path, state_root)["ok"] is True
+
+    permission = json.loads(opencode_json.read_text(encoding="utf-8"))["permission"]
+    assert list(permission["edit"].items()) == [
+        ("*", "ask"),
+        (f"{config_path.parent.as_posix()}/**", "deny"),
+        (f"{state_root.as_posix()}/**", "deny"),
+    ]
+    # One key does every file-writing tool; a second would be the same mistake.
+    assert set(permission) == {"edit"}
 
 
 def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
@@ -1858,6 +2223,136 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert with_reset["reset_after_flash"] is True
     reset_log = (tmp_path / with_reset["log_path"]).read_text(encoding="utf-8")
     assert "verify reset" in reset_log
+
+
+OPENOCD_RESET_COMMANDS = {
+    "run": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset run; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "halt": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset halt; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "init": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset init; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+}
+
+
+@pytest.mark.parametrize("mode", ["run", "halt", "init"])
+def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path, mode: str) -> None:
+    """The command line itself, not just the result.
+
+    0.7.0 sent `reset <mode>` with no `init`, which OpenOCD refuses with
+    `invalid command name "reset"` before it opens the probe, and no test looked
+    at what was sent. `init; reset init` is two different things in one line: the
+    server leaving its configuration stage, then OpenOCD's reset-init mode - the
+    same pair OpenOCD's own `program` proc issues."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert openocd_backend.openocd_reset_command(mode, "AGENTIC_HIL_RESULT:reset_target:ok") == OPENOCD_RESET_COMMANDS[mode]
+    assert result["ok"] is True, result
+    assert result["success_confirmed"] is True
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(command_for_log(["-c", OPENOCD_RESET_COMMANDS[mode]]))
+
+
+def test_openocd_probe_sends_init_before_the_target_query(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(
+        command_for_log(["-c", 'init; echo "AGENTIC_HIL_STAGE:init:ok"; targets; echo "AGENTIC_HIL_RESULT:probe_target:ok"; shutdown'])
+    )
+
+
+def test_a_command_openocd_refuses_before_init_does_not_take_the_bench_out_of_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 0.7.0 command line again, and what it may cost.
+
+    OpenOCD stopped in its interpreter, before it opened the adapter, so the
+    board is untouched. Reporting that as an unconfirmed target state is what
+    turned a mistyped command line into a work stoppage: the quarantine also
+    blocked the reset that would have cleared it."""
+    monkeypatch.setattr(
+        openocd_backend,
+        "openocd_reset_command",
+        lambda mode, marker: f'reset {mode}; echo "{marker}"; shutdown',
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+        still_usable = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "debugger_command_rejected"
+    assert refused["backend_error_type"] == "command_rejected_before_init"
+    assert refused["rejected_commands"] == ["reset"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_committed"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["retry_safe"] is True
+    assert refused.get("quarantined") is not True, refused
+    assert refused.get("cleanup_required") is not True, refused
+    # The operator is told not to go and look at the board for this one.
+    assert any("rejected_commands" in step for step in refused["remediation"])
+    assert still_usable["ok"] is True, still_usable
+
+
+def test_a_reset_that_may_have_reached_the_target_still_quarantines(tmp_path: Path) -> None:
+    """The other direction, which matters more.
+
+    This OpenOCD opened the adapter and then failed, so nothing on the host knows
+    what state the target is in. Only an abort that provably never got that far
+    may be waved through."""
+    config = load_config(str(write_config(tmp_path, debugger_executable=FAKE_OPENOCD_NO_TARGET)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result.get("rejected_commands") is None
+    assert result["side_effect_status"] == "unknown"
+    assert result["quarantined"] is True
+    assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+
+def test_an_openocd_that_is_not_installed_is_a_call_that_never_started(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_executable=tmp_path / "missing-openocd.exe")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "debugger_not_found"
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result.get("quarantined") is not True, result
+
+
+def test_the_openocd_fake_refuses_a_run_stage_command_the_way_openocd_does() -> None:
+    """The fake is the thing under test here.
+
+    Every OpenOCD test in this suite is only worth what this evaluator is worth,
+    and the one it accepted for three releases could not have run."""
+    refused, initialized, exit_code = fake_openocd.evaluate('reset halt; echo "done"; shutdown', initialized=False)
+    accepted, _, accepted_exit = fake_openocd.evaluate('init; reset halt; echo "done"; shutdown', initialized=False)
+
+    assert refused == ['Error: invalid command name "reset"']
+    assert initialized is False
+    assert exit_code == 1
+    assert accepted == ["done"]
+    assert accepted_exit == 0
 
 
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:

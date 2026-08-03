@@ -41,6 +41,8 @@ class DebuggerBackend(Protocol):
 
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject: ...
 
+    def target_support(self) -> JsonObject: ...
+
     def classify_last_error(self) -> JsonObject: ...
 
     def close(self) -> None: ...
@@ -61,6 +63,19 @@ class UnboundDebuggerBackend:
 
     def close(self) -> None:
         return None
+
+    def target_support(self) -> JsonObject:
+        """Undetermined rather than refused: with no probe bound there is no
+        backend to ask, and that is a fact about the binding, not a fault in the
+        configuration. Refusing here would make `doctor` red on every project
+        that configures no debugger at all."""
+        return {
+            "ok": True,
+            "tool": "debugger_target_support",
+            "status": "undetermined",
+            "undetermined_reason": "no debugger is bound, so no backend can be asked which target types it resolves.",
+            "summary": "Target support was not checked: no debugger is bound.",
+        }
 
     def classify_last_error(self) -> JsonObject:
         """Classify the last recorded failure even with no probe bound.

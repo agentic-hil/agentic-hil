@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import difflib
 import json
+import string
 import time
 from pathlib import Path
 
@@ -45,6 +47,25 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "probe_not_found": "adapter_not_found",
 }
 
+# Legal characters in a pyOCD target type name, from pyocd.target.
+# normalise_target_type_name.
+_TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+
+# Phrases that identify pyOCD refusing a target type. Taken from observed output
+# and from pyocd/board/board.py, not from memory: 0.45.1 emits "Target type
+# <name> not recognized. Use 'pyocd list --targets' to see currently available
+# target types. See <https://pyocd.io/docs/target_support.html> for how to
+# install additional target support." — which none of the first three phrases
+# matched, so the whole remediation was unreachable on the one message that
+# should produce it.
+#
+# "pyocd list --targets" is deliberately NOT a marker: pyOCD prints it in an
+# unrelated warning about defaulting to the generic cortex_m target, so matching
+# on it would call a successful run a failure. "not recognized" alone is not
+# either, because pyOCD says the same of an unknown board ID.
+TARGET_TYPE_INVALID_PHRASES = ("unknown target type", "no target type", "target type is not")
+TARGET_TYPE_INVALID_DOC = "target_support.html"
+
 
 class PyOCDBackend:
     backend_name = "pyocd"
@@ -52,10 +73,13 @@ class PyOCDBackend:
     def __init__(self, config: AgenticHILConfig):
         self.config = config
         self._resolved_probe_uid: str | None = None
+        self._target_types: JsonObject | None = None
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         if config.debugger is None or self.config.debugger is None or config.debugger.probe_id != self.config.debugger.probe_id:
             self._resolved_probe_uid = None
+        if config.debugger is None or self.config.debugger is None or config.debugger.executable != self.config.debugger.executable:
+            self._target_types = None
         self.config = config
 
     def info(self) -> JsonObject:
@@ -214,11 +238,123 @@ class PyOCDBackend:
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_dump_symbol_ihex")
 
+    def target_support(self) -> JsonObject:
+        """Whether this pyOCD resolves the configured target_type, before anything is driven.
+
+        Three answers, and keeping them apart is the whole point. `unsupported`
+        is a fact about this host: pyOCD enumerated its target types and the
+        configured one is not among them, so no flash can work and the pack
+        command is the fix. `undetermined` means this host could not answer —
+        pyOCD is not installed, the enumeration failed, the output was not
+        readable — which says nothing about the configuration and must not turn
+        a healthy `doctor` red. A check that conflated the two would fail every
+        bench that has no toolchain installed yet, and `setup` rolls back on a
+        red `doctor`.
+        """
+        report: JsonObject = {"ok": True, "tool": "debugger_target_support", "backend": self.backend_name}
+        target_type = self.config.debugger.target_type if self.config.debugger else None
+        if not target_type:
+            return {
+                **report,
+                "status": "not_configured",
+                "target_type": None,
+                "summary": "No debuggers.<name>.target_type is configured, so pyOCD guesses the target from the probe's board ID. Set it to the MCU part for a board pyOCD does not recognise.",
+            }
+        report["target_type"] = target_type
+        listed = self._enumerate_target_types()
+        if not listed["ok"]:
+            return {
+                **report,
+                "status": "undetermined",
+                "undetermined_reason": listed["reason"],
+                "summary": f"Whether pyOCD resolves target_type '{target_type}' could not be determined on this host: {listed['reason']} This is not a fault in the configuration.",
+            }
+        targets = listed["targets"]
+        entry = targets.get(normalise_target_type(target_type))
+        if entry is not None:
+            source = entry.get("source")
+            provenance = "an installed CMSIS pack" if source == "pack" else "pyOCD's built-in list"
+            return {
+                **report,
+                "status": "supported",
+                "source": source,
+                "vendor": entry.get("vendor"),
+                "part_number": entry.get("part_number"),
+                "summary": f"pyOCD resolves target_type '{target_type}' from {provenance}.",
+            }
+        return {
+            **report,
+            "ok": False,
+            "status": "unsupported",
+            "error_type": "target_type_invalid",
+            "summary": f"pyOCD does not resolve target_type '{target_type}'. Most vendor parts, including the whole STM32F4 family, exist only after a CMSIS device-family pack is installed.",
+            "likely_causes": self._likely_causes("target_type_invalid"),
+            **remediation_fields("target_type_invalid", self.backend_name),
+            "install_commands": pack_install_commands(target_type),
+            "close_matches": difflib.get_close_matches(normalise_target_type(target_type), sorted(targets), n=5, cutoff=0.7),
+            "resolved_target_types": len(targets),
+        }
+
     def classify_last_error(self) -> JsonObject:
         return classify_failure_report(self.config, self._likely_causes)
 
     def close(self) -> None:
         return None
+
+    def _enumerate_target_types(self) -> JsonObject:
+        """Every target type this pyOCD resolves, keyed by pyOCD's normalised name.
+
+        `{"ok": True, "targets": {...}}`, or `{"ok": False, "reason": "..."}` when
+        the question could not be answered here. Never guesses: an output that
+        does not parse exactly as pyOCD's documented `json` envelope is a reason,
+        not an empty target list, because an empty list would read as "nothing is
+        supported" and condemn a working configuration.
+        """
+        if self._target_types is not None:
+            return self._target_types
+        self._target_types = self._read_target_types()
+        return self._target_types
+
+    def _read_target_types(self) -> JsonObject:
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return {"ok": False, "reason": "the pyOCD executable could not be found."}
+        command = [*invocation(str(resolved["executable_path"])), "json", "--targets", "--no-config"]
+        # Enumerating target types is a host query that never reaches the probe,
+        # so a short hardware timeout must not turn a determinable answer into
+        # "undetermined"; a first run that populates the pack cache is slow.
+        timeout_s = max(self.config.debugger.timeout_s, 30) if self.config.debugger else 30
+        completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), timeout_s)
+        if completed.not_found:
+            return {"ok": False, "reason": "the pyOCD executable could not be found."}
+        if completed.timed_out:
+            return {"ok": False, "reason": f"`pyocd json --targets` did not finish within {timeout_s:g}s."}
+        if completed.returncode != 0:
+            return {"ok": False, "reason": "`pyocd json --targets` failed, so the list of resolvable target types is unknown."}
+        return parse_pyocd_targets(completed.stdout)
+
+    def _confirm_target_support(self, backend_error_type: str) -> str:
+        """Reclassify an unexplained failure when the target type provably does not resolve.
+
+        pyOCD reports a bad target type as prose on stderr and exits 1 like every
+        other error, so the classifier above has to match text, and text changes
+        between releases — it already did, which is how this stayed invisible.
+        `pyocd json --targets` answers the same question in a machine-readable
+        form, so a failure nothing else explains is checked against it once.
+
+        Only a definite absence reclassifies. An enumeration that could not be
+        run or read leaves the classification exactly as it was, because "cannot
+        tell" must never be reported as "the target type is wrong".
+        """
+        if backend_error_type != "unknown_debugger_error":
+            return backend_error_type
+        target_type = self.config.debugger.target_type if self.config.debugger else None
+        if not target_type:
+            return backend_error_type
+        listed = self._enumerate_target_types()
+        if not listed["ok"]:
+            return backend_error_type
+        return "target_type_invalid" if normalise_target_type(target_type) not in listed["targets"] else backend_error_type
 
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
@@ -260,7 +396,7 @@ class PyOCDBackend:
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path), audit_error)
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
@@ -333,7 +469,13 @@ class PyOCDBackend:
         # cost the most: without the fix in the result, the caller has to work
         # out from pyOCD's own sources that the value comes from a CMSIS pack.
         error_type = self._public_error_type(backend_error_type)
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        target_type = self.config.debugger.target_type if self.config.debugger else None
+        if error_type == "target_type_invalid" and target_type:
+            # The refusal carries the command that fixes it, with the configured
+            # value already substituted, so nobody has to reconstruct it.
+            result["install_commands"] = pack_install_commands(target_type)
+        return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
         backend_error_type = self._classify_output(output, tool)
@@ -368,7 +510,9 @@ class PyOCDBackend:
             return "probe_not_found"
         if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack received", "error connecting"]):
             return "target_not_detected"
-        if contains_any(lower, ["unknown target type", "no target type", "target type is not"]):
+        if contains_any(lower, TARGET_TYPE_INVALID_PHRASES) or TARGET_TYPE_INVALID_DOC in lower:
+            return "target_type_invalid"
+        if "target type" in lower and "not recognized" in lower:
             return "target_type_invalid"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
@@ -405,6 +549,71 @@ class PyOCDBackend:
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])
+
+
+def normalise_target_type(value: str) -> str:
+    """pyOCD's own normalisation of a target type name.
+
+    Mirrors pyocd.target.normalise_target_type_name: characters outside
+    ``[A-Za-z0-9_]`` collapse to a single underscore and the rest is lowercased,
+    so ``STM32F446-RETx`` and ``stm32f446_retx`` are one target type. Comparing
+    raw strings would report a value pyOCD resolves as unsupported, which is the
+    one mistake this check must not make.
+    """
+    result: list[str] = []
+    in_replace = False
+    for character in value:
+        if character in _TARGET_TYPE_NAME_CHARS:
+            result.append(character.lower())
+            in_replace = False
+        elif not in_replace:
+            result.append("_")
+            in_replace = True
+    return "".join(result)
+
+
+def pack_install_commands(target_type: str) -> list[str]:
+    """The host setup commands that make a missing target type resolvable.
+
+    Named, never run. `pyocd pack install` fetches from the vendor index over the
+    network, and a background download nobody asked for is exactly what went
+    wrong when this was undocumented: an agent hunting for the right value ended
+    up pulling a .pdsc from a vendor site by hand, twice.
+    """
+    normalised = normalise_target_type(target_type)
+    return [
+        f"pyocd pack find {normalised}",
+        f"pyocd pack install {normalised}",
+        "pyocd pack show",
+    ]
+
+
+def parse_pyocd_targets(output: str) -> JsonObject:
+    """Target types from `pyocd json --targets`, keyed by normalised name.
+
+    Anything that is not exactly pyOCD's documented envelope is reported as a
+    reason rather than as an empty list, because an empty list is the answer
+    "nothing resolves", which would condemn a working configuration.
+    """
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": False, "reason": "`pyocd json --targets` returned output that is not JSON."}
+    if not isinstance(payload, dict) or payload.get("status") != 0 or not isinstance(payload.get("targets"), list):
+        return {"ok": False, "reason": "`pyocd json --targets` did not report a target list."}
+    targets: JsonObject = {}
+    for target in payload["targets"]:
+        if not isinstance(target, dict) or not isinstance(target.get("name"), str) or not target["name"]:
+            return {"ok": False, "reason": "`pyocd json --targets` returned a target record without a name."}
+        targets[normalise_target_type(target["name"])] = {
+            "name": target["name"],
+            "vendor": target.get("vendor"),
+            "part_number": target.get("part_number"),
+            "source": target.get("source"),
+        }
+    if not targets:
+        return {"ok": False, "reason": "`pyocd json --targets` reported no target types at all."}
+    return {"ok": True, "targets": targets}
 
 
 def parse_pyocd_probes(output: str) -> JsonObject:

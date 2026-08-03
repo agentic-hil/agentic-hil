@@ -54,7 +54,18 @@ Fix: run `agentic-hil init`, review the deny-by-default file outside the reposit
 
 `init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
-If the refusal is `unsafe_configured_path` on the location rather than the file contents — a stock Windows profile rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+If the refusal is `unsafe_configured_path` on the location rather than the file contents — a Windows profile where an installed packaged application holds an app-capability ACE on `AppData` rejects `%APPDATA%` and `%LOCALAPPDATA%` — move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path. Never relax an ACL or take ownership to pass the check.
+
+On Windows the refusal names who holds the right, in `untrusted_principals`: the SID, plus the application package it belongs to when the SID resolves. A capability SID `S-1-15-3-<sub-authorities>` is resolved through the package SID `S-1-15-2-<the same sub-authorities>`, which Windows registers under `HKLM\SOFTWARE\Microsoft\SecurityManager\CapAuthz\ApplicationsEx` and in the AppContainer mappings under `HKEY_CLASSES_ROOT`. That turns "an unknown principal has rights here" into a decision you can actually take: use a permitted location, or have the operator remove that application's grant through the application itself. A SID that resolves to nothing is still reported as `sid`, and the refusal is unchanged.
+
+`AGENTIC_HIL_CONFIG` and a chosen `state_root` are the supported answer to a refused location, not a workaround for it. Nothing about a project is second class for using them: a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions — and `state_root` may be any absolute directory that passes the check and does not overlap `workspace_root`.
+
+```text
+AGENTIC_HIL_CONFIG=C:\Users\<user>\.agentic-hil\projects\<workspace-name>\config.yaml
+state_root:        C:\Users\<user>\.agentic-hil\state
+```
+
+Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment — never in a repository-controlled file, because an agent that can edit the file selecting the configuration can select a configuration it wrote.
 
 ## 3. `config_invalid` / Workspace Binding Failure
 
@@ -70,7 +81,7 @@ Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_no
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins the CMSIS pack is a second, separate step — see 5a below.
 
 ## 5. `debugger_config_not_found`
 
@@ -79,6 +90,26 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
 Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
+
+## 5a. `target_type_invalid` (pyOCD) — the CMSIS pack is missing
+
+Symptom: a pyOCD call returns `error_type: "target_type_invalid"`, or `agentic-hil doctor` reports `debuggers.<name>.target_support.status: "unsupported"`. pyOCD's own message is `Target type <name> not recognized`.
+
+Likely cause: the configured `target_type` comes from a CMSIS device-family pack that is not installed on this host. Most vendor parts — including the whole STM32F4 family — are not built into pyOCD; `pyocd list --targets` shows `pack` in its Source column for them.
+
+Fix: run the commands the result carries in `install_commands`, as a deliberate host setup step:
+
+```bash
+pyocd pack find stm32f446         # GLOB; shorten it to widen the search
+pyocd pack install stm32f446retx  # downloads the pack from the vendor index
+pyocd pack show                   # what is installed now
+```
+
+Agentic HIL never runs these. `pyocd pack install` fetches over the network, and a background download nobody asked for is precisely what this documentation gap once caused. Do not reconstruct a pack from hand-downloaded `.pdsc` files.
+
+Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\cmsis-pack-manager\cmsis-pack-manager` on Windows, `~/.local/share/cmsis-pack-manager` on Linux). `CMSIS_PACK_ROOT` is a different thing — pyOCD reads it only for CMSIS-Toolbox `cbuild-run` projects — and does not relocate that cache.
+
+`doctor` distinguishes three answers, and only one is a failure: `unsupported` means the backend enumerated its target types and this one is absent; `undetermined` means this host could not answer at all — no toolchain, or the enumeration failed — and stays green with `undetermined_reason` saying why. Full detail: `agentic-hil://reference/target-support`.
 
 ## 6. `adapter_not_found`
 
@@ -119,6 +150,8 @@ Symptom: probe works, but flashing, verification, reset, or a debugger action ti
 Likely cause: the image does not match the target memory layout, flash is locked, the target is unstable, reset wiring is wrong, the wrong OpenOCD target config is used, or `debuggers.<name>.timeout_s` is too low.
 
 Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debuggers.<name>.timeout_s` only when the operation is valid but consistently slow.
+
+Not this: `error_type: "debugger_command_rejected"`, which carries `target_contacted: false` and the `rejected_commands` OpenOCD would not run. OpenOCD stopped inside its own interpreter, before it opened the probe, so the board was never driven and there is nothing on it to inspect, power-cycle or recover. The named commands are either unknown to the installed OpenOCD or belong to its run stage and were reached before `init`; check the version `debugger_info` reports, and the scripts named by `interface_cfg` and `target_cfg`.
 
 ## 11. COM Port Does Not Work
 
@@ -168,3 +201,34 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 `reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
 For the operator case, physically confirm the bench is in a safe state, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override.
+
+## 14. Upgrading, And Adding `[pyocd]` Or `[can]` Later
+
+Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it — `uv tool`, `pipx`, `uv pip`, or `pip` — instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.
+
+**Stop the agent host before upgrading.** The host starts the Agentic HIL MCP server itself, so the server runs for as long as the host does — a working setup is exactly the state an upgrade fails in. On Windows a file that is mapped as a running image cannot be deleted, and `uv` removes a tool environment before it rebuilds it. When that removal fails, the rebuild never happens, and neither the old installation nor the new one is left:
+
+```text
+error: failed to remove directory ...\uv\tools\agentic-hil\Scripts: Zugriff verweigert (os error 5)
+Failed find package agentic-hil in tool environment
+ModuleNotFoundError: No module named 'agentic_hil'
+```
+
+`agentic-hil upgrade` refuses with `installation_in_use` before anything is removed, naming each holding process by pid and image path, and leaves the installation working. Close the host and run it again. Running `uv tool install --upgrade` or `uv tool install --force` by hand is what the refusal is protecting against — those have no such check.
+
+If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras, and take the environment name from the error message:
+
+```bash
+uv tool install --force "agentic-hil[pyocd]"     # or pipx install --force "agentic-hil[pyocd]"
+```
+
+Adding an extra is a different operation from upgrading, and there are two ways to do it:
+
+- **Permanently, with the host stopped.** Close the agent host, then `uv tool install --upgrade "agentic-hil[pyocd]"` (or `pipx install --force "agentic-hil[pyocd]"`), then start the host. Name every extra you want on that command line: `uv` records the requirement literally, so `uv tool install --upgrade agentic-hil` on an installation made with `agentic-hil[can]` re-resolves without the extra and uninstalls `python-can`. `agentic-hil upgrade` does not have this problem — `uv tool upgrade` and `pipx upgrade` both reinstall from the requirement the manager already recorded, extras included.
+- **Without stopping the host, `uv` only.** This adds the extra's dependencies to the existing environment and removes nothing, so no locked file is in the way:
+
+  ```bash
+  uv pip install --python "$(uv tool dir)/agentic-hil/Scripts/python.exe" "agentic-hil[pyocd]"   # bin/python3 on Linux and macOS
+  ```
+
+  The MCP server picks the new packages up when the host restarts. This does not update `uv`'s record of the tool, so name the extra again the next time the tool itself is reinstalled or upgraded.

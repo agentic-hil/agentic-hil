@@ -31,9 +31,9 @@ Read facts about the server from its MCP resources, not from its source or its i
 | Resource | Answers |
 |---|---|
 | `agentic-hil://reference/debugger-backends` | which `debuggers.<name>` field each of `openocd`, `stlink`, `pyocd` requires, discovers, or ignores; when `probe_id` and `flash_address` become mandatory |
-| `agentic-hil://reference/target-support` | which field names the target per backend, known-good values, where pyOCD `target_type` values come from |
+| `agentic-hil://reference/target-support` | which field names the target per backend, known-good values, where pyOCD `target_type` values come from, how to find and install the CMSIS pack that provides one, and what `doctor`'s `target_support` statuses mean |
 | `agentic-hil://reference/errors` | every `error_type` with its meaning, ordered fix, and the wrong fix; one entry at `.../errors/<error_type>[:<field-or-backend>]` |
-| `agentic-hil://reference/platform-paths` | which locations pass the path trust check, and where the configuration and `state_root` belong |
+| `agentic-hil://reference/platform-paths` | which locations pass the path trust check, how a Windows refusal names the package holding the right, why `AGENTIC_HIL_CONFIG` and a chosen `state_root` are the supported answer to a refused location |
 | `agentic-hil://reference/lease-lifecycle` | which device a run locks and for how long, `device_busy` and `undeclared_device`, why a crashed run needs no recovery; lease states, the continue predicate, the recovery path |
 | `agentic-hil://reference/config-schema` | the authoritative configuration JSON Schema |
 

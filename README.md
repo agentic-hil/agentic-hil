@@ -79,6 +79,17 @@ optional because they carry platform-specific drivers that flashing and UART do
 not need; without them those tools refuse with `can_backend_not_available`
 rather than failing at import.
 
+Adding one of them to an installation that already exists means rewriting that
+environment, so stop the agent host first — it runs the MCP server out of that
+environment — and name every extra you want on the command line, because `uv`
+records the requirement literally and drops the extras it is not told about.
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the sequence and the way to add an
+extra without stopping the host.
+
+To upgrade later, run `agentic-hil upgrade`: it upgrades through the manager
+that owns the installation running it, keeps the extras, and refuses before it
+removes anything if the MCP server is still running.
+
 To check a version without installing anything, `uvx --from agentic-hil
 agentic-hil --version` is a diagnostic only.
 
@@ -106,7 +117,9 @@ Every MCP host starts the same local stdio server from the firmware project root
 
 Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil agent-install --agent <agent>` — which `agentic-hil setup --agent <agent>` runs first — performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](docs/mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
-`mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` only when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
+`mcp-stdio` discovers the authoritative file from its project working directory: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows or `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. Set `AGENTIC_HIL_CONFIG` when an operator-controlled absolute-path override is needed; never commit a machine-specific override in repository-controlled MCP configuration.
+
+That override is a supported binding, not a debug switch, and one Windows profile needs it. Where an installed packaged application holds an app-capability ACE (`S-1-15-3-*`, FullControl) on `%USERPROFILE%\AppData`, `%APPDATA%` and `%LOCALAPPDATA%` inherit it and the path trust check refuses both. Put the configuration and `state_root` under `%USERPROFILE%\.agentic-hil` and select it with `AGENTIC_HIL_CONFIG`; a configuration reached that way is read exactly like a discovered one, and `state_root` may be any absolute directory that passes the check. The refusal names the package holding the right in `untrusted_principals`, so the alternative — having the operator revoke that grant through the application that made it — is an informed choice rather than a guess. Never relax an ACL to pass the check. Full rules: `agentic-hil://reference/platform-paths`.
 
 ## Configuration
 
@@ -294,6 +307,15 @@ agentic-hil skill-install --agent opencode
 ## Platform Support
 
 Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+
+Installing pyOCD is not enough to reach an STM32 part. Most vendor target types — the whole STM32F4 family included — come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
+
+```bash
+pyocd pack find stm32f446         # what packs offer this part
+pyocd pack install stm32f446retx  # downloads it from the vendor index
+```
+
+`agentic-hil doctor` reports this as `debuggers.<name>.target_support` before anything is flashed, and separates "this host cannot resolve that target type" (red, with the install command) from "this host cannot answer the question" (green, with the reason). Agentic HIL never installs a pack itself: `pyocd pack install` fetches over the network, and that is a step a person takes knowingly. Details: `agentic-hil://reference/target-support`.
 
 ## Development
 
