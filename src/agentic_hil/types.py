@@ -1,9 +1,54 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 JsonObject = dict[str, Any]
+
+
+# --- how a device identity folds case ------------------------------------
+#
+# Two rules, because a device's identity is built from two different kinds of
+# value and only one of them belongs to a filesystem. Both live here rather than
+# beside either caller: config.py validates identities and devices.py derives
+# them, and config.py sits below devices.py in the import graph (bench imports
+# config, devices imports bench), so this leaf module is the one place both can
+# agree from.
+
+
+def fold_hardware_id(value: str) -> str:
+    """Fold an opaque hardware identifier, identically on every platform.
+
+    A ``resource_id``, a probe serial and a CAN channel each name a physical
+    unit, not a file. ``os.path.normcase`` is therefore the wrong instrument for
+    them: it folds case on Windows and does nothing at all on POSIX, so two
+    config entries naming one unit in two spellings would collapse to one lock
+    on Windows and stay two locks on Linux — the same bench, two different
+    exclusivity guarantees, and no error on either.
+
+    Of the two consistent answers, folding is the safe one. An over-collapse
+    costs concurrency and announces itself: a run waits, or is told which owner
+    holds the board. An under-collapse lets two runs each believe they hold the
+    same board, which is the failure the mutex exists to prevent. Nothing is
+    merged silently either way — two entries whose ``resource_id`` values differ
+    only in case are refused at config load (``config.validate_resource_ids``),
+    so an operator who meant them as two units is asked, not overruled."""
+    return value.casefold()
+
+
+def fold_device_path(value: str) -> str:
+    """Fold a path-like device value the way its own filesystem does.
+
+    A debugger executable and a serial device name (``COM7``,
+    ``/dev/ttyACM0``) are named by the host, and whether case distinguishes two
+    of them is the host's rule rather than ours: ``COM7`` and ``com7`` open one
+    port on Windows, while ``/dev/ttyACM0`` and ``/dev/ttyacm0`` are two
+    different names on Linux. ``os.path.normcase`` is exactly that rule, which
+    is why the platform dependence it carries is correct here and wrong in
+    ``fold_hardware_id``."""
+    return os.path.normcase(value)
+
 
 # A configuration with no `version:` key was written under the deny-by-default
 # read model and is still read under it. Version 2 has no read permission at

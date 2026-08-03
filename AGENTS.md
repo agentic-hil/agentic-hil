@@ -22,6 +22,8 @@ If an Agentic HIL tool returns `permission_denied`, stop and ask the operator to
 
 A `device_busy` refusal is not a fault: another run holds that physical device for its whole duration, and the result names the holder. Wait for it or ask its owner; never delete a lock under `~/.agentic-hil/device-locks`. An `undeclared_device` refusal means the run reached for a device its test plan does not name — add it to the plan and rerun.
 
+A sequence of hardware calls is one run, and it has to say so. `bench_run_start` takes every device you name — `{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}`, the DUT is not a device — and holds them until `bench_run_stop`; without it each call holds its device only for its own duration and the board is free between two steps. Inside a run only the declared devices may be touched, a device already held fails the start immediately naming its holder, and nothing is left half-acquired. Two entries describing one physical unit collapse to one lock. Nothing times a run out: it ends when you close it, when the client disconnects, or when the server process dies. `bench_run_status` says whether one is open; `agentic-hil://reference/lease-lifecycle` has the rest.
+
 Read facts about the server from its MCP resources, not from its source or its installed package. A failing result already carries `remediation` and `do_not` when a fix is known; `resources/list` carries the rest.
 
 | Resource | Answers |

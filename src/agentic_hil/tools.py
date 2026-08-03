@@ -19,6 +19,7 @@ from agentic_hil.coordination import (
     debugger_effect_resources,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
+from agentic_hil.devices import DeviceError, resolve_devices
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
@@ -302,6 +303,9 @@ class AgenticHILToolService:
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
             "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
+            "bench_run_start": lambda: self.bench_run_start(args),
+            "bench_run_stop": lambda: self.bench_run_stop(),
+            "bench_run_status": lambda: self.bench_run_status(),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
@@ -380,6 +384,45 @@ class AgenticHILToolService:
 
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
+
+    def bench_run_start(self, payload: JsonObject | None = None) -> JsonObject:
+        """Open a run that holds its devices across several calls.
+
+        Without this the agent path had no run boundary at all: every MCP call
+        took its device, released it at the end of the call, and left the board
+        free between flash, reset and read. Decision 0018 promises the opposite —
+        every device a run names is held for the run's duration — and that
+        promise only held for `agentic-hil test-reactor` until now.
+
+        The devices are resolved completely before anything is locked, and the
+        whole set is then taken in one all-or-nothing acquisition, so a run whose
+        third device is busy has never held its first two."""
+        payload = payload or {}
+        try:
+            devices = resolve_devices(self.config, payload.get("devices"))
+        except DeviceError as error:
+            return {"tool": "bench_run_start", "side_effect_committed": False, **error.result}
+        try:
+            return self.coordinator.begin_run(
+                devices,
+                label=str(payload["label"]) if payload.get("label") is not None else None,
+                wait_s=float(payload.get("wait_s", 0.0)),
+            )
+        except CoordinationError as error:
+            return {"tool": "bench_run_start", "side_effect_committed": False, **error.result}
+
+    def bench_run_stop(self) -> JsonObject:
+        """Close the run and give the devices back.
+
+        Idempotent: closing a run that is not open is how an agent recovers from
+        losing track of its own state, so it answers instead of refusing."""
+        try:
+            return self.coordinator.end_run()
+        except CoordinationError as error:
+            return {"tool": "bench_run_stop", "side_effect_committed": False, **error.result}
+
+    def bench_run_status(self) -> JsonObject:
+        return self.coordinator.run_status()
 
     def _poison_quietly(self, reason: str, error: object | None = None, *, audit_broken: bool = False) -> Exception | None:
         """Quarantine the coordinator without letting a coordination failure mask the primary hardware error."""

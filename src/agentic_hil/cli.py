@@ -47,7 +47,7 @@ from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, declared_devices, load_test_config
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
 from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -930,10 +930,11 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     # the plan assumes nothing moved. The same declaration fixes what this run
     # may touch, so a step reaching past the plan is refused rather than
     # silently widening what the plan says it does.
-    devices = declared_devices(config, test_config)
+    plan = plan_devices(config, test_config)
+    devices = plan.lock_keys
     if devices:
         try:
-            service.coordinator.begin_run(devices, label=test_config.name, wait_s=wait_s)
+            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s)
         except CoordinationError as error:
             service.close()
             return write_report(

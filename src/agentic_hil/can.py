@@ -18,8 +18,8 @@ from agentic_hil.coordination import (
     DetachedHardwareLease,
     HardwareCoordinator,
     HardwareLease,
-    can_resource,
 )
+from agentic_hil.devices import can_device
 from agentic_hil.process import (
     cleanup_registered_processes,
     current_process_owner,
@@ -138,7 +138,7 @@ class CanBusService:
         except (ConfigError, OSError) as error:
             return audit_unavailable("can_session_start", error)
         try:
-            lease = self.coordinator.acquire(can_resource(self.config, bus_id))
+            lease = self.coordinator.acquire(can_device(self.config, bus_id))
         except CoordinationError as error:
             return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result})
         try:

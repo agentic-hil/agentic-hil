@@ -13,8 +13,8 @@ from agentic_hil.coordination import (
     DetachedHardwareLease,
     HardwareCoordinator,
     HardwareLease,
-    com_resource,
 )
+from agentic_hil.devices import uart_device
 from agentic_hil.provisional import (
     cleanup_provisional_handles,
     discharge_provisional_handle,
@@ -207,7 +207,7 @@ class ComPortService:
         except (ConfigError, OSError) as error:
             return audit_unavailable("com_session_start", error)
         try:
-            lease = self.coordinator.acquire(com_resource(self.config, port_id))
+            lease = self.coordinator.acquire(uart_device(self.config, port_id))
         except CoordinationError as error:
             return self._write_report({"tool": "com_session_start", "port_id": port_id, "side_effect_committed": False, **error.result})
         try:

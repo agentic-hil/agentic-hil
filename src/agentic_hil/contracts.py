@@ -55,6 +55,22 @@ def object_schema(
     return schema
 
 
+# One entry of a run's declaration. `id` names the *config entry*; the lock this
+# resolves to is derived from the hardware behind it, so two entries describing
+# one physical unit collapse onto one lock. The DUT is not a kind here: it is
+# what the devices drive, not something that drives.
+DEVICE_SELECTOR: JsonObject = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["kind"],
+    "properties": {
+        "kind": {"type": "string", "enum": ["debugger", "uart", "can"]},
+        # Optional only for a debugger, and only when the project configures
+        # exactly one: with several, naming none is how the wrong board is taken.
+        "id": NONEMPTY_STRING,
+    },
+}
+
 MCP_TOOLS: list[JsonObject] = [
     {"name": "debugger_info", "description": "Check whether the configured debugger backend is available. Use this instead of running openocd, pyocd, or st-info yourself.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "debugger_probes_list", "description": "List every connected probe ID visible to the configured debugger backend. Use this instead of st-info --probe, pyocd list, or JLinkExe.", "inputSchema": EMPTY_OBJECT_SCHEMA},
@@ -85,6 +101,34 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, required=["bus_id", "frame_id"])},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["bus_id"])},
+    {
+        "name": "bench_run_start",
+        "description": (
+            "Declare a multi-step run and lock every device it names for the whole run, not for one call. "
+            "Call this before a sequence like flash, reset, read: without it each call takes and releases its own "
+            "device, and between two calls the board is free for anything else on this machine. Declared devices "
+            "are held until bench_run_stop, the only devices this run may touch, and a device already held fails "
+            "the call immediately naming its holder."
+        ),
+        "inputSchema": object_schema(
+            {
+                "devices": {"type": "array", "minItems": 1, "items": DEVICE_SELECTOR},
+                "label": NONEMPTY_STRING,
+                "wait_s": {"type": "number", "minimum": 0, "maximum": 900},
+            },
+            required=["devices"],
+        ),
+    },
+    {
+        "name": "bench_run_stop",
+        "description": "End the declared run and release every device it held. Always call this when the run is finished; it is safe to call when no run is open.",
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
+    {
+        "name": "bench_run_status",
+        "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

@@ -485,13 +485,60 @@ Two different things guard the hardware, and they live in two different places.
 | Property | Rule |
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<identity>`, `com:<device>`, `can:<adapter>:<channel>` |
+| case | a name for hardware — `resource_id`, a probe serial, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one probe wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |
 | contention | refused with `device_busy`, naming the holder; waiting happens only when the caller asked for it with `wait_s`, and stays bounded |
 | a crashed owner | the operating system drops the lock when the process dies, so the device is free immediately — no quarantine, no `recover`, no waiting |
 
-A run outside a declared run still takes the device for the length of the call, so a lone observation is refused while a run holds the board and works when none does.
+A call outside a declared run still takes the device for the length of the call, so a lone observation is refused while a run holds the board and works when none does.
+
+## Declaring a run over MCP
+
+A single call needs no declaration. A *sequence* does: without one, `flash_firmware`, `reset_target` and `com_read` are three runs, each holding its device only for its own duration, and between them the board is free for anything else on this machine.
+
+```json
+{"name": "bench_run_start", "arguments": {
+  "devices": [{"kind": "debugger", "id": "dut"}, {"kind": "uart", "id": "dut_uart"}],
+  "label": "boot-smoke"
+}}
+```
+
+| Tool | Does |
+|---|---|
+| `bench_run_start` | resolves every named device, then takes the whole set at once; holds it until the run ends |
+| `bench_run_stop` | releases the run's devices; safe to call when no run is open |
+| `bench_run_status` | whether a run is open here, what it declared, and since when |
+
+`kind` is one of `debugger`, `uart`, `can`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
+
+What the declaration buys, and what it costs:
+
+- **Held for the run.** Every call inside the run borrows the run's hold instead of taking its own, so no gap opens between two steps.
+- **Nothing else may be touched.** A call reaching for a device the run did not declare is refused with `undeclared_device`. Declare everything the sequence touches, up front.
+- **All or nothing.** A declared device already held fails `bench_run_start` immediately with `device_busy` naming the holder. Nothing is left half-acquired: if the third of four is busy, the first two were already given back before the refusal returned.
+- **Fixed order.** Devices are taken sorted by lock key, never in the order they were declared, so two runs reaching for an overlapping set cannot each hold what the other needs next.
+
+### If a run is never closed
+
+Nothing times a run out, and that is deliberate: dropping a device that may be mid-operation is exactly the silent failure exclusivity exists to prevent. A run therefore holds its devices until one of these happens.
+
+| Event | What frees the devices |
+|---|---|
+| `bench_run_stop` | the run releases them itself |
+| the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
+| the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
+
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true` — an idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+
+One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
+
+### Two config entries, one board
+
+The lock is keyed on the hardware, not on the name of the config entry. Two entries that describe one physical unit — a debug probe and its virtual COM port sharing a `resource_id`, or the same serial device configured twice — resolve to one lock key and are taken once. Declaring both is not an error and does not double-lock anything.
+
+The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
 
 Reading can still perturb a target — an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
 
