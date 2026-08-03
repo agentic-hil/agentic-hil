@@ -38,20 +38,18 @@ absolute executable path, creates the deny-by-default policy outside the
 repository, and runs `doctor`. It prints where the policy file landed — review it
 before enabling anything.
 
-Those are two scopes, and `setup` is a composition of the two commands that own
-them:
+Those are two scopes, and `setup` composes the commands that own them:
 
 ```bash
-agentic-hil agent-install --agent <agent>   # skill + user-level MCP registration
-agentic-hil init --agent <agent>            # this project's policy + doctor
+agentic-hil agent-install --agent <agent>   # skill + user-level MCP registration; once per user and agent
+agentic-hil init --agent <agent>            # this project's policy + doctor; once per project, from its root
 ```
 
-`agent-install` is user-wide: once per user and agent, from anywhere, with no
-project and no configuration involved. Everything it writes lands under the
-invoking user's home, so it is per user, per machine — another OS user on the
-same host gets none of it. `init` is per project, from its root. Each rolls back
-only its own writes, so a project that will not configure leaves a working agent
-behind, and the second firmware repository for this user needs `init` alone.
+`agent-install` writes only under the invoking user's home — user-wide, per user
+and per machine, not shared with other OS users — and needs no project and no
+configuration. Each half rolls back only its own writes, so a project that will
+not configure still leaves a working agent, and the next repository for this
+user needs `init` alone.
 
 If `pip` is missing, Python is externally managed, or `agentic-hil` does not end
 up on `PATH`, install it persistently with a tool installer instead and rerun

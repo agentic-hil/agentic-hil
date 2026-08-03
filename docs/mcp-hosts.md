@@ -17,19 +17,18 @@ executable path, and creates the external policy. Install it first if the
 command is missing: [AI_AGENT_QUICKSTART.md](../AI_AGENT_QUICKSTART.md) has the
 complete install chain. The hosts below are the ones `setup` does not cover.
 
-`setup` is a composition of two commands with different scopes, and either can
-be run on its own:
+`setup` composes two commands; either runs on its own:
 
 ```bash
 agentic-hil agent-install --agent claude-code   # skill + user-level registration; once per user and agent
 agentic-hil init --agent claude-code            # this project's policy + doctor; from the project root
 ```
 
-`agent-install` writes only under the invoking user's home, so it is user-wide —
-per user, per machine, and another OS user on the same host gets none of it. It
-needs no project and reads no configuration, so a second firmware repository for
-this user needs only `init`, and a configuration location this profile refuses
-cannot take the registration down with it.
+`agent-install` writes only under the invoking user's home: user-wide, meaning
+per user and per machine, not shared with another OS user on the host. It needs
+no project and reads no configuration, so a second repository for this user
+needs only `init`, and a configuration location this profile refuses cannot take
+the registration down.
 
 Every host configuration below represents this launch contract:
 

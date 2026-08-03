@@ -149,9 +149,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`state_root: {safe_state_root}` (every field is in MCP resource "
             + CONFIG_SCHEMA_URI
             + "), then set AGENTIC_HIL_CONFIG to that absolute path.",
-            "This is the project half only. `agentic-hil agent-install` reads and writes no configuration and no "
-            "state_root, so it is unaffected: the agent skill and the user-level MCP registration are installed on "
-            "such a profile, and only this project binding is left to do.",
+            "This is the project half only: `agentic-hil agent-install` reads and writes no configuration and no "
+            "state_root, so on such a profile the agent skill and the user-level MCP registration install normally "
+            "and only this project binding is left.",
             "Re-run `agentic-hil doctor`; it reports the first path that still fails.",
         ),
         do_not=(
@@ -519,17 +519,15 @@ Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configur
 
 ## Which command touches which of these
 
-`setup` is a composition of two commands with different scopes, and only one of them has anything to do with the paths above.
+Only the project half touches the paths above. User scope is per user, per machine: all of it under the invoking user's home, invisible to other OS users on the host.
 
 | Command | Scope | Touches | On a profile that rejects the paths above |
 |---|---|---|---|
-| `agentic-hil agent-install --agent <agent>` | user and agent, once per user | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; it reads and writes no configuration and no `state_root` |
-| `agentic-hil init [--agent <agent>]` | this workspace, once per project | the authoritative configuration and `state_root`, then `doctor` | refuses, because those are exactly the rejected paths |
-| `agentic-hil setup --agent <agent>` | both, in that order | both of the above | the user half completes and stays; the project half refuses and rolls back only itself |
+| `agentic-hil agent-install --agent <agent>` | user, once per user and agent | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; reads and writes no configuration and no `state_root` |
+| `agentic-hil init [--agent <agent>]` | project, once per workspace | the authoritative configuration and `state_root`, then `doctor` | refuses; those are exactly the rejected paths |
+| `agentic-hil setup --agent <agent>` | both, in order | both of the above | the user half completes and stays; the project half refuses and rolls back only itself |
 
-User scope is per user, per machine: every process of one OS user on one host, and no other OS user on it.
-
-So a rejected configuration location leaves the agent installed and working. Fix the location as below and run `agentic-hil init` alone; `agent-install` does not have to run again, for this user, on this project or any other.
+A rejected configuration location therefore leaves the agent installed and working. Fix the location as below, then run `agentic-hil init` alone; `agent-install` need not run again for this user, on this project or any other.
 
 ## Where to put things instead
 

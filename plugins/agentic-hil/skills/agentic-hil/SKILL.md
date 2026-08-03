@@ -67,10 +67,10 @@ call.
 Installation and project binding are separate commands with separate scopes.
 `agent-install` installs this skill and the user-level MCP registration once per
 user and agent — per user, per machine, so no other OS user on the host sees
-either — and needs no project. `init` binds one project by writing its
-authoritative configuration and verifying it. `setup` runs both, so a first run
-stays one command. A second project for the same user needs `init` alone, and
-a project step that fails never removes the user-wide installation.
+either — and needs no project. `init` writes and verifies one project's
+authoritative configuration. `setup` runs both. A later project for the same
+user needs `init` alone, and a failing project step never removes the user-wide
+installation.
 
 ## Configuration and regression runs
 
@@ -111,6 +111,6 @@ agentic-hil setup --agent claude
 
 `setup` installs the packaged copy of this skill, registers the MCP server with
 the verified absolute persistent console-script path, and creates the
-deny-by-default project configuration. The first two are user-wide and also
-available on their own as `agentic-hil agent-install --agent claude`; the last
-is per project and also available on its own as `agentic-hil init`.
+deny-by-default project configuration. The first two are available alone as
+`agentic-hil agent-install --agent claude` (user scope), the last as
+`agentic-hil init` (project scope).

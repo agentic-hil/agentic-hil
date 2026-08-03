@@ -4,7 +4,15 @@ Agentic HIL is the hardware gate. It discovers the project's authoritative confi
 
 For installation and first-time setup, follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) — everything installs user-local without admin rights.
 
-Setting up has two scopes. `agentic-hil agent-install --agent <agent>` installs the agent skill and the user-level MCP registration once per user and agent — everything lands under the invoking user's home, so the scope is per user, per machine, and no other OS user on the host sees it — needs no workspace and no configuration, and finishes even where the configuration location is refused. `agentic-hil init [--agent <agent>]` binds one project: it writes that workspace's authoritative configuration and verifies it with `doctor`. `agentic-hil setup --agent <agent>` runs both, so a first run stays one command; a second project for the same user needs `init` alone. Neither half rolls back the other, so a `setup` that reports `ok: false` with `scopes.user.ok` true has left a working agent behind — read that field before concluding nothing was installed.
+Setup has two scopes. User scope is per user, per machine: all of it under the invoking user's home, invisible to other OS users on the host.
+
+| Command | Scope | Does |
+|---|---|---|
+| `agentic-hil agent-install --agent <agent>` | user, once per user and agent | agent skill + user-level MCP registration; needs no workspace or config, and finishes even where the config location is refused |
+| `agentic-hil init [--agent <agent>]` | project, once per project | writes the workspace's authoritative config, then `doctor` |
+| `agentic-hil setup --agent <agent>` | both, in order | first run in one command; later projects for this user need `init` alone |
+
+Neither half rolls back the other: `setup` with `ok: false` but `scopes.user.ok` true left a working agent installed — read that field before reporting nothing was installed.
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 

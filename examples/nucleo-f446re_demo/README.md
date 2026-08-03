@@ -33,7 +33,7 @@ agentic-hil setup --agent claude-code   # or: codex / opencode
 agentic-hil doctor
 ```
 
-The profile is read by the project half, so where `agentic-hil agent-install` has already run for this user, `agentic-hil init` alone does the same discovery.
+The project half reads the profile: where `agentic-hil agent-install` has already run for this user, `agentic-hil init` alone does the same discovery.
 
 Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. The profile declares requirements; the project half resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
 
