@@ -98,6 +98,8 @@ If the board, debugger, COM port or artifact path cannot be inferred, ask one co
 
 Discover them with `tools/list`. Build, `probe_target`, `flash_firmware`, then `com_session_*` or `can_session_*` for stimulus and feedback, and `get_last_report` plus `classify_last_error` to diagnose.
 
+A sequence of hardware calls is one run and has to say so: `bench_run_start` with `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds those devices until `bench_run_stop`. Without it each call holds its device only for its own duration and the board is free between two steps; inside a run only the declared devices may be touched.
+
 Never substitute raw `openocd`, `pyocd`, `st-flash`, `gdb`, `screen` or `candump`, a Makefile target that runs one, or direct `/dev/tty*` access. `permission_denied` is the answer to the request, not an obstacle: report it, name the permission, stop. Never edit the config to grant yourself one.
 
 Names: the distribution, CLI, repository and MCP server are `agentic-hil`; Python imports and fixtures are `agentic_hil`.

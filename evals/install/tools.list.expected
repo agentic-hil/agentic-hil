@@ -1,4 +1,7 @@
 artifact_upload
+bench_run_start
+bench_run_status
+bench_run_stop
 can_buses_list
 can_read
 can_send
