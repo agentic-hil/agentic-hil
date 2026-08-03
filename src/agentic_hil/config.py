@@ -775,6 +775,9 @@ def windows_sid_to_string(advapi32: object, sid: object) -> str | None:
         try:
             return buffer.value or None
         finally:
+            # cast reinterprets the pointer, it does not copy: LocalFree gets the
+            # address ConvertSidToStringSidW allocated, not a ctypes-owned copy of
+            # the string, which is what passing the LPWSTR itself risks.
             if buffer:
                 local_free(ctypes.cast(buffer, ctypes.c_void_p))
     except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
