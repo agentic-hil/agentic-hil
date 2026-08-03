@@ -1552,8 +1552,8 @@ def run_mcp_stdio(config_path: str | None = None) -> int:
 
     Only an absent file takes that route. A configuration that exists and does
     not load — invalid, or in a location the trust check rejects — is still a
-    hard stop: reading "broken" as "absent" would make corrupting the file a way
-    to be handed the provisioning grant again."""
+    hard stop: reading "broken" as "absent" would let a damaged file be replaced
+    by a generated one, silently discarding the policy an operator wrote."""
     try:
         config = load_cli_authoritative_config(config_path)
     except ConfigError as error:

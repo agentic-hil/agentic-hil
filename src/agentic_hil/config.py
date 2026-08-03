@@ -14,7 +14,6 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import replace
-from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -1124,30 +1123,30 @@ recovery:
 # ---------------------------------------------------------------------------
 # One-time agent provisioning of a project configuration.
 #
-# An agent that finds no configuration may generate one, once. The file it
-# generates denies further configuration writes, so the step is a ratchet: the
-# agent enables itself up to observation — reading needs no grant under decision
-# 0018 — and never up to modification.
+# An agent that finds no configuration may generate one. The file it generates
+# denies further configuration writes, so the step is a ratchet: the agent
+# enables itself up to observation — reading needs no grant under decision 0018 —
+# and never up to modification.
 #
-# "May generate" therefore cannot be derived from "no configuration exists":
-# whoever is locked out could remove the file and be entitled again. The grant is
-# recorded in its own file OUTSIDE the configuration, keyed by workspace rather
-# than by config path, so neither deleting the configuration, moving it, nor
-# pointing AGENTIC_HIL_CONFIG somewhere else brings the grant back.
+# The ratchet lives in the configuration itself, and there is no second state
+# store anywhere. Two states, both readable from the one file a human inspects:
+# no configuration for the workspace, and the agent may generate one; a
+# configuration exists, and its own permissions.allow_config_write decides
+# whether the agent may write it.
 #
-# The record lives beside the device locks of decision 0018, for the same reason
-# and with the same limit: ``~/.agentic-hil`` is the one place whose ancestors
-# pass the trust check on a stock profile of either platform, it is reachable
-# without first agreeing on a configuration, and it has NO environment override —
-# an override is exactly how two sessions stop seeing the same boundary. What it
-# cannot be is a place the same OS user cannot write: that would need a second
-# principal (a service, root), which is the compromise 0018 explicitly refused.
-# The boundary this enforces is therefore the tool surface — no tool here
-# deletes, moves, or rewrites either file — and not the file system. An agent
-# with a shell of its own can delete the record just as it can delete a device
-# lock; both are refusals it must not work around, and both are stated as such.
-AGENT_PROVISIONING_DIRECTORY_NAME = "project-provisioning"
-AGENT_PROVISIONING_RECORD_VERSION = 1
+# Deleting the configuration out of band therefore lets an agent generate a fresh
+# one. That is a downgrade, not an escalation: what it can generate is the fixed
+# deny-by-default skeleton filled from hardware discovery, never content of its
+# own choosing, so the cycle yields no capability that was not already there —
+# only the loss of whatever a human had opened. Nothing on the MCP surface
+# deletes or moves a configuration.
+#
+# An external record was tried and removed. It could not be a place the same OS
+# user cannot write — that needs a second principal, the compromise 0018 refused
+# — so against an agent with a shell it was a second thing to delete rather than
+# a boundary, while it moved part of the effective policy out of the file an
+# operator reads and blocked an operator who deliberately deletes a
+# configuration to start over.
 # Every permission an agent-generated configuration must carry as false. The
 # write class of decision 0018, per section, plus the project-scoped grant that
 # closes the configuration behind the agent.
@@ -1156,68 +1155,6 @@ GENERATED_WRITE_PERMISSIONS = {
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
-
-
-def agent_provisioning_root() -> Path:
-    """Where the one-time provisioning grant is recorded for every workspace."""
-    home = Path(os.path.expanduser("~"))
-    return secure_user_directory(
-        home / ".agentic-hil" / AGENT_PROVISIONING_DIRECTORY_NAME,
-        field="agent_provisioning_root",
-        label="Agent provisioning record directory",
-    )
-
-
-def agent_provisioning_record_path(workspace: str | Path) -> Path:
-    """The record for one workspace.
-
-    Keyed by the workspace, never by the configuration's location: a grant that
-    were keyed by config path would be handed out again for the same project by
-    pointing AGENTIC_HIL_CONFIG at a second path."""
-    identity = os.path.normcase(str(Path(workspace).resolve()))
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    return agent_provisioning_root() / f"{digest}.json"
-
-
-def agent_provisioning_record(workspace: str | Path) -> JsonObject | None:
-    """The recorded grant, or None when this workspace has never used it.
-
-    An entry that exists but cannot be parsed counts as used. The record is a
-    boundary, so anything other than a clean absence closes it."""
-    path = agent_provisioning_record_path(workspace)
-    text = secure_optional_read_text(path)
-    if text is None:
-        return None
-    try:
-        loaded = json.loads(text)
-    except ValueError:
-        return {"record_version": None, "path": str(path), "unreadable": True}
-    if not isinstance(loaded, dict):
-        return {"record_version": None, "path": str(path), "unreadable": True}
-    return {**loaded, "path": str(path)}
-
-
-def record_agent_provisioning(workspace: str | Path, config_path: str | Path) -> Path:
-    """Spend this workspace's one-time grant.
-
-    Written before the configuration it authorizes, not after: a grant that were
-    recorded only on success would be handed out again by whatever made the write
-    fail. A workspace whose configuration write then fails is not stuck — a human
-    still runs ``agentic-hil init``, which needs no grant."""
-    from agentic_hil import __version__
-
-    path = agent_provisioning_record_path(workspace)
-    payload = {
-        "record_version": AGENT_PROVISIONING_RECORD_VERSION,
-        "workspace_root": str(Path(workspace).resolve()),
-        "config_path": str(config_path),
-        "granted_to": "agent",
-        "granted_via": "mcp:project_config_create",
-        "granted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "agentic_hil_version": __version__,
-    }
-    secure_atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    return path
 
 
 def authoritative_config_target(workspace: Path) -> Path:

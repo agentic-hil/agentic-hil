@@ -109,8 +109,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
             "the hardware attached to this machine, and writes every permission false — including the one that would "
             "let it write the file again.",
-            "On the command line a person runs `agentic-hil init` from the project root, which does the same thing "
-            "and needs no grant.",
+            "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
             "Then ask the operator to set the permissions the task actually needs; nothing but a human edit turns one "
             "of them true.",
         ),
@@ -118,6 +117,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not write the configuration by hand to give yourself a permission, and do not drive the hardware "
             "another way while the project has none. A missing configuration is the absence of policy, not permission "
             "to act without it.",
+            "Do not delete or move an existing configuration to reach this state. Generating a replacement produces "
+            "the deny-by-default skeleton again, so it throws the operator's settings away and gives you nothing.",
         ),
     ),
     "unsafe_configured_path": ErrorRemedy(
@@ -652,7 +653,6 @@ A rejected configuration location therefore leaves the agent installed and worki
 | authoritative configuration | `%USERPROFILE%\\.agentic-hil\\projects\\<workspace-name>\\config.yaml`, selected by `AGENTIC_HIL_CONFIG` | default `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml` passes |
 | `state_root` | `%USERPROFILE%\\.agentic-hil\\state` | default `$XDG_STATE_HOME/agentic-hil` passes |
 | device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed |
-| agent provisioning record | `%USERPROFILE%\\.agentic-hil\\project-provisioning`, fixed | `~/.agentic-hil/project-provisioning`, fixed |
 
 The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other — which is the failure it exists to prevent. The home directory is chosen because it is the only location whose ancestors pass this check on a stock profile of either platform: a directory shared across *users* (`C:\\ProgramData`, `/var/lib`) is either writable by principals the check rejects or needs root to create, so exclusivity reaches every process of one user rather than every user of one machine.
 
@@ -662,7 +662,7 @@ Rules that hold on both platforms:
 - Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment. Never in a repository-controlled file (`.vscode/mcp.json`, `.mcp.json`, `.codex/config.toml`, `opencode.json`).
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
-- The agent provisioning record has no environment override either, and is keyed by workspace rather than by configuration path. It records that one workspace has used its one-time agent configuration generation, so that removing the configuration, moving it, or pointing `AGENTIC_HIL_CONFIG` at a second path does not hand the grant out again. `agentic-hil init` needs no grant and is unaffected by it.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the deny-by-default skeleton again, so the round trip costs a human their customised permissions and gains an agent nothing.
 
 ## Do not
 
