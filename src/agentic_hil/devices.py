@@ -474,11 +474,23 @@ def resolve_device(config: AgenticHILConfig, selector: object) -> Device:
     kind = selector.get("kind")
     name = selector.get("id")
     if kind == "debugger":
+        # The only kind whose id may be omitted, and only when the project
+        # configures exactly one probe; debugger_device says so when it cannot.
         return debugger_device(config, str(name) if name is not None else None)
-    if kind == "uart":
-        return uart_device(config, str(name))
-    if kind == "can":
-        return can_device(config, str(name))
+    if kind in {"uart", "can"}:
+        if name is None:
+            raise DeviceError(
+                {
+                    "ok": False,
+                    "error_type": "invalid_argument",
+                    "summary": f"A {kind} device must be named by the id of its config entry; only a debugger may be left unnamed, and only with one configured.",
+                    "kind": kind,
+                    "configured_devices": sorted(config.com_ports if kind == "uart" else config.can_buses),
+                    "side_effect_committed": False,
+                    "retry_safe": False,
+                }
+            )
+        return uart_device(config, str(name)) if kind == "uart" else can_device(config, str(name))
     raise DeviceError(
         {
             "ok": False,

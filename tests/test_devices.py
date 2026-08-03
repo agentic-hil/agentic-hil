@@ -402,6 +402,19 @@ def test_a_device_whose_key_the_mutex_would_not_lock_refuses_the_run(tmp_path: P
         coordinator.close()
 
 
+def test_only_a_debugger_may_be_declared_without_a_name(tmp_path: Path) -> None:
+    """With one probe configured there is one board a bare selector can mean; a
+    port or a bus always has to be named."""
+    config = config_for(tmp_path, com_ports_yaml=TWO_NAMES_ONE_PORT)
+
+    assert resolve_devices(config, [{"kind": "debugger"}]).lock_keys == [debugger_device(config).lock_key]
+    with pytest.raises(DeviceError) as excinfo:
+        resolve_devices(config, [{"kind": "uart"}])
+
+    assert excinfo.value.result["error_type"] == "invalid_argument"
+    assert excinfo.value.result["configured_devices"] == ["bootloader_uart", "dut_uart"]
+
+
 def test_a_run_declared_with_bare_resource_names_still_works(tmp_path: Path) -> None:
     """The reactor and the existing suite declare names; devices are additive."""
     coordinator = HardwareCoordinator(four_device_config(tmp_path), "owner")
