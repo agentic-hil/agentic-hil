@@ -6,7 +6,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-Adds surface — two configuration keys, two MCP tools, one resource — so it belongs in a minor under decision 0019, not in a patch.
+Both entries below add surface — configuration keys, MCP tools, a resource, a changed generated default — so this is a minor under decision 0019, not a patch.
 
 ### Added
 
@@ -17,6 +17,12 @@ Adds surface — two configuration keys, two MCP tools, one resource — so it b
 - `project_config_describe` answers, for this configuration in this state, which keys the caller may change, which it may not, which permission would open a locked one, each key's current value and its shape from the schema. Not a general list: after the split the answer differs with what an operator has opened, and a general one would be wrong for most callers. Reading needs no permission.
 - New MCP resource `agentic-hil://reference/config-shape`: which sections a configuration has and what each is for, which are required, a worked Nucleo-F446RE example, how to change one over MCP, which permission opens which key, and what deliberately cannot be done. `config-schema` says what is *valid*; this says what a configuration *looks like*, which is what a caller needs in order to write one. Every value shape in it is read out of the shipped schema when it is served, so the two cannot drift — the same principle that makes a refusal and the `errors` resource read one catalogue.
 - A `debuggers` / `com_ports` / `can_buses` entry can be added by setting a key under a name that does not exist yet, which is hardci-hq#76's case. The server writes that entry's `permissions` block itself, every flag false, so a device an agent adds can never arrive already allowed to be flashed.
+
+### Changed
+
+- **A generated configuration permits firmware anywhere in the workspace.** `artifacts.allowed_roots` defaulted to `["build"]`, which no CLion, PlatformIO, or Zephyr tree builds into — `cmake-build-debug`, `.pio/build/<env>`, `out`, `Debug`, `zephyr/build` all miss it, so the list had to be curated before a single flash worked. `agentic-hil init` and `project_config_create` now write `allowed_roots: ["."]`: the whole workspace, recursively. The list was never what stopped an attacker. Containment in `workspace_root` is, and it is untouched — the artifact path still fails on a traversal segment, and a build directory that is a symlink or junction pointing outside is still refused as `within_workspace: false`, which no configuration key relaxes. `allowed_extensions`, `inspect_known_formats` and the SHA-256 of the bytes that reach a backend are unchanged. What the root list added beyond those was a restriction inside the operator's own project, which is still available by naming directories. Implements hardci-hq#82.
+- **Nothing that already exists widens.** The new value reaches an operator through generation only. A configuration that names `["build"]` still means `build`, and one that omits the key is still read as `["build"]` — what an absent key means is exactly what an update may not change (decision 0018). `project_config_create` now carries an existing `allowed_roots` into the file it regenerates, alongside the permissions it already carried; without that, a hardware refresh would have replaced a narrowed list with the skeleton's.
+- **`artifacts.allowed_roots: []` is refused at load, by name.** An empty list is one obvious spelling for "no restriction" and equally the obvious spelling for "nothing at all"; here it always meant the second, in line with `debug.allowed_symbols`. The refusal names `["."]` for the whole workspace, naming directories for a narrower set, and `artifacts.upload_directory` for uploads only, rather than let one key mean opposite things to two readers.
 
 ### Unchanged
 

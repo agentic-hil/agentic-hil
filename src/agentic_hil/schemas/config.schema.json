@@ -307,9 +307,11 @@
       "properties": {
         "allowed_roots": {
           "type": "array",
+          "description": "Directories under workspace_root that firmware may be flashed from and debug dumps written to, each including its subdirectories. A single \".\" is the whole workspace, recursively, and is what a generated configuration names; list directories instead to narrow it. Omitting the key means [\"build\"], which is what configurations written before 0.8.0 mean and never changes under them. An empty list is refused rather than read as either \"everything\" or \"nothing\". This list never relaxes containment in workspace_root, the extension list, or the format check.",
           "items": {
             "type": "string"
           },
+          "minItems": 1,
           "default": [
             "build"
           ]

@@ -340,6 +340,39 @@ def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeyp
     assert document["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
 
 
+def test_regeneration_keeps_the_artifact_roots_the_person_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The skeleton names the whole workspace. A regeneration that carried the
+    # skeleton's value would widen a file whose owner had narrowed it — the same
+    # silent widening the carried-over permissions exist to prevent.
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert written_document(created)["artifacts"]["allowed_roots"] == ["."]
+
+    config_file = Path(created["path"])
+    opened = written_document(created)
+    opened["permissions"]["allow_config_write"] = True
+    opened["artifacts"]["allowed_roots"] = ["build", "dist"]
+    config_file.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+
+    attached_hardware(monkeypatch, probe_id="STLINK999")
+    reopened = UnprovisionedToolService(workspace)
+    try:
+        rewritten = reopened.call(PROJECT_CONFIG_CREATE)
+    finally:
+        reopened.close()
+
+    assert rewritten["ok"] is True, rewritten
+    document = written_document(rewritten)
+    assert document["debuggers"]["dut"]["probe_id"] == "STLINK999"
+    assert document["artifacts"]["allowed_roots"] == ["build", "dist"]
+
+
 def test_a_configured_server_refuses_to_write_its_own_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The ordinary server carries the same refusal.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
@@ -89,6 +90,8 @@ def write_config(
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
     config_version: int | None = None,
+    allowed_roots: list[str] | None = None,
+    omit_allowed_roots: bool = False,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     workspace_root = (workspace_root or directory).resolve()
@@ -120,6 +123,10 @@ def write_config(
             f"  max_attempts: {recovery_max_attempts}\n" if recovery_max_attempts is not None else "",
         ]
     )
+    # Named explicitly by default, exactly as a generated configuration names it.
+    # `omit_allowed_roots` is the other file worth testing: one that never named
+    # the key and is therefore read under the historical ["build"].
+    artifact_roots_line = "" if omit_allowed_roots else f"  allowed_roots: {json.dumps(allowed_roots if allowed_roots is not None else ['build'])}\n"
     config_path = config_path or directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # No `version:` by default: the bulk of the suite exercises the file a
@@ -138,8 +145,7 @@ debug:
   allow_all_symbols: {str(allow_all_symbols).lower()}
   max_dump_size_bytes: {max_dump_size_bytes}
 artifacts:
-  allowed_roots: ["build"]
-  allowed_extensions: [".elf", ".hex", ".bin"]
+{artifact_roots_line}  allowed_extensions: [".elf", ".hex", ".bin"]
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
