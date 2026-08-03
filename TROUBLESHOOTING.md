@@ -118,6 +118,8 @@ Likely cause: the image does not match the target memory layout, flash is locked
 
 Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debuggers.<name>.timeout_s` only when the operation is valid but consistently slow.
 
+Not this: `error_type: "debugger_command_rejected"`, which carries `target_contacted: false` and the `rejected_commands` OpenOCD would not run. OpenOCD stopped inside its own interpreter, before it opened the probe, so the board was never driven and there is nothing on it to inspect, power-cycle or recover. The named commands are either unknown to the installed OpenOCD or belong to its run stage and were reached before `init`; check the version `debugger_info` reports, and the scripts named by `interface_cfg` and `target_cfg`.
+
 ## 11. COM Port Does Not Work
 
 Symptom: COM tools cannot start a session, return permission errors, or read no expected serial text.
