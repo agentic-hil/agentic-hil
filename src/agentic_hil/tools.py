@@ -38,6 +38,7 @@ from agentic_hil.coordination import (
     debugger_effect_resources,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
@@ -1099,6 +1100,7 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
             f"Call `{PROJECT_CONFIG_CREATE}`. It takes no arguments, writes a configuration in which every permission is "
             "false, and then denies itself further writes. Ask a person for anything beyond reading the bench."
         ),
+        **remediation_fields("config_file_not_found"),
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",

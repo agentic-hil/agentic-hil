@@ -1268,8 +1268,9 @@ def test_gateway_tool_descriptions_name_what_they_replace() -> None:
 def test_skill_only_names_tools_the_server_exposes() -> None:
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
-    # Underscored identifiers in backticks are tool names; these two are not.
-    not_a_tool = {"agentic_hil", "permission_denied"}
+    # Underscored identifiers in backticks are tool names; these are the import
+    # name and two error types, not tools.
+    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found"}
 
     referenced = {
         token

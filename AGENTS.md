@@ -14,6 +14,8 @@ Setup has two scopes. User scope is per user, per machine: all of it under the i
 
 Neither half rolls back the other: `setup` with `ok: false` but `scopes.user.ok` true left a working agent installed — read that field before reporting nothing was installed.
 
+A project with no configuration answers every tool with `config_file_not_found`. `project_config_create` is the way out: it takes no arguments, generates the configuration for the workspace this server is bound to out of attached hardware, and writes every permission `false`, including `permissions.allow_config_write`. That means it succeeds once and then refuses itself, and the record of that one use lives outside the configuration — deleting or moving the file does not make it available again, while `agentic-hil init` run by a person always works. It is not a way to grant yourself anything: report the path and ask the operator for whatever the task needs beyond reading the bench.
+
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 Use Agentic HIL MCP tools for hardware actions. Do not bypass them with raw OpenOCD commands, arbitrary debugger shells, direct serial-device access, or direct CAN-adapter access when an Agentic HIL tool is available.

@@ -84,6 +84,16 @@ HIL projects directory, never inside the repository; `AGENTIC_HIL_CONFIG` may
 give an explicit absolute-path override. `agentic-hil init` creates it and
 prints its path; ask the operator to review any permission change.
 
+When a project has none, every tool answers `config_file_not_found` and
+`project_config_create` is the way out. It takes no arguments and generates the
+file from the hardware attached to this machine, with every permission `false` —
+including the one that would let it write the file again, so it succeeds once
+and then refuses itself. The record of that one use is kept outside the
+configuration, so removing or moving the file does not make it available again.
+Report where the file is and that an agent generated it, and ask the operator
+for anything the task needs beyond reading the bench. Never edit the file to
+grant yourself a permission.
+
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.
