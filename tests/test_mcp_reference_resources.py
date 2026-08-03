@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_OPENOCD_NO_TARGET, write_config
+from conftest import FAKE_OPENOCD_NO_TARGET, FAKE_STLINK_NO_PROBE, FAKE_STLINK_NO_TARGET, write_config
 
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import (
@@ -237,6 +237,53 @@ def test_a_target_that_does_not_answer_carries_that_backends_next_checks(tmp_pat
     # OpenOCD target comes from target_cfg, a pyOCD one from target_type.
     assert any("target_cfg" in step for step in result["remediation"])
     assert not any("target_type" in step for step in result["remediation"])
+
+
+def test_an_stlink_target_that_does_not_answer_carries_that_backends_next_checks(tmp_path: Path) -> None:
+    """The same property as the openocd case, for the backend most likely to hit it.
+
+    stlink is the STM32CubeProgrammer path, so it is what a Windows caller with
+    neither OpenOCD nor pyOCD on PATH reaches first. The remediation is wired per
+    backend in each `_failure_result`, which is why covering two of three leaves
+    the third with nothing under it.
+    """
+    tools = AgenticHILToolService(
+        load_config(str(write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_NO_TARGET)))
+    )
+    try:
+        result = tools.call("probe_target")
+    finally:
+        tools.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "target_not_detected"
+    # Classified from STM32CubeProgrammer's own output, not the unconfirmed-exit
+    # fallback, which reaches the same public error_type as `probe_unconfirmed`
+    # down a different branch.
+    assert result["backend_error_type"] == "target_not_detected"
+    assert result["remediation"] == remediation_fields("target_not_detected", "stlink")["remediation"]
+    # Backend-specific for the same reason as openocd's: an ST-Link transport is
+    # selected with `interface`, passed as `port=`, never with interface_cfg.
+    assert any("debuggers.<name>.interface`" in step for step in result["remediation"])
+    assert not any("interface_cfg" in step for step in result["remediation"])
+
+
+def test_an_stlink_that_enumerates_no_probe_carries_that_backends_next_checks(tmp_path: Path) -> None:
+    tools = AgenticHILToolService(
+        load_config(str(write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_NO_PROBE)))
+    )
+    try:
+        result = tools.call("probe_target")
+    finally:
+        tools.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["backend_error_type"] == "probe_not_found"
+    assert result["remediation"] == remediation_fields("adapter_not_found", "stlink")["remediation"]
+    # Each backend passes the probe selector under its own name: `sn=` here,
+    # `adapter serial` for openocd, `--uid` for pyocd.
+    assert any("`sn=`" in step for step in result["remediation"])
 
 
 def test_an_ambiguous_pyocd_probe_selector_carries_the_substring_rule(tmp_path: Path) -> None:
