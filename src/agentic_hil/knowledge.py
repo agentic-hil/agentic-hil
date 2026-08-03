@@ -329,10 +329,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Check the spelling against `pyocd list --targets`; the Source column says `builtin` or `pack`.",
             "If the part is not listed, install its pack as a deliberate host setup step: `pyocd pack find <part>` then "
-            "`pyocd pack install <target_type>`. This downloads from the vendor index.",
-            "Re-run the failing tool afterwards. Provenance and the location of the pack cache: MCP resource "
+            "`pyocd pack install <target_type>`. The exact commands, with the configured value already substituted, "
+            "are in `install_commands` on the result.",
+            "Run them yourself. `pyocd pack install` downloads a device-family pack from the vendor index over the "
+            "network; Agentic HIL names that command and never runs it.",
+            "`agentic-hil doctor` answers the same question before anything is flashed, in "
+            "`debuggers.<name>.target_support`.",
+            "Re-run the failing tool afterwards. Provenance and where installed packs live: MCP resource "
             + TARGET_SUPPORT_URI
             + ".",
+        ),
+        do_not=(
+            "Do not reconstruct the pack by downloading .pdsc or .pack files by hand. That is a network fetch nobody "
+            "reviewed, of content that then sits outside the cache pyOCD reads, and it is what happened the last time "
+            "this was undocumented.",
         ),
     ),
 }
@@ -813,19 +823,50 @@ $ pyocd list --targets
   stm32f446retx    STMicroelectronics  STM32F446RETx   STM32F4 Series, STM32F446   pack
 ```
 
-Without the pack the same value is simply unknown, and the failure surfaces as `error_type: target_type_invalid` with `backend_error_type` from pyOCD.
+Without the pack the same value is simply unknown. pyOCD refuses with `Target type <name> not recognized`, which surfaces as `error_type: target_type_invalid` with `backend_error_type` from pyOCD and the install command in `install_commands`.
 
 Install it as a deliberate host setup step, not in passing:
 
 ```bash
-pyocd pack find stm32f446        # what packs offer this part
+pyocd pack find stm32f446        # what packs offer this part; GLOB, so shorten to widen
 pyocd pack install stm32f446retx # downloads the pack from the vendor index
 pyocd pack show                  # what is installed now
 ```
 
-`pyocd pack install` fetches from the network. Run it knowingly; do not fabricate an equivalent by downloading `.pdsc` files by hand. The pack cache location is pyOCD's, overridable with the `CMSIS_PACK_ROOT` environment variable.
+## Nothing downloads a pack for you
+
+`pyocd pack install` fetches a device-family pack over the network from the vendor index. Agentic HIL never runs it, never runs it for you as part of another call, and has no setting that would. It names the command; a person runs it, knowing what is being fetched and from where.
+
+That rule exists because of what happened without it: an agent looking for the right `target_type` found nothing about packs anywhere, escalated through pyOCD's installed sources and `cmsis_pack_manager`'s internals, and ended up fetching a `.pdsc` from a vendor site by hand — twice — without anyone confirming the download. Do not reconstruct a pack from hand-downloaded `.pdsc` files. `pyocd pack install` is the one supported route.
+
+## Where installed packs live
+
+Two locations exist and they are not the same one.
+
+| What | Where | Set by |
+|---|---|---|
+| packs installed by `pyocd pack install` | `cmsis-pack-manager`'s data directory: `%LOCALAPPDATA%\\cmsis-pack-manager\\cmsis-pack-manager` on Windows, `~/.local/share/cmsis-pack-manager` on Linux, `~/Library/Application Support/cmsis-pack-manager` on macOS | not configurable through an environment variable; `pyocd pack show` reports what is there |
+| a CMSIS-Toolbox pack root | `CMSIS_PACK_ROOT`, defaulting to `%LOCALAPPDATA%\\Arm\\Packs` on Windows and `~/.cache/arm/packs` on POSIX | read by pyOCD only for its `cbuild-run` support |
+
+So `CMSIS_PACK_ROOT` does **not** relocate the cache `pyocd pack install` writes to. A pack outside either location is passed explicitly with pyOCD's `pack` session option, which Agentic HIL does not configure.
 
 These are host setup commands for the toolchain, not hardware actions. They do not replace the Agentic HIL tools: probing, flashing, resetting, and reading the target still go through the tools, never through `pyocd`, `openocd`, `st-flash`, or a Makefile target that calls one.
+
+## `doctor` asks before the flash does
+
+`agentic-hil doctor` reports `debuggers.<name>.target_support` for every checked debugger, so a missing pack is found at setup rather than at the first flash.
+
+| `status` | Means | `doctor` |
+|---|---|---|
+| `supported` | the backend resolves the configured `target_type`; `source` says `builtin` or `pack` | green |
+| `unsupported` | the backend enumerated its target types and this one is not among them, so no flash can work | **red**, with `install_commands` |
+| `undetermined` | this host could not answer — no toolchain installed, the enumeration failed or could not be read | green, and `undetermined_reason` says why |
+| `not_configured` | no `target_type` is set, so pyOCD would guess from the probe's board ID | green |
+| `not_applicable` | this backend has no target type: OpenOCD uses `target_cfg`, STM32CubeProgrammer identifies the part itself | green |
+
+The line between `unsupported` and `undetermined` is deliberate. `unsupported` is a fact about this host; `undetermined` says nothing about the configuration and must not be read as one. A bench with no debugger toolchain installed yet stays green — `agentic-hil setup` rolls back on a red `doctor`, so conflating the two would break installation on exactly the fresh machine the check is meant to help.
+
+`undetermined` is also not a pass. It means the question was asked and went unanswered, and the `doctor` summary says so.
 
 ## A green run can depend on a pack nobody recorded
 
@@ -877,7 +918,7 @@ MCP_RESOURCES: list[JsonObject] = [
         TARGET_SUPPORT_URI,
         "target-support",
         "Target selection and target support",
-        "Which field names the target per backend, known-good values for the Nucleo-F446RE, and how pyOCD target types are provided by CMSIS packs.",
+        "Which field names the target per backend, known-good values for the Nucleo-F446RE, how pyOCD target types are provided by CMSIS packs, how to find and install the right one and where installed packs live, and what doctor's target_support statuses mean — including why 'undetermined' is not a failure.",
         MARKDOWN_MIME,
     ),
 ]

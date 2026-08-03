@@ -79,7 +79,7 @@ Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_no
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
 
-Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins, install the CMSIS pack first (`pyocd pack install <target_type>`).
+Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins the CMSIS pack is a second, separate step — see 5a below.
 
 ## 5. `debugger_config_not_found`
 
@@ -88,6 +88,26 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
 Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
+
+## 5a. `target_type_invalid` (pyOCD) — the CMSIS pack is missing
+
+Symptom: a pyOCD call returns `error_type: "target_type_invalid"`, or `agentic-hil doctor` reports `debuggers.<name>.target_support.status: "unsupported"`. pyOCD's own message is `Target type <name> not recognized`.
+
+Likely cause: the configured `target_type` comes from a CMSIS device-family pack that is not installed on this host. Most vendor parts — including the whole STM32F4 family — are not built into pyOCD; `pyocd list --targets` shows `pack` in its Source column for them.
+
+Fix: run the commands the result carries in `install_commands`, as a deliberate host setup step:
+
+```bash
+pyocd pack find stm32f446         # GLOB; shorten it to widen the search
+pyocd pack install stm32f446retx  # downloads the pack from the vendor index
+pyocd pack show                   # what is installed now
+```
+
+Agentic HIL never runs these. `pyocd pack install` fetches over the network, and a background download nobody asked for is precisely what this documentation gap once caused. Do not reconstruct a pack from hand-downloaded `.pdsc` files.
+
+Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\cmsis-pack-manager\cmsis-pack-manager` on Windows, `~/.local/share/cmsis-pack-manager` on Linux). `CMSIS_PACK_ROOT` is a different thing — pyOCD reads it only for CMSIS-Toolbox `cbuild-run` projects — and does not relocate that cache.
+
+`doctor` distinguishes three answers, and only one is a failure: `unsupported` means the backend enumerated its target types and this one is absent; `undetermined` means this host could not answer at all — no toolchain, or the enumeration failed — and stays green with `undetermined_reason` saying why. Full detail: `agentic-hil://reference/target-support`.
 
 ## 6. `adapter_not_found`
 

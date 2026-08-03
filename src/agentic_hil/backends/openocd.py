@@ -195,6 +195,23 @@ class OpenOCDBackend:
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject:
         return self._debug.dump_symbol_ihex(symbol, output)
 
+    def target_support(self) -> JsonObject:
+        """OpenOCD has no target type to check.
+
+        It selects the target with `target_cfg`, a script config load already
+        resolved against an existing file, so there is no separate catalogue
+        that could be missing. Answered rather than omitted, so the field means
+        the same thing on every backend.
+        """
+        return {
+            "ok": True,
+            "tool": "debugger_target_support",
+            "backend": self.backend_name,
+            "status": "not_applicable",
+            "target_cfg": self.config.debugger.target_cfg if self.config.debugger else None,
+            "summary": "OpenOCD selects the target through debuggers.<name>.target_cfg, a bundled script, not through a target_type a CMSIS pack has to provide.",
+        }
+
     def classify_last_error(self) -> JsonObject:
         return classify_failure_report(self.config, self._likely_causes)
 

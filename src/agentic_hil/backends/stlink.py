@@ -192,6 +192,21 @@ class STLinkBackend:
     def close(self) -> None:
         return None
 
+    def target_support(self) -> JsonObject:
+        """STM32CubeProgrammer identifies the part itself.
+
+        There is no target_type field for this backend and no catalogue to
+        install, so nothing here can be missing. Answered rather than omitted,
+        so the field means the same thing on every backend.
+        """
+        return {
+            "ok": True,
+            "tool": "debugger_target_support",
+            "backend": self.backend_name,
+            "status": "not_applicable",
+            "summary": "STM32CubeProgrammer identifies the connected part itself; debuggers.<name>.target_type is not read by this backend.",
+        }
+
     def classify_last_error(self) -> JsonObject:
         return classify_failure_report(self.config, self._likely_causes)
 
