@@ -24,6 +24,9 @@ from agentic_hil.config import (
     load_authoritative_config,
     provisionable_state_root,
     record_agent_provisioning,
+    secure_atomic_write_text,
+    secure_optional_read_text,
+    secure_remove_file,
     secure_user_file_lock,
     write_generated_config,
 )
@@ -959,18 +962,25 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
             }
         state_root = provisionable_state_root(workspace)
         document = _generated_document(workspace, state_root, discovery)
-        dropped: list[str] = []
-        if existing is None:
-            deny_every_write(document)
-        else:
-            dropped = carry_over_permissions(document, existing)
+        # Deny first in both cases, so that "this tool introduces no grant" holds
+        # by construction rather than by reading what filled the skeleton in. A
+        # regeneration then puts back exactly the grants already on disk.
+        deny_every_write(document)
+        dropped: list[str] = [] if existing is None else carry_over_permissions(document, existing)
         text = GENERATED_CONFIG_HEADER + yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
 
+        previous_text = secure_optional_read_text(target_path)
         record_path: Path | None = None
         if existing is None:
             record_path = record_agent_provisioning(workspace, target_path)
         write_generated_config(target_path, workspace, text)
-        written = load_authoritative_config(workspace)
+        try:
+            written = load_authoritative_config(workspace)
+        except ConfigError as error:
+            # The generated text validated on a temporary file, so reaching here
+            # means the authoritative rules refused what parsing accepted. The
+            # operator's own file must not be what pays for that.
+            return _rolled_back(target_path, previous_text, error)
 
     return {
         "ok": True,
@@ -988,6 +998,11 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "provisioning_record": str(record_path) if record_path is not None else None,
         "permissions": _permission_summary(written),
         "dropped_entries": dropped,
+        # A server that started without a configuration binds the one it just
+        # wrote. A server that already had one keeps serving what it loaded,
+        # because swapping a configuration under open sessions and held device
+        # leases is not something a tool call may do behind their back.
+        "reload_required": existing is not None,
         "hardware_discovery": discovery,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
@@ -995,6 +1010,30 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "cleanup_required": False,
         "next_steps": _generated_next_steps(written, created=existing is None),
     }
+
+
+def _rolled_back(target_path: Path, previous_text: str | None, error: ConfigError) -> JsonObject:
+    """Put back whatever was at the configuration path, and say so.
+
+    The spent grant is not put back with it. A ratchet that were released by a
+    failed write would be released by whatever could make a write fail."""
+    result: JsonObject = {
+        "tool": PROJECT_CONFIG_CREATE,
+        **error.to_dict(),
+        "summary": "The generated configuration did not load as authoritative and the previous state of the file was restored.",
+        "path": str(target_path),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+    }
+    try:
+        if previous_text is None:
+            secure_remove_file(target_path)
+        else:
+            secure_atomic_write_text(target_path, previous_text)
+    except (ConfigError, OSError) as failure:
+        result["rollback_error"] = str(failure)
+    return result
 
 
 def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject) -> JsonObject:
@@ -1034,7 +1073,12 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool) -> list[st
             "This server will not write this configuration again. The one-time grant is recorded outside the file, so "
             "removing or moving the file does not return it, while `agentic-hil init` run by a person still works."
         )
-    steps.append("Hardware tools read this configuration from now on; `debugger_info` confirms the bench is reachable.")
+        steps.append("Hardware tools read this configuration from now on; `debugger_info` confirms the bench is reachable.")
+    else:
+        steps.append(
+            "This server is still serving the configuration it loaded at startup. Ask the operator to restart the "
+            "MCP server before relying on anything this rewrite changed."
+        )
     return steps
 
 

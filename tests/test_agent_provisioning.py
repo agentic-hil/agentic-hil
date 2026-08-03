@@ -24,7 +24,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.contracts import MCP_TOOL_NAMES, TOOL_SCHEMAS
 from agentic_hil.mcp import handle_mcp_message
-from agentic_hil.tools import PROJECT_CONFIG_CREATE, UnprovisionedToolService
+from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
 # outside the workspace, because loading the configuration pins the executable.
@@ -308,6 +308,8 @@ def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeyp
 
     assert rewritten["ok"] is True, rewritten
     assert rewritten["created"] is False
+    # The rewrite changed the file, not the configuration this server loaded.
+    assert rewritten["reload_required"] is True
     document = written_document(rewritten)
     # The hardware facts are refreshed …
     assert document["debuggers"]["dut"]["probe_id"] == "STLINK999"
@@ -318,6 +320,34 @@ def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeyp
     assert document["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert document["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
     assert document["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
+
+
+def test_a_configured_server_refuses_to_write_its_own_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary server carries the same refusal.
+
+    A project that was set up by a person is the common case, and the tool is
+    advertised there too — it has to answer with the permission it is denied by,
+    not by being absent from the list.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == "allow_config_write"
+    assert refused["retry_safe"] is False
+    assert "only the operator may edit it" in refused["next_step"]
+    assert written_document(created)["provenance"]["created_by"] == "agent"
 
 
 def test_creation_is_only_for_the_workspace_the_server_is_bound_to(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
