@@ -135,6 +135,51 @@ MCP_TOOLS: list[JsonObject] = [
     # this server was never pointed at, and a content argument would let it
     # decide its own permissions.
     {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments and writes no permission: every write permission in the generated file is false, including allow_config_write, so it succeeds once and then refuses itself. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    # Reading is free, so this takes no arguments either: it answers for the one
+    # configuration this server is bound to, in the state it is in.
+    {
+        "name": "project_config_describe",
+        "description": (
+            "Report which keys of this project's configuration you may change right now, which you may not, and which "
+            "permission would open a locked one — for this configuration in this state, not in general. Also carries "
+            "each key's current value and the value shape the shipped schema declares for it. Read this before "
+            "project_config_set instead of guessing a key and being refused."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
+    # Field-wise and scalar-valued, and both halves of that are the contract.
+    # There is no argument that takes a document, and `value` admits no object
+    # and no array — so no subtree, and therefore no permissions: block hidden
+    # inside one, can arrive as a value. The agent names keys from a closed set;
+    # it does not author this file.
+    {
+        "name": "project_config_set",
+        "description": (
+            "Change named keys of this project's configuration, field-wise. Two separate permissions gate it: "
+            "allow_config_description_write for what the bench is (target, probe id, port device and baudrate, CAN bus "
+            "settings) and allow_config_permissions_write for the permissions: blocks. Values are scalars checked "
+            "against the shipped schema; the changed file is validated before it replaces the working one, and a write "
+            "is refused while a run holds hardware. Use this instead of editing the configuration file yourself."
+        ),
+        "inputSchema": object_schema(
+            {
+                "changes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["key", "value"],
+                        "properties": {
+                            "key": {"type": "string", "minLength": 1, "description": "Dotted configuration key, e.g. debuggers.dut.probe_id. project_config_describe lists the ones this caller may set."},
+                            "value": {"type": ["string", "number", "integer", "boolean", "null"], "description": "A single scalar. Objects and arrays are refused: a whole subtree is content the agent authored, which is what this tool exists not to accept."},
+                        },
+                    },
+                }
+            },
+            required=["changes"],
+        ),
+    },
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

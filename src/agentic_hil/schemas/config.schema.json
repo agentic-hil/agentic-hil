@@ -81,20 +81,30 @@
     },
     "permissions": {
       "type": "object",
-      "description": "Project-scoped permissions. Deny-by-default like every other write permission in this file, and like those it is only ever widened by a human editing this file.",
+      "description": "Project-scoped permissions: what may be done to this configuration itself. Deny-by-default like every other write permission in this file, and like those only ever widened by a human editing this file. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the granting of allow_flash.",
       "additionalProperties": false,
       "properties": {
         "allow_config_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may write this configuration through the MCP server. False in every configuration an agent generated for itself, which is what makes agent provisioning one-time: an agent can enable itself up to observation, never up to modification. Set it true by hand to let the agent regenerate this file from hardware discovery afterwards; even then the agent supplies no permission value, only the discovered hardware facts."
+          "description": "Whether an agent may regenerate this whole configuration from hardware discovery through project_config_create. False in every configuration an agent generated for itself, which is what makes agent provisioning one-time: an agent can enable itself up to observation, never up to modification. Set it true by hand to let the agent regenerate this file afterwards; even then the agent supplies no permission value, only the discovered hardware facts."
+        },
+        "allow_config_description_write": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permissions: block, so granting it does not let the agent widen what it may do to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
+        },
+        "allow_config_permissions_write": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether an agent may change the permissions: blocks field-wise through project_config_set, including this key and allow_config_description_write. This is the grant that hands over the granting: with it, an agent can set allow_flash and allow_mass_erase on itself. Leave it false unless that is deliberately what you want."
         }
       },
       "default": {}
     },
     "provenance": {
       "type": "object",
-      "description": "Who wrote this file. Informational only: nothing reads it as policy and it grants nothing. It exists so a later reader does not have to guess whether a person intended these contents.",
+      "description": "Who wrote this file and who last changed it. Informational only: nothing reads it as policy and it grants nothing. It exists so a later reader does not have to guess whether a person intended these contents.",
       "additionalProperties": false,
       "properties": {
         "created_by": {
@@ -115,6 +125,34 @@
         },
         "agentic_hil_version": {
           "type": "string"
+        },
+        "last_modified_by": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "human"
+          ],
+          "description": "Who made the most recent field-wise change. Written by project_config_set; a person editing this file by hand leaves it as it was, which is itself the signal that the recorded change is not the newest one."
+        },
+        "last_modified_via": {
+          "type": "string",
+          "description": "The call that made the most recent change, e.g. mcp:project_config_set."
+        },
+        "last_modified_at": {
+          "type": "string",
+          "description": "UTC ISO-8601 timestamp of the most recent field-wise change."
+        },
+        "last_modified_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The dotted keys the most recent field-wise change set, so a later reader sees what moved and not only that something did."
+        },
+        "modification_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many field-wise changes have been applied to this file. A count rather than a log: an unbounded history inside the policy file itself would grow without limit, and the count is what tells a reader whether last_modified_keys is the whole story."
         }
       }
     },

@@ -15,6 +15,7 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
+    GENERATED_PROJECT_PERMISSIONS,
     GENERATED_WRITE_PERMISSIONS,
     ConfigError,
     authoritative_config_target,
@@ -27,6 +28,12 @@ from agentic_hil.config import (
     secure_remove_file,
     secure_user_file_lock,
     write_generated_config,
+)
+from agentic_hil.configwrite import (
+    PROJECT_CONFIG_DESCRIBE,
+    PROJECT_CONFIG_SET,
+    project_config_describe,
+    project_config_set,
 )
 from agentic_hil.contracts import MCP_TOOL_NAMES, validate_tool_arguments
 from agentic_hil.coordination import (
@@ -331,6 +338,8 @@ class AgenticHILToolService:
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it.
             PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config),
+            PROJECT_CONFIG_DESCRIBE: lambda: project_config_describe(Path(self.config.work_dir), self.config, open_holds=self.open_hardware_holds()),
+            PROJECT_CONFIG_SET: lambda: project_config_set(Path(self.config.work_dir), self.config, args.get("changes"), open_holds=self.open_hardware_holds()),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
@@ -409,6 +418,31 @@ class AgenticHILToolService:
 
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
+
+    def open_hardware_holds(self) -> JsonObject | None:
+        """What this server is holding, or None when it holds nothing.
+
+        A configuration write while something is held would change the policy
+        under an active lock — the mirror image of the rule that a run may only
+        touch what it declared. Both a declared run and a lease taken outside one
+        count: a COM session outlives `bench_run_stop` by design, so asking only
+        whether a run is open would miss the case where a board is still held.
+        """
+        run = self.coordinator.run_status()
+        leases = sorted(lease.lease_id for lease in self.coordinator.leases.values())
+        if not run.get("run_active") and not leases:
+            return None
+        holds: JsonObject = {
+            "run_active": bool(run.get("run_active")),
+            "declared_devices": run.get("declared_devices") or [],
+            "held_devices": run.get("held_devices") or [],
+            "open_leases": leases,
+        }
+        if run.get("run_label"):
+            holds["run_label"] = run["run_label"]
+        if run.get("run_started_at"):
+            holds["run_started_at"] = run["run_started_at"]
+        return holds
 
     def bench_run_start(self, payload: JsonObject | None = None) -> JsonObject:
         """Open a run that holds its devices across several calls.
@@ -1112,7 +1146,7 @@ def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject
 
 def _permission_summary(config: AgenticHILConfig) -> JsonObject:
     return {
-        "allow_config_write": config.permissions.allow_config_write,
+        **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
         "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
         "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
         "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},

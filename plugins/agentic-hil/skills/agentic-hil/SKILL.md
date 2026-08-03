@@ -102,6 +102,25 @@ the bench. Never edit the file to grant yourself a permission, and never delete
 or move a configuration to get a different one: regenerating only produces the
 same restrictive file and throws the operator's settings away.
 
+Changing an existing configuration goes through MCP too, never through your own
+file tools, and two separate permissions gate it. `project_config_describe`
+takes no arguments and answers, for this configuration in this state, which keys
+you may change, which you may not, and which permission would open a locked one;
+reading needs no grant. `project_config_set` then sets named keys with scalar
+values checked against the shipped schema:
+`permissions.allow_config_description_write` opens what the bench *is* —
+`target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device`, CAN bus
+settings — and `permissions.allow_config_permissions_write` opens the
+`permissions:` blocks. The split is deliberate. The first is the one an operator
+can leave open, because it does not reach your own authority; a refusal names
+the permission that is missing and is the answer to the request. A write is
+refused while a run or a session holds hardware, the changed file is validated
+before it replaces the working one, and what moved is recorded in `provenance`.
+This server keeps serving the configuration it loaded, so report the result's
+reload_required field and ask the operator to restart it.
+`agentic-hil://reference/config-shape` describes the whole shape, a worked
+example, and what deliberately cannot be done.
+
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.

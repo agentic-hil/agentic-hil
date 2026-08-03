@@ -37,6 +37,12 @@ SERVER_INSTRUCTIONS = (
     "A permission_denied result is the answer to the request, not an obstacle: report it, name the "
     "permission that is denied, and stop. Never edit the authoritative configuration to grant "
     "yourself a permission — it belongs to the operator — and never carry out the action another way.\n"
+    "Changing the configuration also goes through these tools, never through your own file tools. "
+    "project_config_describe says which keys you may change in this state and which permission would "
+    "open a locked one; project_config_set then sets named keys with scalar values. Two permissions "
+    "gate it: allow_config_description_write for what the bench is — target, probe_id, port device and "
+    "baudrate, CAN bus settings — and allow_config_permissions_write for the permissions: blocks. Read "
+    "agentic-hil://reference/config-shape before guessing a key.\n"
     "If a tool answers config_file_not_found, this project has no configuration yet: call "
     "project_config_create. It takes no arguments, generates the file from the hardware attached to "
     "this machine, and every permission in it is false — including the one that would let it write the "
@@ -47,8 +53,8 @@ SERVER_INSTRUCTIONS = (
     "installed package. resources/list carries agentic-hil://reference/debugger-backends (which config "
     "field each debugger backend requires, discovers, or ignores), .../target-support (which field "
     "names the target, which values are known good), .../errors (every error_type with its fix), "
-    ".../platform-paths (which locations pass the path trust check), .../lease-lifecycle, and "
-    ".../config-schema."
+    ".../platform-paths (which locations pass the path trust check), .../lease-lifecycle, "
+    ".../config-schema, and .../config-shape (what a configuration looks like and how to change it)."
 )
 
 JSONRPC_PARSE_ERROR = -32700
