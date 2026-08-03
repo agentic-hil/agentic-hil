@@ -75,6 +75,17 @@ Safety rules:
 MCP_PROMPTS = [{"name": "agentic_hil_embedded_workflow", "description": "Safe workflow for using Agentic HIL hardware tools from an AI agent."}]
 
 
+def tool_result_text(payload: JsonObject) -> str:
+    """The serialized form of a tool result for the content text block.
+
+    That block exists only so a host that does not read structuredContent still
+    gets the result (the MCP specification recommends servers return both). It
+    is parsed, never read as prose, so it carries no indentation: the same
+    payload without the whitespace nobody reads.
+    """
+    return json.dumps(payload, separators=(",", ":"))
+
+
 def parse_error_response() -> JsonObject:
     return error_response(None, JSONRPC_PARSE_ERROR, "Parse error")
 
@@ -164,7 +175,7 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     # serialized into the MCP content text and structuredContent. isError is
     # computed from the raw result (redaction touches no success field).
     safe_result = redact_sensitive(result)
-    return {"content": [{"type": "text", "text": json.dumps(safe_result, indent=2)}], "structuredContent": safe_result, "isError": not overall_success(result)}
+    return {"content": [{"type": "text", "text": tool_result_text(safe_result)}], "structuredContent": safe_result, "isError": not overall_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:
@@ -185,7 +196,7 @@ def params_object_or_throw(params: Any) -> JsonObject:
 
 def mcp_tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
     result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "structuredContent": result, "isError": True}
+    return {"content": [{"type": "text", "text": tool_result_text(result)}], "structuredContent": result, "isError": True}
 
 
 def result_response(request_id: Any, result: JsonObject) -> JsonObject:
