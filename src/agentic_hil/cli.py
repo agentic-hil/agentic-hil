@@ -12,7 +12,7 @@ import tempfile
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import yaml
 
@@ -1249,6 +1249,53 @@ def _protected_write_globs(config_path: Path, state_root: Path) -> list[str]:
     return [f"{config_path.parent.as_posix()}/**", f"{state_root.as_posix()}/**"]
 
 
+def _claude_code_deny_patterns(config_path: Path, state_root: Path) -> list[str]:
+    """The same two trees, written the way Claude Code actually resolves a path.
+
+    Two things are observed rather than assumed here, both from
+    https://code.claude.com/docs/en/permissions:
+
+    `Edit` is the only file form that is consulted. "Claude Code checks file
+    permissions against `Edit(path)` and `Read(path)` rules only"; a `Write(...)`
+    path rule "is accepted but never consulted", and warned about at every start.
+    One `Edit` rule covers every file-editing tool, so it needs no twin.
+
+    A pattern needs two leading slashes to mean an absolute path. One leading
+    slash "anchors at the settings source, not the filesystem root" — and these
+    rules go into user settings, where that source is `~/.claude`. Windows paths
+    are normalised to POSIX form before matching, so `C:\\Users\\alice` matches
+    as `/c/Users/alice`.
+    """
+    return [f"/{_posix_filesystem_path(path)}/**" for path in (config_path.parent, state_root)]
+
+
+def _posix_filesystem_path(path: PurePath) -> str:
+    """An absolute path in the POSIX form Claude Code normalises to: a Windows
+    drive letter becomes a lowercase leading segment, `C:/Users` -> `/c/Users`."""
+    posix = path.as_posix()
+    drive, colon, rest = posix.partition(":")
+    if colon and len(drive) == 1 and drive.isalpha():
+        return f"/{drive.lower()}{rest}"
+    return posix
+
+
+def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[str]:
+    """What earlier releases wrote here and this one has to take back.
+
+    Earlier releases built both rules straight from the absolute path: a
+    `Write(...)` that Claude Code never consults, and an `Edit(...)` whose single
+    leading slash anchored it under `~/.claude` instead of at the filesystem root.
+    The first is loud — a yellow warning at every start (hardci-hq#81) — and the
+    second is silent, which is worse: it reads as protection and is not.
+
+    Identifying them needs no heuristic. The globs are derived from this
+    project's config path and state root, so a rule is ours exactly when its text
+    is one of these few strings. An operator's own `Write(...)` or `Edit(...)`
+    rule names some other path and is therefore never one of them.
+    """
+    return {f"{form}({glob})" for form in ("Edit", "Write") for glob in _protected_write_globs(config_path, state_root)}
+
+
 def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Path) -> JsonObject:
     """Ask the agent CLI to refuse its own write tools on the policy files.
 
@@ -1260,6 +1307,10 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
 
     It is a lock on the front door, not a wall. A shell can still write the file,
     which is why SECURITY.md asks for a separate identity where that matters.
+
+    Which rule form a host actually evaluates is read out of that host's own
+    documentation rather than expected — see `_claude_code_deny_patterns` and the
+    opencode branch below, each of which cites what it is built on.
     """
     path = _agent_permission_config_path(agent_id)
     if path is None:
@@ -1272,7 +1323,7 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     if document is None:
         return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} is not a JSON object; left untouched.", "path": str(path)}
 
-    globs = _protected_write_globs(config_path, state_root)
+    removed: list[str] = []
     if agent_id == "claude-code":
         # Documented to merge across scopes rather than override, so adding
         # rules never removes the operator's own.
@@ -1282,24 +1333,42 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         deny = permissions.setdefault("deny", [])
         if not isinstance(deny, list):
             return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
-        added = [rule for glob in globs for rule in (f"Edit({glob})", f"Write({glob})") if rule not in deny]
+        stale = _stale_claude_code_deny_rules(config_path, state_root)
+        removed = [rule for rule in deny if rule in stale]
+        if removed:
+            deny = permissions["deny"] = [rule for rule in deny if rule not in stale]
+        # `Edit`, `//`-anchored, and nothing else. See _claude_code_deny_patterns.
+        added = [f"Edit({pattern})" for pattern in _claude_code_deny_patterns(config_path, state_root) if f"Edit({pattern})" not in deny]
         deny.extend(added)
     else:
         permission = document.setdefault("permission", {})
         if not isinstance(permission, dict):
             return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permission entry; left untouched.", "path": str(path)}
         existing = permission.get("edit")
-        # The last matching rule wins, so an operator's own patterns are kept and
-        # the denials are appended after them.
+        # https://opencode.ai/docs/permissions: `edit` takes either an action or
+        # an object of pattern -> action, it covers "all file modifications
+        # (covers edit, write, patch)" so there is no second key to write, and
+        # "the last matching rule winning" is why an operator's own patterns are
+        # kept and the denials appended after them.
+        #
+        # Open, and deliberately not answered here: that page does not say what
+        # the patterns are matched against. If it is the worktree-relative path,
+        # an absolute pattern never matches — neither tree protected here is ever
+        # inside the worktree — and the key for paths outside it is
+        # `external_directory`. Establish it before relying on this branch.
+        globs = _protected_write_globs(config_path, state_root)
         rules: dict[str, object] = {"*": existing} if isinstance(existing, str) else dict(existing) if isinstance(existing, dict) else {}
         added = [glob for glob in globs if rules.get(glob) != "deny"]
         for glob in globs:
             rules[glob] = "deny"
         permission["edit"] = rules
-    if not added:
-        return {"ok": True, "mode": "tool-permissions", "summary": "The agent already refuses to write the policy files.", "path": str(path), "added": []}
+    if not added and not removed:
+        return {"ok": True, "mode": "tool-permissions", "summary": "The agent already refuses to write the policy files.", "path": str(path), "added": [], "removed": []}
     secure_atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
-    return {"ok": True, "mode": "tool-permissions", "summary": f"{agent_id} will refuse its own write tools on the authoritative config and state root.", "path": str(path), "added": added}
+    summary = f"{agent_id} will refuse its own write tools on the authoritative config and state root."
+    if removed:
+        summary += " The inert deny rules an earlier setup wrote were dropped."
+    return {"ok": True, "mode": "tool-permissions", "summary": summary, "path": str(path), "added": added, "removed": removed}
 
 
 def register_agent_mcp(agent: str | None = None, force: bool = False, *, command: str | None = None, _locked: bool = False) -> JsonObject:
@@ -1511,12 +1580,19 @@ def _load_json_object(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> JsonObject:
-    """Run debugger_info against one named probe."""
+def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> tuple[JsonObject, JsonObject]:
+    """Run debugger_info and the target-support check against one named probe.
+
+    Both use the one service, so the toolchain is resolved once and neither
+    check touches the hardware: target support is a question about what this
+    host's toolchain resolves, not about what is plugged in.
+    """
     service = AgenticHILToolService(bind_debugger(config, debugger_id), frontend="doctor")
     primary_error: BaseException | None = None
+    support: JsonObject = {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the debugger check did not complete."}
     try:
         result = service.call("debugger_info")
+        support = _doctor_target_support(service)
     except BaseException as error:
         primary_error = error
         result = {"ok": False, "tool": "debugger_info", "summary": "Debugger check raised an exception.", "backend_error": str(error)}
@@ -1528,7 +1604,23 @@ def _doctor_probe_check(config: AgenticHILConfig, debugger_id: str) -> JsonObjec
         primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
     if primary_error is not None:
         raise primary_error
-    return result
+    return result, support
+
+
+def _doctor_target_support(service: AgenticHILToolService) -> JsonObject:
+    """Ask the bound backend whether it resolves the configured target type.
+
+    A backend that raises here has told us nothing, so the answer is
+    "undetermined" and not a failure. `doctor` going red decides whether
+    `setup` rolls back, and a host that simply has no CMSIS pack cache yet
+    must not look like a broken configuration.
+    """
+    try:
+        # Broad on purpose: a diagnostic must never become the failure it reports.
+        support = service.backend.target_support()
+    except Exception as error:
+        return {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": f"the target-support check raised {type(error).__name__}: {error}"}
+    return support if isinstance(support, dict) else {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the backend returned no target-support report."}
 
 
 def doctor(config_path: str | None = None) -> JsonObject:
@@ -1548,7 +1640,9 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
     # and it is the same set config load already insisted on resolving.
-    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    checks = {name: result for name, (result, _) in probed.items()}
+    target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
@@ -1556,14 +1650,27 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "skipped": True,
         "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
     }
-    all_ok = all(result.get("ok") is True for result in checks.values())
+    # Only a definite negative is a failure. A target-support check that could
+    # not run said nothing about this configuration, and reporting it as broken
+    # would make `doctor` red — and `setup` roll back — on any host that has no
+    # debugger toolchain installed yet.
+    unsupported = sorted(name for name, support in target_support.items() if support.get("ok") is not True)
+    undetermined = sorted(name for name, support in target_support.items() if support.get("status") == "undetermined")
+    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported
     if not checked:
         summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
     elif all_ok:
         summary = f"Agentic HIL configuration loaded and {len(checked)} debugger(s) checked."
     else:
         failed = sorted(name for name, result in checks.items() if result.get("ok") is not True)
-        summary = f"Agentic HIL configuration loaded, but the debugger check failed for: {', '.join(failed)}."
+        parts = []
+        if failed:
+            parts.append(f"the debugger check failed for: {', '.join(failed)}")
+        if unsupported:
+            parts.append(f"the configured target_type is not resolvable for: {', '.join(unsupported)}")
+        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}."
+    if undetermined:
+        summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
     return {
         "ok": all_ok,
         "tool": "agentic_hil_doctor",
@@ -1579,6 +1686,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "bound": name == config.debugger_id,
                 "permissions": asdict(entry.permissions),
                 **({"check": checks[name]} if name in checks else {}),
+                **({"target_support": target_support[name]} if name in target_support else {}),
             }
             for name, entry in config.debuggers.items()
         },

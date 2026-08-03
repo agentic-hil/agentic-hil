@@ -72,9 +72,10 @@ def _home() -> Path:
 def safe_user_root() -> str:
     """A directory whose every ancestor passes the trust check on both platforms.
 
-    Windows applies an app-capability ACE (``S-1-15-3-*``, FullControl) to
-    ``%USERPROFILE%\\AppData`` and inherits it into ``Roaming`` and ``Local``, so
-    both fail the ancestor check while the profile root itself passes.
+    On a Windows profile where an installed packaged application holds an
+    app-capability ACE (``S-1-15-3-*``, FullControl) on ``%USERPROFILE%\\AppData``,
+    ``Roaming`` and ``Local`` inherit it and both fail the ancestor check while
+    the profile root itself passes.
     """
     return str(_home() / ".agentic-hil")
 
@@ -150,22 +151,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Move the path under {safe_user_root}, whose every ancestor passes the check on a stock profile.",
-            "Windows: %USERPROFILE% passes; %APPDATA% and %LOCALAPPDATA% do not, because AppData carries an "
+            "Windows: %USERPROFILE% passes; %APPDATA% and %LOCALAPPDATA% do not on a profile where AppData carries an "
             "app-capability ACE (S-1-15-3-*, FullControl) that both inherit.",
+            "On Windows the refusal carries `untrusted_principals`: the SID that holds the right, and the application "
+            "package it belongs to when the SID resolves. That names who to ask, so the choice between moving the path "
+            "and having the operator revoke the grant is an informed one.",
             "Re-run the command that failed. Nothing else has to change.",
             "Full rules and the measured per-directory verdicts: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
         do_not=(
             "Do not change the ACL or the owner of the rejected path or any ancestor. That removes the protection the "
-            "check exists for instead of satisfying it, and on AppData Windows re-applies the ACE anyway.",
+            "check exists for instead of satisfying it.",
         ),
     ),
     "unsafe_configured_path:user_config": ErrorRemedy(
         meaning=(
-            "The directory or file holding the authoritative configuration has an untrusted ancestor. On a stock "
-            "Windows 11 profile the documented default under %APPDATA% is exactly this case."
+            "The directory or file holding the authoritative configuration has an untrusted ancestor. On a Windows 11 "
+            "profile where an installed packaged application holds an app-capability ACE on AppData, the documented "
+            "default under %APPDATA% is exactly this case. On Windows the refusal names the holder in "
+            "`untrusted_principals` when the SID resolves to a package."
         ),
         remediation=(
+            "AGENTIC_HIL_CONFIG is the supported answer here, not a workaround: it is how a project binds to a "
+            "configuration outside the discovered default, and a refused default is precisely what it is for.",
             "Create {safe_user_root}/projects/<workspace-name>/ and move config.yaml there.",
             "Point the server at it with an absolute path: AGENTIC_HIL_CONFIG={safe_user_config}",
             "Set AGENTIC_HIL_CONFIG in the host's user-level or managed environment, never in a repository-controlled "
@@ -173,8 +181,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Re-run `agentic-hil doctor` to confirm the new location loads.",
         ),
         do_not=(
-            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. Windows sets that ACE "
-            "for packaged applications and re-applies it; relaxing it weakens every application in the profile.",
+            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. The grant belongs to "
+            "an installed application, which re-applies it; relaxing it weakens every application in the profile.",
         ),
     ),
     "unsafe_configured_path:state_root": ErrorRemedy(
@@ -184,7 +192,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "local principal forge them."
         ),
         remediation=(
-            "Set `state_root: {safe_state_root}` in the authoritative configuration.",
+            "Set `state_root: {safe_state_root}` in the authoritative configuration. state_root is a first-class "
+            "setting with no fixed location: any absolute directory that passes the check is a supported value, and "
+            "choosing one is the answer to a refused default rather than a workaround for it.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
             "`agentic-hil init` derives the default state_root from %LOCALAPPDATA% on Windows and $XDG_STATE_HOME on "
             "POSIX, and validates before writing anything. On a stock Windows profile that default is rejected, so it "
@@ -333,6 +343,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Close whatever else holds the probe.",
         ),
     ),
+    "debugger_command_rejected:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD refused a command in its own interpreter and stopped before it opened the debug probe. The named "
+            "command either does not exist in this OpenOCD build, or it belongs to the run stage and was reached before "
+            "`init`. Nothing was sent to the bench, so the target is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read `rejected_commands` in the result: those are the commands OpenOCD would not run.",
+            "Check `debuggers.<name>.interface_cfg` and `target_cfg` for a script that uses a run-stage command such as "
+            "`reset`, `halt` or `mww` before `init`. OpenOCD registers those only while `init` runs.",
+            "Confirm the installed OpenOCD is a release that knows the command: `debugger_info` reports the version.",
+            "Retry the call once the cause is fixed. The bench was not driven, so nothing has to be inspected or "
+            "recovered first.",
+        ),
+        do_not=(
+            "Do not inspect the hardware or run `agentic-hil recover` for this result. It is a rejected call, not an "
+            "unconfirmed target state, and the two must not be treated the same.",
+        ),
+    ),
     "target_type_invalid:pyocd": ErrorRemedy(
         meaning=(
             "pyOCD does not resolve `debuggers.<name>.target_type`. Most vendor parts are not built into pyOCD; they "
@@ -341,10 +370,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Check the spelling against `pyocd list --targets`; the Source column says `builtin` or `pack`.",
             "If the part is not listed, install its pack as a deliberate host setup step: `pyocd pack find <part>` then "
-            "`pyocd pack install <target_type>`. This downloads from the vendor index.",
-            "Re-run the failing tool afterwards. Provenance and the location of the pack cache: MCP resource "
+            "`pyocd pack install <target_type>`. The exact commands, with the configured value already substituted, "
+            "are in `install_commands` on the result.",
+            "Run them yourself. `pyocd pack install` downloads a device-family pack from the vendor index over the "
+            "network; Agentic HIL names that command and never runs it.",
+            "`agentic-hil doctor` answers the same question before anything is flashed, in "
+            "`debuggers.<name>.target_support`.",
+            "Re-run the failing tool afterwards. Provenance and where installed packs live: MCP resource "
             + TARGET_SUPPORT_URI
             + ".",
+        ),
+        do_not=(
+            "Do not reconstruct the pack by downloading .pdsc or .pack files by hand. That is a network fetch nobody "
+            "reviewed, of content that then sits outside the cache pyOCD reads, and it is what happened the last time "
+            "this was undocumented.",
         ),
     ),
 }
@@ -685,9 +724,9 @@ Every configured path is checked before it is used, so that no other local princ
 | final directory, rights | no other principal holds `0x500D0116` (write, delete, WRITE_DAC, WRITE_OWNER) | not group- or other-writable |
 | every ancestor | no other principal holds `0x100D0040` (DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER); inherit-only ACEs are excluded | not group- or other-writable unless sticky (`01777`) |
 
-A failure raises `error_type: unsafe_configured_path` and names the offending component in `path` and the setting in `field`.
+A failure raises `error_type: unsafe_configured_path` and names the offending component in `path` and the setting in `field`. On Windows it also names *who* holds the right, in `untrusted_principals`.
 
-## Windows 11, stock user profile: measured verdicts
+## Windows 11: measured verdicts on an affected profile
 
 | Path | Verdict | Reason |
 |---|---|---|
@@ -698,10 +737,57 @@ A failure raises `error_type: unsafe_configured_path` and names the offending co
 | `%APPDATA%` = `...\\AppData\\Roaming` | **fail** | inherits the AppData ACE |
 | `%LOCALAPPDATA%` = `...\\AppData\\Local` | **fail** | inherits the AppData ACE |
 | `C:\\Users\\<user>\\.agentic-hil` | pass | no ancestor below the profile root |
+| `C:\\Users\\Default\\AppData` | pass | no capability ACE at all |
 
-`S-1-15-3-*` is an app-capability SID that Windows itself applies to `AppData` for packaged applications. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. This is the check working as specified, not a bug in the profile.
+`S-1-15-3-*` is an app-capability SID belonging to a packaged application. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. Two ACEs of that SID sit on `AppData`: one inherit-only, which the check correctly skips, and one effective on the directory itself, which really does carry DELETE and WRITE_DAC. The refusal is not a false positive.
 
-Consequence: on Windows the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+It is also not a Windows default. `C:\\Users\\Default` is the template every new profile is copied from and it carries no such ACE, so the grant arrives later, with an installed application. Whether your profile is affected is therefore a property of what is installed on it.
+
+Consequence where it is present: the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+
+## The refusal names the holder
+
+An `unsafe_configured_path` refusal on Windows carries `untrusted_principals`, one entry per principal that holds the rejected right:
+
+```json
+{
+  "error_type": "unsafe_configured_path",
+  "field": "user_config",
+  "path": "C:\\\\Users\\\\<user>\\\\AppData\\\\Roaming",
+  "untrusted_principals": [
+    {
+      "sid": "S-1-15-3-3557520199-...",
+      "kind": "app_capability",
+      "package_sid": "S-1-15-2-3557520199-...",
+      "package_family": "<name>_<publisher-id>",
+      "display_name": "<application>",
+      "package": "<Name>_<version>_<arch>__<publisher-id>"
+    }
+  ]
+}
+```
+
+A capability SID `S-1-15-3-<sub-authorities>` shares its sub-authorities with the package SID `S-1-15-2-<the same sub-authorities>`, which Windows registers under `HKLM\\SOFTWARE\\Microsoft\\SecurityManager\\CapAuthz\\ApplicationsEx\\<PackageFullName>\\PackageSid` and under `HKEY_CLASSES_ROOT\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\<package SID>`. Both are readable without privileges.
+
+Resolution is best effort. A SID that resolves to nothing is still reported as `sid`, and the refusal is unchanged: the right exists whether or not anyone can put a name to it. The entry never carries a name that was guessed.
+
+Knowing the package turns "an unknown principal has rights here" into a decision the operator can actually take: use a permitted location, or remove that application's grant. Agentic HIL does neither on its own — it reads ACLs and never writes them.
+
+## The override is the supported answer, not a workaround
+
+`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case.
+
+```text
+# Windows, on a profile where %APPDATA% is refused
+AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<workspace-name>\\config.yaml
+
+# inside that config.yaml
+state_root: C:\\Users\\<user>\\.agentic-hil\\state
+```
+
+Using them costs nothing else: `state_root` has no fixed location beyond being absolute, non-overlapping with `workspace_root`, and passing the check, and a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions. Nothing about a project is second class for having taken this route.
+
+The one rule that does not bend: set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment, never in a repository-controlled file. An agent that can edit the file that selects the configuration can select a configuration it wrote.
 
 ## Which command touches which of these
 
@@ -735,7 +821,9 @@ Rules that hold on both platforms:
 
 ## Do not
 
-Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. The ancestor is rejected precisely because a second principal can replace it; changing that removes the guarantee rather than meeting it. On `AppData` it also does not work: Windows re-applies the inherited ACE.
+Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. The ancestor is rejected precisely because a second principal can replace it; changing that removes the guarantee rather than meeting it. On `AppData` it also does not hold: the application that made the grant re-applies it.
+
+Removing the grant is the operator's call, not the tool's, and it is made through the application that holds it — not by editing the ACL underneath it. Moving the configuration and `state_root` needs no privileges, changes nothing on the system, and is the answer this project supports.
 """
 
 
@@ -776,19 +864,50 @@ $ pyocd list --targets
   stm32f446retx    STMicroelectronics  STM32F446RETx   STM32F4 Series, STM32F446   pack
 ```
 
-Without the pack the same value is simply unknown, and the failure surfaces as `error_type: target_type_invalid` with `backend_error_type` from pyOCD.
+Without the pack the same value is simply unknown. pyOCD refuses with `Target type <name> not recognized`, which surfaces as `error_type: target_type_invalid` with `backend_error_type` from pyOCD and the install command in `install_commands`.
 
 Install it as a deliberate host setup step, not in passing:
 
 ```bash
-pyocd pack find stm32f446        # what packs offer this part
+pyocd pack find stm32f446        # what packs offer this part; GLOB, so shorten to widen
 pyocd pack install stm32f446retx # downloads the pack from the vendor index
 pyocd pack show                  # what is installed now
 ```
 
-`pyocd pack install` fetches from the network. Run it knowingly; do not fabricate an equivalent by downloading `.pdsc` files by hand. The pack cache location is pyOCD's, overridable with the `CMSIS_PACK_ROOT` environment variable.
+## Nothing downloads a pack for you
+
+`pyocd pack install` fetches a device-family pack over the network from the vendor index. Agentic HIL never runs it, never runs it for you as part of another call, and has no setting that would. It names the command; a person runs it, knowing what is being fetched and from where.
+
+That rule exists because of what happened without it: an agent looking for the right `target_type` found nothing about packs anywhere, escalated through pyOCD's installed sources and `cmsis_pack_manager`'s internals, and ended up fetching a `.pdsc` from a vendor site by hand — twice — without anyone confirming the download. Do not reconstruct a pack from hand-downloaded `.pdsc` files. `pyocd pack install` is the one supported route.
+
+## Where installed packs live
+
+Two locations exist and they are not the same one.
+
+| What | Where | Set by |
+|---|---|---|
+| packs installed by `pyocd pack install` | `cmsis-pack-manager`'s data directory: `%LOCALAPPDATA%\\cmsis-pack-manager\\cmsis-pack-manager` on Windows, `~/.local/share/cmsis-pack-manager` on Linux, `~/Library/Application Support/cmsis-pack-manager` on macOS | not configurable through an environment variable; `pyocd pack show` reports what is there |
+| a CMSIS-Toolbox pack root | `CMSIS_PACK_ROOT`, defaulting to `%LOCALAPPDATA%\\Arm\\Packs` on Windows and `~/.cache/arm/packs` on POSIX | read by pyOCD only for its `cbuild-run` support |
+
+So `CMSIS_PACK_ROOT` does **not** relocate the cache `pyocd pack install` writes to. A pack outside either location is passed explicitly with pyOCD's `pack` session option, which Agentic HIL does not configure.
 
 These are host setup commands for the toolchain, not hardware actions. They do not replace the Agentic HIL tools: probing, flashing, resetting, and reading the target still go through the tools, never through `pyocd`, `openocd`, `st-flash`, or a Makefile target that calls one.
+
+## `doctor` asks before the flash does
+
+`agentic-hil doctor` reports `debuggers.<name>.target_support` for every checked debugger, so a missing pack is found at setup rather than at the first flash.
+
+| `status` | Means | `doctor` |
+|---|---|---|
+| `supported` | the backend resolves the configured `target_type`; `source` says `builtin` or `pack` | green |
+| `unsupported` | the backend enumerated its target types and this one is not among them, so no flash can work | **red**, with `install_commands` |
+| `undetermined` | this host could not answer — no toolchain installed, the enumeration failed or could not be read | green, and `undetermined_reason` says why |
+| `not_configured` | no `target_type` is set, so pyOCD would guess from the probe's board ID | green |
+| `not_applicable` | this backend has no target type: OpenOCD uses `target_cfg`, STM32CubeProgrammer identifies the part itself | green |
+
+The line between `unsupported` and `undetermined` is deliberate. `unsupported` is a fact about this host; `undetermined` says nothing about the configuration and must not be read as one. A bench with no debugger toolchain installed yet stays green — `agentic-hil setup` rolls back on a red `doctor`, so conflating the two would break installation on exactly the fresh machine the check is meant to help.
+
+`undetermined` is also not a pass. It means the question was asked and went unanswered, and the `doctor` summary says so.
 
 ## A green run can depend on a pack nobody recorded
 
@@ -833,14 +952,14 @@ MCP_RESOURCES: list[JsonObject] = [
         PLATFORM_PATHS_URI,
         "platform-paths",
         "Path trust rules and permitted locations",
-        "What the ancestor check verifies, which Windows and POSIX locations pass it and why, where the configuration and state_root belong, and why changing an ACL is the wrong fix.",
+        "What the ancestor check verifies, which Windows and POSIX locations pass it and why, how a refusal names the Windows package that holds the right, why AGENTIC_HIL_CONFIG and a chosen state_root are the supported answer to a refused location, and why changing an ACL is the wrong fix.",
         MARKDOWN_MIME,
     ),
     _resource_descriptor(
         TARGET_SUPPORT_URI,
         "target-support",
         "Target selection and target support",
-        "Which field names the target per backend, known-good values for the Nucleo-F446RE, and how pyOCD target types are provided by CMSIS packs.",
+        "Which field names the target per backend, known-good values for the Nucleo-F446RE, how pyOCD target types are provided by CMSIS packs, how to find and install the right one and where installed packs live, and what doctor's target_support statuses mean — including why 'undetermined' is not a failure.",
         MARKDOWN_MIME,
     ),
 ]

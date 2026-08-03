@@ -8,25 +8,30 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
 from conftest import (
     FAKE_OPENOCD,
+    FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
     FAKE_STLINK_UNCONFIRMED,
     write_authoritative_config,
     write_config,
 )
+from fixtures import fake_openocd
 from support import trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends import openocd as openocd_backend
+from agentic_hil.backends.common import command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import (
+    _posix_filesystem_path,
     build_parser,
     debugger_probes,
     doctor,
@@ -1366,9 +1371,8 @@ def test_setup_asks_the_agent_to_refuse_writing_the_policy_files(
     restriction = result["steps"]["agent_write_restriction"]
     assert restriction["ok"] is True
     deny = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"]["deny"]
-    config_directory = Path(result["steps"]["config"]["path"]).parent.as_posix()
-    assert f"Edit({config_directory}/**)" in deny
-    assert f"Write({config_directory}/**)" in deny
+    config_directory = Path(result["steps"]["config"]["path"]).parent
+    assert f"Edit(/{_posix_filesystem_path(config_directory)}/**)" in deny
     # Running the CLI is untouched: setup, doctor and a rerun must keep working.
     assert not any(rule.startswith("Bash(") for rule in deny)
 
@@ -1402,6 +1406,165 @@ def test_the_write_restriction_is_left_to_the_sandbox_for_codex(tmp_path: Path) 
 
     assert restriction["ok"] is True
     assert restriction["mode"] == "sandboxed-by-the-agent"
+
+
+def _claude_settings(home: Path, deny: list[str]) -> Path:
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"permissions": {"deny": deny}}) + "\n", encoding="utf-8")
+    return settings
+
+
+def _deny_rules(settings: Path) -> list[str]:
+    return json.loads(settings.read_text(encoding="utf-8"))["permissions"]["deny"]
+
+
+def _superseded_claude_rules(config_path: Path, state_root: Path) -> list[str]:
+    """Exactly what releases up to 0.7.0 wrote into ~/.claude/settings.json."""
+    return [f"{form}({directory.as_posix()}/**)" for directory in (config_path.parent, state_root) for form in ("Edit", "Write")]
+
+
+def test_the_claude_deny_rules_use_only_the_form_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the shape, because nothing else does.
+
+    https://code.claude.com/docs/en/permissions: Claude Code "checks file
+    permissions against `Edit(path)` and `Read(path)` rules only", a `Write(...)`
+    path rule is "accepted but never consulted" and warned about at every start,
+    and a single leading slash "anchors at the settings source, not the
+    filesystem root" — which in user settings is `~/.claude`, not `/`.
+
+    Both halves were written from expectation once already (hardci-hq#81), so
+    the absence of the `Write` form is asserted explicitly rather than implied.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, [])
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+
+    deny = _deny_rules(settings)
+    assert deny == [f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]
+    # Anchored at the filesystem root, so it means the path it names...
+    assert all(rule.startswith("Edit(//") for rule in deny), deny
+    # ...and no inert twin comes along with it, in any spelling.
+    assert not any(rule.startswith("Write(") for rule in deny), deny
+
+
+def test_a_deny_pattern_names_a_filesystem_path_on_either_platform() -> None:
+    """Both branches, on whichever runner this lands on.
+
+    The defect was reported on Debian and the fix is written on Windows, so the
+    platform-dependent half of this would otherwise only ever run on one of them.
+    `C:\\Users\\alice` matches as `/c/Users/alice`, per
+    https://code.claude.com/docs/en/permissions.
+    """
+    assert _posix_filesystem_path(PureWindowsPath(r"C:\Users\alice\.agentic-hil")) == "/c/Users/alice/.agentic-hil"
+    assert _posix_filesystem_path(PurePosixPath("/home/hpauli/.config/agentic-hil")) == "/home/hpauli/.config/agentic-hil"
+    # A colon deeper in a POSIX path is not a drive letter.
+    assert _posix_filesystem_path(PurePosixPath("/home/h/a:b/state")) == "/home/h/a:b/state"
+
+
+def test_a_repeat_setup_takes_back_the_inert_rules_an_earlier_release_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.7.0 left a warning behind that no later start clears by itself.
+
+    Anyone who ran that setup carries the rules in ~/.claude/settings.json, so
+    removal has to happen here or the yellow warning is permanent.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    superseded = _superseded_claude_rules(config_path, state_root)
+    settings = _claude_settings(home, ["Bash(curl *)", *superseded])
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert sorted(restriction["removed"]) == sorted(superseded)
+    deny = _deny_rules(settings)
+    assert not any(rule in superseded for rule in deny), deny
+    assert deny == ["Bash(curl *)", *[f"Edit(/{_posix_filesystem_path(directory)}/**)" for directory in (config_path.parent, state_root)]]
+
+
+def test_the_deny_rule_cleanup_leaves_an_operators_own_write_rule_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ours is identified by its exact text, never by its shape.
+
+    A `Write(...)` rule of the operator's is inert for the same reason ours was,
+    but it is not this tool's to delete — including one that covers a tree of
+    ours from further up.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    theirs = [
+        "Write(/etc/**)",
+        f"Write({tmp_path.as_posix()}/**)",
+        f"Write({config_path.parent.as_posix()}/*.yaml)",
+        f"Edit({state_root.as_posix()})",
+    ]
+    settings = _claude_settings(home, theirs)
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert _deny_rules(settings)[: len(theirs)] == theirs
+
+
+def test_the_deny_rule_cleanup_settles_after_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    settings = _claude_settings(home, _superseded_claude_rules(config_path, state_root))
+
+    assert restrict_agent_write_access("claude-code", config_path, state_root)["ok"] is True
+    migrated = settings.read_text(encoding="utf-8")
+    second = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert (second["added"], second["removed"]) == ([], [])
+    assert settings.read_text(encoding="utf-8") == migrated
+
+
+def test_the_opencode_deny_rules_use_the_shape_that_host_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """https://opencode.ai/docs/permissions.
+
+    `edit` takes an object of pattern -> action and covers "all file
+    modifications (covers edit, write, patch)", so there is no second key to
+    write; "the last matching rule winning" is why the denials come after an
+    operator's own catch-all rather than before it.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
+    opencode_json = home / ".config" / "opencode" / "opencode.json"
+    opencode_json.parent.mkdir(parents=True, exist_ok=True)
+    opencode_json.write_text(json.dumps({"permission": {"edit": "ask"}}) + "\n", encoding="utf-8")
+
+    assert restrict_agent_write_access("opencode", config_path, state_root)["ok"] is True
+
+    permission = json.loads(opencode_json.read_text(encoding="utf-8"))["permission"]
+    assert list(permission["edit"].items()) == [
+        ("*", "ask"),
+        (f"{config_path.parent.as_posix()}/**", "deny"),
+        (f"{state_root.as_posix()}/**", "deny"),
+    ]
+    # One key does every file-writing tool; a second would be the same mistake.
+    assert set(permission) == {"edit"}
 
 
 def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
@@ -2060,6 +2223,136 @@ def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: P
     assert with_reset["reset_after_flash"] is True
     reset_log = (tmp_path / with_reset["log_path"]).read_text(encoding="utf-8")
     assert "verify reset" in reset_log
+
+
+OPENOCD_RESET_COMMANDS = {
+    "run": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset run; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "halt": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset halt; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+    "init": 'init; echo "AGENTIC_HIL_STAGE:init:ok"; reset init; echo "AGENTIC_HIL_RESULT:reset_target:ok"; shutdown',
+}
+
+
+@pytest.mark.parametrize("mode", ["run", "halt", "init"])
+def test_openocd_reset_sends_init_before_reset_in_every_mode(tmp_path: Path, mode: str) -> None:
+    """The command line itself, not just the result.
+
+    0.7.0 sent `reset <mode>` with no `init`, which OpenOCD refuses with
+    `invalid command name "reset"` before it opens the probe, and no test looked
+    at what was sent. `init; reset init` is two different things in one line: the
+    server leaving its configuration stage, then OpenOCD's reset-init mode - the
+    same pair OpenOCD's own `program` proc issues."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert openocd_backend.openocd_reset_command(mode, "AGENTIC_HIL_RESULT:reset_target:ok") == OPENOCD_RESET_COMMANDS[mode]
+    assert result["ok"] is True, result
+    assert result["success_confirmed"] is True
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(command_for_log(["-c", OPENOCD_RESET_COMMANDS[mode]]))
+
+
+def test_openocd_probe_sends_init_before_the_target_query(tmp_path: Path) -> None:
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(
+        command_for_log(["-c", 'init; echo "AGENTIC_HIL_STAGE:init:ok"; targets; echo "AGENTIC_HIL_RESULT:probe_target:ok"; shutdown'])
+    )
+
+
+def test_a_command_openocd_refuses_before_init_does_not_take_the_bench_out_of_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 0.7.0 command line again, and what it may cost.
+
+    OpenOCD stopped in its interpreter, before it opened the adapter, so the
+    board is untouched. Reporting that as an unconfirmed target state is what
+    turned a mistyped command line into a work stoppage: the quarantine also
+    blocked the reset that would have cleared it."""
+    monkeypatch.setattr(
+        openocd_backend,
+        "openocd_reset_command",
+        lambda mode, marker: f'reset {mode}; echo "{marker}"; shutdown',
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+        still_usable = mcp_tool_call(service, "probe_target")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "debugger_command_rejected"
+    assert refused["backend_error_type"] == "command_rejected_before_init"
+    assert refused["rejected_commands"] == ["reset"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_committed"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["retry_safe"] is True
+    assert refused.get("quarantined") is not True, refused
+    assert refused.get("cleanup_required") is not True, refused
+    # The operator is told not to go and look at the board for this one.
+    assert any("rejected_commands" in step for step in refused["remediation"])
+    assert still_usable["ok"] is True, still_usable
+
+
+def test_a_reset_that_may_have_reached_the_target_still_quarantines(tmp_path: Path) -> None:
+    """The other direction, which matters more.
+
+    This OpenOCD opened the adapter and then failed, so nothing on the host knows
+    what state the target is in. Only an abort that provably never got that far
+    may be waved through."""
+    config = load_config(str(write_config(tmp_path, debugger_executable=FAKE_OPENOCD_NO_TARGET)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result.get("rejected_commands") is None
+    assert result["side_effect_status"] == "unknown"
+    assert result["quarantined"] is True
+    assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+
+def test_an_openocd_that_is_not_installed_is_a_call_that_never_started(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debugger_executable=tmp_path / "missing-openocd.exe")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "debugger_not_found"
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result.get("quarantined") is not True, result
+
+
+def test_the_openocd_fake_refuses_a_run_stage_command_the_way_openocd_does() -> None:
+    """The fake is the thing under test here.
+
+    Every OpenOCD test in this suite is only worth what this evaluator is worth,
+    and the one it accepted for three releases could not have run."""
+    refused, initialized, exit_code = fake_openocd.evaluate('reset halt; echo "done"; shutdown', initialized=False)
+    accepted, _, accepted_exit = fake_openocd.evaluate('init; reset halt; echo "done"; shutdown', initialized=False)
+
+    assert refused == ['Error: invalid command name "reset"']
+    assert initialized is False
+    assert exit_code == 1
+    assert accepted == ["done"]
+    assert accepted_exit == 0
 
 
 def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None:

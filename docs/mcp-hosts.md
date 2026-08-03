@@ -75,6 +75,14 @@ Optional Windows PowerShell override:
 $env:AGENTIC_HIL_CONFIG = "$env:APPDATA\agentic-hil\projects\<project-id>\config.yaml"
 ```
 
+On a Windows profile where an installed packaged application holds an app-capability ACE on `%USERPROFILE%\AppData`, that path is refused by the path trust check with `unsafe_configured_path`, which names the package holding the right. There the override is the supported answer rather than a workaround, pointed at a location that passes:
+
+```powershell
+$env:AGENTIC_HIL_CONFIG = "$env:USERPROFILE\.agentic-hil\projects\<project-id>\config.yaml"
+```
+
+Set `state_root` in that file to a directory under the same root. Never relax an ACL to make the check pass. Full rules: `agentic-hil://reference/platform-paths`.
+
 ## Canonical Tool Names
 
 Agentic HIL returns one canonical name for each tool in MCP `tools/list`, such as `probe_target`, `flash_firmware`, and `com_read`. Hosts may display a qualified form such as `agentic-hil_probe_target` or `mcp__agentic-hil__probe_target`. That prefix is a host-side namespace, not a second Agentic HIL API.
