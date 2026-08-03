@@ -86,6 +86,12 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # `setup`. It is a capability floor and must not follow the release: raising
     # it would reject installations that are new enough.
     "AI_AGENT_QUICKSTART.md": "capability floor, deliberately not the current release",
+    # These two name, in prose, the release a defect shipped in, so a reader can
+    # tell which behaviour the test pins and why it exists. Naming that release
+    # is the point; following the current one would erase the history the
+    # comment records. Neither file pins a version anything installs against.
+    "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
+    "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
 }
 
 
