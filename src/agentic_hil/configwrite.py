@@ -319,10 +319,10 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         applied: list[JsonObject] = []
         created_entries: list[str] = []
         for resolved, value in requested:
-            outcome = _apply_change(updated, resolved, value, created_entries)
-            if isinstance(outcome, dict) and outcome.get("ok") is False:
-                return outcome
-            applied.append({"key": resolved.key, "previous_value": outcome, "value": value, "right": resolved.right})
+            refusal, previous = _apply_change(updated, resolved, value, created_entries)
+            if refusal is not None:
+                return refusal
+            applied.append({"key": resolved.key, "previous_value": previous, "value": value, "right": resolved.right})
 
         _deny_new_entries(updated, created_entries)
         missing = _missing_required_fields(updated, created_entries)
@@ -428,22 +428,34 @@ def _rule_for(resolved: ResolvedConfigKey) -> Any:
     raise ConfigError("config_invalid", "No key rule covers a key that resolved.", {"field": resolved.key})  # pragma: no cover - resolution comes from the rules
 
 
-def _apply_change(document: JsonObject, resolved: ResolvedConfigKey, value: Any, created_entries: list[str]) -> Any:
+def _apply_change(document: JsonObject, resolved: ResolvedConfigKey, value: Any, created_entries: list[str]) -> tuple[JsonObject | None, Any]:
+    """Set one key, or say why not. Returns (refusal or None, previous value)."""
     section = document.get(resolved.section)
     if section is None:
         section = {}
         document[resolved.section] = section
     if not isinstance(section, dict):
-        return _invalid(resolved.section, f"`{resolved.section}` in this configuration is not a mapping, so a key under it cannot be set.")
+        return _invalid(resolved.section, f"`{resolved.section}` in this configuration is not a mapping, so a key under it cannot be set."), None
     container: JsonObject = section
     if resolved.entry is not None:
         entry = section.get(resolved.entry)
         if entry is None:
+            # Only a description key brings a device into existence. Granting a
+            # permission on an entry that does not exist is not a thing anyone
+            # means, and letting it create one would make the refusal that
+            # follows name the wrong grant.
+            if resolved.under_permissions:
+                return _invalid(
+                    f"{resolved.section}.{resolved.entry}",
+                    f"`{resolved.section}.{resolved.entry}` is not in this configuration, and a permission does not "
+                    "create a device. Describe the device first; a new entry is created with every permission false.",
+                    unknown_entry=f"{resolved.section}.{resolved.entry}",
+                ), None
             entry = {}
             section[resolved.entry] = entry
             created_entries.append(f"{resolved.section}.{resolved.entry}")
         if not isinstance(entry, dict):
-            return _invalid(f"{resolved.section}.{resolved.entry}", f"`{resolved.section}.{resolved.entry}` is not a mapping, so a key under it cannot be set.")
+            return _invalid(f"{resolved.section}.{resolved.entry}", f"`{resolved.section}.{resolved.entry}` is not a mapping, so a key under it cannot be set."), None
         container = entry
         if resolved.under_permissions:
             permissions = entry.get("permissions")
@@ -451,11 +463,11 @@ def _apply_change(document: JsonObject, resolved: ResolvedConfigKey, value: Any,
                 permissions = {}
                 entry["permissions"] = permissions
             if not isinstance(permissions, dict):
-                return _invalid(f"{resolved.section}.{resolved.entry}.permissions", "That entry's permissions block is not a mapping.")
+                return _invalid(f"{resolved.section}.{resolved.entry}.permissions", "That entry's permissions block is not a mapping."), None
             container = permissions
     previous = container.get(resolved.field)
     container[resolved.field] = value
-    return previous
+    return None, previous
 
 
 def _deny_new_entries(document: JsonObject, created_entries: list[str]) -> None:

@@ -325,6 +325,25 @@ def test_a_new_device_an_agent_adds_arrives_granted_nothing(tmp_path: Path, monk
     assert added["permissions_changed"] == []
 
 
+def test_a_permission_does_not_bring_a_device_into_existence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a description key creates an entry.
+
+    Otherwise `debuggers.ghost.permissions.allow_flash` would conjure a probe
+    that is not on the bench, and the refusal that followed would be about the
+    wrong thing."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True, CONFIG_PERMISSIONS_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.ghost.permissions.allow_flash", True)))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["unknown_entry"] == "debuggers.ghost"
+    assert path.read_bytes() == before
+
+
 def test_a_new_device_still_needs_the_field_its_schema_requires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_bytes()

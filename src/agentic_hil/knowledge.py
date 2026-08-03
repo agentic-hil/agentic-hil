@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass
+from functools import cache, lru_cache
 from importlib import resources
 from pathlib import Path
 
@@ -615,7 +617,14 @@ def config_schema_text() -> str:
     return resources.files("agentic_hil").joinpath("schemas", "config.schema.json").read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=1)
 def config_schema_document() -> JsonObject:
+    """The shipped schema, parsed once.
+
+    Cached because resolving a key reads it, and a change set resolves many; the
+    file is packaged data that cannot change while the process runs. Callers that
+    hand a node onward copy it — ``config_key_schema`` does — so nothing that
+    escapes into a result can write back into the cache."""
     document = json.loads(config_schema_text())
     if not isinstance(document, dict):  # pragma: no cover - the shipped schema is an object
         raise ValueError("The bundled configuration schema is not a JSON object.")
@@ -749,6 +758,7 @@ def _section_entry_schema(schema: JsonObject, rule: ConfigKeyRule) -> JsonObject
     return section
 
 
+@cache
 def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
     """The field names this rule covers, read out of the shipped schema.
 
@@ -782,7 +792,9 @@ def config_key_schema(rule: ConfigKeyRule, field: str) -> JsonObject | None:
     properties = _section_entry_schema(schema, rule).get("properties")
     if not isinstance(properties, dict) or field not in properties:
         return None
-    return _dereference(schema, properties[field])
+    # A copy, because this node travels into tool results and reference tables,
+    # and the schema behind it is cached for the life of the process.
+    return deepcopy(_dereference(schema, properties[field]))
 
 
 def resolve_config_key(key: str) -> ResolvedConfigKey | None:
