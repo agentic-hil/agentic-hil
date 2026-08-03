@@ -760,7 +760,10 @@ def plan_devices(config: AgenticHILConfig, test_config: TestConfig) -> DeviceSet
             continue
         debugger_id = step_debugger_id(config, step)
         if debugger_id in config.debuggers:
-            devices.append(debugger_device(bind_debugger(config, str(debugger_id)), str(debugger_id)))
+            # Named, not bound: a probe's lock identity comes from its own config
+            # entry, so which probe this config happens to be bound to cannot
+            # change which board a step is declared to lock.
+            devices.append(debugger_device(config, str(debugger_id)))
     return DeviceSet.of(devices)
 
 
