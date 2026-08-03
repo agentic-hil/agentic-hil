@@ -50,7 +50,7 @@ from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, declared_devices, load_test_config
-from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SKILL_NAME = "agentic-hil"
@@ -205,7 +205,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
-        return run_stdio_server(load_cli_authoritative_config(args.config))
+        return run_mcp_stdio(args.config)
     if args.command == "com-stdio":
         config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
@@ -1540,6 +1540,27 @@ def load_cli_authoritative_config(config_path: str | None = None) -> AgenticHILC
     expected_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(workspace)).expanduser().resolve()
     validate_legacy_config_selector(config_path, workspace, expected_path)
     return load_authoritative_config(workspace)
+
+
+def run_mcp_stdio(config_path: str | None = None) -> int:
+    """Serve MCP for the current workspace, configured or not.
+
+    A missing configuration used to end the server before it started, which left
+    an agent with `config_file_not_found` and no way forward that did not involve
+    a person at a terminal. It now starts bound to the workspace instead, with
+    every tool refusing except the one that generates a configuration once.
+
+    Only an absent file takes that route. A configuration that exists and does
+    not load — invalid, or in a location the trust check rejects — is still a
+    hard stop: reading "broken" as "absent" would make corrupting the file a way
+    to be handed the provisioning grant again."""
+    try:
+        config = load_cli_authoritative_config(config_path)
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        return run_stdio_server(None, tools=UnprovisionedToolService(Path.cwd().resolve()))
+    return run_stdio_server(config)
 
 
 def validate_legacy_config_selector(config_path: str | None, workspace: Path, expected_path: Path) -> None:

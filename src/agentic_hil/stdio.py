@@ -7,7 +7,7 @@ from typing import TextIO
 
 from agentic_hil.config import ConfigError, load_authoritative_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import AgenticHILConfig
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
@@ -23,15 +23,25 @@ def message_size_limit(config: AgenticHILConfig) -> int:
 
 
 def run_stdio_server(
-    config: AgenticHILConfig,
+    config: AgenticHILConfig | None,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
     max_message_chars: int | None = None,
+    tools: AgenticHILToolService | UnprovisionedToolService | None = None,
 ) -> int:
+    """Serve MCP over stdio.
+
+    ``config`` is None only for a workspace that has no configuration yet, and
+    the caller then supplies the service that may generate one. The message limit
+    is the fixed default in that case: there is no configured upload size to
+    derive it from, and nothing to upload either."""
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
-    tools = AgenticHILToolService(config, frontend="mcp")
-    limit = max_message_chars or message_size_limit(tools.config)
+    if tools is None:
+        if config is None:
+            raise ValueError("run_stdio_server needs either a configuration or a prepared tool service.")
+        tools = AgenticHILToolService(config, frontend="mcp")
+    limit = max_message_chars or (message_size_limit(config) if config is not None else DEFAULT_MAX_MESSAGE_CHARS)
     primary_error: BaseException | None = None
     try:
         while True:

@@ -85,6 +85,12 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, required=["bus_id", "frame_id"])},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["bus_id"])},
+    # No parameters, and that is the contract. The configuration is generated for
+    # the workspace this server is bound to, out of what is attached to this
+    # machine: a workspace_root argument would let a caller provision a project
+    # this server was never pointed at, and a content argument would let it
+    # decide its own permissions.
+    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments and writes no permission: every write permission in the generated file is false, including allow_config_write, so it succeeds once and then refuses itself. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

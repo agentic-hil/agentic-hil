@@ -26,4 +26,5 @@ debugger_probes_list
 flash_firmware
 get_last_report
 probe_target
+project_config_create
 reset_target
