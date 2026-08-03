@@ -22,7 +22,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.contracts import validate_tool_arguments
-from agentic_hil.devices import Device, DeviceSet, debugger_device, uart_device
+from agentic_hil.devices import Device, DeviceError, DeviceSet, debugger_device, uart_device
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
@@ -443,9 +443,18 @@ class TestReactor:
         return self.runner(str(self.step_debugger_id(step))).execute(step.action, step.arguments)
 
     def _execute_uart(self, step: TestStep) -> JsonObject:
+        """Run a UART step through the device the plan named.
+
+        The device supplies its own ``port_id``, so a step cannot address one
+        config entry and reach another, and ``uart_open``/``uart_close`` are the
+        same action vocabulary every device kind answers to."""
         port_id = str(step.port_id)
+        try:
+            device = uart_device(self.config, port_id)
+        except DeviceError as error:
+            return {"tool": "test_reactor", **error.result}
         if step.action == "uart_open":
-            result = self.service.call("com_session_start", {"port_id": port_id, "clear_buffer": step.arguments.get("clear_buffer", True)})
+            result = device.execute(self.service, step.action, {"clear_buffer": step.arguments.get("clear_buffer", True)})
             self._owned_uarts[port_id] = result.get("ok") is True and not result.get("already_active", False)
             return result
         if not self._owned_uarts.get(port_id):
@@ -456,7 +465,7 @@ class TestReactor:
                 "summary": "A test plan cannot close a UART session it did not open.",
                 "port_id": port_id,
             }
-        result = self.service.call("com_session_stop", {"port_id": port_id})
+        result = device.execute(self.service, step.action)
         if result.get("ok") is True:
             self._owned_uarts[port_id] = False
         return result
