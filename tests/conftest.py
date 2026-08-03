@@ -87,6 +87,7 @@ def write_config(
     config_path: Path | None = None,
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
+    config_version: int | None = None,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     workspace_root = (workspace_root or directory).resolve()
@@ -120,8 +121,12 @@ def write_config(
     )
     config_path = config_path or directory / ".agentic-hil" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    # No `version:` by default: the bulk of the suite exercises the file a
+    # project already has on disk, which is read under version 1 and still needs
+    # a granted read. A test that wants the version 2 model asks for it.
+    version_line = "" if config_version is None else f"version: {config_version}\n"
     config_path.write_text(
-        f"""workspace_root: {workspace_root.as_posix()!r}
+        f"""{version_line}workspace_root: {workspace_root.as_posix()!r}
 state_root: {state_root.as_posix()!r}
 target:
   name: "example-target"
@@ -137,7 +142,7 @@ artifacts:
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{section_yaml("debuggers", debuggers_yaml, grants, extra={debugger_name: primary}, auto_probe_ids=auto_probe_ids)}{section_yaml("com_ports", com_ports_yaml, grants)}{section_yaml("can_buses", can_buses_yaml, grants)}reports:
+{section_yaml("debuggers", debuggers_yaml, grants, extra={debugger_name: primary}, auto_probe_ids=auto_probe_ids, config_version=config_version)}{section_yaml("com_ports", com_ports_yaml, grants, config_version=config_version)}{section_yaml("can_buses", can_buses_yaml, grants, config_version=config_version)}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"
@@ -161,6 +166,7 @@ DEFAULT_TEST_PERMISSIONS = {
     "allow_raw_debugger_commands": False,
     "allow_mass_erase": False,
 }
+READ_PERMISSION_FLAGS = frozenset({"allow_probe", "allow_read"})
 SECTION_GRANTS = {
     "debuggers": {"allow_probe": "allow_probe", "allow_flash": "allow_flash", "allow_reset": "allow_reset", "allow_raw_debugger_commands": "allow_raw_debugger_commands", "allow_mass_erase": "allow_mass_erase"},
     "com_ports": {"allow_read": "allow_com_read", "allow_write": "allow_com_write"},
@@ -168,7 +174,7 @@ SECTION_GRANTS = {
 }
 
 
-def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: dict | None = None, *, auto_probe_ids: bool = True) -> str:
+def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: dict | None = None, *, auto_probe_ids: bool = True, config_version: int | None = None) -> str:
     """Render one named-device section, giving every entry the permissions it
     does not declare itself.
 
@@ -180,6 +186,9 @@ def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: di
     if not entries:
         return f"{section}: {{}}\n"
     defaults = {flag: bool(grants.get(source, False)) for flag, source in SECTION_GRANTS[section].items()}
+    if config_version is not None and config_version >= 2:
+        # Version 2 has no read permission to grant, and refuses the key.
+        defaults = {flag: value for flag, value in defaults.items() if flag not in READ_PERMISSION_FLAGS}
     for entry in entries.values():
         entry.setdefault("permissions", defaults)
     if section == "debuggers" and len(entries) > 1 and auto_probe_ids:

@@ -1,5 +1,7 @@
 # Bootstrap profile for `agentic-hil init` / `setup`. Roots, debugger/probe,
 # target, and serial bindings resolve externally; placeholders show final shape.
+# The config it produces is written at version 2, where reading needs no
+# permission, so a profile only ever requests what writes or changes state.
 workspace_root: "/absolute/path/to/agentic-hil/examples/nucleo-f446re_demo"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
@@ -7,9 +9,11 @@ target:
   name: "nucleo-f446re-demo"
   controller: "stm32f446ret6"
 
-# Every device is named, and every device carries its own permissions. The name
-# is how test plans and MCP tool calls address it. All permission flags are
-# deny-by-default: what is not listed here is refused.
+# Every device is named, and the name is how test plans and MCP tool calls
+# address it. Reading a device needs no permission: every device a test plan
+# names is locked for the whole run, and a device the plan does not name is
+# refused. Writing and state-changing operations are deny-by-default, per
+# device: what is not listed here is refused.
 debuggers:
   dut:
     type: "openocd"          # or "stlink" for STM32CubeProgrammer CLI
@@ -17,7 +21,6 @@ debuggers:
     target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
-      allow_probe: true
       allow_flash: true
       allow_reset: true
       allow_raw_debugger_commands: false
@@ -32,5 +35,4 @@ com_ports:
     device: "/dev/ttyACM0"   # Nucleo ST-LINK virtual COM port; e.g. COM5 on Windows
     baudrate: 115200
     permissions:
-      allow_read: true
       allow_write: false

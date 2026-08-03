@@ -127,8 +127,12 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             "probe_id": discovery["probe_id"],
             "interface": "SWD",
             "timeout_s": profile_debugger.get("timeout_s", 60),
+            # The template this fills in is a version 2 configuration, where
+            # reading needs no grant and `allow_probe` is refused by name. A
+            # profile written against version 1 may still request it; that
+            # request is already satisfied, so it is dropped rather than
+            # written into a file that would be refused on load.
             "permissions": {
-                "allow_probe": bool(requested_permissions.get("allow_probe", True)),
                 "allow_flash": bool(requested_permissions.get("allow_flash", False)),
                 "allow_reset": bool(requested_permissions.get("allow_reset", False)),
                 "allow_raw_debugger_commands": False,
@@ -150,8 +154,9 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             "dut_uart": {
                 "device": str(matched_port["device"]),
                 "baudrate": int(profile_port.get("baudrate", 115200)),
+                # `allow_read` went the same way as `allow_probe`: reading a
+                # port needs no grant at version 2, and the key is refused there.
                 "permissions": {
-                    "allow_read": bool(requested_io.get("allow_read", False)),
                     "allow_write": bool(requested_io.get("allow_write", False)),
                 },
             }

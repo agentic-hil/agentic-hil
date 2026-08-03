@@ -65,7 +65,7 @@ class OpenOCDBackend:
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
-        debug_permission_revoked = not config.debugger.permissions.allow_probe or config.debugger.permissions.allow_raw_debugger_commands
+        debug_permission_revoked = not config.probe_allowed() or config.debugger.permissions.allow_raw_debugger_commands
         if debugger_changed or debug_permission_revoked:
             self._debug.close()
         self.config = config
@@ -112,7 +112,7 @@ class OpenOCDBackend:
         }
 
     def list_probes(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
         return {
             "ok": False,
@@ -123,7 +123,7 @@ class OpenOCDBackend:
         }
 
     def probe_target(self) -> JsonObject:
-        if not self.config.debugger.permissions.allow_probe:
+        if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'init; targets; echo "{marker}"; shutdown', marker)

@@ -100,6 +100,27 @@ def _substitutions() -> dict[str, str]:
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "config_file_not_found": ErrorRemedy(
+        meaning=(
+            "This workspace has no authoritative configuration, so there is no bench, no permission and no state "
+            "directory for the call to use. It is the first wall a new project hits, not a fault."
+        ),
+        remediation=(
+            "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
+            "the hardware attached to this machine, and writes every permission false — including the one that would "
+            "let it write the file again.",
+            "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
+            "Then ask the operator to set the permissions the task actually needs; nothing but a human edit turns one "
+            "of them true.",
+        ),
+        do_not=(
+            "Do not write the configuration by hand to give yourself a permission, and do not drive the hardware "
+            "another way while the project has none. A missing configuration is the absence of policy, not permission "
+            "to act without it.",
+            "Do not delete or move an existing configuration to reach this state. Generating a replacement produces "
+            "the deny-by-default skeleton again, so it throws the operator's settings away and gives you nothing.",
+        ),
+    ),
     "unsafe_configured_path": ErrorRemedy(
         meaning=(
             "A configured path, or one of its ancestor directories, can be replaced or re-permissioned by a principal "
@@ -157,6 +178,66 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not change the ACL or the owner of the rejected directory, and do not move state_root inside "
             "workspace_root to dodge the check.",
+        ),
+    ),
+    "unsafe_configured_path:device_lock_root": ErrorRemedy(
+        meaning=(
+            "The machine-wide device lock directory, ~/.agentic-hil/device-locks, or one of its ancestors failed the "
+            "trust check. That directory is the single place every process on this machine agrees to look for who holds "
+            "a board, so a replaceable ancestor would let another local principal fake or steal a hold."
+        ),
+        remediation=(
+            "Fix the ancestor the refusal names under {safe_user_root}; the location is fixed and has no override, "
+            "because an override is how two sessions stop seeing each other.",
+            "Windows: %USERPROFILE% passes; the failure is normally a directory somebody re-permissioned below it.",
+            "Full rules and the measured per-directory verdicts: MCP resource " + PLATFORM_PATHS_URI + ".",
+        ),
+        do_not=(
+            "Do not change the ACL of the rejected path, and do not work around it by keeping the lock beside the "
+            "configuration: a lock kept per configuration is not a bench lock, which is exactly the failure this "
+            "location exists to prevent.",
+        ),
+    ),
+    "device_busy": ErrorRemedy(
+        meaning=(
+            "A physical device is held by another owner for the duration of their run. The refusal names the holder in "
+            "`holder` (pid, host, frontend, and the run label when there is one) and when it took the device in "
+            "`held_since`. Nothing was touched."
+        ),
+        remediation=(
+            "Read `holder` and wait for that run, or ask its owner to finish. This is not a fault: it is the exclusivity "
+            "that replaced the read permission.",
+            "If waiting is the right answer, ask for it explicitly and bounded: `wait_s` on the run start. Waiting is "
+            "never silent and never unbounded.",
+            "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
+            "the hold is still real, so stop that process rather than deleting anything.",
+        ),
+        do_not=(
+            "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "
+            "would let two runs drive one board, which is the failure the mutex exists to prevent.",
+        ),
+    ),
+    "undeclared_device": ErrorRemedy(
+        meaning=(
+            "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "
+            "`undeclared_devices` what it reached for. Nothing was touched."
+        ),
+        remediation=(
+            "Add the device to the test description and rerun. The declaration is what the mutex locks before the run "
+            "starts, so a device that is not declared was never locked and could be driven by somebody else mid-run.",
+            "A test plan declares a debugger with `debugger: <name>` and a serial line with `port_id: <name>` on the "
+            "steps that use them.",
+        ),
+        do_not=(
+            "Do not work around this by splitting the access into a separate session outside the run. That is exactly "
+            "the outside observation the declaration exists to keep out of a running test.",
+        ),
+    ),
+    "run_already_active": ErrorRemedy(
+        meaning="This owner already holds an open run, and a run declares its devices once, up front.",
+        remediation=(
+            "End the open run before declaring another; the devices it declared are released then.",
+            "One run per owner is what makes the declared set the complete answer to what this owner may touch.",
         ),
     ),
     "target_not_detected:openocd": ErrorRemedy(
@@ -364,9 +445,26 @@ def debugger_backends_document() -> JsonObject:
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
         "flash_address": FLASH_ADDRESS_RULE,
         "permissions": {
-            "rule": "Every debugger action is denied unless `debuggers.<name>.permissions` grants it. The permissions belong to the operator.",
-            "fields": ["allow_probe", "allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"],
+            "rule": (
+                "Reading a target needs no permission: probing it, listing probes, and opening a debug session are "
+                "allowed as configured. Every action that writes or changes state is denied unless "
+                "`debuggers.<name>.permissions` grants it. The permissions belong to the operator."
+            ),
+            "fields": ["allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"],
             "default": False,
+            "reading": (
+                "What protects a read is exclusivity, not a grant: every device a run declares is locked machine-wide "
+                "for the whole run, and a device the description does not name is refused. See MCP resource "
+                + LEASE_LIFECYCLE_URI
+                + "."
+            ),
+            "removed_field": {
+                "allow_probe": (
+                    "Version 1 only. A configuration that sets `version: 2` must not carry it; a configuration without "
+                    "a `version` key is still read under version 1, where reading needs it. Both COM ports and CAN "
+                    "buses lost `permissions.allow_read` the same way."
+                )
+            },
             "on_refusal": "error_type `permission_denied`: report it and stop. Never edit the authoritative configuration to grant it, and never carry the action out another way.",
         },
         "full_schema": CONFIG_SCHEMA_URI,
@@ -395,9 +493,75 @@ def config_schema_text() -> str:
     return resources.files("agentic_hil").joinpath("schemas", "config.schema.json").read_text(encoding="utf-8")
 
 
-LEASE_LIFECYCLE_DOCUMENT = """# Hardware lease and quarantine lifecycle
+LEASE_LIFECYCLE_DOCUMENT = """# Device exclusivity, hardware leases, and the quarantine lifecycle
 
-State lives under `state_root`, outside the workspace, shared by every frontend. It survives process exit; that is what makes an abandoned incident visible instead of forgotten.
+Two different things guard the hardware, and they live in two different places.
+
+**Exclusivity** is machine-wide and keyed on the physical device. It is what replaced the read permission: reading needs no grant, because whoever holds a board cannot be disturbed and whoever reads while no run holds it disturbs nobody.
+
+**The lease** is per configuration, lives under `state_root`, and records what a call did and whether the hardware was left in a confirmed state. It survives process exit; that is what makes an abandoned incident visible instead of forgotten.
+
+## Device exclusivity
+
+| Property | Rule |
+|---|---|
+| what is locked | the physical device: `physical:<resource_id>`, `probe:<identity>`, `com:<device>`, `can:<adapter>:<channel>` |
+| case | a name for hardware — `resource_id`, a probe serial, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one probe wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
+| where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
+| how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
+| what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |
+| contention | refused with `device_busy`, naming the holder; waiting happens only when the caller asked for it with `wait_s`, and stays bounded |
+| a crashed owner | the operating system drops the lock when the process dies, so the device is free immediately — no quarantine, no `recover`, no waiting |
+
+A call outside a declared run still takes the device for the length of the call, so a lone observation is refused while a run holds the board and works when none does.
+
+## Declaring a run over MCP
+
+A single call needs no declaration. A *sequence* does: without one, `flash_firmware`, `reset_target` and `com_read` are three runs, each holding its device only for its own duration, and between them the board is free for anything else on this machine.
+
+```json
+{"name": "bench_run_start", "arguments": {
+  "devices": [{"kind": "debugger", "id": "dut"}, {"kind": "uart", "id": "dut_uart"}],
+  "label": "boot-smoke"
+}}
+```
+
+| Tool | Does |
+|---|---|
+| `bench_run_start` | resolves every named device, then takes the whole set at once; holds it until the run ends |
+| `bench_run_stop` | releases the run's devices; safe to call when no run is open |
+| `bench_run_status` | whether a run is open here, what it declared, and since when |
+
+`kind` is one of `debugger`, `uart`, `can`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
+
+What the declaration buys, and what it costs:
+
+- **Held for the run.** Every call inside the run borrows the run's hold instead of taking its own, so no gap opens between two steps.
+- **Nothing else may be touched.** A call reaching for a device the run did not declare is refused with `undeclared_device`. Declare everything the sequence touches, up front.
+- **All or nothing.** A declared device already held fails `bench_run_start` immediately with `device_busy` naming the holder. Nothing is left half-acquired: if the third of four is busy, the first two were already given back before the refusal returned.
+- **Fixed order.** Devices are taken sorted by lock key, never in the order they were declared, so two runs reaching for an overlapping set cannot each hold what the other needs next.
+
+### If a run is never closed
+
+Nothing times a run out, and that is deliberate: dropping a device that may be mid-operation is exactly the silent failure exclusivity exists to prevent. A run therefore holds its devices until one of these happens.
+
+| Event | What frees the devices |
+|---|---|
+| `bench_run_stop` | the run releases them itself |
+| the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
+| the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
+
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true` — an idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+
+One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
+
+### Two config entries, one board
+
+The lock is keyed on the hardware, not on the name of the config entry. Two entries that describe one physical unit — a debug probe and its virtual COM port sharing a `resource_id`, or the same serial device configured twice — resolve to one lock key and are taken once. Declaring both is not an error and does not double-lock anything.
+
+The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
+
+Reading can still perturb a target — an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
 
 ## Lease states
 
@@ -535,6 +699,9 @@ A rejected configuration location therefore leaves the agent installed and worki
 |---|---|---|
 | authoritative configuration | `%USERPROFILE%\\.agentic-hil\\projects\\<workspace-name>\\config.yaml`, selected by `AGENTIC_HIL_CONFIG` | default `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml` passes |
 | `state_root` | `%USERPROFILE%\\.agentic-hil\\state` | default `$XDG_STATE_HOME/agentic-hil` passes |
+| device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed |
+
+The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other — which is the failure it exists to prevent. The home directory is chosen because it is the only location whose ancestors pass this check on a stock profile of either platform: a directory shared across *users* (`C:\\ProgramData`, `/var/lib`) is either writable by principals the check rejects or needs root to create, so exclusivity reaches every process of one user rather than every user of one machine.
 
 Rules that hold on both platforms:
 
@@ -542,6 +709,7 @@ Rules that hold on both platforms:
 - Set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment. Never in a repository-controlled file (`.vscode/mcp.json`, `.mcp.json`, `.codex/config.toml`, `opencode.json`).
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the deny-by-default skeleton again, so the round trip costs a human their customised permissions and gains an agent nothing.
 
 ## Do not
 
@@ -635,8 +803,8 @@ MCP_RESOURCES: list[JsonObject] = [
     _resource_descriptor(
         LEASE_LIFECYCLE_URI,
         "lease-lifecycle",
-        "Lease and quarantine lifecycle",
-        "Lease states, the predicate that decides whether to continue, the auto-recovery branch, and the operator recovery path including --confirm-safe-state, --quarantine-id and --accept-config-change.",
+        "Device exclusivity, lease and quarantine lifecycle",
+        "Which device a run locks and for how long, what device_busy and undeclared_device mean, why a crashed run needs no recovery; then lease states, the predicate that decides whether to continue, the auto-recovery branch, and the operator recovery path including --confirm-safe-state, --quarantine-id and --accept-config-change.",
         MARKDOWN_MIME,
     ),
     _resource_descriptor(

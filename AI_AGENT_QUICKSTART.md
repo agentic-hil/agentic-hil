@@ -15,7 +15,7 @@ Not project-local. The whole of it, before you start:
 - A user-local package and console script in your home directory. No admin rights, ever.
 - An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches. *(user-wide, `agent-install`)*
 - A skill file in your agent's skill directory. *(user-wide, `agent-install`)*
-- One external config per project: deny-by-default unless `agentic-hil.config.example.yaml` declares bootstrap hardware requirements. *(per project, `init`)*
+- One external config per project, outside its repository: reading a device needs no permission, and every permission that writes or changes state is denied — unless `agentic-hil.config.example.yaml` declares bootstrap hardware requirements. *(per project, `init`)*
 - Nothing inside the firmware project, nothing committed — no `.mcp.json`, no config, no checkout. `setup` needs none of them, and writing one puts the hardware gate in a file anyone with repository access can change.
 
 Larger than what the operator asked for? Say so and let them decide.
@@ -84,9 +84,9 @@ Each half rolls back only its own writes; **a failing project half never removes
 
 `--force` on `setup` and `agent-install` repairs a managed skill or MCP entry. It never rewrites an authoritative config; only `agentic-hil init --force` does, and that is operator policy — ask first.
 
-The external config binds `workspace_root` and normally denies all hardware access. A shipped `agentic-hil.config.example.yaml` instead authorizes bootstrap: setup locates STM32CubeProgrammer, requires one ST-Link, identifies it via HOTPLUG, matches its virtual COM port, then writes requested probe/flash/reset/UART grants. Raw debugger commands and mass erase stay denied. Multiple probes, ambiguous COM matches, or existing configs cause refusal, never guessing or replacement.
+The external config binds `workspace_root` and is written at `version: 2`: reading a device needs no permission, because a run locks the devices its test plan names for its whole duration and that exclusivity is what protects a read. Everything that writes or changes state is denied. A shipped `agentic-hil.config.example.yaml` instead authorizes bootstrap: setup locates STM32CubeProgrammer, requires one ST-Link, identifies it via HOTPLUG, matches its virtual COM port, then writes requested flash/reset/UART grants. Raw debugger commands and mass erase stay denied. Multiple probes, ambiguous COM matches, or existing configs cause refusal, never guessing or replacement.
 
-Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`; `allow_probe` belongs to the config being created. No profile means deny-by-default.
+Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`. No profile means everything that writes or changes state is denied.
 
 **`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
 
@@ -97,6 +97,8 @@ If the board, debugger, COM port or artifact path cannot be inferred, ask one co
 ## Then use the tools
 
 Discover them with `tools/list`. Build, `probe_target`, `flash_firmware`, then `com_session_*` or `can_session_*` for stimulus and feedback, and `get_last_report` plus `classify_last_error` to diagnose.
+
+A sequence of hardware calls is one run and has to say so: `bench_run_start` with `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds those devices until `bench_run_stop`. Without it each call holds its device only for its own duration and the board is free between two steps; inside a run only the declared devices may be touched.
 
 Never substitute raw `openocd`, `pyocd`, `st-flash`, `gdb`, `screen` or `candump`, a Makefile target that runs one, or direct `/dev/tty*` access. `permission_denied` is the answer to the request, not an obstacle: report it, name the permission, stop. Never edit the config to grant yourself one.
 

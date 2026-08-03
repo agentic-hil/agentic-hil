@@ -21,11 +21,14 @@ from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
+    DEFAULT_CONFIG_TEMPLATE,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
+    authoritative_config_target,
     bind_debugger,
     config_schema_text,
+    debugger_access_enabled,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
@@ -46,79 +49,9 @@ from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config
-from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
-
-DEFAULT_CONFIG_TEMPLATE = """target:
-  name: "example-target"
-  controller: "unknown-controller"
-
-# Every debug probe is a named entry, and each carries its own
-# deny-by-default permissions. Test-reactor plan steps address a probe by that
-# name. The MCP tools drive one probe: with exactly one entry it is bound
-# automatically, and with several they refuse rather than pick a board, so
-# multi-board work runs through `agentic-hil test-reactor`.
-debuggers:
-  dut:
-    type: "openocd"
-    executable: null
-    probe_id: null
-    target_type: null
-    interface_cfg: "interface/stlink.cfg"
-    target_cfg: "target/stm32f4x.cfg"
-    timeout_s: 60
-    permissions:
-      allow_probe: false
-      allow_flash: false
-      allow_reset: false
-      allow_raw_debugger_commands: false
-      allow_mass_erase: false
-
-debug:
-  gdb_executable: null
-  allowed_symbols: []
-  allow_all_symbols: false
-  max_dump_size_bytes: 1048576
-
-artifacts:
-  allowed_roots:
-    - "build"
-  upload_directory: ".agentic-hil/artifacts"
-  allowed_extensions:
-    - ".elf"
-    - ".hex"
-    - ".bin"
-  max_upload_size_mb: 64
-  allow_upload: false
-
-com_ports: {}
-
-can_buses: {}
-
-validation:
-  require_existing_file: true
-  require_allowed_root: true
-  require_allowed_extension: true
-  compute_sha256: true
-  inspect_known_formats: true
-
-reports:
-  directory: ".agentic-hil/reports"
-
-logs:
-  directory: ".agentic-hil/logs"
-
-# How far this bench lets the owning process clear its own hardware
-# quarantines. "off" always defers to the operator. "readonly" may reap
-# leftover debugger processes and re-read the probe, which touches nothing
-# physical. "reset_halt" may additionally drive a reset-into-halt, which is
-# what settles an unconfirmed flash or reset without a person — set
-# "readonly" instead if anything on this bench reacts to a target reset.
-recovery:
-  auto_recover: "reset_halt"
-  max_attempts: 3
-"""
 
 SKILL_NAME = "agentic-hil"
 # Earlier releases installed the same skill under these names. Leaving one in
@@ -218,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     reactor_parser = subparsers.add_parser("test-reactor", help="run a validated hardware test sequence")
     reactor_parser.add_argument("--test-config", default=DEFAULT_TEST_CONFIG_PATH)
+    reactor_parser.add_argument(
+        "--wait-s",
+        type=float,
+        default=0.0,
+        help="wait up to this many seconds for a device another run holds, instead of refusing immediately; bounded and never implicit",
+    )
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
@@ -266,12 +205,12 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "com-ports":
         return list_available_com_ports()
     if args.command == "mcp-stdio":
-        return run_stdio_server(load_cli_authoritative_config(args.config))
+        return run_mcp_stdio(args.config)
     if args.command == "com-stdio":
         config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
-        return run_test_reactor(args.test_config)
+        return run_test_reactor(args.test_config, wait_s=args.wait_s)
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -892,23 +831,42 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
 
 
 def initialized_config_path(workspace: Path) -> Path:
-    configured = os.environ.get(CONFIG_ENV)
-    if configured:
-        requested = Path(configured).expanduser()
-        if not requested.is_absolute():
-            raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
-        target = absolute_without_symlinks(requested)
-    else:
-        target = project_config_path(workspace)
-    if is_path_within_frozen(target, workspace):
-        raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
-    return target
+    """Where `init` writes. The same rule the agent provisioning path follows, so
+    the two cannot disagree about which file is authoritative."""
+    return authoritative_config_target(workspace)
 
 
-def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
+def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
     service = AgenticHILToolService(config, frontend="reactor")
+    # The plan's devices are held from before its first step to after its last,
+    # not around each call: between two steps there would otherwise be no lock at
+    # all, and an observation from outside could reach the board exactly where
+    # the plan assumes nothing moved. The same declaration fixes what this run
+    # may touch, so a step reaching past the plan is refused rather than
+    # silently widening what the plan says it does.
+    plan = plan_devices(config, test_config)
+    devices = plan.lock_keys
+    if devices:
+        try:
+            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s)
+        except CoordinationError as error:
+            service.close()
+            return write_report(
+                config,
+                {
+                    "tool": "test_reactor",
+                    "name": test_config.name,
+                    "test_config_path": test_config.path,
+                    "steps": [],
+                    "cleanup": [],
+                    "cleanup_ok": True,
+                    "declared_devices": devices,
+                    **error.result,
+                    "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
+                },
+            )
     # A step naming another probe gets its own service driving that debugger,
     # sharing the base coordinator so the whole project stays one owner.
     def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
@@ -995,10 +953,10 @@ def run_test_reactor(test_config_path: str | None = None) -> JsonObject:
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
     next_steps = [
-        f"Review the deny-by-default config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
+        f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Grant only the permissions the board needs under debuggers.<name>.permissions; every flag is deny-by-default.",
+        "Reading needs nothing granted: probing, serial reads and CAN reads work as written. Grant only what writes or changes state under debuggers.<name>.permissions; those flags stay deny-by-default.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
@@ -1409,17 +1367,23 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
-    # Check every probe the operator granted, not only a bound one. Reporting a
-    # green doctor because nothing was bound would hide an unplugged board, a
-    # wrong probe_id, or a broken toolchain on exactly the multi-board bench
-    # that most needs the check.
-    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if entry.permissions.allow_probe}
+    # Check every probe whose toolchain this configuration required to resolve,
+    # not only a bound one. Reporting a green doctor because nothing was bound
+    # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
+    # exactly the multi-board bench that most needs the check.
+    #
+    # Reading needs no permission any more, so "may be probed" no longer says
+    # anything about what this bench is meant to drive; a config that granted
+    # nothing would otherwise demand a debugger toolchain from every operator
+    # the moment `init` wrote it. What the config did pin is the honest signal,
+    # and it is the same set config load already insisted on resolving.
+    checks = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger grants allow_probe.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
     }
     all_ok = all(result.get("ok") is True for result in checks.values())
     if not checked:
@@ -1528,7 +1492,7 @@ def debugger_probes() -> JsonObject:
         # MCP surface does for the same config, so the two do not send an
         # operator hunting for a flag that has no entry to live on.
         return unbound_debugger_error("debugger_probes_list", config)
-    granted = [name for name, entry in config.debuggers.items() if entry.permissions.allow_probe]
+    granted = [name for name, entry in config.debuggers.items() if config.probe_allowed(entry)]
     if not granted:
         return {
             "ok": False,
@@ -1577,6 +1541,27 @@ def load_cli_authoritative_config(config_path: str | None = None) -> AgenticHILC
     expected_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(workspace)).expanduser().resolve()
     validate_legacy_config_selector(config_path, workspace, expected_path)
     return load_authoritative_config(workspace)
+
+
+def run_mcp_stdio(config_path: str | None = None) -> int:
+    """Serve MCP for the current workspace, configured or not.
+
+    A missing configuration used to end the server before it started, which left
+    an agent with `config_file_not_found` and no way forward that did not involve
+    a person at a terminal. It now starts bound to the workspace instead, with
+    every tool refusing except the one that generates a configuration once.
+
+    Only an absent file takes that route. A configuration that exists and does
+    not load — invalid, or in a location the trust check rejects — is still a
+    hard stop: reading "broken" as "absent" would let a damaged file be replaced
+    by a generated one, silently discarding the policy an operator wrote."""
+    try:
+        config = load_cli_authoritative_config(config_path)
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        return run_stdio_server(None, tools=UnprovisionedToolService(Path.cwd().resolve()))
+    return run_stdio_server(config)
 
 
 def validate_legacy_config_selector(config_path: str | None, workspace: Path, expected_path: Path) -> None:

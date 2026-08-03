@@ -592,7 +592,7 @@ def test_cli_uses_authoritative_config_and_repository_local_test_plan(
 
 
 def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr("agentic_hil.cli.run_test_reactor", lambda _path: {"ok": True, "audit_ok": False})
+    monkeypatch.setattr("agentic_hil.cli.run_test_reactor", lambda _path, **_kwargs: {"ok": True, "audit_ok": False})
 
     exit_code = entrypoint(["test-reactor"])
 
