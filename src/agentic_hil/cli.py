@@ -21,9 +21,11 @@ from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
+    DEFAULT_CONFIG_TEMPLATE,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
+    authoritative_config_target,
     bind_debugger,
     config_schema_text,
     debugger_access_enabled,
@@ -50,84 +52,6 @@ from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, declared_devices, load_test_config
 from agentic_hil.tools import AgenticHILToolService, unbound_debugger_error
 from agentic_hil.types import AgenticHILConfig, JsonObject
-
-DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. Every device a test plan
-# names is locked machine-wide for the whole run and a device the plan does not
-# name is refused, so an observation from outside cannot reach into a run, and a
-# reader while no run holds the board disturbs nobody. Writing and
-# state-changing operations are unchanged and stay deny-by-default. A config
-# written without this key is read under version 1, where reading still needs
-# allow_probe / allow_read.
-version: 2
-
-target:
-  name: "example-target"
-  controller: "unknown-controller"
-
-# Every debug probe is a named entry, and each carries its own
-# deny-by-default permissions. Test-reactor plan steps address a probe by that
-# name. The MCP tools drive one probe: with exactly one entry it is bound
-# automatically, and with several they refuse rather than pick a board, so
-# multi-board work runs through `agentic-hil test-reactor`.
-debuggers:
-  dut:
-    type: "openocd"
-    executable: null
-    probe_id: null
-    target_type: null
-    interface_cfg: "interface/stlink.cfg"
-    target_cfg: "target/stm32f4x.cfg"
-    timeout_s: 60
-    permissions:
-      allow_flash: false
-      allow_reset: false
-      allow_raw_debugger_commands: false
-      allow_mass_erase: false
-
-debug:
-  gdb_executable: null
-  allowed_symbols: []
-  allow_all_symbols: false
-  max_dump_size_bytes: 1048576
-
-artifacts:
-  allowed_roots:
-    - "build"
-  upload_directory: ".agentic-hil/artifacts"
-  allowed_extensions:
-    - ".elf"
-    - ".hex"
-    - ".bin"
-  max_upload_size_mb: 64
-  allow_upload: false
-
-com_ports: {}
-
-can_buses: {}
-
-validation:
-  require_existing_file: true
-  require_allowed_root: true
-  require_allowed_extension: true
-  compute_sha256: true
-  inspect_known_formats: true
-
-reports:
-  directory: ".agentic-hil/reports"
-
-logs:
-  directory: ".agentic-hil/logs"
-
-# How far this bench lets the owning process clear its own hardware
-# quarantines. "off" always defers to the operator. "readonly" may reap
-# leftover debugger processes and re-read the probe, which touches nothing
-# physical. "reset_halt" may additionally drive a reset-into-halt, which is
-# what settles an unconfirmed flash or reset without a person — set
-# "readonly" instead if anything on this bench reacts to a target reset.
-recovery:
-  auto_recover: "reset_halt"
-  max_attempts: 3
-"""
 
 SKILL_NAME = "agentic-hil"
 # Earlier releases installed the same skill under these names. Leaving one in
@@ -907,17 +831,9 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
 
 
 def initialized_config_path(workspace: Path) -> Path:
-    configured = os.environ.get(CONFIG_ENV)
-    if configured:
-        requested = Path(configured).expanduser()
-        if not requested.is_absolute():
-            raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
-        target = absolute_without_symlinks(requested)
-    else:
-        target = project_config_path(workspace)
-    if is_path_within_frozen(target, workspace):
-        raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
-    return target
+    """Where `init` writes. The same rule the agent provisioning path follows, so
+    the two cannot disagree about which file is authoritative."""
+    return authoritative_config_target(workspace)
 
 
 def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:

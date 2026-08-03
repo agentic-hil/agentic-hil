@@ -14,6 +14,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import replace
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -23,7 +24,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
@@ -37,6 +38,7 @@ from agentic_hil.types import (
     IoPermissions,
     JsonObject,
     LogsConfig,
+    ProjectPermissions,
     RecoveryConfig,
     ReportsConfig,
     TargetConfig,
@@ -215,6 +217,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     reports_raw = mapping(raw.get("reports"), "reports")
     logs_raw = mapping(raw.get("logs"), "logs")
     recovery_raw = mapping(raw.get("recovery"), "recovery")
+    permissions_raw = mapping(raw.get("permissions"), "permissions")
 
     target = target_config(target_raw)
     debuggers = {name: named_debugger_config(name, value, target) for name, value in debuggers_raw.items()}
@@ -246,6 +249,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         debugger_id=single[0],
         debugger=single[1],
         config_version=config_version,
+        permissions=project_permissions(permissions_raw),
     )
 
 
@@ -1031,6 +1035,320 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
         else:
             secure_optional_read_text(lock_path)
         yield
+
+
+# The deny-by-default skeleton every generated configuration starts from —
+# `agentic-hil init` on the CLI and the one-time agent provisioning path over
+# MCP write the same file. It lives here rather than beside either caller
+# because a second skeleton is a second set of defaults, and defaults are the
+# thing this file exists to keep honest.
+DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. Every device a test plan
+# names is locked machine-wide for the whole run and a device the plan does not
+# name is refused, so an observation from outside cannot reach into a run, and a
+# reader while no run holds the board disturbs nobody. Writing and
+# state-changing operations are unchanged and stay deny-by-default. A config
+# written without this key is read under version 1, where reading still needs
+# allow_probe / allow_read.
+version: 2
+
+target:
+  name: "example-target"
+  controller: "unknown-controller"
+
+# Every debug probe is a named entry, and each carries its own
+# deny-by-default permissions. Test-reactor plan steps address a probe by that
+# name. The MCP tools drive one probe: with exactly one entry it is bound
+# automatically, and with several they refuse rather than pick a board, so
+# multi-board work runs through `agentic-hil test-reactor`.
+debuggers:
+  dut:
+    type: "openocd"
+    executable: null
+    probe_id: null
+    target_type: null
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
+    timeout_s: 60
+    permissions:
+      allow_flash: false
+      allow_reset: false
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+
+debug:
+  gdb_executable: null
+  allowed_symbols: []
+  allow_all_symbols: false
+  max_dump_size_bytes: 1048576
+
+artifacts:
+  allowed_roots:
+    - "build"
+  upload_directory: ".agentic-hil/artifacts"
+  allowed_extensions:
+    - ".elf"
+    - ".hex"
+    - ".bin"
+  max_upload_size_mb: 64
+  allow_upload: false
+
+com_ports: {}
+
+can_buses: {}
+
+validation:
+  require_existing_file: true
+  require_allowed_root: true
+  require_allowed_extension: true
+  compute_sha256: true
+  inspect_known_formats: true
+
+reports:
+  directory: ".agentic-hil/reports"
+
+logs:
+  directory: ".agentic-hil/logs"
+
+# How far this bench lets the owning process clear its own hardware
+# quarantines. "off" always defers to the operator. "readonly" may reap
+# leftover debugger processes and re-read the probe, which touches nothing
+# physical. "reset_halt" may additionally drive a reset-into-halt, which is
+# what settles an unconfirmed flash or reset without a person — set
+# "readonly" instead if anything on this bench reacts to a target reset.
+recovery:
+  auto_recover: "reset_halt"
+  max_attempts: 3
+"""
+
+
+# ---------------------------------------------------------------------------
+# One-time agent provisioning of a project configuration.
+#
+# An agent that finds no configuration may generate one, once. The file it
+# generates denies further configuration writes, so the step is a ratchet: the
+# agent enables itself up to observation — reading needs no grant under decision
+# 0018 — and never up to modification.
+#
+# "May generate" therefore cannot be derived from "no configuration exists":
+# whoever is locked out could remove the file and be entitled again. The grant is
+# recorded in its own file OUTSIDE the configuration, keyed by workspace rather
+# than by config path, so neither deleting the configuration, moving it, nor
+# pointing AGENTIC_HIL_CONFIG somewhere else brings the grant back.
+#
+# The record lives beside the device locks of decision 0018, for the same reason
+# and with the same limit: ``~/.agentic-hil`` is the one place whose ancestors
+# pass the trust check on a stock profile of either platform, it is reachable
+# without first agreeing on a configuration, and it has NO environment override —
+# an override is exactly how two sessions stop seeing the same boundary. What it
+# cannot be is a place the same OS user cannot write: that would need a second
+# principal (a service, root), which is the compromise 0018 explicitly refused.
+# The boundary this enforces is therefore the tool surface — no tool here
+# deletes, moves, or rewrites either file — and not the file system. An agent
+# with a shell of its own can delete the record just as it can delete a device
+# lock; both are refusals it must not work around, and both are stated as such.
+AGENT_PROVISIONING_DIRECTORY_NAME = "project-provisioning"
+AGENT_PROVISIONING_RECORD_VERSION = 1
+# Every permission an agent-generated configuration must carry as false. The
+# write class of decision 0018, per section, plus the project-scoped grant that
+# closes the configuration behind the agent.
+GENERATED_WRITE_PERMISSIONS = {
+    "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
+    "com_ports": ("allow_write",),
+    "can_buses": ("allow_write",),
+}
+
+
+def agent_provisioning_root() -> Path:
+    """Where the one-time provisioning grant is recorded for every workspace."""
+    home = Path(os.path.expanduser("~"))
+    return secure_user_directory(
+        home / ".agentic-hil" / AGENT_PROVISIONING_DIRECTORY_NAME,
+        field="agent_provisioning_root",
+        label="Agent provisioning record directory",
+    )
+
+
+def agent_provisioning_record_path(workspace: str | Path) -> Path:
+    """The record for one workspace.
+
+    Keyed by the workspace, never by the configuration's location: a grant that
+    were keyed by config path would be handed out again for the same project by
+    pointing AGENTIC_HIL_CONFIG at a second path."""
+    identity = os.path.normcase(str(Path(workspace).resolve()))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return agent_provisioning_root() / f"{digest}.json"
+
+
+def agent_provisioning_record(workspace: str | Path) -> JsonObject | None:
+    """The recorded grant, or None when this workspace has never used it.
+
+    An entry that exists but cannot be parsed counts as used. The record is a
+    boundary, so anything other than a clean absence closes it."""
+    path = agent_provisioning_record_path(workspace)
+    text = secure_optional_read_text(path)
+    if text is None:
+        return None
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        return {"record_version": None, "path": str(path), "unreadable": True}
+    if not isinstance(loaded, dict):
+        return {"record_version": None, "path": str(path), "unreadable": True}
+    return {**loaded, "path": str(path)}
+
+
+def record_agent_provisioning(workspace: str | Path, config_path: str | Path) -> Path:
+    """Spend this workspace's one-time grant.
+
+    Written before the configuration it authorizes, not after: a grant that were
+    recorded only on success would be handed out again by whatever made the write
+    fail. A workspace whose configuration write then fails is not stuck — a human
+    still runs ``agentic-hil init``, which needs no grant."""
+    from agentic_hil import __version__
+
+    path = agent_provisioning_record_path(workspace)
+    payload = {
+        "record_version": AGENT_PROVISIONING_RECORD_VERSION,
+        "workspace_root": str(Path(workspace).resolve()),
+        "config_path": str(config_path),
+        "granted_to": "agent",
+        "granted_via": "mcp:project_config_create",
+        "granted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "agentic_hil_version": __version__,
+    }
+    secure_atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def authoritative_config_target(workspace: Path) -> Path:
+    """Where this workspace's authoritative configuration belongs.
+
+    The operator's ``AGENTIC_HIL_CONFIG`` wins when it is set, because that is
+    the one location a running server actually reads; otherwise the canonical
+    per-workspace path. Never inside the workspace, where repository content
+    could rewrite policy."""
+    configured = os.environ.get(CONFIG_ENV)
+    if configured:
+        requested = Path(configured).expanduser()
+        if not requested.is_absolute():
+            raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
+        target = absolute_without_symlinks(requested)
+    else:
+        target = project_config_path(workspace)
+    if is_path_within_frozen(target, workspace):
+        raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
+    return target
+
+
+def provisionable_state_root(workspace: Path) -> Path:
+    """A ``state_root`` this profile actually accepts, or the actionable refusal.
+
+    The documented default lands under ``%LOCALAPPDATA%``/``$XDG_STATE_HOME``,
+    and on a stock Windows 11 profile that inherits AppData's app-capability ACE
+    and is rejected (issue #64). A generated configuration that named it would be
+    written and then refused on load, so the trusted fallback under
+    ``~/.agentic-hil`` — the same location every refusal already recommends — is
+    tried next. When neither passes, the caller gets the same
+    ``unsafe_configured_path`` refusal, carrying the same remediation, that the
+    CLI returns."""
+    candidates: list[Path] = []
+    failure: ConfigError | None = None
+    try:
+        candidates.append(user_state_root())
+    except ConfigError as error:
+        failure = error
+    fallback = absolute_without_symlinks(Path(safe_state_root_suggestion()))
+    if not any(os.path.normcase(str(item)) == os.path.normcase(str(fallback)) for item in candidates):
+        candidates.append(fallback)
+    for candidate in candidates:
+        if is_path_within_frozen(candidate, workspace) or is_path_within_frozen(workspace, candidate):
+            failure = ConfigError(
+                "config_invalid",
+                "state_root and workspace_root must not overlap.",
+                {"field": "state_root", "state_root": str(candidate), "workspace_root": str(workspace)},
+            )
+            continue
+        try:
+            return secure_user_directory(candidate, field="state_root", label="Default state root")
+        except ConfigError as error:
+            failure = error
+    raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})
+
+
+def deny_every_write(document: JsonObject) -> JsonObject:
+    """Set every write permission in a generated document to false.
+
+    The generated skeleton already says so; this makes it true regardless of what
+    filled it in. A generated configuration reaches exactly as far as reading
+    does and no further, so the one thing that must not depend on a template
+    staying correct is which grants it hands out."""
+    for section, flags in GENERATED_WRITE_PERMISSIONS.items():
+        entries = document.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if isinstance(entry, dict):
+                entry["permissions"] = dict.fromkeys(flags, False)
+    artifacts = document.get("artifacts")
+    if isinstance(artifacts, dict):
+        artifacts["allow_upload"] = False
+    debug = document.get("debug")
+    if isinstance(debug, dict):
+        debug["allow_all_symbols"] = False
+    document["permissions"] = {"allow_config_write": False}
+    return document
+
+
+def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> list[str]:
+    """Give a regenerated document exactly the grants the existing file has.
+
+    Regeneration refreshes what the hardware is, never what it may do. Every
+    permission is copied from the configuration on disk, by name, so the grants a
+    human made survive and no new one appears; a device the regenerated document
+    does not contain is returned to the caller rather than dropped in silence."""
+    sources: dict[str, dict[str, Any]] = {
+        "debuggers": dict(existing.debuggers),
+        "com_ports": dict(existing.com_ports),
+        "can_buses": dict(existing.can_buses),
+    }
+    for section, flags in GENERATED_WRITE_PERMISSIONS.items():
+        entries = document.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, entry in entries.items():
+            previous = sources[section].get(name)
+            if not isinstance(entry, dict) or previous is None:
+                continue
+            granted = previous.permissions
+            entry["permissions"] = {flag: bool(getattr(granted, flag, False)) for flag in flags}
+    artifacts = document.get("artifacts")
+    if isinstance(artifacts, dict):
+        artifacts["allow_upload"] = existing.artifacts.allow_upload
+    debug = document.get("debug")
+    if isinstance(debug, dict):
+        debug["allow_all_symbols"] = existing.debug.allow_all_symbols
+        debug["allowed_symbols"] = list(existing.debug.allowed_symbols)
+    document["permissions"] = {"allow_config_write": existing.permissions.allow_config_write}
+    return sorted(f"{section}.{name}" for section, entries in sources.items() for name in entries if name not in (document.get(section) or {}))
+
+
+def write_generated_config(target_path: Path, workspace: Path, text: str) -> None:
+    """Validate generated configuration text, then make it the authoritative file.
+
+    Validation runs on a temporary file in the target directory first, so a
+    document that would not load never replaces one that does."""
+    secure_user_directory(target_path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        load_config(str(temporary_path), str(workspace))
+    finally:
+        secure_remove_file(temporary_path)
+    secure_atomic_write_text(target_path, text)
 
 
 def trusted_persistent_executable(
@@ -1865,6 +2183,10 @@ def debugger_permissions(raw: JsonObject) -> DebuggerPermissions:
 
 def io_permissions(raw: JsonObject) -> IoPermissions:
     return IoPermissions(allow_read=bool(raw.get("allow_read", False)), allow_write=bool(raw.get("allow_write", False)))
+
+
+def project_permissions(raw: JsonObject) -> ProjectPermissions:
+    return ProjectPermissions(allow_config_write=bool(raw.get("allow_config_write", False)))
 
 
 def debugger_access_enabled(debugger: DebuggerConfig) -> bool:

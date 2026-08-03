@@ -79,6 +79,45 @@
       "minLength": 1,
       "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
     },
+    "permissions": {
+      "type": "object",
+      "description": "Project-scoped permissions. Deny-by-default like every other write permission in this file, and like those it is only ever widened by a human editing this file.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_config_write": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether an agent may write this configuration through the MCP server. False in every configuration an agent generated for itself, which is what makes agent provisioning one-time: an agent can enable itself up to observation, never up to modification. Set it true by hand to let the agent regenerate this file from hardware discovery afterwards; even then the agent supplies no permission value, only the discovered hardware facts."
+        }
+      },
+      "default": {}
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Who wrote this file. Informational only: nothing reads it as policy and it grants nothing. It exists so a later reader does not have to guess whether a person intended these contents.",
+      "additionalProperties": false,
+      "properties": {
+        "created_by": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "human"
+          ],
+          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission false."
+        },
+        "created_via": {
+          "type": "string",
+          "description": "The interface that wrote it, e.g. mcp:project_config_create."
+        },
+        "created_at": {
+          "type": "string",
+          "description": "UTC ISO-8601 timestamp of the write."
+        },
+        "agentic_hil_version": {
+          "type": "string"
+        }
+      }
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
