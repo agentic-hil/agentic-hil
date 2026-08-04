@@ -157,9 +157,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Ask the operator to put the file back at the path in `config_status.path`, or to say that its removal was "
-            "intended, and then restart the MCP server.",
-            "Report what the current policy still allows from `project_config_describe` while the file is absent, so "
-            "the operator can see what is being enforced without a file to read it from.",
+            "intended, and then restart the MCP server. A restart before the file is back cannot succeed: there is no "
+            "document to load.",
+            "Report what the current policy still allows from `project_config_describe`, which answers out of the "
+            "loaded policy while the file is absent: `permissions_in_force` is what is being enforced, and "
+            "`document_source: loaded_policy` says it came from memory rather than from a file. `writable_keys` is "
+            "empty because no configuration key can be changed while there is nothing to change.",
         ),
         do_not=(
             "Do not call `project_config_create` to replace it. A server bound to a configuration is gated by the "

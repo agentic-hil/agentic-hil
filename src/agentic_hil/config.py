@@ -1292,6 +1292,21 @@ GENERATED_WRITE_PERMISSIONS = {
 GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
 
 
+def permission_summary(config: AgenticHILConfig) -> JsonObject:
+    """Every grant a loaded configuration holds, by name.
+
+    Read off the parsed policy rather than off a document, which is what makes
+    it the answer when there is no document left to read: a server whose
+    configuration was removed underneath it still enforces what it loaded, and
+    this is the only shape in which an operator can be shown what that is."""
+    return {
+        **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
+        "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
+        "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
+        "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
+    }
+
+
 def authoritative_config_target(workspace: Path) -> Path:
     """Where this workspace's authoritative configuration belongs.
 

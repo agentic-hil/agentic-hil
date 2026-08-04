@@ -105,7 +105,16 @@ def config_status(config: AgenticHILConfig | None) -> JsonObject:
         }
 
     try:
-        current = config_digest(safe_read_bytes(path))
+        raw = safe_read_bytes(path)
+        # Decoded before it is classified, and deliberately not to produce the
+        # digest: the digest is over the exact bytes, because that is what was
+        # hashed at load time. The decode is the same one `load_config` performs,
+        # so a file that is no longer UTF-8 is a file no restart can load — which
+        # makes it unreadable rather than a `changed` document with a restart
+        # remedy that cannot work. UnicodeDecodeError is a ValueError and lands
+        # in the branch below.
+        raw.decode("utf-8")
+        current = config_digest(raw)
     except (ConfigError, OSError, ValueError) as error:
         return _unreadable(base, error, path)
 

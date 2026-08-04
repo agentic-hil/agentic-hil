@@ -121,18 +121,32 @@ reload_required field and ask the operator to restart it.
 `agentic-hil://reference/config-shape` describes the whole shape, a worked
 example, and what deliberately cannot be done.
 
-`config_stale: true` on any result says the authoritative file has changed since
-this server parsed it. Nothing is reloaded while the server runs, so the backend
+`config_stale: true` on any result says the authoritative file is no longer the
+one this server parsed. Nothing is reloaded while the server runs, so the backend
 that result names, the devices it knows and the permissions it enforces are all
 from the version loaded at startup. The `config_status` block names the file and
-shows the two digests differing, and separates `changed` from `missing` (the
-file is gone) and `unreadable` (it is there and will not open, which is unknown
-rather than unchanged). Report it, ask the operator to restart the MCP server
-once, and do not try to make it pick the file up by editing again or by calling
-a configuration tool. `debugger_info` and `project_config_describe` carry the
-block either way, so a disagreement between `agentic-hil doctor` — which reads
-the file fresh every time — and `debugger_info` is this and nothing else. A
-permission revoked since startup already binds; one added since does not.
+says which of three states it is in, and the three do not share one remedy:
+
+- `changed` — loaded_digest and current_digest differ. Ask for a restart; it
+  loads the file that exists now.
+- `missing` — the file is gone and current_digest is `null`, so there is
+  nothing to restart onto. It has to be put back first. `project_config_describe`
+  still answers in this state, out of the loaded policy: permissions_in_force
+  is what is still being enforced and `document_source: loaded_policy` says it
+  came from memory rather than from a file.
+- `unreadable` — it is there and will not open: an ACL, a path component that is
+  no longer a directory, bytes that are no longer UTF-8. current_digest is
+  `null` and backend_error names what the read failed on. It has to be made
+  readable and valid before a restart can load it.
+
+`unknown` is not one of these and never sets `config_stale`: no comparison was
+made, so nothing is claimed either way and reload_required is `false`. Report
+what you get, ask the operator once, and do not try to make the server pick the
+file up by editing again or by calling a configuration tool. `debugger_info` and
+`project_config_describe` carry the block either way, so a disagreement between
+`agentic-hil doctor` — which reads the file fresh every time — and
+`debugger_info` is this and nothing else. A permission revoked since startup
+already binds; one added since does not.
 
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through

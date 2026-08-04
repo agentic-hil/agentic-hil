@@ -27,10 +27,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import FAKE_PYOCD, write_authoritative_config
+from conftest import FAKE_PYOCD, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.cli import doctor
-from agentic_hil.config import config_digest, load_authoritative_config
+from agentic_hil.config import ConfigError, config_digest, load_authoritative_config
 from agentic_hil.configstate import (
     STATE_CHANGED,
     STATE_MISSING,
@@ -48,12 +48,20 @@ from agentic_hil.knowledge import (
     ERRORS_URI,
     read_resource,
 )
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 COM_PORTS = 'com_ports:\n  dut_uart:\n    device: "COM9"\n    baudrate: 115200\n'
+SECOND_PROBE = f'debuggers:\n  spare:\n    type: "stlink"\n    executable: "{FAKE_STLINK.as_posix()}"\n'
 
 
-def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, device_grants: dict[str, bool] | None = None, **grants: bool) -> tuple[Path, Path]:
+def bench(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    device_grants: dict[str, bool] | None = None,
+    debuggers_yaml: str = "",
+    **grants: bool,
+) -> tuple[Path, Path]:
     """One probe on `stlink`, exactly the shape the reported session had.
 
     Under the sandbox `isolated_config_environment` provides rather than under
@@ -69,6 +77,7 @@ def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, device_grants: dic
         debugger_type="stlink",
         permissions=device_grants or {},
         com_ports_yaml=COM_PORTS,
+        debuggers_yaml=debuggers_yaml,
     )
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     document["permissions"] = {CONFIG_WRITE_RIGHT: False, CONFIG_DESCRIPTION_RIGHT: False, CONFIG_PERMISSIONS_RIGHT: False, **grants}
@@ -205,6 +214,114 @@ def test_a_changed_configuration_reaches_every_answer_not_only_the_two_that_name
     assert elsewhere["config_stale"] is True
 
 
+def test_a_file_edited_while_the_backend_answers_is_not_reported_as_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`debugger_info` samples the file after the backend, never before.
+
+    `backend.info()` runs the toolchain's version command and is allowed
+    seconds. A status taken before it would answer `unchanged` about a file the
+    operator edited during exactly that window — a positive claim that the two
+    documents agree, made out of a comparison that predates the divergence."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+
+        def edits_the_file_while_it_answers() -> dict:
+            switch_to_pyocd(path)
+            return {"ok": True, "tool": "debugger_info", "backend": "stlink"}
+
+        monkeypatch.setattr(tools.backend, "info", edits_the_file_while_it_answers)
+        answered = tools.call("debugger_info")
+    finally:
+        tools.close()
+
+    assert answered["backend"] == "stlink"
+    assert answered["config_status"]["state"] == STATE_CHANGED
+    assert answered["config_stale"] is True
+
+
+def test_the_two_prominent_answers_carry_the_block_when_they_refuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every case means the refusals too.
+
+    A refused call still answered out of some configuration, and which one is
+    exactly what an operator comparing two answers is trying to establish. Both
+    refusals below are returned before the body that attaches the block ever
+    runs: the unbound-probe error comes out of the dispatch gate, and a describe
+    against a file that is not this workspace's authoritative one is raised and
+    caught before its result is built."""
+    workspace, path = bench(tmp_path, monkeypatch, debuggers_yaml=SECOND_PROBE)
+    tools = service(workspace)
+    try:
+        assert tools.config.debugger is None, "two probes, so none is bound"
+        unbound = tools.call("debugger_info")
+
+        elsewhere = path.parent / "elsewhere.yaml"
+        elsewhere.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(elsewhere))
+        wrong_file = tools.call(PROJECT_CONFIG_DESCRIBE)
+    finally:
+        tools.close()
+
+    assert unbound["error_type"] == "not_supported"
+    assert unbound["config_status"]["state"] == STATE_UNCHANGED
+    assert "config_stale" not in unbound
+
+    assert wrong_file["error_type"] == "config_invalid"
+    assert wrong_file["config_status"]["state"] == STATE_UNCHANGED
+
+
+def test_an_edit_after_this_session_created_the_configuration_is_still_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provisioning sequence, run to its end.
+
+    Start with no configuration, generate the deny-by-default one, let the
+    operator open a permission in it, call `project_config_create` again. The
+    second call is refused by the file — correctly, the server is gated by the
+    policy it loaded — and that refusal used to be handed back around the bound
+    service, so it carried nothing at all. It is the one moment in this sequence
+    where the loaded document and the file have provably come apart."""
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda: {
+            "ok": True,
+            "tool": "bootstrap_hardware_discovery",
+            "backend": "stlink",
+            "executable": str(FAKE_STLINK),
+            "probe_id": "STLINK123",
+            "target": {"probe_id": "STLINK123", "controller": "STM32F446RE"},
+            "com_port": {"device": "COM3", "serial_number": "STLINK123"},
+            "available_com_ports": {"ok": True, "ports": [{"device": "COM3", "serial_number": "STLINK123"}]},
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+            "cleanup_required": False,
+            "summary": "One attached STM32 target was identified.",
+        },
+    )
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+        assert created["ok"] is True, created
+        path = Path(created["path"])
+
+        # A person opens what this project needs. Nothing reloads.
+        rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_flash": True}))
+
+        refused = provisioner.call(PROJECT_CONFIG_CREATE)
+        elsewhere = provisioner.call("com_ports_list")
+    finally:
+        provisioner.close()
+
+    assert refused["error_type"] == "permission_denied"
+    assert refused["config_stale"] is True
+    assert refused["config_status"]["state"] == STATE_CHANGED
+    assert refused["config_status"]["path"] == str(path)
+    # And the same statement from the same check on an ordinary answer, so the
+    # two cannot say different things about one file.
+    assert elsewhere["config_status"]["current_digest"] == refused["config_status"]["current_digest"]
+
+
 # ---------------------------------------------------------------------------
 # Why the comparison is a hash of the loaded bytes.
 
@@ -287,6 +404,46 @@ def test_a_configuration_that_disappeared_is_its_own_answer(tmp_path: Path, monk
     assert any("project_config_create" in step for step in answered["config_status"]["do_not"])
 
 
+def test_a_missing_file_still_gets_an_answer_about_the_policy_in_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The remedy for a removed file names `project_config_describe`, so it has
+    to work.
+
+    Nothing else can show what is being enforced once the document is gone: the
+    keys and values every other answer reports are read from disk. This one
+    answers out of the loaded policy instead of refusing with the very error the
+    remedy is written for, and says so rather than passing memory off as a file.
+    """
+    workspace, path = bench(
+        tmp_path,
+        monkeypatch,
+        device_grants={"allow_flash": True},
+        **{CONFIG_DESCRIPTION_RIGHT: True},
+    )
+    tools = service(workspace)
+    try:
+        path.unlink()
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+        gone = config_status(tools.config)
+    finally:
+        tools.close()
+
+    assert described["ok"] is True, described
+    assert described["document_source"] == "loaded_policy"
+    assert described["config_status"]["state"] == STATE_MISSING
+    assert described["config_stale"] is True
+    # The half nothing else exposes: what this server still enforces.
+    assert described["permissions_in_force"][CONFIG_DESCRIPTION_RIGHT] is True
+    assert described["permissions_in_force"]["debuggers"]["dut"]["allow_flash"] is True
+    # And nothing is open, because there is no document to change and this
+    # server will not create one over the operator's settings.
+    assert described["writable_keys"] == []
+    assert described["locked_keys"] == []
+    assert all(entry["granted"] is False for entry in described["rights"])
+    assert any("no file" in step or "no file at the path" in step for step in described["next_steps"])
+    # The catalogue entry that sent the caller here says what it will get.
+    assert any("permissions_in_force" in step for step in gone["remediation"])
+
+
 def test_a_configuration_that_cannot_be_read_is_not_reported_as_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unknown, and said as unknown.
 
@@ -304,6 +461,30 @@ def test_a_configuration_that_cannot_be_read_is_not_reported_as_unchanged(tmp_pa
     assert unreadable["error_type"] == "config_unreadable"
     assert unreadable["current_digest"] is None
     assert unreadable["backend_error"]
+
+
+def test_bytes_that_are_no_longer_utf8_are_unreadable_rather_than_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart cannot load this file, so it must not be sent to a restart.
+
+    `changed` promises that restarting picks the new document up, and the state
+    contract already lists non-UTF-8 bytes under `unreadable`. Hashing the raw
+    bytes without decoding them first classified exactly that file as a
+    restartable change, which is a remedy that cannot work."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    path.write_bytes(path.read_bytes() + b'\ncomment: "\xff\xfe"\n')
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_UNREADABLE
+    assert status["error_type"] == "config_unreadable"
+    assert status["current_digest"] is None
+    assert any("UTF-8" in step for step in status["remediation"])
+    # The claim the state makes, checked against what a restart would actually
+    # do with this file.
+    with pytest.raises(ConfigError):
+        load_authoritative_config(workspace)
 
 
 # ---------------------------------------------------------------------------

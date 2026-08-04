@@ -47,6 +47,7 @@ from agentic_hil.config import (
     authoritative_config_target,
     config_schema,
     load_authoritative_config,
+    permission_summary,
     secure_atomic_write_text,
     secure_optional_read_text,
     secure_user_file_lock,
@@ -583,18 +584,33 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to describe.", {"workspace_root": str(workspace)})
     target_path = _authoritative_path(workspace, existing)
-    _, document = _load_document(target_path)
-    rights = granted_rights(existing, document)
     # This tool needs no permission, so it is also the answer to "is what this
     # server enforces still what the file says". It reads the document as it is
     # now, which is exactly why the divergence has to be stated here: the keys
     # and values below come from disk while the grants that gate them are the
     # narrower of disk and what this server loaded.
     status = config_status(existing)
+    try:
+        _, document = _load_document(target_path)
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        # The file this server loaded is gone, and refusing with
+        # `config_file_not_found` would say the wrong thing twice: this workspace
+        # is not unconfigured — this server holds a policy and is enforcing it —
+        # and that error sends a caller to `project_config_create`, which is
+        # refused here and would replace the operator's settings with a
+        # deny-by-default skeleton if it were not. Nothing else exposes the
+        # policy still in force, so this answers with it, and says plainly that
+        # it came from memory and cannot be compared against anything.
+        document = None
+    # No file is no grant: `granted_rights` takes the narrower of the loaded
+    # policy and the document, and an absent document grants nothing.
+    rights = granted_rights(existing, document if document is not None else {})
 
     writable: list[JsonObject] = []
     locked: list[JsonObject] = []
-    for entry in _concrete_keys(document):
+    for entry in _concrete_keys(document) if document is not None else []:
         if rights[str(entry["right"])]:
             writable.append(entry)
         else:
@@ -608,9 +624,22 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
         "summary": (
             f"{len(writable)} configuration key(s) are open to this caller and {len(locked)} are not; "
             f"every locked one names the grant that would open it."
+            if document is not None
+            else "The authoritative configuration is no longer at its path, so no key can be changed. What this server "
+            "loaded is still the policy in force and is reported below as `permissions_in_force`."
         ),
         "config_status": status,
         **({"config_stale": True} if config_stale(status) else {}),
+        # Which document the keys and values below were read from. `disk` is the
+        # file as it is now; `loaded_policy` means there is no file and every
+        # value here comes from what this process parsed at startup, so nothing
+        # in this answer can be compared against anything on disk.
+        "document_source": "disk" if document is not None else "loaded_policy",
+        # The grants this server is actually enforcing, whatever the file says.
+        # On a stale or absent file this is the half a caller cannot get any
+        # other way: `writable_keys` and `locked_keys` are read from disk, and
+        # these are what a call is really gated on.
+        "permissions_in_force": permission_summary(existing),
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
         "config_version": existing.config_version,
@@ -635,7 +664,7 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
         "open_holds": open_holds or None,
         "writes_blocked_by_open_run": bool(open_holds),
         "reference": CONFIG_SHAPE_URI,
-        "next_steps": _describe_next_steps(rights, writable, open_holds, status),
+        "next_steps": _describe_next_steps(rights, writable, open_holds, status, on_disk=document is not None),
         **NOT_STARTED,
         "cleanup_required": False,
     }
@@ -702,9 +731,18 @@ def _entry_patterns(rights: dict[str, bool]) -> list[JsonObject]:
     return patterns
 
 
-def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None, status: JsonObject) -> list[str]:
+def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None, status: JsonObject, *, on_disk: bool) -> list[str]:
     steps: list[str] = []
-    if config_stale(status):
+    if not on_disk:
+        steps.append(
+            "There is no file at the path this server loaded its configuration from, so `writable_keys` and "
+            "`locked_keys` are empty and no value here can be compared against a document: everything below comes "
+            "from what this process parsed at startup. `permissions_in_force` is the policy still being enforced. "
+            "Ask the operator to put the file back at `config_status.path`, or to confirm the removal was intended, "
+            "and then to restart the MCP server. Do not call `project_config_create` to replace it — it is refused, "
+            "and it would write a deny-by-default skeleton over the operator's settings if it were not."
+        )
+    elif config_stale(status):
         steps.append(
             "The file has moved since this server loaded it, so the two halves of this answer come from two "
             "documents: the keys and values below are read from disk, and every grant is the narrower of what this "
