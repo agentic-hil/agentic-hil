@@ -31,6 +31,7 @@ from agentic_hil.config import (
     config_schema_text,
     debugger_access_enabled,
     ensure_safe_state_root,
+    inspect_windows_path_trust,
     is_path_within_frozen,
     load_authoritative_config,
     load_config,
@@ -45,6 +46,7 @@ from agentic_hil.config import (
     trusted_persistent_executable,
     user_file_lock_path,
     user_state_root,
+    windows_path_trust,
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.knowledge import remediation_fields
@@ -1709,6 +1711,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "summary": summary,
         "config_path": config.config_path,
         "installation": _doctor_installation_report(),
+        **({"path_trust": _doctor_path_trust_report(config)} if os.name == "nt" else {}),
         "mcp": _doctor_mcp_report(),
         "target": {"name": config.target.name, "controller": config.target.controller},
         "debuggers": {
@@ -1726,6 +1729,44 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": asdict(bus.permissions)} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }
+
+
+def _doctor_path_trust_report(config: AgenticHILConfig) -> JsonObject:
+    """What the Windows path trust check saw on this configuration's own paths
+    and did not refuse.
+
+    A finding that does not refuse still has to be visible. Otherwise a
+    restricted environment whose ACLs cannot be read looks exactly like a healthy
+    one, and a tolerated grant is a decision nobody was told about. Reported
+    rather than refused, like the editable-installation report above.
+    """
+    from agentic_hil.windows_principals import describe_principals, principal_label
+
+    mode = windows_path_trust()
+    findings: list[JsonObject] = []
+    for field, path in (("user_config", Path(config.config_path).parent), ("state_root", Path(config.state_root))):
+        try:
+            inspected = inspect_windows_path_trust(path)
+        except OSError as error:
+            inspected = [{"finding": "acl_unreadable", "scope": "object", "path": str(path), "backend_error": str(error)}]
+        findings.extend({"field": field, **finding} for finding in inspected)
+    report: JsonObject = {"mode": mode, "ok": not findings, "findings": findings}
+    if not findings:
+        report["summary"] = f"Every path this configuration names passes the Windows trust check under windows_path_trust: {mode}."
+        return report
+    sids = [str(sid) for finding in findings for sid in finding.get("sids", []) if sid]
+    principals = describe_principals(sids)
+    holders = ", ".join(principal_label(entry) for entry in principals)
+    unreadable = sum(1 for finding in findings if finding["finding"] == "acl_unreadable")
+    parts = [f"windows_path_trust: {mode} accepted {len(findings)} finding(s) that windows_path_trust: strict would refuse"]
+    if holders:
+        parts.append(f"rights are held by {holders}")
+    if unreadable:
+        parts.append(f"{unreadable} ACL(s) could not be read, which is unknown rather than unsafe")
+    report["summary"] = ". ".join(parts) + ". Nothing was changed; see the platform-paths reference for what each finding means."
+    if principals:
+        report["principals"] = principals
+    return report
 
 
 def _doctor_installation_report() -> JsonObject:

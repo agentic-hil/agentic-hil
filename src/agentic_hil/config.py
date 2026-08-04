@@ -45,7 +45,13 @@ from agentic_hil.types import (
     fold_device_path,
     fold_hardware_id,
 )
-from agentic_hil.windows_principals import untrusted_principal_details
+from agentic_hil.windows_principals import (
+    PRINCIPAL_CLASS_ACCOUNT,
+    PRINCIPAL_CLASS_APP_PACKAGE,
+    PRINCIPAL_CLASS_UNRESOLVED,
+    principal_class,
+    untrusted_principal_details,
+)
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
@@ -186,6 +192,9 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     config_version = configured_version(raw, resolved_config_path)
     reject_read_permissions(raw, resolved_config_path, config_version)
     validate_config_schema(raw, resolved_config_path)
+    # Established on every load, including one that names nothing, so a second
+    # configuration in the same process never inherits the first one's mode.
+    set_windows_path_trust(raw.get("windows_path_trust"), resolved_config_path)
 
     workspace_value = str(raw["workspace_root"])
     workspace_requested = Path(workspace_value).expanduser()
@@ -597,10 +606,121 @@ def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
         os.close(descriptor)
 
 
-def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root") -> None:
+# Modes for the `windows_path_trust` configuration key. The default is
+# `standard`; `strict` restores the pre-0.8.0 rule for an operator who wants it
+# back; `permissive` is the explicit, visible override for an environment whose
+# ACLs do not describe its trust boundary at all.
+WINDOWS_PATH_TRUST_MODES = ("standard", "strict", "permissive")
+WINDOWS_PATH_TRUST_DEFAULT = "standard"
+
+# The security decision of hardci-hq#91, in one table. A finding refuses under a
+# mode when it is listed there and is reported otherwise.
+_WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
+    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal"}),
+    "strict": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "app_package_principal", "unresolved_principal", "acl_unreadable"}),
+    "permissive": frozenset(),
+}
+
+# One authoritative configuration per process, so the mode it names is a process
+# property. It is established on every load, including a load that names nothing,
+# so a second configuration can never inherit the first one's mode. Paths checked
+# before any configuration exists — the user configuration directory itself — are
+# checked under the default, because there is nothing yet to read the key from.
+_windows_path_trust = WINDOWS_PATH_TRUST_DEFAULT
+
+
+def windows_path_trust() -> str:
+    return _windows_path_trust
+
+
+def set_windows_path_trust(value: object, config_path: str = "") -> str:
+    global _windows_path_trust
+    if value is None:
+        _windows_path_trust = WINDOWS_PATH_TRUST_DEFAULT
+        return _windows_path_trust
+    if not isinstance(value, str) or value not in WINDOWS_PATH_TRUST_MODES:
+        raise ConfigError(
+            "config_invalid",
+            f"windows_path_trust must be one of {', '.join(WINDOWS_PATH_TRUST_MODES)}.",
+            {"path": config_path, "field": "windows_path_trust", "value": value},
+        )
+    _windows_path_trust = value
+    return _windows_path_trust
+
+
+# The refusal texts, unchanged from before 0.8.0: what changed is which findings
+# reach them, not what an operator who does hit one reads.
+_WINDOWS_TRUST_SUMMARIES = {
+    ("acl_unreadable", "object"): "Windows ownership and ACL could not be inspected.",
+    ("acl_unreadable", "ancestor"): "ancestor ACL could not be inspected.",
+    ("untrusted_owner", "object"): "must have a trusted Windows owner.",
+}
+
+
+def _windows_trust_summary(label: str, finding: JsonObject) -> str:
+    key = (str(finding["finding"]), str(finding["scope"]))
+    if key in _WINDOWS_TRUST_SUMMARIES:
+        return f"{label} {_WINDOWS_TRUST_SUMMARIES[key]}"
+    if finding["scope"] == "ancestor":
+        return f"{label} has a replaceable Windows ancestor directory."
+    return f"{label} must not grant write access to other Windows principals."
+
+
+def _trust_finding(name: str, scope: str, path: Path, **extra: object) -> JsonObject:
+    return {"finding": name, "scope": scope, "path": str(path), **extra}
+
+
+def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root") -> list[JsonObject]:
+    """Refuse a Windows path whose ACLs put it outside the operator's control.
+
+    What is defended: the authoritative configuration is the permission policy
+    for hardware, and state_root holds leases, quarantines and canonical reports.
+    A *nameable account other than the operator* that can write, delete or
+    re-permission either of them could forge that policy or those records, and
+    that is what this refuses.
+
+    What is not defended, and never was: code running as the operator. The
+    operator owns these objects and holds FullControl on them, so every ordinary
+    process of that user can rewrite them regardless of any ACL. No check here
+    can move that boundary, and pretending otherwise is what made the standard
+    per-user folders unusable — an app-capability ACE on ``AppData`` grants a
+    *sandboxed subset* of rights the same user's unpackaged processes already
+    have in full.
+
+    Returns every finding, including the ones that did not refuse, so `doctor`
+    can name a degraded environment instead of the tool going quiet about it.
+    """
+    findings = inspect_windows_path_trust(root)
+    mode = windows_path_trust()
+    refusing = _WINDOWS_PATH_TRUST_REFUSALS[mode]
+    for finding in findings:
+        if finding["finding"] not in refusing:
+            continue
+        details: JsonObject = {
+            "field": field,
+            "path": finding["path"],
+            "finding": finding["finding"],
+            "path_trust": mode,
+            **untrusted_principal_details([sid for sid in finding.get("sids", []) if sid]),
+        }
+        for key in ("winerror", "backend_error"):
+            if key in finding:
+                details[key] = finding[key]
+        raise ConfigError("unsafe_configured_path", _windows_trust_summary(label, finding), details)
+    return findings
+
+
+def inspect_windows_path_trust(root: Path) -> list[JsonObject]:
+    """Everything this path's ACLs say about who other than the operator can
+    replace it. Refuses nothing; ``validate_windows_state_root`` decides.
+
+    One walk for the refusal and for the report, so what `doctor` says and what a
+    refusal says cannot drift apart.
+    """
     import ctypes
     from ctypes import wintypes
 
+    findings: list[JsonObject] = []
     owner_sid = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     security_descriptor = ctypes.c_void_p()
@@ -613,7 +733,10 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
     get_security.restype = wintypes.DWORD
     result = get_security(str(root), 1, 0x00000005, ctypes.byref(owner_sid), None, ctypes.byref(dacl), None, ctypes.byref(security_descriptor))
     if result:
-        raise ConfigError("unsafe_configured_path", f"{label} Windows ownership and ACL could not be inspected.", {"field": field, "path": str(root), "winerror": result})
+        # Not a verdict. "The ACL could not be read" is ignorance, and a sandbox,
+        # a service account or a CI runner reaches it without anything being
+        # wrong with the path.
+        return [_trust_finding("acl_unreadable", "object", root, winerror=result)]
 
     open_token = advapi32.OpenProcessToken
     open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
@@ -657,46 +780,83 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
                 raise ctypes.WinError(ctypes.get_last_error())
             trusted_owner = bool(equal_sid(owner_sid, candidate))
         if not trusted_owner:
-            raise ConfigError("unsafe_configured_path", f"{label} must have a trusted Windows owner.", {"field": field, "path": str(root)})
-        # A NULL DACL grants everyone everything, so it is refused without being
-        # walked; walking it would only dereference nothing.
-        granted, offenders = windows_acl_untrusted_principals(advapi32, dacl, current_sid, 0x500D0116) if dacl.value else (True, [])
-        if not dacl.value or granted:
-            raise ConfigError("unsafe_configured_path", f"{label} must not grant write access to other Windows principals.", {"field": field, "path": str(root), **untrusted_principal_details(offenders)})
+            findings.append(_trust_finding("untrusted_owner", "object", root, sids=[windows_sid_to_string(advapi32, owner_sid) or ""]))
+        # A NULL DACL grants everyone everything. Nothing to walk, and nothing
+        # ambiguous about it either: it is a grant to Everyone in all but name.
+        if not dacl.value:
+            findings.append(_trust_finding("null_dacl", "object", root))
+        else:
+            findings.extend(_windows_principal_findings(advapi32, dacl, current_sid, 0x500D0116, "object", root))
         for ancestor in root.parents:
             ancestor_dacl = ctypes.c_void_p()
             ancestor_descriptor = ctypes.c_void_p()
             result = get_security(str(ancestor), 1, 0x00000004, None, None, ctypes.byref(ancestor_dacl), None, ctypes.byref(ancestor_descriptor))
             if result:
-                raise ConfigError("unsafe_configured_path", f"{label} ancestor ACL could not be inspected.", {"field": field, "path": str(ancestor), "winerror": result})
+                findings.append(_trust_finding("acl_unreadable", "ancestor", ancestor, winerror=result))
+                continue
             try:
-                ancestor_granted, ancestor_offenders = (
-                    windows_acl_untrusted_principals(advapi32, ancestor_dacl, current_sid, 0x100D0040, include_inherit_only=False) if ancestor_dacl.value else (True, [])
-                )
-                if not ancestor_dacl.value or ancestor_granted:
+                if not ancestor_dacl.value:
+                    findings.append(_trust_finding("null_dacl", "ancestor", ancestor))
+                else:
                     # Name the holder, not only the path. An opaque S-1-15-3-...
                     # leaves the operator unable to decide between the permitted
                     # location and revoking the grant, and that decision is theirs.
-                    raise ConfigError("unsafe_configured_path", f"{label} has a replaceable Windows ancestor directory.", {"field": field, "path": str(ancestor), **untrusted_principal_details(ancestor_offenders)})
+                    findings.extend(_windows_principal_findings(advapi32, ancestor_dacl, current_sid, 0x100D0040, "ancestor", ancestor, include_inherit_only=False))
             finally:
                 if ancestor_descriptor:
                     local_free(ancestor_descriptor)
     except OSError as error:
-        raise ConfigError("unsafe_configured_path", f"{label} Windows ownership and ACL could not be inspected.", {"field": field, "path": str(root), "backend_error": str(error)}) from error
+        findings.append(_trust_finding("acl_unreadable", "object", root, backend_error=str(error)))
     finally:
         if token:
             close_handle(token)
         if security_descriptor:
             local_free(security_descriptor)
+    return findings
 
 
-def windows_acl_untrusted_principals(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> tuple[bool, list[str]]:
-    """Whether the ACL grants access_mask to an untrusted principal, and to whom.
+def _windows_principal_findings(
+    advapi32: object,
+    dacl: object,
+    current_sid: object,
+    access_mask: int,
+    scope: str,
+    path: Path,
+    *,
+    include_inherit_only: bool = True,
+) -> list[JsonObject]:
+    """One finding per class of principal that holds ``access_mask`` here.
 
-    The boolean is the verdict and decides the refusal; the SID strings are only
-    what the refusal can say about it. Stringifying a SID is therefore allowed to
-    fail without changing the verdict — a principal nobody could name still holds
-    the right.
+    Grouped by class rather than by SID, because the class is what decides the
+    refusal and the SIDs are what the refusal can say about it.
+    """
+    name_by_class = {
+        PRINCIPAL_CLASS_ACCOUNT: "foreign_principal",
+        PRINCIPAL_CLASS_APP_PACKAGE: "app_package_principal",
+        PRINCIPAL_CLASS_UNRESOLVED: "unresolved_principal",
+    }
+    grouped: dict[str, list[str]] = {}
+    for sid in windows_acl_principals_holding(advapi32, dacl, current_sid, access_mask, include_inherit_only=include_inherit_only):
+        # A SID that could not even be stringified cannot be classified either,
+        # so it is ignorance and lands in `unresolved` rather than in a verdict.
+        holder = principal_class(sid) if sid else PRINCIPAL_CLASS_UNRESOLVED
+        grouped.setdefault(holder, [])
+        if sid and sid not in grouped[holder]:
+            grouped[holder].append(sid)
+    # Deterministic and worst-first, so the refusal names the account before it
+    # names a package nobody has to act on.
+    order = (PRINCIPAL_CLASS_ACCOUNT, PRINCIPAL_CLASS_APP_PACKAGE, PRINCIPAL_CLASS_UNRESOLVED)
+    return [_trust_finding(name_by_class[holder], scope, path, principal_class=holder, sids=grouped[holder]) for holder in order if holder in grouped]
+
+
+def windows_acl_principals_holding(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> list[str]:
+    """Every principal other than the operator, SYSTEM, Administrators and
+    CREATOR OWNER that this ACL grants ``access_mask`` to.
+
+    One entry per ACE that hits, in ACL order, deduplicated. A SID that cannot be
+    stringified is reported as an empty string rather than dropped: the right
+    exists whether or not anyone can put a name to it, and the caller decides
+    what an unnameable holder means.
     """
     import ctypes
     from ctypes import wintypes
@@ -729,8 +889,7 @@ def windows_acl_untrusted_principals(advapi32: object, dacl: object, current_sid
         if not create_well_known_sid(sid_type, None, sid, ctypes.byref(size)):
             raise ctypes.WinError(ctypes.get_last_error())
         trusted_sids.append(sid)
-    granted = False
-    offenders: list[str] = []
+    holders: list[str] = []
     for index in range(info.ace_count):
         ace = ctypes.c_void_p()
         if not get_ace(dacl, index, ctypes.byref(ace)):
@@ -751,11 +910,10 @@ def windows_acl_untrusted_principals(advapi32: object, dacl: object, current_sid
         sid = ctypes.c_void_p(address + sid_offset)
         if equal_sid(sid, current_sid) or any(equal_sid(sid, trusted_sid) for trusted_sid in trusted_sids):
             continue
-        granted = True
-        readable = windows_sid_to_string(advapi32, sid)
-        if readable and readable not in offenders:
-            offenders.append(readable)
-    return granted, offenders
+        readable = windows_sid_to_string(advapi32, sid) or ""
+        if readable not in holders:
+            holders.append(readable)
+    return holders
 
 
 def windows_sid_to_string(advapi32: object, sid: object) -> str | None:

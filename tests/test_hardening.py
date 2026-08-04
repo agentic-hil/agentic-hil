@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from io import StringIO
@@ -26,14 +27,20 @@ from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     _PATH_LOCKS,
+    WINDOWS_PATH_TRUST_DEFAULT,
+    WINDOWS_PATH_TRUST_MODES,
     ConfigError,
     _close_windows_handles,
     _windows_hold_directory_chain,
     load_authoritative_config,
     load_config,
     project_state_directory,
+    set_windows_path_trust,
     trusted_state_directory,
+    user_state_root,
+    validate_windows_state_root,
     validated_state_root,
+    windows_path_trust,
 )
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.gdbmi import GdbMiClient
@@ -201,6 +208,186 @@ def test_broadly_writable_windows_state_root_is_rejected(tmp_path: Path) -> None
         assert excinfo.value.error_type == "unsafe_configured_path"
     finally:
         subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
+
+
+# --- Windows path trust: what the check defends, and against whom -----------
+#
+# The table below is the security decision of hardci-hq#91 written down. It is
+# exercised through synthetic findings so the policy is pinned on every platform
+# and not only on a host whose ACLs happen to contain the case in question.
+
+WINDOWS_TRUST_TABLE = [
+    # A principal the local security authority can name as an account other than
+    # the operator is the whole point of the check, and stays a refusal.
+    ("foreign_principal", {"standard", "strict"}),
+    # A NULL DACL is a grant to Everyone in all but name.
+    ("null_dacl", {"standard", "strict"}),
+    ("untrusted_owner", {"standard", "strict"}),
+    # An AppContainer identity of software the operator installed holds a subset
+    # of the operator's own rights, and the operator's unpackaged processes can
+    # already rewrite the file in full. Reported, not refused.
+    ("app_package_principal", {"strict"}),
+    # A SID nothing here can resolve names no token this machine can build.
+    ("unresolved_principal", {"strict"}),
+    # Ignorance, not a verdict. Refusing it locked out every sandbox, service
+    # account and CI runner rather than only the untrustworthy ones.
+    ("acl_unreadable", {"strict"}),
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_windows_path_trust() -> Iterator[None]:
+    yield
+    set_windows_path_trust(None)
+
+
+@pytest.mark.parametrize(("finding", "refused_under"), WINDOWS_TRUST_TABLE)
+def test_which_windows_finding_refuses_under_which_mode(finding: str, refused_under: set[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "agentic_hil.config.inspect_windows_path_trust",
+        lambda root: [{"finding": finding, "scope": "ancestor", "path": str(root.parent), "sids": ["S-1-5-21-1-2-3-1001"]}],
+    )
+    for mode in WINDOWS_PATH_TRUST_MODES:
+        set_windows_path_trust(mode)
+        if mode in refused_under:
+            with pytest.raises(ConfigError) as refused:
+                validate_windows_state_root(tmp_path)
+            assert refused.value.error_type == "unsafe_configured_path"
+            assert refused.value.details["finding"] == finding
+            assert refused.value.details["path_trust"] == mode
+        else:
+            assert [entry["finding"] for entry in validate_windows_state_root(tmp_path)] == [finding]
+
+
+def test_a_tolerated_finding_is_returned_rather_than_discarded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A restricted environment has to be nameable, not silent.
+
+    `doctor` reports what `standard` accepted; if the validator dropped it there
+    would be nothing to report and a sandbox would look like a healthy host.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.config.inspect_windows_path_trust",
+        lambda root: [
+            {"finding": "acl_unreadable", "scope": "ancestor", "path": str(root.parent), "winerror": 5},
+            {"finding": "app_package_principal", "scope": "object", "path": str(root), "sids": ["S-1-15-3-1-2-3"]},
+        ],
+    )
+    set_windows_path_trust("standard")
+
+    findings = validate_windows_state_root(tmp_path)
+
+    assert [entry["finding"] for entry in findings] == ["acl_unreadable", "app_package_principal"]
+
+
+def test_a_refused_windows_path_names_the_holder_and_the_active_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "agentic_hil.config.inspect_windows_path_trust",
+        lambda root: [{"finding": "foreign_principal", "scope": "object", "path": str(root), "sids": ["S-1-1-0"]}],
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        validate_windows_state_root(tmp_path, field="state_root", label="state_root")
+
+    details = refused.value.to_dict()
+    assert details["field"] == "state_root"
+    assert details["path_trust"] == "standard"
+    assert [entry["sid"] for entry in details["untrusted_principals"]] == ["S-1-1-0"]
+    assert any("ACL" in step for step in details["do_not"])
+
+
+def test_the_configuration_names_the_mode_and_a_configuration_that_does_not_resets_it(tmp_path: Path) -> None:
+    """The mode is a property of the authoritative configuration, not of history.
+
+    Established on every load, so a second configuration in the same process can
+    never keep running under a mode the first one asked for.
+    """
+    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+
+    strict_workspace = tmp_path / "strict"
+    strict_path = write_config(strict_workspace)
+    strict_path.write_text("windows_path_trust: strict\n" + strict_path.read_text(encoding="utf-8"), encoding="utf-8")
+    # The mode is established before state_root is validated, so it holds even
+    # where strict then refuses that state_root — which on a normal Windows
+    # profile it does, and which is the point of asking for strict.
+    with suppress(ConfigError):
+        load_config(str(strict_path))
+    assert windows_path_trust() == "strict"
+
+    load_config(str(write_config(tmp_path / "plain")))
+    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+
+
+def test_an_unknown_path_trust_mode_is_refused_by_name(tmp_path: Path) -> None:
+    path = write_config(tmp_path)
+    path.write_text("windows_path_trust: lax\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(path))
+
+    assert refused.value.error_type == "config_invalid"
+    assert "windows_path_trust" in json.dumps(refused.value.to_dict())
+    # The setter refuses it too, so a caller that never went through the schema
+    # cannot establish a mode the table below has no row for.
+    with pytest.raises(ConfigError) as direct:
+        set_windows_path_trust("lax")
+    assert direct.value.details["field"] == "windows_path_trust"
+    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
+def test_the_standard_windows_user_directories_are_not_refused() -> None:
+    """hardci-hq#91: %APPDATA% and %LOCALAPPDATA% are standard working folders.
+
+    Against the real ACLs of the machine the suite runs on, and against the real
+    defaults `init` derives, because that is where the refusal was met.
+    """
+    set_windows_path_trust("standard")
+    roots = [user_state_root()]
+    for variable in ("APPDATA", "LOCALAPPDATA", "TEMP"):
+        value = os.environ.get(variable)
+        if value:
+            candidate = Path(value) / "agentic-hil-path-trust-check"
+            candidate.mkdir(parents=True, exist_ok=True)
+            roots.append(candidate)
+    for root in roots:
+        validate_windows_state_root(root, field="state_root", label=str(root))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
+def test_a_real_foreign_account_still_refuses_under_the_relaxed_default(tmp_path: Path) -> None:
+    """The relaxation is about who holds the right, not about how many do.
+
+    Everyone (S-1-1-0) is a principal the local security authority names, so it
+    is exactly the class that must survive the change.
+    """
+    path = write_config(tmp_path)
+    root = Path(load_config(str(path)).state_root)
+    grant = subprocess.run(["icacls", str(root), "/grant", "*S-1-1-0:(OI)(CI)M"], capture_output=True, text=True, check=False)
+    if grant.returncode != 0:
+        pytest.skip(f"could not set temporary test ACL: {grant.stderr}")
+    try:
+        set_windows_path_trust("standard")
+        with pytest.raises(ConfigError) as refused:
+            validate_windows_state_root(root)
+        assert refused.value.details["finding"] == "foreign_principal"
+        set_windows_path_trust("permissive")
+        assert any(entry["finding"] == "foreign_principal" for entry in validate_windows_state_root(root))
+    finally:
+        subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
+
+
+def test_the_suite_does_not_route_around_the_check_it_tests(tmp_path: Path, isolated_config_environment: Path) -> None:
+    """The strongest single argument in hardci-hq#91 was that it did.
+
+    `tests/conftest.py` and `tests/support.py` diverted their own scaffolding
+    into the real Local AppData because the check refused the standard per-user
+    Temp. A tool whose tests have to evade its own rule has drawn the rule wrong.
+    Both now sit where pytest and the operator already are, on every platform.
+    """
+    from support import LAUNCHER_ROOT, REAL_HOME
+
+    assert isolated_config_environment.parent.parent == tmp_path.parent
+    assert LAUNCHER_ROOT.parent == REAL_HOME
 
 
 def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> None:

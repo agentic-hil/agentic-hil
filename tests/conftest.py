@@ -40,13 +40,13 @@ def isolated_config_environment(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> Path:
-    original_home = Path.home()
-    original_local_appdata = Path(os.environ.get("LOCALAPPDATA") or original_home / "AppData" / "Local")
-    # Windows rejects trust-boundary paths below the replaceable per-user Temp
-    # ACL, so use protected Local AppData there. On POSIX, keep user policy/state
-    # outside workspaces that use tmp_path as cwd; pytest owns tmp_path.parent.
-    sandbox_parent = original_local_appdata if os.name == "nt" else tmp_path.parent
-    test_sandbox = sandbox_parent / f"agentic-hil-pytest-{os.getpid()}-{uuid.uuid4().hex}"
+    # pytest owns tmp_path.parent on every platform, and the trust check accepts
+    # it on every platform. It used to divert to Local AppData on Windows because
+    # the ACEs a normal profile carries below Temp were read as untrusted; the
+    # suite evading the project's own rule was the clearest evidence that the
+    # rule was drawn wrong. Keeping user policy and state out of tmp_path itself
+    # still matters: tests use tmp_path as the workspace cwd.
+    test_sandbox = tmp_path.parent / f"agentic-hil-pytest-{os.getpid()}-{uuid.uuid4().hex}"
     home_root = test_sandbox / "home"
     config_root = test_sandbox / "config"
     state_root = test_sandbox / "state"

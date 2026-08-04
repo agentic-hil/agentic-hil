@@ -79,6 +79,17 @@
       "minLength": 1,
       "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
     },
+    "windows_path_trust": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "strict",
+        "permissive"
+      ],
+      "default": "standard",
+      "description": "How far the Windows ACL check on state_root and the directories derived from it may go. standard refuses a path that a nameable account other than the operator, SYSTEM or Administrators can write, delete or re-permission, and reports without refusing an application-package identity, a SID no authority can resolve, and an ACL that could not be read. strict additionally refuses all three of those, which is the rule from before 0.8.0. permissive refuses nothing the ACLs say and reports everything; it is the visible override for an environment whose ACLs do not describe its trust boundary. Ignored off Windows. It does not govern the check on the user configuration directory, which is read before any configuration exists and is therefore always checked under standard.",
+      "$comment": "The check defends the policy file and state against principals outside the operator's identity. It cannot defend against code running as the operator, which owns these objects and can rewrite them regardless of any ACL."
+    },
     "permissions": {
       "type": "object",
       "description": "Project-scoped permissions: what may be done to this configuration itself. Deny-by-default like every other write permission in this file, and like those only ever widened by a human editing this file. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the granting of allow_flash.",
