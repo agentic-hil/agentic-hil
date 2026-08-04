@@ -39,6 +39,7 @@ from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.windows_principals import (
     describe_principal,
     package_sid_for_capability,
+    principal_class,
     principal_label,
     untrusted_principal_details,
 )
@@ -109,6 +110,44 @@ def test_an_unresolvable_capability_sid_still_reports_the_sid(monkeypatch: pytes
     assert "display_name" not in described
     assert principal_label(described) == CAPABILITY_SID
     assert CAPABILITY_SID in untrusted_principal_details([CAPABILITY_SID])["untrusted_principals_summary"]
+
+
+def test_a_principal_is_classified_by_what_it_is_not_by_where_it_appears(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The class decides the refusal, so it is the thing worth pinning.
+
+    Structure answers for a package identity without any lookup. Everything else
+    turns on whether the local security authority names an account for it —
+    which is the difference between "somebody can exercise this right" and "this
+    SID belongs to nothing that can log on here".
+    """
+    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
+    monkeypatch.setattr(windows_principals, "_account_name", lambda sid: "BUILTIN\\Everyone" if sid == "S-1-1-0" else None)
+
+    assert principal_class(CAPABILITY_SID) == "app_package"
+    assert principal_class(PACKAGE_SID) == "app_package"
+    assert principal_class("S-1-1-0") == "account"
+    assert principal_class("S-1-5-21-923859167-1023467973-1024582151-2273314122") == "unresolved"
+    assert principal_class("") == "unresolved"
+
+
+def test_a_broken_lookup_reports_ignorance_rather_than_a_holder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lookup that cannot run has not found an account; it has found nothing.
+
+    Reporting it as an account would refuse a path on the strength of a failure
+    in the code that was only trying to name somebody.
+    """
+
+    def explode(sid: str):
+        raise OSError("lookup unavailable")
+
+    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
+    monkeypatch.setattr(windows_principals, "_account_name", explode)
+
+    assert principal_class("S-1-5-21-1-2-3-1001") == "unresolved"
+
+
+def test_a_described_principal_carries_the_class_that_decided_the_verdict(resolvable_package: None) -> None:
+    assert describe_principal(CAPABILITY_SID)["principal_class"] == "app_package"
 
 
 def test_a_lookup_that_raises_never_becomes_the_reported_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,6 +248,46 @@ def test_a_real_windows_refusal_names_the_principal_holding_the_right(tmp_path: 
         assert "S-1-1-0" in details["untrusted_principals_summary"]
     finally:
         subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the path trust check is Windows-only")
+def test_doctor_names_what_the_path_trust_check_saw_and_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """hardci-hq#91: an environment the check cannot fully vouch for is named.
+
+    Refusing an unreadable ACL locked out every sandbox, service account and CI
+    runner. Accepting it silently would leave a degraded host indistinguishable
+    from a healthy one, which is the other half of the same mistake.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(
+        "agentic_hil.cli.inspect_windows_path_trust",
+        lambda path: [{"finding": "acl_unreadable", "scope": "object", "path": str(path), "winerror": 5}],
+    )
+
+    report = doctor()
+
+    trust = report["path_trust"]
+    assert trust["mode"] == "standard"
+    assert trust["ok"] is False
+    assert {entry["field"] for entry in trust["findings"]} == {"user_config", "state_root"}
+    assert "could not be read" in trust["summary"]
+    assert "strict" in trust["summary"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the path trust check is Windows-only")
+def test_doctor_says_so_plainly_when_nothing_was_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("agentic_hil.cli.inspect_windows_path_trust", lambda path: [])
+
+    trust = doctor()["path_trust"]
+
+    assert trust["ok"] is True
+    assert trust["findings"] == []
+    assert "passes" in trust["summary"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the package registry is a Windows construct")
