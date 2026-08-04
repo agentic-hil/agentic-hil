@@ -263,6 +263,14 @@ class AgenticHILConfig:
     # Project-scoped grants. Not per device, because writing this file is not a
     # property of any one board.
     permissions: ProjectPermissions = field(default_factory=ProjectPermissions)
+    # The exact bytes this policy was parsed from, hashed, and the moment that
+    # happened. A server enforces the configuration it loaded for as long as it
+    # runs, so the only way one of its answers can say whether that is still the
+    # file on disk is to carry what it read. Empty when the configuration did not
+    # come from a file this process read — "unchanged" is then not a claim it may
+    # make.
+    config_digest: str = ""
+    loaded_at: str = ""
 
     @property
     def read_free(self) -> bool:

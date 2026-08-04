@@ -29,6 +29,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
+from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     PROJECT_CONFIG_DESCRIBE,
     PROJECT_CONFIG_SET,
@@ -116,11 +117,21 @@ class AgenticHILToolService:
         return self.config.debugger.permissions if self.config.debugger is not None else DebuggerPermissions()
 
     def debugger_info(self) -> JsonObject:
+        """Which debugger backend this server drives, and which file said so.
+
+        The configuration is named in every case, including the two refusals.
+        This is the answer an operator compares against `agentic-hil doctor`, and
+        the two came apart silently once already: `doctor` read the file and said
+        `pyocd` while this said `stlink` out of the version loaded at startup,
+        with nothing anywhere to say which was which."""
+        status = config_status(self.config)
         if self.config.debugger is None:
-            return unbound_debugger_error("debugger_info", self.config)
-        if not self.config.probe_allowed():
-            return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
-        return self.backend.info()
+            result = unbound_debugger_error("debugger_info", self.config)
+        elif not self.config.probe_allowed():
+            result = tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
+        else:
+            result = self.backend.info()
+        return with_config_status(result, status, prominent=True)
 
     def debugger_probes_list(self) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -288,8 +299,19 @@ class AgenticHILToolService:
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         with self._lifecycle_lock:
             if self._state != "open":
-                return {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
-            return self._call_unlocked(name, arguments)
+                result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
+            else:
+                result = self._call_unlocked(name, arguments)
+            # A configuration that has moved since startup belongs in every
+            # answer, not only in the two that name it outright: a caller reading
+            # a flash result has the same reason to know that the policy it was
+            # decided by is no longer the policy on disk. Answers that already
+            # carry the block — `debugger_info`, and the configuration tools —
+            # are left alone, so there is one statement per result and it always
+            # comes from the same check.
+            if "config_status" in result:
+                return result
+            return with_config_status(result, config_status(self.config))
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -1063,7 +1085,14 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
             return _rolled_back(target_path, previous_text, error)
 
     created = current is None
-    return {
+    # One check, one answer. A server that started without a configuration binds
+    # what this call wrote and has nothing to reload; one that already had a
+    # configuration is now serving a file that no longer exists in that form, and
+    # `reload_required` here has to be the same fact that the staleness block in
+    # every following answer reports, or an operator gets "no change" from one
+    # mechanism and "restart needed" from the other.
+    status = config_status(existing) if existing is not None else None
+    result = {
         "ok": True,
         "tool": PROJECT_CONFIG_CREATE,
         "summary": (
@@ -1082,7 +1111,7 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         # wrote. A server that already had one keeps serving what it loaded,
         # because swapping a configuration under open sessions and held device
         # leases is not something a tool call may do behind their back.
-        "reload_required": existing is not None,
+        "reload_required": status is not None and bool(status["reload_required"]),
         "hardware_discovery": discovery,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
@@ -1090,6 +1119,7 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "cleanup_required": False,
         "next_steps": _generated_next_steps(written, created=created),
     }
+    return result if status is None else with_config_status(result, status)
 
 
 def _configuration_on_disk(workspace: Path) -> AgenticHILConfig | None:

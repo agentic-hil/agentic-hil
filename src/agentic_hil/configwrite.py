@@ -52,6 +52,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
+from agentic_hil.configstate import config_stale, config_status, with_config_status
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_KEY_RULES,
@@ -358,7 +359,15 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         except ConfigError as error:
             return _rolled_back(target_path, previous_text, error)
 
-    return {
+    # The same rule the regeneration path follows: this server keeps serving the
+    # configuration it loaded, because swapping a policy under a live session is
+    # not something a tool call may do behind its back. `reload_required` is read
+    # off the staleness check rather than asserted here, so that this result and
+    # the block every later answer carries are one statement made once — an
+    # operator must never get "restart needed" from the write and "no change"
+    # from the next tool call.
+    status = config_status(existing)
+    result = {
         "ok": True,
         "tool": PROJECT_CONFIG_SET,
         "summary": f"{len(applied)} configuration key(s) were changed; the file was validated before it replaced the previous one.",
@@ -368,10 +377,7 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         "created_entries": sorted(created_entries),
         "permissions_changed": moved,
         "provenance": dict(updated.get("provenance") or {}),
-        # The same rule the regeneration path follows: this server keeps serving
-        # the configuration it loaded, because swapping a policy under a live
-        # session is not something a tool call may do behind its back.
-        "reload_required": True,
+        "reload_required": bool(status["reload_required"]),
         "next_steps": [
             "Report which keys changed and where the file is.",
             "This server is still serving the configuration it loaded at startup. Ask the operator to restart the MCP "
@@ -381,6 +387,7 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         **NOT_STARTED,
         "cleanup_required": False,
     }
+    return with_config_status(result, status)
 
 
 def _parse_changes(changes: object) -> list[tuple[ResolvedConfigKey, Any]] | JsonObject:
@@ -578,6 +585,12 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
     target_path = _authoritative_path(workspace, existing)
     _, document = _load_document(target_path)
     rights = granted_rights(existing, document)
+    # This tool needs no permission, so it is also the answer to "is what this
+    # server enforces still what the file says". It reads the document as it is
+    # now, which is exactly why the divergence has to be stated here: the keys
+    # and values below come from disk while the grants that gate them are the
+    # narrower of disk and what this server loaded.
+    status = config_status(existing)
 
     writable: list[JsonObject] = []
     locked: list[JsonObject] = []
@@ -596,6 +609,8 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
             f"{len(writable)} configuration key(s) are open to this caller and {len(locked)} are not; "
             f"every locked one names the grant that would open it."
         ),
+        "config_status": status,
+        **({"config_stale": True} if config_stale(status) else {}),
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
         "config_version": existing.config_version,
@@ -620,7 +635,7 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
         "open_holds": open_holds or None,
         "writes_blocked_by_open_run": bool(open_holds),
         "reference": CONFIG_SHAPE_URI,
-        "next_steps": _describe_next_steps(rights, writable, open_holds),
+        "next_steps": _describe_next_steps(rights, writable, open_holds, status),
         **NOT_STARTED,
         "cleanup_required": False,
     }
@@ -687,8 +702,16 @@ def _entry_patterns(rights: dict[str, bool]) -> list[JsonObject]:
     return patterns
 
 
-def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None) -> list[str]:
+def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None, status: JsonObject) -> list[str]:
     steps: list[str] = []
+    if config_stale(status):
+        steps.append(
+            "The file has moved since this server loaded it, so the two halves of this answer come from two "
+            "documents: the keys and values below are read from disk, and every grant is the narrower of what this "
+            "server loaded and what the file now says. A grant revoked since startup is already in force; a grant "
+            "added since startup is not, and will not be until the MCP server is restarted — a server bound to a "
+            "policy does not widen itself from a file that changed underneath it."
+        )
     if open_holds:
         steps.append("A run or session is holding hardware, so no configuration write is accepted until it is closed with `bench_run_stop`.")
     if writable:

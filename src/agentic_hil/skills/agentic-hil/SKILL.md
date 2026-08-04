@@ -121,6 +121,19 @@ reload_required field and ask the operator to restart it.
 `agentic-hil://reference/config-shape` describes the whole shape, a worked
 example, and what deliberately cannot be done.
 
+`config_stale: true` on any result says the authoritative file has changed since
+this server parsed it. Nothing is reloaded while the server runs, so the backend
+that result names, the devices it knows and the permissions it enforces are all
+from the version loaded at startup. The `config_status` block names the file and
+shows the two digests differing, and separates `changed` from `missing` (the
+file is gone) and `unreadable` (it is there and will not open, which is unknown
+rather than unchanged). Report it, ask the operator to restart the MCP server
+once, and do not try to make it pick the file up by editing again or by calling
+a configuration tool. `debugger_info` and `project_config_describe` carry the
+block either way, so a disagreement between `agentic-hil doctor` — which reads
+the file fresh every time — and `debugger_info` is this and nothing else. A
+permission revoked since startup already binds; one added since does not.
+
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.

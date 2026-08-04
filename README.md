@@ -226,6 +226,14 @@ With the first set, an agent calls `project_config_describe` — which keys are 
 
 Named keys with scalar values, each checked against the shipped schema. No document and no subtree can be sent, so the file stays something the agent did not author. A write is refused while a run or a session holds hardware, the changed document is validated before it replaces the working one, and `provenance` records what moved, when, and through which call. The MCP resource `agentic-hil://reference/config-shape` is the full description, with a worked example and what deliberately cannot be done.
 
+### Changing it while the server runs
+
+The MCP server parses this file once, at startup, and answers out of that version until it exits. Nothing reloads it: a policy that changed under a held board would move the rules during the run they govern, and a server bound to a policy must not be able to widen its own grants from a file that moved underneath it.
+
+What the answers do say is whether the two still match. Every result carries a `config_status` block once they do not, plus a flat `config_stale: true`; `debugger_info`, `project_config_describe` and `agentic-hil doctor` carry it in every case, so "this is the configuration in force" is a positive statement and not an absence. The comparison is a SHA-256 of the exact bytes the running server parsed against the bytes on disk now — not a modification time, which calls a `git checkout` that restored identical content a change and misses two writes inside one timestamp tick. `state` is one of `unchanged`, `changed`, `missing` (the file is gone, so there is nothing to restart onto), `unreadable` (it is there and will not open, which is unknown rather than unchanged) and `unknown`. The remedy for the last three is the same: restart the MCP server. `agentic-hil doctor` re-reads the file on every invocation and is therefore always current, which is why its `config_status.loaded_digest` is the value to compare a running server's against — if they differ, that server is answering out of the older file.
+
+One thing does follow the file while the server runs, and it can only ever narrow: `project_config_describe` and `project_config_set` gate on the narrower of the permissions this server loaded and the ones on disk. A permission an operator revokes therefore binds on the next call, and one they add needs the restart.
+
 ### Migration
 
 A configuration written before this release has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Nothing infers the new model from a missing key, so an update never widens what a bench already allows. Migrating is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.

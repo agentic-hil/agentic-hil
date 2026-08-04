@@ -46,6 +46,25 @@ MARKDOWN_MIME = "text/markdown"
 
 BACKENDS = ("openocd", "stlink", "pyocd")
 
+# The loaded configuration and the file it came from have come apart. Not a
+# refusal — every tool still works — but it is carried like one, because what a
+# caller has to do about it is the same kind of thing as a refusal: report it,
+# name the file, and let the operator decide.
+CONFIG_STALE_ERROR = "config_stale"
+# The scope that separates "this project has no configuration", which
+# `project_config_create` answers, from "the configuration this running server
+# loaded is gone from disk", which it must not.
+CONFIG_RUNNING_SERVER_SCOPE = "running_server"
+# Said by `doctor`, which parses the file at the moment it is asked and is
+# therefore always current — which is exactly why it cannot speak for a server
+# that has been running since before the last edit.
+RUNNING_SERVER_COMPARISON = (
+    "This is the configuration as it is on disk right now; the command line reads it fresh on every invocation. A "
+    "running MCP server does not: it keeps serving what it parsed at startup. Compare the `loaded_digest` here with "
+    "`config_status.loaded_digest` in that server's `debugger_info`. If they differ, that server is enforcing an older "
+    "configuration and only restarting it changes that."
+)
+
 
 @dataclass(frozen=True)
 class ErrorRemedy:
@@ -104,6 +123,66 @@ def _substitutions() -> dict[str, str]:
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    CONFIG_STALE_ERROR: ErrorRemedy(
+        meaning=(
+            "The authoritative configuration has changed since this MCP server parsed it, and the server is still "
+            "answering out of the version it loaded at startup. It does not reload while it runs, so the backend it "
+            "names, the devices it knows and the permissions it enforces are the ones from the older file. Nothing "
+            "failed; what an answer says and what the file says have come apart, and the file is the one an operator "
+            "reads."
+        ),
+        remediation=(
+            "Ask the operator to restart the MCP server, then repeat the call. Say which server: the one the agent "
+            "host started for this workspace, not the `agentic-hil` command line, which reads the file fresh every "
+            "time and is already current.",
+            "Until it is restarted, treat what this server says about the bench as the older file's answer. Do not "
+            "reconcile the difference by guessing which of the two is right — `config_status.path` names the file and "
+            "`loaded_digest` versus `current_digest` says they differ.",
+            "If the change was made through `project_config_set` or `project_config_create` in this session, this is "
+            "the same fact those results reported as `reload_required`, not a second problem.",
+        ),
+        do_not=(
+            "Do not carry on flashing, resetting or driving devices on the assumption that the new file is in force. "
+            "It is not, and the permissions in force are the older ones — which may be wider than what the operator "
+            "has just written.",
+            "Do not try to make the server pick the file up by editing it again, by deleting it, or by calling a "
+            "configuration tool. Nothing short of a restart rebinds a running server, by design.",
+        ),
+    ),
+    f"config_file_not_found:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration this server loaded is no longer at its path. This is not a project "
+            "without a configuration: this server has one, in memory, and is still enforcing it. What is gone is the "
+            "file an operator would read to find out what that policy says."
+        ),
+        remediation=(
+            "Ask the operator to put the file back at the path in `config_status.path`, or to say that its removal was "
+            "intended, and then restart the MCP server.",
+            "Report what the current policy still allows from `project_config_describe` while the file is absent, so "
+            "the operator can see what is being enforced without a file to read it from.",
+        ),
+        do_not=(
+            "Do not call `project_config_create` to replace it. A server bound to a configuration is gated by the "
+            "permissions it loaded even when the file is gone, so that call is refused — and if it were not, it would "
+            "replace an operator's settings with a deny-by-default skeleton.",
+        ),
+    ),
+    f"config_unreadable:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration this server loaded is still at its path and can no longer be read, so "
+            "whether it still matches what is being enforced is unknown. Unknown is not unchanged. The server keeps "
+            "enforcing the version it loaded."
+        ),
+        remediation=(
+            "Report `config_status.backend_error`: it names what the read failed on — a permission on the file or a "
+            "directory above it, a path component that is no longer a directory, bytes that are no longer UTF-8.",
+            "Ask the operator to make the file readable again and restart the MCP server, so that what is enforced and "
+            "what can be read are the same document.",
+        ),
+        do_not=(
+            "Do not treat an unreadable file as an unchanged one and carry on as if the answers were current.",
+        ),
+    ),
     "installation_in_use": ErrorRemedy(
         meaning=(
             "A process is running out of the installation this upgrade would replace, and on Windows a file mapped as "
