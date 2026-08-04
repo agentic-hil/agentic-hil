@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FAKE_GDB, write_config
+from conftest import FAKE_GDB, FAKE_OPENOCD_STATE_ENV, write_config
 
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
@@ -300,6 +300,39 @@ def test_the_execution_grant_is_what_lets_the_target_run(tmp_path: Path) -> None
         assert "-exec-continue" in gdb_commands(tmp_path, started)
     finally:
         service.close()
+
+
+def test_stopping_a_session_leaves_the_target_halted_rather_than_running_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ending a session must not be the resume the bench was refused.
+
+    `debug_stop_session` is deliberately ungated — containment that needed a
+    permission would leave a running target nobody may stop — and it detaches
+    GDB. A debug server whose detach event resumes the core would therefore turn
+    the one call every caller may make into the one call this configuration
+    forbids."""
+    state_path = tmp_path / "openocd-detach-state.json"
+    monkeypatch.setenv(FAKE_OPENOCD_STATE_ENV, str(state_path))
+    service = debug_service(tmp_path, may_execute=False)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": 10.0})
+        assert started["ok"] is True, started
+
+        stopped = service.call("debug_stop_session", {"timeout_s": 5})
+
+        assert stopped["ok"] is True, stopped
+        # Confirmed while GDB was still attached, not assumed after it left.
+        assert stopped["halt_confirmed"] is True
+        assert stopped["target_state"] == "halted"
+        assert "-exec-continue" not in gdb_commands(tmp_path, started)
+    finally:
+        service.close()
+
+    # Read back from the server rather than from the argument list this bench
+    # built: what it would leave on the target, and what a detach would do to it.
+    left_on_the_target = json.loads(state_path.read_text(encoding="utf-8"))
+    assert left_on_the_target["target_state"] == "halted"
+    assert left_on_the_target["state_after_detach"] == "halted"
+    assert "resume" not in json.dumps(left_on_the_target["events"])
 
 
 def test_the_refusal_does_not_depend_on_a_session_being_open(tmp_path: Path) -> None:

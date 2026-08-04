@@ -25,6 +25,8 @@ from yaml.resolver import BaseResolver
 
 from agentic_hil.knowledge import remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
+    CAN_FD_MAX_DATA_BYTES,
+    CLASSICAL_CAN_MAX_DATA_BYTES,
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
     AgenticHILConfig,
@@ -833,7 +835,22 @@ def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) 
     return str(lexical)
 
 
-def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, required: bool) -> DebuggerConfig:
+def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, required: bool, reachable: bool) -> DebuggerConfig:
+    """Pin one named probe's executable and, for OpenOCD, its scripts.
+
+    ``required`` is "this probe holds a grant that drives hardware": the
+    toolchain has to resolve at startup rather than fail at the first call, and
+    its scripts have to be named absolutely so this server can see the file
+    OpenOCD will execute.
+
+    ``reachable`` is the wider question of whether *any* call can get to the
+    bench through this probe, which from configuration version 2 on includes
+    every read — ``probe_target`` and a debug attach need no grant there. The
+    scripts are Tcl that OpenOCD executes, so they are validated whenever the
+    probe is reachable at all; keying that on ``required`` alone left a version 2
+    configuration with every permission false pointing a permitted probe at a
+    script any local user could rewrite.
+    """
     candidates = {
         "openocd": ["openocd"],
         "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
@@ -848,11 +865,11 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
         debugger,
         executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates, required=required),
     )
-    if required and pinned.type == "openocd":
+    if reachable and pinned.type == "openocd":
         pinned = replace(
             pinned,
-            interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg"),
-            target_cfg=configured_external_file(config, pinned.target_cfg, f"{field_prefix}.target_cfg"),
+            interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg", require_absolute=required),
+            target_cfg=configured_external_file(config, pinned.target_cfg, f"{field_prefix}.target_cfg", require_absolute=required),
         )
     return pinned
 
@@ -880,8 +897,13 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     # Every named debugger MUST be pinned and validated: a named entry could
     # otherwise point a backend at an unvalidated executable. Each is required to
     # resolve on its own grants, so a board with no enabled permission does not
-    # force an operator to install a toolchain it will never drive.
-    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named)) for name, named in config.debuggers.items()}
+    # force an operator to install a toolchain it will never drive — but the code
+    # it would run when it *is* reached is validated on reachability, which under
+    # version 2 is every configured probe, because reading one needs no grant.
+    debuggers = {
+        name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named), debugger_toolchain_reachable(config, named))
+        for name, named in config.debuggers.items()
+    }
     return replace(
         config,
         debuggers=debuggers,
@@ -994,14 +1016,27 @@ def disabled_executable_path(config: AgenticHILConfig, field: str) -> str:
     return str(Path(config.config_path).parent / f".agentic-hil-disabled-{safe_field}")
 
 
-def configured_external_file(config: AgenticHILConfig, value: str, field: str) -> str:
+def configured_external_file(config: AgenticHILConfig, value: str, field: str, *, require_absolute: bool = True) -> str:
     requested = Path(value)
     if not requested.is_absolute():
-        raise ConfigError(
-            "config_invalid",
-            "Configured debugger files must use absolute paths.",
-            {"field": field, "value": value},
-        )
+        if require_absolute:
+            raise ConfigError(
+                "config_invalid",
+                "Configured debugger files must use absolute paths.",
+                {"field": field, "value": value},
+            )
+        # A relative name is not a path this server resolves at all: OpenOCD
+        # looks it up in its own script search path, inside the installation
+        # whose executable already had to pass validate_trusted_program_file.
+        # What it may not do is climb out of that search path, because the file
+        # it would reach then is one nothing here has vouched for.
+        if requested.drive or requested.root or ".." in requested.parts:
+            raise ConfigError(
+                "config_invalid",
+                "A relative debugger script name must stay inside the debugger's own script search path.",
+                {"field": field, "value": value},
+            )
+        return value
     resolved = requested.resolve()
     if is_path_within(resolved, Path(config.work_dir)):
         raise ConfigError(
@@ -2337,7 +2372,31 @@ def project_permissions(raw: JsonObject) -> ProjectPermissions:
 
 
 def debugger_access_enabled(debugger: DebuggerConfig) -> bool:
-    return any([debugger.permissions.allow_probe, debugger.permissions.allow_flash, debugger.permissions.allow_reset])
+    """Whether this probe carries a grant that makes it drive hardware.
+
+    ``allow_debug_execution`` belongs here with flash and reset: a bench that
+    may resume firmware through this probe is a bench whose toolchain has to be
+    there, and one whose OpenOCD scripts must be named by a path this server can
+    check rather than left to a search path."""
+    return any(
+        [
+            debugger.permissions.allow_probe,
+            debugger.permissions.allow_flash,
+            debugger.permissions.allow_reset,
+            debugger.permissions.allow_debug_execution,
+        ]
+    )
+
+
+def debugger_toolchain_reachable(config: AgenticHILConfig, debugger: DebuggerConfig) -> bool:
+    """Whether any call can reach the bench through this probe, read or write.
+
+    Not the same question as ``debugger_access_enabled``. From configuration
+    version 2 on, reading needs no permission, so ``probe_target`` and a debug
+    attach run on a probe that granted nothing — and both hand the configured
+    OpenOCD scripts to ``openocd -f``. A probe that is genuinely out of reach
+    (version 1 with no grant at all) stays unvalidated and unavailable."""
+    return config.probe_allowed(debugger) or debugger_access_enabled(debugger)
 
 
 def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
@@ -2398,6 +2457,18 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
             {"field": f"can_buses.{name}.adapter", "value": adapter, "allowed_values": ["peak", "socketcan", "process"]},
         )
     fd = bool(raw.get("fd", False))
+    max_frame_data_bytes = int(raw.get("max_frame_data_bytes", CAN_FD_MAX_DATA_BYTES if fd else CLASSICAL_CAN_MAX_DATA_BYTES))
+    if not fd and max_frame_data_bytes > CLASSICAL_CAN_MAX_DATA_BYTES:
+        # The schema permits up to 64 because CAN FD reaches that; the pairing
+        # with `fd` is what it cannot express. A classical data field is eight
+        # bytes wide, so a wider limit here is a configuration whose frames the
+        # wire cannot hold - the adapter would reject, truncate or malform them,
+        # and the audit would record bytes that never went out.
+        raise ConfigError(
+            "config_invalid",
+            "A classical CAN frame carries at most 8 data bytes; a larger max_frame_data_bytes needs fd: true.",
+            {"field": f"can_buses.{name}.max_frame_data_bytes", "value": max_frame_data_bytes, "maximum": CLASSICAL_CAN_MAX_DATA_BYTES},
+        )
     return CanBusConfig(
         adapter=adapter,  # type: ignore[arg-type]
         channel=str(raw["channel"]),
@@ -2412,7 +2483,7 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
         receive_own_messages=bool(raw.get("receive_own_messages", False)),
         listen_only=bool(raw.get("listen_only", False)),
         max_buffer_frames=int(raw.get("max_buffer_frames", 1024)),
-        max_frame_data_bytes=int(raw.get("max_frame_data_bytes", 64 if fd else 8)),
+        max_frame_data_bytes=max_frame_data_bytes,
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"can_buses.{name}.permissions")),
     )

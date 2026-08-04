@@ -11,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -482,6 +483,9 @@ def test_can_session_constructor_failure_shuts_down_raw_bus(tmp_path: Path, monk
     from agentic_hil.can import open_python_can_adapter
 
     config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    # An interface whose timing this host cannot answer for is not opened at all,
+    # so describe one that matches to reach the construction failure under test.
+    _socketcan_link(monkeypatch, bitrate=config.can_buses["bench"].bitrate)
     bus = SimpleNamespace(closed=False, shutdown=lambda: setattr(bus, "closed", True))
     monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus))
     monkeypatch.setattr("agentic_hil.can.PythonCanAdapterSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
@@ -531,6 +535,7 @@ def test_can_inner_double_failure_keeps_raw_bus_reachable_for_retry(tmp_path: Pa
             raise OSError("first shutdown failed")
 
     bus = SimpleNamespace(shutdown=flaky_shutdown)
+    _socketcan_link(monkeypatch, bitrate=config.can_buses["bench"].bitrate)
     monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus))
     monkeypatch.setattr("agentic_hil.can.PythonCanAdapterSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
 
@@ -2782,6 +2787,79 @@ def test_a_group_writable_openocd_script_is_refused(tmp_path: Path, monkeypatch:
     assert detail["field"] == "debuggers.dut.interface_cfg"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_a_writable_openocd_script_is_refused_on_a_bench_that_granted_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Version 2 grants no permission and still reaches the probe.
+
+    Reading needs no grant from version 2 on, so `probe_target` and a debug
+    attach run with every flag false — and both hand these scripts to
+    `openocd -f`. Validating them only when a grant was present left the
+    deny-by-default configuration executing Tcl any local user could rewrite."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, permissions={}, config_version=2)
+    script = Path(os.environ["AGENTIC_HIL_CONFIG"]).parent / "interface.cfg"
+    script.chmod(0o664)
+    monkeypatch.setattr(subprocess, "Popen", _no_process_started)
+
+    with pytest.raises(ConfigError) as error:
+        load_authoritative_config(workspace)
+
+    detail = error.value.to_dict()
+    assert detail["error_type"] == "unsafe_configured_path"
+    assert detail["field"] == "debuggers.dut.interface_cfg"
+
+
+def _no_process_started(*args: object, **kwargs: object) -> None:
+    raise AssertionError("a configuration refused at load must not have started a process")
+
+
+def test_a_read_free_bench_that_granted_nothing_still_pins_its_openocd_scripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: a trusted script is pinned to the file that was checked."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, permissions={}, config_version=2)
+    config_root = Path(os.environ["AGENTIC_HIL_CONFIG"]).parent
+
+    config = load_authoritative_config(workspace)
+
+    assert config.debugger.permissions.allow_flash is False
+    assert config.debugger.interface_cfg == str((config_root / "interface.cfg").resolve())
+    assert config.debugger.target_cfg == str((config_root / "target.cfg").resolve())
+
+
+def test_a_relative_openocd_script_may_not_climb_out_of_the_search_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bench with no grant keeps naming OpenOCD's own bundled scripts.
+
+    `interface/stlink.cfg` is resolved by OpenOCD inside the installation whose
+    executable was already validated, so it is left alone. `../` leaves that
+    installation, which is a file nothing here vouched for."""
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, permissions={}, config_version=2
+    )
+    original = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        original.replace((config_path.parent / "interface.cfg").as_posix(), "interface/stlink.cfg"), encoding="utf-8"
+    )
+
+    assert load_authoritative_config(workspace).debugger.interface_cfg == "interface/stlink.cfg"
+
+    config_path.write_text(
+        original.replace((config_path.parent / "interface.cfg").as_posix(), "../../attacker/stlink.cfg"), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError) as error:
+        load_authoritative_config(workspace)
+
+    detail = error.value.to_dict()
+    assert detail["error_type"] == "config_invalid"
+    assert detail["field"] == "debuggers.dut.interface_cfg"
+
+
 # ---------------------------------------------------------------------------
 # What a direct CAN adapter is actually told, and what it refuses to be told.
 
@@ -2889,6 +2967,7 @@ def test_an_fd_bus_sends_fd_frames_and_carries_more_than_eight_bytes(tmp_path: P
     _fake_can_module(monkeypatch)
     config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    fd: true\n')
     bus_config = config.can_buses["bench"]
+    _socketcan_link(monkeypatch, bitrate=bus_config.bitrate)
     assert bus_config.max_frame_data_bytes == 64
 
     result = open_python_can_adapter(config, "bench", bus_config, False)
@@ -2905,11 +2984,79 @@ def test_an_fd_bus_sends_fd_frames_and_carries_more_than_eight_bytes(tmp_path: P
     assert sent["data"] == payload
 
 
+def test_a_classical_bus_configured_for_fd_payloads_is_refused_at_load(tmp_path: Path) -> None:
+    """A classical CAN data field is eight bytes wide, whatever the file says.
+
+    The schema allows up to 64 because CAN FD reaches that; the pairing with
+    `fd` is what it cannot express, so it is checked here instead of leaving a
+    bus configured to send frames the wire cannot hold."""
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    max_frame_data_bytes: 64\n')
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "can_buses.bench.max_frame_data_bytes"
+    assert rejected.value.details["maximum"] == 8
+
+
+def test_a_classical_bus_refuses_an_over_eight_byte_payload_before_the_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same limit immediately before dispatch.
+
+    A `CanBusConfig` reaching this process any other way must not hand nine
+    bytes to an adapter opened with `is_fd=False`: the frame is rejected,
+    truncated or malformed, and the audit would record bytes that never went
+    out."""
+    from agentic_hil.can import CanBusSession
+
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    classical = replace(config.can_buses["bench"], max_frame_data_bytes=64)
+    assert classical.fd is False
+
+    refused = payload_frame(classical, {"frame_id": "0x123", "data_hex": bytes(range(9)).hex()})
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["max_frame_data_bytes"] == 8
+    assert refused["bytes_requested"] == 9
+    assert payload_frame(classical, {"frame_id": "0x123", "data_hex": bytes(range(8)).hex()})["ok"] is True
+
+    class _RecordingAdapter:
+        adapter_name = "fake"
+
+        def __init__(self) -> None:
+            self.sent: list[object] = []
+
+        def send(self, frame: object) -> dict:
+            self.sent.append(frame)
+            return {"ok": True}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": True, "frames": []}
+
+        def status(self) -> dict:
+            return {"active": True}
+
+        def close(self) -> dict:
+            return {"safe_state_confirmed": True, "process_reaped": True}
+
+    adapter = _RecordingAdapter()
+    service = CanBusService(config)
+    try:
+        service.sessions["bench"] = CanBusSession("bench", classical, adapter, str(tmp_path / "can-classical.jsonl"))
+        sent = service.send("bench", {"frame_id": "0x123", "data_hex": bytes(range(9)).hex()})
+
+        assert sent["ok"] is False
+        assert sent["error_type"] == "invalid_argument"
+        assert adapter.sent == [], "a frame the protocol cannot carry must not reach the adapter"
+    finally:
+        service.close()
+
+
 def test_a_classical_bus_still_sends_classical_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from agentic_hil.can import CanFrame, open_python_can_adapter
 
     _fake_can_module(monkeypatch)
     config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+    _socketcan_link(monkeypatch, bitrate=config.can_buses["bench"].bitrate)
 
     result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
     session = result["session"]
@@ -2995,10 +3142,10 @@ def test_a_matching_socketcan_interface_opens_and_is_reported_as_verified(tmp_pa
 
 
 def test_an_unreadable_socketcan_timing_is_reported_rather_than_assumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A virtual bus has no timing, and an absent interface fails its own open.
+    """A virtual bus has no timing to report and no wire to disturb.
 
-    Neither contradicts the configuration, so neither is refused here — but the
-    session says the bitrate is unconfirmed instead of repeating it as fact."""
+    It cannot contradict the configuration and cannot be mistimed, so it opens —
+    saying the bitrate is unconfirmed rather than repeating it as fact."""
     from agentic_hil.can import open_python_can_adapter
 
     _fake_can_module(monkeypatch)
@@ -3013,6 +3160,59 @@ def test_an_unreadable_socketcan_timing_is_reported_rather_than_assumed(tmp_path
         assert result["session"].status()["bitrate_verified"] is False
     finally:
         result["session"].close()
+
+
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        ({"found": True, "kind": "can", "bitrate": None}, "interface can0 reports no bit timing"),
+        ({"found": False, "kind": None, "bitrate": None}, "interface can0 was not found on this host"),
+        ({"found": False, "kind": None, "bitrate": None}, "netlink is not available on this platform"),
+    ],
+)
+def test_a_socketcan_bus_whose_timing_could_not_be_confirmed_is_not_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: dict, reason: str
+) -> None:
+    """Unverified is not "matches".
+
+    A physical `can` link with no readable timing, an interface that is not on
+    this host and a netlink query that failed leave the same question open, and a
+    bus opened on an answer nobody gave is the same wrong bus as one opened on a
+    wrong answer: it hears nothing, or it puts error frames on somebody else's
+    wire."""
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, channel="can0", reason=reason, **fields)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "can0"\n    bitrate: 500000\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == "can_buses.bench.bitrate"
+    assert result["bitrate_verified"] is False
+    assert result["bitrate_unverified_reason"] == reason
+    assert result["configured_bitrate"] == 500000
+    assert result["side_effect_committed"] is False
+    assert module.opened == [], "a bus whose timing could not be confirmed must not be opened"
+
+
+def test_a_can_session_refuses_to_start_on_an_unconfirmable_interface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal reaches the caller of can_session_start, not only the opener."""
+    _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, channel="can0", found=True, kind="can", bitrate=None, reason="interface can0 reports no bit timing")
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "can0"\n')
+    service = CanBusService(config)
+    try:
+        started = service.session_start("bench")
+
+        assert started["ok"] is False, started
+        assert started["error_type"] == "config_invalid"
+        assert started["field"] == "can_buses.bench.bitrate"
+        assert service.sessions == {}
+    finally:
+        service.close()
 
 
 def _netlink_attribute(kind: int, payload: bytes) -> bytes:

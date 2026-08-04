@@ -71,6 +71,19 @@ OPENOCD_INIT_PREFIX = f'init; echo "{OPENOCD_INIT_STAGE_MARKER}"; '
 # interpreter, before handle_init_command opens the probe.
 OPENOCD_UNREGISTERED_COMMAND = re.compile(r'invalid command name "([^"]+)"', re.IGNORECASE)
 OPENOCD_WRONG_STAGE_COMMAND = re.compile(r"the '([^']+)' command must be used (?:after|before) 'init'", re.IGNORECASE)
+# Detaching is not neutral. OpenOCD fires `gdb-detach` when GDB goes away and
+# `gdb-end` when the connection closes, and hanging `resume` on either is the
+# documented way to leave firmware running after a debug session - a board or
+# target script may already do it. `debug_stop_session` is deliberately ungated
+# because containment must never need a permission, so without this a bench that
+# may not start its target with `debug_continue` could start it by stopping the
+# session. Both events are pinned to `halt` here, on the command line and
+# therefore after the interface and target scripts have been sourced, so this
+# overrides what they configured rather than the other way round. The bodies run
+# only when the event fires, which is after `init` has registered `halt`, and an
+# openocd with no target created iterates an empty list.
+OPENOCD_HALT_ON_DETACH_EVENTS = ("gdb-detach", "gdb-end")
+OPENOCD_HALT_ON_DETACH_COMMAND = "foreach agentic_hil_target [target names] { " + " ".join(f"${{agentic_hil_target}} configure -event {event} {{ halt }};" for event in OPENOCD_HALT_ON_DETACH_EVENTS) + " }"
 
 
 class OpenOCDBackend:
@@ -258,6 +271,8 @@ class OpenOCDBackend:
             "tcl_port disabled",
             "-c",
             "telnet_port disabled",
+            "-c",
+            OPENOCD_HALT_ON_DETACH_COMMAND,
             "-c",
             startup,
         ]

@@ -507,7 +507,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
-        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Resolved against OpenOCD's own search path."},
+        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. A relative name is resolved against OpenOCD's own search path and may not traverse out of it; a probe holding allow_flash, allow_reset or allow_debug_execution must name an absolute path, which is checked at load like any other program this server runs."},
         "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`. Must match the MCU family."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
@@ -578,7 +578,9 @@ def debugger_backends_document() -> JsonObject:
             "resuming_the_target": (
                 "`debug_continue` needs `allow_debug_execution`. A debug session attaches to a halted core, which is a "
                 "read; letting it run again executes firmware and actuates whatever that firmware drives. "
-                "`debug_halt` and `debug_stop_session` need no grant: they are containment."
+                "`debug_halt` and `debug_stop_session` need no grant: they are containment. Stopping a session cannot "
+                "become a resume by the back door — the debug server's detach events are pinned to `halt`, and teardown "
+                "confirms the target halted while GDB is still attached."
             ),
             "default": False,
             "reading": (

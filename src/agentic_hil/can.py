@@ -47,7 +47,7 @@ from agentic_hil.report import (
     utc_now_iso,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject, effective_max_frame_data_bytes
 
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
 CAN_DRAIN_BATCH_LIMIT = 16
@@ -472,10 +472,13 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
 # The other unsendable fields (listen_only, data_bitrate) are refused outright,
 # because nothing can check them. Timing is different: the kernel will say what
 # the interface is set to, so the configured value is compared against the wire
-# and a bus timed differently is refused before it is opened. What cannot be
-# read is not invented — a virtual interface has no timing at all, and an
-# interface that is simply absent fails its own open — so those open as before
-# and say plainly that the bitrate is unconfirmed.
+# and a bus timed differently is refused before it is opened. So is one that
+# could not be checked at all — a `can` link that reported no timing, an
+# interface that is not on this host, a netlink query that failed. None of those
+# is evidence of a match, and a physical bus opened on an answer nobody gave is
+# the same wrong bus as one opened on a wrong answer. The single exception is a
+# recognized virtual interface (vcan, vxcan): it has no timing to report and no
+# wire to disturb, so it opens and says plainly that the bitrate is unconfirmed.
 NETLINK_ROUTE = 0
 RTM_NEWLINK = 16
 RTM_GETLINK = 18
@@ -495,6 +498,13 @@ IFINFOMSG_BYTES = 16
 NETLINK_RECEIVE_BYTES = 65536
 NETLINK_TIMEOUT_S = 1.0
 CAN_LINK_KINDS = frozenset({"can"})
+# The interface kinds that have no bit timing because they have no wire. A
+# virtual bus cannot be mistimed and cannot disturb anybody, so a session on one
+# opens with the bitrate reported as unverified. Everything else that cannot be
+# confirmed — a physical `can` link whose timing would not read, an interface
+# that is not there, a host where the query could not be made — is
+# indeterminate, and an indeterminate bus is not opened at all.
+VIRTUAL_CAN_LINK_KINDS = frozenset({"vcan", "vxcan"})
 
 
 @dataclass(frozen=True)
@@ -619,9 +629,42 @@ def _netlink_dump_complete(chunk: bytes) -> bool:
 
 
 def socketcan_bitrate_refusal(bus_id: str, bus_config: CanBusConfig, link: SocketCanLink) -> JsonObject | None:
-    """Refuse a bus whose interface is demonstrably timed at something else."""
-    if link.bitrate is None or link.bitrate == bus_config.bitrate:
+    """Refuse a bus whose configured timing is not demonstrably the interface's.
+
+    Unverified is not "matches". A `can` link whose timing would not read, an
+    interface that is not on this host and a netlink query that failed all leave
+    the same question open, and opening a physical bus on the answer nobody gave
+    is how a session ends up hearing nothing or putting error frames on somebody
+    else's wire. Only a recognized virtual interface is allowed through without
+    an answer, because it has none to give and no wire to disturb."""
+    if link.bitrate == bus_config.bitrate:
         return None
+    if link.bitrate is None:
+        if link.found and link.kind in VIRTUAL_CAN_LINK_KINDS:
+            return None
+        return {
+            "ok": False,
+            "tool": "can_session_start",
+            "bus_id": bus_id,
+            "adapter": bus_config.adapter,
+            "backend": "socketcan",
+            "error_type": "config_invalid",
+            "field": f"can_buses.{bus_id}.bitrate",
+            "channel": bus_config.channel,
+            "configured_bitrate": bus_config.bitrate,
+            "bitrate_verified": False,
+            "bitrate_unverified_reason": link.reason,
+            "summary": (
+                f"SocketCAN bit timing belongs to the interface, not to this session, and {bus_config.channel} could not "
+                f"be confirmed to run at the configured {bus_config.bitrate}: {link.reason}. An unconfirmed physical bus "
+                "is not opened, because one timed differently hears nothing and puts error frames on somebody else's "
+                f"wire. Bring the interface up with `ip link set {bus_config.channel} type can bitrate "
+                f"{bus_config.bitrate}`, or name a virtual interface for a bench with no wire."
+            ),
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": True,
+        }
     observed = (
         "the interface has no bit timing configured (bitrate 0)"
         if link.bitrate == 0
@@ -898,8 +941,18 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
     data = parse_hex_bytes(data_hex)
     if data is None:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "data_hex must contain valid hexadecimal bytes."}
-    if len(data) > bus_config.max_frame_data_bytes:
-        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bytes_requested": len(data), "max_frame_data_bytes": bus_config.max_frame_data_bytes}
+    # The protocol limit as well as the configured one: a classical bus is
+    # opened with is_fd=False, and a nine-byte payload handed to can.Message
+    # there is a frame the adapter rejects, truncates or malforms, while the
+    # audit record would claim every byte reached the wire.
+    maximum = effective_max_frame_data_bytes(bus_config)
+    if len(data) > maximum:
+        summary = (
+            "CAN frame data exceeds configured max_frame_data_bytes."
+            if maximum == bus_config.max_frame_data_bytes
+            else "A classical CAN frame carries at most 8 data bytes; a larger payload needs a bus with fd: true."
+        )
+        return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": summary, "bytes_requested": len(data), "max_frame_data_bytes": maximum, "fd": bus_config.fd}
     return {"ok": True, "frame": CanFrame(id=parsed_id, extended=extended, rtr=rtr, data=data)}
 
 

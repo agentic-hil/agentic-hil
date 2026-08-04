@@ -125,10 +125,13 @@ def main() -> int:
         elif command.startswith("-exec-continue"):
             emit(f"{token}^running")
             emit("*running,thread-id=\"all\"")
-            threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
+            # "never_stops" is a target that runs and cannot be brought back: the
+            # continue never reports a stop and neither does the interrupt.
+            if behavior() != "never_stops":
+                threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
         elif command.startswith("-exec-interrupt"):
             emit(f"{token}^done")
-            if behavior() != "halt_timeout":
+            if behavior() not in {"halt_timeout", "never_stops"}:
                 emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
         elif command.startswith("-data-evaluate-expression"):
             expression = command[len("-data-evaluate-expression") :].strip().strip('"')

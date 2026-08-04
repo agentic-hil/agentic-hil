@@ -261,12 +261,19 @@ class GdbDebugSessions:
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
+        halt = self._halt_before_disconnect(session, timeout)
         cleanup_error = self._cleanup_session(session, timeout)
         session.status = "cleanup_required" if cleanup_error is not None else "stopped"
         if cleanup_error is not None:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), **halt, "summary": "Debug session cleanup failed; ownership is retained for retry."})
         self.session = None
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
+        if halt.get("halt_confirmed") is False:
+            # The processes are gone, so there is nothing left to retry here -
+            # what is unresolved is the board. Reported as a failure so the lease
+            # quarantines and an operator, not the next call, decides what state
+            # the target is in.
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "error_type": "halt_not_confirmed", "hardware_state": "unknown", "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), **halt, "summary": "Debug processes were stopped, but the target could not be confirmed halted before GDB detached."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), **halt, "summary": "Debug session stopped."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
@@ -501,9 +508,49 @@ class GdbDebugSessions:
         self._write_session_log(session)
         return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "output": output, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol memory dumped as Intel HEX."})
 
+    def _halt_before_disconnect(self, session: GdbDebugSession, timeout_s: float) -> JsonObject:
+        """Leave the target halted while GDB is still attached.
+
+        Ending a session is not the same as ending it safely. GDB's `-gdb-exit`
+        detaches, the debug server fires its detach event, and a target script
+        may resume the core there - which would run firmware on a bench that was
+        never granted `allow_debug_execution`. The server is started with that
+        event pinned to `halt` (backends/openocd.py), and this is the half that
+        does not depend on the server: the target is halted and the halt is
+        confirmed before the connection goes away, so a session that ends with
+        the board in an unknown state is a state this bench reports rather than
+        assumes away.
+
+        Ungated on purpose, like `debug_halt`: halting is containment, and
+        containment that needed a permission would leave a running target nobody
+        may stop."""
+        if session.gdb is None or not session.gdb.is_running() or session.status not in {"halted", "running", "error"}:
+            # No GDB connection to detach, or a session that never reached the
+            # target: there is no resume for a detach to cause.
+            return {}
+        if session.status != "halted":
+            self._refresh_session_stop(session)
+        if session.status == "halted":
+            return {"halt_confirmed": True, "halt_requested": False, "target_state": "halted"}
+        response = self._gdb_command(session, "-exec-interrupt --all", timeout_s, containment=True)
+        confirmed = session.gdb.wait_for_stop(timeout_s) if response.ok else GdbMiStopResult(line="", reason="timeout", timed_out=True)
+        halt_confirmed = response.ok and not confirmed.timed_out and confirmed.reason != "debugger_error"
+        if halt_confirmed:
+            session.stop_reason = self._stop_reason_from_gdb(session, confirmed)
+            session.status = "halted"
+        else:
+            session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
+        self._write_session_log(session)
+        return {"halt_confirmed": halt_confirmed, "halt_requested": True, "halt_command_acknowledged": response.ok, "target_state": "halted" if halt_confirmed else "unknown"}
+
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
+            # Best effort, and deliberately not folded into cleanup_error: a
+            # process shutdown must still reap its processes, and the detach
+            # event pinned on the server is what contains the target when this
+            # cannot.
+            self._halt_before_disconnect(session, CLOSE_SESSION_TIMEOUT_S)
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"

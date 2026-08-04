@@ -40,6 +40,9 @@ FAKE_STLINK_NO_PROBE = trusted_program(ROOT / "tests" / "fixtures" / "fake_stlin
 FAKE_PYOCD = trusted_program(ROOT / "tests" / "fixtures" / "fake_pyocd.py")
 FAKE_PYOCD_UNKNOWN_TARGET = trusted_program(ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py")
 FAKE_GDB = trusted_program(ROOT / "tests" / "fixtures" / "fake_gdb.py")
+# Set to a path and the fake OpenOCD gdb-server run records what it would leave
+# on the target there; see tests/fixtures/fake_openocd.py.
+FAKE_OPENOCD_STATE_ENV = "AGENTIC_HIL_FAKE_OPENOCD_STATE"
 
 
 

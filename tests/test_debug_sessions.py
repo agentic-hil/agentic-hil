@@ -149,6 +149,35 @@ def test_unconfirmed_debug_halt_quarantines_lease(tmp_path: Path) -> None:
         service.coordinator.close()
 
 
+def test_stopping_a_running_session_that_cannot_be_halted_quarantines_the_lease(tmp_path: Path) -> None:
+    """Disconnecting from a running target is not stopping it.
+
+    Teardown halts the target and confirms the halt while GDB is still attached.
+    When that cannot be confirmed the processes are still reaped — leaving them
+    would be worse — but the board is unresolved, and that is reported instead of
+    being closed over by a successful-looking stop."""
+    service = debug_service(tmp_path, fake_gdb_behavior="never_stops")
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        running = service.call("debug_continue", {"timeout_s": TIMEOUT_TEST_CAP_S})
+        assert running["ok"] is False
+        assert running["halt_confirmed"] is False
+
+        stopped = service.call("debug_stop_session", {"timeout_s": 0.5})
+
+        assert stopped["ok"] is False, stopped
+        assert stopped["error_type"] == "halt_not_confirmed"
+        assert stopped["halt_confirmed"] is False
+        assert stopped["target_state"] == "unknown"
+        assert stopped["cleanup_required"] is True
+        assert service.coordinator.blocked is True
+        assert service.call("debug_get_session_status")["active"] is False
+    finally:
+        with pytest.raises(RuntimeError, match="target state remains unconfirmed"):
+            service.close()
+        service.coordinator.close()
+
+
 def test_debug_continue_reports_target_exception_context(tmp_path: Path) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="hardfault")
     try:

@@ -186,6 +186,14 @@ class ComPortConfig:
     permissions: IoPermissions = field(default_factory=IoPermissions)
 
 
+# What a frame can carry, per protocol rather than per configuration. A
+# classical CAN data field is eight bytes wide and no adapter setting widens it;
+# only CAN FD reaches 64. A bus configured above its own protocol limit is a
+# configuration whose frames the wire cannot hold.
+CLASSICAL_CAN_MAX_DATA_BYTES = 8
+CAN_FD_MAX_DATA_BYTES = 64
+
+
 @dataclass(frozen=True)
 class CanBusConfig:
     adapter: Literal["peak", "socketcan", "process"]
@@ -204,6 +212,17 @@ class CanBusConfig:
     max_frame_data_bytes: int
     resource_id: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
+
+
+def effective_max_frame_data_bytes(bus_config: CanBusConfig) -> int:
+    """The largest payload this bus can actually put on the wire.
+
+    A classical bus is capped at the protocol's eight bytes whatever the
+    configuration says. Configuration loading refuses a wider classical bus
+    outright; this is the same limit applied where the frame is built, so a
+    ``CanBusConfig`` that reached this process any other way cannot hand nine
+    bytes to an adapter opened with ``is_fd=False``."""
+    return bus_config.max_frame_data_bytes if bus_config.fd else min(bus_config.max_frame_data_bytes, CLASSICAL_CAN_MAX_DATA_BYTES)
 
 
 @dataclass(frozen=True)

@@ -503,7 +503,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 64,
-            "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true."
+            "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true. Above 8 requires fd: true: a classical CAN data field is eight bytes wide, so a wider limit on a classical bus is refused at load rather than sent as a frame the wire cannot hold."
           },
           "resource_id": {
             "type": [

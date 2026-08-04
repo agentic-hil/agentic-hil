@@ -16,20 +16,65 @@ arguments, and a script that never reaches its `echo` prints nothing.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import socket
 import sys
 import time
+from pathlib import Path
 
 RUN_STAGE_COMMANDS = frozenset({"reset", "targets", "halt", "resume", "step", "poll", "mdw", "mww", "mdb", "mwb"})
 INITIALIZING_COMMANDS = frozenset({"init", "program"})
+# Where the gdb-server run records what it would leave on the target. A test
+# that wants to know what a debug session did to the board reads this instead of
+# reading the command line the server was given back to itself.
+STATE_ENV = "AGENTIC_HIL_FAKE_OPENOCD_STATE"
+EVENT_PATTERN = re.compile(r"configure\s+-event\s+(\S+)\s+\{([^}]*)\}")
+HALTING_COMMANDS = frozenset({"halt", "reset halt", "reset init"})
+RESUMING_COMMANDS = frozenset({"resume", "reset", "reset run"})
 
 
-def serve_gdb_port(port: int) -> int:
+def gdb_server_state(args: list[str]) -> dict[str, object]:
+    """What this server leaves on the target, and what a GDB detach would do.
+
+    OpenOCD decides the second with the `gdb-detach` / `gdb-end` target events:
+    hanging `resume` on one is the documented way to let firmware run after a
+    debug session. With no handler configured this fake answers `unknown`
+    rather than `halted`, because a server that was never told what to do on
+    detach is exactly the case where this bench cannot say what state the board
+    is in."""
+    scripts = [args[index + 1] for index, argument in enumerate(args) if argument == "-c" and index + 1 < len(args)]
+    events: dict[str, str] = {}
+    target_state = "unknown"
+    for script in scripts:
+        for event, body in EVENT_PATTERN.findall(script):
+            events[event] = body.strip()
+        # The event bodies are configuration, not commands this run executed.
+        for segment in EVENT_PATTERN.sub("", script).split(";"):
+            command = " ".join(segment.split())
+            if command in HALTING_COMMANDS:
+                target_state = "halted"
+            elif command in RESUMING_COMMANDS:
+                target_state = "running"
+    detach_body = events.get("gdb-detach") or events.get("gdb-end")
+    if detach_body in HALTING_COMMANDS:
+        after_detach = "halted"
+    elif detach_body in RESUMING_COMMANDS:
+        after_detach = "running"
+    else:
+        after_detach = "unknown"
+    return {"target_state": target_state, "events": events, "state_after_detach": after_detach}
+
+
+def serve_gdb_port(port: int, args: list[str]) -> int:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", port))
     listener.listen(1)
+    state_path = os.environ.get(STATE_ENV)
+    if state_path:
+        Path(state_path).write_text(json.dumps(gdb_server_state(args), indent=2) + "\n", encoding="utf-8")
     print(f"Info : Listening on port {port} for gdb connections", flush=True)
     try:
         while True:
@@ -71,7 +116,7 @@ def main() -> int:
         return 0
     gdb_port_match = re.search(r"gdb_port (\d+)", " ".join(args))
     if gdb_port_match:
-        return serve_gdb_port(int(gdb_port_match.group(1)))
+        return serve_gdb_port(int(gdb_port_match.group(1)), args)
     initialized = False
     for index, argument in enumerate(args):
         if argument != "-c" or index + 1 >= len(args):
