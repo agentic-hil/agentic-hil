@@ -1032,12 +1032,19 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     already has `agentic-hil init --force`, which rewrites the whole file and
     resets every grant in it to false — strictly more destructive, and of no use
     to anyone trying to gain something.
+
+    The grant is what differs, and only the grant. Reading the probe goes through
+    the same coordinator every other hardware call on this machine goes through,
+    so this command waits for nothing, quarantines nothing and reads nothing that
+    an MCP server or another terminal is holding — a person's authority over
+    their own configuration is not authority over somebody else's running bench.
     """
     config = load_cli_authoritative_config(None)
     return project_config_adopt_hardware(
         Path(config.work_dir),
         config,
         {"apply": not dry_run, "debugger_id": debugger_id, "com_port_id": com_port_id, "probe_id": probe_id},
+        frontend="operator-cli",
         actor=ACTOR_HUMAN,
         via="cli:adopt-hardware",
     )

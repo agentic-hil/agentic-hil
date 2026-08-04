@@ -297,15 +297,22 @@ def project_config_set(
     open_holds: JsonObject | None = None,
     actor: str = ACTOR_AGENT,
     via: str = f"mcp:{PROJECT_CONFIG_SET}",
+    expect: dict[str, Any] | None = None,
 ) -> JsonObject:
     """Set named configuration keys, or refuse and change nothing.
 
     ``actor`` and ``via`` say who is asking and through what, and both end up in
     ``provenance``. ``ACTOR_HUMAN`` is a person at the CLI, which is the
     authority ``agentic-hil init`` already runs under; it waives the description
-    grant and nothing else."""
+    grant and nothing else.
+
+    ``expect`` maps a key to the value the caller decided against. It is not
+    part of any tool schema and no caller supplies it: it exists for a caller
+    that read the document, spent time deciding, and must not then overwrite what
+    somebody else wrote in between. Checked inside the write lock against the
+    document as it is now, so a mismatch refuses the whole call."""
     try:
-        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via)
+        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via, expect=expect)
     except ConfigError as error:
         return {"tool": PROJECT_CONFIG_SET, **error.to_dict(), **NOT_STARTED}
 
@@ -314,7 +321,7 @@ def _invalid(field: str, summary: str, **extra: object) -> JsonObject:
     return {"ok": False, "tool": PROJECT_CONFIG_SET, "error_type": "invalid_argument", "field": field, "summary": summary, "reference": CONFIG_SHAPE_URI, **extra, **NOT_STARTED}
 
 
-def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, changes: object, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
+def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, changes: object, *, open_holds: JsonObject | None, actor: str, via: str, expect: dict[str, Any] | None = None) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
     if open_holds:
@@ -326,6 +333,12 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
     target_path = authoritative_write_target(workspace, existing)
     with secure_user_file_lock(target_path):
         previous_text, document = load_config_document(target_path)
+        # Before the grants and before anything is applied: a plan made against a
+        # document that has since moved is not a plan for this document, and the
+        # only safe thing to do with it is to say so.
+        stale = _stale_expectations(document, requested, expect)
+        if stale:
+            return _changed_underneath(target_path, stale)
         rights = granted_rights(existing, document)
         # An operator at the CLI is the person the description grant belongs to,
         # so it is not consulted for them; the permissions grant is consulted for
@@ -408,6 +421,44 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         ],
         **NOT_STARTED,
         "cleanup_required": False,
+    }
+
+
+def _stale_expectations(document: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]], expect: dict[str, Any] | None) -> list[JsonObject]:
+    """Keys whose current value is no longer the one the caller planned against.
+
+    A caller that classifies a document, then does something slow — reading a
+    probe takes seconds — and then writes has a window in which another CLI or
+    MCP process can fill the very placeholder it decided was free. The document
+    is re-read inside this lock anyway; comparing it against what the caller saw
+    is what turns "fill only what is unset" into a promise rather than a hope."""
+    if not expect:
+        return []
+    stale: list[JsonObject] = []
+    for resolved, _ in requested:
+        if resolved.key not in expect:
+            continue
+        current = _current_value(document, resolved.section, resolved.entry, resolved.under_permissions, resolved.field)
+        if current != expect[resolved.key]:
+            stale.append({"key": resolved.key, "expected_value": expect[resolved.key], "current_value": current})
+    return stale
+
+
+def _changed_underneath(target_path: Path, stale: list[JsonObject]) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_SET,
+        "error_type": "config_changed_underneath",
+        "summary": (
+            f"{len(stale)} key(s) this change was planned against no longer hold the value they were planned against, so "
+            "somebody else wrote this file in the meantime and nothing was written here."
+        ),
+        "stale_keys": stale,
+        "path": str(target_path),
+        "next_step": "Read the configuration again and decide against what it says now; the plan this call carried is out of date.",
+        "reference": CONFIG_SHAPE_URI,
+        **NOT_STARTED,
+        "retry_safe": True,
     }
 
 

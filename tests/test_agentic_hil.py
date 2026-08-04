@@ -1763,8 +1763,8 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
     # Underscored identifiers in backticks are tool names; these are the import
-    # name and two error types, not tools.
-    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found"}
+    # name and the error types the skill names, not tools.
+    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found", "device_busy", "hardware_mismatch"}
 
     referenced = {
         token

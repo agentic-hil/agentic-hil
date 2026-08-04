@@ -1115,6 +1115,9 @@ A refused write names the grant that is missing and the key in this file that ca
 | permissions | it cannot name one. `permissions_changed` in the result is the file's own before/after answer, not a claim. |
 | more than one probe attached | `ambiguous_hardware`, listing every attached serial. Name one as `probe_id`. It never chooses a board. |
 | nothing attached, or no port carrying the probe's serial | said as such, with the host's serial ports listed, rather than guessed. |
+| a probe already named, and a different one attached | `hardware_mismatch`, and nothing is planned. The keys describe one board between them, so carrying only the unset ones would leave a `probe_id` naming one Nucleo beside another's controller and COM port. |
+| the board is busy | reading a probe takes the same machine-wide lock every hardware call takes, so a board another server, run or terminal is holding answers `device_busy` and nothing is read. |
+| version 1 configurations | reading a probe there still needs `allow_probe` on the entry, and this is a probe read: `permission_denied` if it is false, exactly as `probe_target` answers. |
 | refused | `permission_denied` on `{CONFIG_DESCRIPTION_RIGHT}` still returns the plan. Report the keys and values it names and let the operator run `agentic-hil adopt-hardware`. |
 
 ## Getting from "board attached" to a valid change

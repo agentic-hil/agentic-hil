@@ -341,7 +341,11 @@ class AgenticHILToolService:
             PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config),
             PROJECT_CONFIG_DESCRIBE: lambda: project_config_describe(Path(self.config.work_dir), self.config, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_SET: lambda: project_config_set(Path(self.config.work_dir), self.config, args.get("changes"), open_holds=self.open_hardware_holds()),
-            PROJECT_CONFIG_ADOPT: lambda: project_config_adopt_hardware(Path(self.config.work_dir), self.config, args, open_holds=self.open_hardware_holds()),
+            # This one reads a board, so it goes in with this service's own
+            # coordinator: the locks it takes are the locks a run here already
+            # holds, and a probe held by another process on this machine answers
+            # device_busy instead of being connected to behind its owner's back.
+            PROJECT_CONFIG_ADOPT: lambda: project_config_adopt_hardware(Path(self.config.work_dir), self.config, args, coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
@@ -870,10 +874,16 @@ def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
 
 
 def audited_hardware_tools() -> set[str]:
+    # project_config_adopt_hardware is here because it reads a probe, not because
+    # it writes the configuration: it enumerates and connects in HOTPLUG mode,
+    # which is the same board contact debugger_probes_list makes. So it is
+    # blocked while this bench is quarantined, its audit trail is proven writable
+    # before the board is touched, and an exception inside it quarantines.
     return {
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
+        PROJECT_CONFIG_ADOPT,
     }
 
 

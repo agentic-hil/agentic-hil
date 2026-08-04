@@ -26,11 +26,22 @@ hardware is reported as a disagreement and left alone. Silently replacing a
 deliberate choice is the failure mode that would make this path worse than the
 retyping it removes.
 
+**It reads the board the way every other read of a board happens.** Enumerating
+probes and connecting in HOTPLUG mode is a hardware read, and a read still
+perturbs — an SWD attach halts the core. What answers that in this repository is
+not a grant but exclusivity, so this takes the same machine-wide locks
+``debugger_probes_list`` takes, writes the same audit record, and quarantines the
+same way if the read raises. Both the MCP tool and ``agentic-hil adopt-hardware``
+go through that one path, so a second process on this machine gets ``device_busy``
+instead of reaching into a board somebody is driving.
+
 **It writes through one door.** The changes go into ``project_config_set``, so
 the grants, the scalar-only shape, the closed key model, the before/after
 comparison of every permission in the document, the refusal while hardware is
 held, the validate-before-replace and the ``provenance`` record are all the ones
-that were already there. There is no second way to write this file.
+that were already there. There is no second way to write this file. The plan is
+carried into that write as an expectation per key, so a placeholder somebody else
+filled while the probe was being read refuses the write instead of losing to it.
 """
 
 from __future__ import annotations
@@ -51,9 +62,21 @@ from agentic_hil.configwrite import (
     load_config_document,
     project_config_set,
 )
-from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_NAMED_SECTIONS, CONFIG_SHAPE_URI
-from agentic_hil.report import overall_success
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.coordination import (
+    DEBUGGER_DISCOVERY_RESOURCE,
+    CoordinationError,
+    HardwareCoordinator,
+    HardwareLease,
+)
+from agentic_hil.devices import DebuggerDevice
+from agentic_hil.knowledge import (
+    CONFIG_DESCRIPTION_RIGHT,
+    CONFIG_NAMED_SECTIONS,
+    CONFIG_SHAPE_URI,
+    remediation_fields,
+)
+from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success, write_report
+from agentic_hil.types import AgenticHILConfig, JsonObject, fold_hardware_id
 
 PROJECT_CONFIG_ADOPT = "project_config_adopt_hardware"
 
@@ -199,6 +222,50 @@ def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[Js
         )
 
 
+def configured_probe_id(debugger: JsonObject) -> str | None:
+    """The probe serial this entry already names, if somebody named one."""
+    value = debugger.get("probe_id")
+    if not isinstance(value, str) or is_unset(value, "debuggers", "probe_id"):
+        return None
+    return value
+
+
+def _different_board(debugger_name: str, configured: str, discovered: str) -> JsonObject:
+    """Refuse the whole plan, because it would describe two boards at once.
+
+    The identity keys are not independent. ``probe_id`` names a board, and
+    ``target.controller``, the COM device and the backend executable all describe
+    *that* board. Carrying the ones that happen to be unset while keeping a
+    ``probe_id`` that names a different probe produces a configuration whose
+    debugger drives one Nucleo and whose UART talks to another — a file that
+    loads, passes `doctor`, and is wrong in the one way nobody would look for.
+    So the disagreement is not a per-key `kept`: nothing is planned and nothing
+    is written."""
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_ADOPT,
+        "error_type": "hardware_mismatch",
+        "field": "probe_id",
+        "summary": (
+            f"`debuggers.{debugger_name}.probe_id` names probe '{configured}' and the attached probe is '{discovered}', so "
+            "this is a different board. Nothing was planned and nothing was written: the controller, the COM device and "
+            "the toolchain path all describe the attached board, and carrying them into an entry that names another probe "
+            "would produce a configuration pointing at two boards at once."
+        ),
+        "debugger_id": debugger_name,
+        "configured_probe_id": configured,
+        "discovered_probe_id": discovered,
+        "next_step": (
+            f"Attach the board `debuggers.{debugger_name}` is configured for, or name the entry this attached board "
+            "belongs to as debugger_id. Repointing a configured entry at another probe is an operator's edit, not this "
+            "path's."
+        ),
+        "reference": CONFIG_SHAPE_URI,
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
+
+
 def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: str | None = None, com_port_id: str | None = None) -> JsonObject:
     """What carrying this hardware into this document would change, and what not.
 
@@ -208,6 +275,11 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     if isinstance(chosen, dict):
         return chosen
     debugger_name, debugger = chosen
+
+    configured = configured_probe_id(debugger)
+    discovered = discovery.get("probe_id")
+    if configured is not None and isinstance(discovered, str) and discovered and fold_hardware_id(configured) != fold_hardware_id(discovered):
+        return _different_board(debugger_name, configured, discovered)
 
     carried: list[JsonObject] = []
     already: list[JsonObject] = []
@@ -322,18 +394,35 @@ def project_config_adopt_hardware(
     existing: AgenticHILConfig | None,
     arguments: JsonObject | None = None,
     *,
+    coordinator: HardwareCoordinator | None = None,
+    frontend: str = "python",
     open_holds: JsonObject | None = None,
     actor: str = ACTOR_AGENT,
     via: str = f"mcp:{PROJECT_CONFIG_ADOPT}",
 ) -> JsonObject:
-    """Read what is attached and carry its identity into the configuration."""
+    """Read what is attached and carry its identity into the configuration.
+
+    ``coordinator`` is the caller's own — the MCP service's, so a hold it already
+    has is seen — and a caller that has none gets one for the length of this call.
+    There is deliberately no way to run this without one: the read below talks to
+    a board, and a board on this machine belongs to whoever holds it."""
+    if coordinator is not None or existing is None:
+        return _guarded(workspace, existing, arguments or {}, coordinator, open_holds=open_holds, actor=actor, via=via)
+    owned = HardwareCoordinator(existing, frontend)
     try:
-        return _adopt(workspace, existing, arguments or {}, open_holds=open_holds, actor=actor, via=via)
+        return _guarded(workspace, existing, arguments or {}, owned, open_holds=open_holds, actor=actor, via=via)
+    finally:
+        owned.close()
+
+
+def _guarded(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonObject, coordinator: HardwareCoordinator | None, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
+    try:
+        return _adopt(workspace, existing, arguments, coordinator, open_holds=open_holds, actor=actor, via=via)
     except ConfigError as error:
         return {"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}
 
 
-def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonObject, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
+def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonObject, coordinator: HardwareCoordinator | None, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to carry hardware into.", {"workspace_root": str(workspace)})
     # Before discovery, not only before the write. Enumerating probes and
@@ -346,8 +435,27 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
     target_path = authoritative_write_target(workspace, existing)
     _, document = load_config_document(target_path)
 
+    # Which entry this is about is decided before anything is said to a board.
+    # A call that cannot name one is refused without a probe having been touched,
+    # and the entry decides both the legacy read grant below and which physical
+    # probe this call may talk to at all.
+    chosen = _choose_debugger(document, _optional_string(arguments.get("debugger_id")))
+    if isinstance(chosen, dict):
+        return {**chosen, "path": str(target_path), "workspace_root": existing.workspace_root}
+    debugger_name, debugger_entry = chosen
+
+    denied = _read_denied(existing, debugger_name, target_path)
+    if denied is not None:
+        return denied
+
     apply = bool(arguments.get("apply", False))
-    discovery = discover_attached_hardware(probe_id=_optional_string(arguments.get("probe_id")))
+    # The configured serial selects, when there is one. Otherwise a bench with
+    # two boards attached would enumerate, pick the one probe that answers, and
+    # produce a plan about a board this entry is not for.
+    requested_probe = _optional_string(arguments.get("probe_id")) or configured_probe_id(debugger_entry)
+    discovery, refusal = _discover_exclusively(existing, coordinator, debugger_id=debugger_name, probe_id=requested_probe)
+    if refusal is not None:
+        return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root}
     if not overall_success(discovery):
         return {
             **discovery,
@@ -359,7 +467,7 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
             **NOT_STARTED,
         }
 
-    plan = plan_adoption(document, discovery, debugger_id=_optional_string(arguments.get("debugger_id")), com_port_id=_optional_string(arguments.get("com_port_id")))
+    plan = plan_adoption(document, discovery, debugger_id=debugger_name, com_port_id=_optional_string(arguments.get("com_port_id")))
     if plan.get("ok") is not True:
         return {**plan, "hardware_discovery": discovery, "path": str(target_path), "workspace_root": existing.workspace_root}
 
@@ -406,6 +514,12 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         open_holds=open_holds,
         actor=actor,
         via=via,
+        # What each key held when the plan decided it was free to fill. Reading a
+        # probe takes seconds, and another CLI or MCP process can fill a
+        # placeholder inside them; without this the "never overwrites a value
+        # somebody chose" rule would hold only against values chosen before the
+        # read started.
+        expect={str(item["key"]): item["previous_value"] for item in carried},
     )
     if not overall_success(write):
         # The refusal is the answer, and the values stay in it: an agent that may
@@ -438,6 +552,190 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+# ---------------------------------------------------------------------------
+# Reading the board, under the locks and the audit a board read takes.
+
+
+def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path) -> JsonObject | None:
+    """Refuse to read a probe a version 1 configuration keeps closed.
+
+    From version 2 on there is no read permission — exclusivity replaced it, and
+    the locks below are that exclusivity. A version 1 file still says whether its
+    probe may be read at all, and `allow_probe: false` there means `probe_target`
+    and `debugger_probes_list` are both refused. Adoption reads the same probe by
+    the same means, so a file that closed it must not find this path open: the
+    ability to fill in a serial is not the ability to widen a policy."""
+    entry = existing.debuggers.get(debugger_id)
+    if existing.probe_allowed(entry):
+        return None
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_ADOPT,
+        "error_type": "permission_denied",
+        "summary": (
+            f"Reading debugger '{debugger_id}' is disabled by allow_probe in this version {existing.config_version} "
+            "configuration, and carrying hardware in means reading it. Nothing was read and nothing was written."
+        ),
+        "permission": "allow_probe",
+        "permission_key": f"debuggers.{debugger_id}.permissions.allow_probe",
+        "debugger_id": debugger_id,
+        "config_version": existing.config_version,
+        "path": str(target_path),
+        "workspace_root": existing.workspace_root,
+        "next_step": (
+            "This refusal is the answer to the request. Report it and name the permission that is denied, then stop. "
+            "You must not enable it, and you must not read the probe another way. Migrating this file to version 2 — "
+            "where reading needs no grant — is the operator's edit."
+        ),
+        "reference": CONFIG_SHAPE_URI,
+        **remediation_fields("permission_denied"),
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
+
+
+def _configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> str | None:
+    """The machine-wide lock of the entry being filled in, when it names a board.
+
+    ``resource_id`` and ``probe_id`` name a physical unit and produce the same
+    key a run holding that board holds. The remaining fallbacks name a toolchain
+    — every unfilled skeleton on the host would derive one and the same
+    `probe:openocd` — so locking those would serialize two unrelated benches
+    against each other while protecting neither."""
+    entry = existing.debuggers.get(debugger_id)
+    if entry is None:
+        return None
+    device = DebuggerDevice(config_id=debugger_id, debugger=entry)
+    return device.lock_key if device.identity_source in {"resource_id", "probe_id"} else None
+
+
+def _discover_exclusively(
+    existing: AgenticHILConfig,
+    coordinator: HardwareCoordinator | None,
+    *,
+    debugger_id: str,
+    probe_id: str | None,
+) -> tuple[JsonObject, JsonObject | None]:
+    """Read the attached probe holding what a probe read holds.
+
+    Three things, and none of them is this path's invention — they are what
+    `debugger_probes_list` already does for the same two commands:
+
+    * the audit trail is proven writable *before* the board is touched, so a
+      bench that cannot record what happened does not have it happen;
+    * the host-wide enumeration pseudo-resource and the physical probe are
+      locked, so a second MCP server, a second `agentic-hil adopt-hardware`, or a
+      run in another project is told `device_busy` instead of finding a HOTPLUG
+      connect underneath it;
+    * a raised exception leaves the locks taken and the lease quarantined,
+      because what was said to that board is then unknown.
+
+    Returns the discovery result and, when the read never got that far, the
+    refusal that is the whole answer.
+    """
+    if coordinator is None:  # pragma: no cover - every caller supplies or is given one
+        raise ConfigError("config_invalid", "Reading attached hardware requires a hardware coordinator.", {"debugger_id": debugger_id})
+    try:
+        ensure_audit_ready(existing)
+    except (ConfigError, OSError) as error:
+        return {}, {**audit_unavailable(PROJECT_CONFIG_ADOPT, error), **NOT_STARTED, "retry_safe": False}
+    if coordinator.blocked:
+        return {}, _quarantined_refusal(coordinator)
+
+    held: list[HardwareLease] = []
+    resources = [DEBUGGER_DISCOVERY_RESOURCE]
+    configured = _configured_probe_resource(existing, debugger_id)
+    if configured is not None:
+        resources.append(configured)
+    try:
+        held.append(coordinator.acquire(*resources))
+    except CoordinationError as error:
+        return {}, _coordination_refusal(error, resources)
+
+    def before_connect(selected: str) -> JsonObject | None:
+        # Which probe the enumeration actually chose is known only here, and the
+        # HOTPLUG connect that follows is the first thing said to it.
+        resource = f"probe:{fold_hardware_id(selected)}"
+        if any(resource in lease.resources for lease in held):
+            return None
+        try:
+            held.append(coordinator.acquire(resource))
+        except CoordinationError as error:
+            return _coordination_refusal(error, [resource])
+        return None
+
+    try:
+        discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect)
+    except BaseException as error:
+        # Fail closed. What reached the board is unknown, so the locks stay taken
+        # and an operator — or `agentic-hil recover` — owns the incident.
+        for lease in held:
+            lease.quarantine("adopt_discovery_exception", error)
+        raise
+
+    record = write_report(existing, {**discovery, "tool": PROJECT_CONFIG_ADOPT, **_combined_status(held)})
+    if record.get("audit_ok") is False:
+        for lease in held:
+            lease.quarantine("adopt_discovery_audit_broken", audit_broken=True)
+        return {}, {
+            **record,
+            "ok": False,
+            "tool": PROJECT_CONFIG_ADOPT,
+            "error_type": "audit_failed_after_action",
+            "summary": "The attached probe was read and the audit record of that read could not be written, so the probe is quarantined and nothing was written to the configuration.",
+            **_combined_status(held),
+            "retry_safe": False,
+        }
+    for lease in reversed(held):
+        if lease.state == "active":
+            lease.release()
+    return discovery, None
+
+
+def _combined_status(held: list[HardwareLease]) -> JsonObject:
+    """One lease status for however many locks this read had to take."""
+    statuses = [lease.status() for lease in held]
+    return {
+        "lease_ids": [str(status["lease_id"]) for status in statuses],
+        "resources": sorted({resource for status in statuses for resource in status["resources"]}),
+        "lease_state": next((str(status["lease_state"]) for status in statuses if status["lease_state"] != "active"), "active"),
+        "cleanup_required": any(status["cleanup_required"] for status in statuses),
+        "quarantined": any(status["quarantined"] for status in statuses),
+        "cleanup_reasons": sorted({reason for status in statuses for reason in status["cleanup_reasons"]}),
+    }
+
+
+def _quarantined_refusal(coordinator: HardwareCoordinator) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_ADOPT,
+        "error_type": "resource_quarantined",
+        "summary": "Hardware on this bench has unresolved cleanup or audit state, and reading a probe is a hardware action, so nothing was read and nothing was written.",
+        "cleanup_required": True,
+        "quarantined": True,
+        "cleanup_reasons": sorted({reason for lease in coordinator.leases.values() for reason in lease.cleanup_reasons()}),
+        "quarantine_id": coordinator.quarantine_id,
+        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
+
+
+def _coordination_refusal(error: CoordinationError, resources: list[str]) -> JsonObject:
+    result = dict(error.result)
+    return {
+        "tool": PROJECT_CONFIG_ADOPT,
+        **result,
+        "requested_resources": sorted(resources),
+        "next_step": str(
+            result.get("next_step")
+            or "The board this would read belongs to the owner named above. Wait for it to be released, then call this again. Nothing was read and nothing was written."
+        ),
+        **remediation_fields(str(result.get("error_type") or "")),
+        **NOT_STARTED,
+    }
 
 
 def _plan_summary(plan: JsonObject) -> str:
@@ -495,6 +793,7 @@ def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObj
 __all__ = [
     "DEFAULT_COM_PORT_ID",
     "PROJECT_CONFIG_ADOPT",
+    "configured_probe_id",
     "is_unset",
     "plan_adoption",
     "project_config_adopt_hardware",
