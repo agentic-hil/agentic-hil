@@ -7,9 +7,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 
+from agentic_hil import windows_principals
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
@@ -35,12 +36,11 @@ from agentic_hil.config import (
     load_authoritative_config,
     load_config,
     project_state_directory,
-    set_windows_path_trust,
     trusted_state_directory,
     user_state_root,
     validate_windows_state_root,
     validated_state_root,
-    windows_path_trust,
+    validated_windows_path_trust,
 )
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.gdbmi import GdbMiClient
@@ -64,6 +64,13 @@ from agentic_hil.report import (
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig
+from agentic_hil.windows_principals import (
+    JOIN_STATE_DOMAIN,
+    JOIN_STATE_UNKNOWN,
+    JOIN_STATE_WORKGROUP,
+    PRINCIPAL_CLASS_UNRESOLVED,
+    PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
+)
 
 WAIT_TIMEOUT_S = 5.0
 POLL_INTERVAL_S = 0.01
@@ -227,13 +234,19 @@ WINDOWS_TRUST_TABLE = [
     # of the operator's own rights, and the operator's unpackaged processes can
     # already rewrite the file in full. Reported, not refused.
     ("app_package_principal", {"strict"}),
-    # The authority was asked and answered ERROR_NONE_MAPPED: no token this
-    # machine builds can carry that SID. A stock Windows 11 %LOCALAPPDATA%
-    # carries one, so refusing it means refusing the documented default
-    # state_root. Reported under `standard`.
+    # The authority was asked and answered ERROR_NONE_MAPPED on a machine where
+    # its own SAM was the only thing asked: no token this machine builds can
+    # carry that SID. A stock Windows 11 %LOCALAPPDATA% carries one, so refusing
+    # it means refusing the documented default state_root. Reported under
+    # `standard`.
     ("unresolved_principal", {"strict"}),
-    # The authority could not be asked at all. Not the same claim as the row
-    # above and deliberately not tolerated with it: the holder might be a live
+    # The same return value on a domain member, where it also means "the domain
+    # did not answer". A live account, or one reachable only through SID history,
+    # arrives looking exactly like the orphan above, so it is the ignorance case
+    # and refuses under the default.
+    ("unresolved_foreign_principal", {"standard", "strict"}),
+    # The authority could not be asked at all. Not the same claim as the rows
+    # above and deliberately not tolerated with them: the holder might be a live
     # account, and a class reachable by breaking the lookup is a class that lets
     # a foreign grant through on the day the lookup breaks.
     ("principal_lookup_failed", {"standard", "strict"}),
@@ -244,12 +257,6 @@ WINDOWS_TRUST_TABLE = [
     # silently under the default did not.
     ("acl_unreadable", {"standard", "strict"}),
 ]
-
-
-@pytest.fixture(autouse=True)
-def _restore_windows_path_trust() -> Iterator[None]:
-    yield
-    set_windows_path_trust(None)
 
 
 @pytest.mark.parametrize(("finding", "refused_under"), WINDOWS_TRUST_TABLE)
@@ -285,7 +292,6 @@ def test_a_path_is_checked_under_standard_unless_its_caller_says_otherwise(findi
         "agentic_hil.config.inspect_windows_path_trust",
         lambda root: [{"finding": finding, "scope": "ancestor", "path": str(root.parent), "sids": ["S-1-5-21-1-2-3-1001"]}],
     )
-    set_windows_path_trust("permissive")
 
     if "standard" in refused_under:
         with pytest.raises(ConfigError) as refused:
@@ -315,6 +321,38 @@ def test_a_tolerated_finding_is_returned_rather_than_discarded(monkeypatch: pyte
     assert [entry["finding"] for entry in findings] == ["unresolved_principal", "app_package_principal"]
 
 
+@pytest.mark.parametrize(
+    ("join_state", "expected"),
+    [
+        # Workgroup: the local SAM is the only account database LookupAccountSid
+        # consults, and it is always reachable. "No such account" is a fact about
+        # the SID, and a stock %LOCALAPPDATA% really carries such an ACE.
+        (JOIN_STATE_WORKGROUP, PRINCIPAL_CLASS_UNRESOLVED),
+        # Domain member: the same call also asks the domain and every trust
+        # behind it, and Microsoft documents ERROR_NONE_MAPPED as what comes back
+        # when that question is not answered. A live account, or one reachable
+        # only through SID history, is indistinguishable from an orphan here.
+        (JOIN_STATE_DOMAIN, PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+        # And not knowing where the question went is not a reason to believe the
+        # answer.
+        (JOIN_STATE_UNKNOWN, PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+    ],
+)
+def test_none_mapped_is_only_evidence_where_nothing_else_was_asked(join_state: str, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One return value, two meanings, and only one of them is a clean bill.
+
+    ERROR_NONE_MAPPED was being read as "nothing on this machine maps to that
+    SID" everywhere, which made a tolerated class reachable on a domain member by
+    a trust that simply did not answer — a live foreign SID passing the default
+    gate while holding write on a replaceable path. The machine's join state is a
+    local read (`NetGetJoinInformation`), so it establishes which meaning applies
+    without depending on the lookup that is in question."""
+    monkeypatch.setattr(windows_principals, "_join_state", join_state)
+
+    assert windows_principals._none_mapped_class() == expected
+    assert windows_principals.none_mapped_is_conclusive() is (join_state == JOIN_STATE_WORKGROUP)
+
+
 def test_a_refused_windows_path_names_the_holder_and_the_active_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "agentic_hil.config.inspect_windows_path_trust",
@@ -331,26 +369,51 @@ def test_a_refused_windows_path_names_the_holder_and_the_active_mode(monkeypatch
     assert any("ACL" in step for step in details["do_not"])
 
 
-def test_the_configuration_names_the_mode_and_a_configuration_that_does_not_resets_it(tmp_path: Path) -> None:
-    """The mode is a property of the authoritative configuration, not of history.
+def test_the_mode_is_bound_to_the_configuration_that_named_it(tmp_path: Path) -> None:
+    """The mode is a field of one loaded policy, not a process global.
 
-    Established on every load, so a second configuration in the same process can
-    never keep running under a mode the first one asked for.
+    It used to be established on every ``load_config``, and `project_config_set`
+    loads its candidate in-process to validate it — so an operator's stale edit
+    to `permissive` took effect for every later derived-path check of the
+    *running* configuration, before the restart that is supposed to put a new
+    policy in force, and even when the candidate was then rolled back. Binding it
+    to the object means a second document parsed here changes nothing about the
+    one being served.
     """
-    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+    plain = load_config(str(write_config(tmp_path / "plain")))
+    assert plain.windows_path_trust == WINDOWS_PATH_TRUST_DEFAULT
 
-    strict_workspace = tmp_path / "strict"
-    strict_path = write_config(strict_workspace)
-    strict_path.write_text("windows_path_trust: strict\n" + strict_path.read_text(encoding="utf-8"), encoding="utf-8")
-    # The mode is established before state_root is validated, so it holds even
-    # where strict then refuses that state_root — which on a normal Windows
-    # profile it does, and which is the point of asking for strict.
-    with suppress(ConfigError):
-        load_config(str(strict_path))
-    assert windows_path_trust() == "strict"
+    permissive_path = write_config(tmp_path / "permissive")
+    permissive_path.write_text("windows_path_trust: permissive\n" + permissive_path.read_text(encoding="utf-8"), encoding="utf-8")
+    permissive = load_config(str(permissive_path))
 
-    load_config(str(write_config(tmp_path / "plain")))
-    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+    assert permissive.windows_path_trust == "permissive"
+    # The one that is being served did not move because another document was read.
+    assert plain.windows_path_trust == WINDOWS_PATH_TRUST_DEFAULT
+    assert load_config(str(write_config(tmp_path / "second_plain"))).windows_path_trust == WINDOWS_PATH_TRUST_DEFAULT
+
+
+def test_a_derived_state_directory_is_judged_by_its_own_configurations_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Which mode reaches `state_root/projects/<digest>` and the coordination tree.
+
+    The one on the AgenticHILConfig whose state_root it was derived from — passed
+    in, never looked up — so a candidate document parsed mid-session cannot widen
+    the rule a live project's leases and reports are checked under.
+    """
+    config = load_config(str(write_config(tmp_path / "plain")))
+    permissive = replace(config, windows_path_trust="permissive")
+
+    seen: list[str] = []
+    monkeypatch.setattr("agentic_hil.config.os.name", "nt")
+    monkeypatch.setattr("agentic_hil.config._windows_hold_directory_chain", lambda target, create=True: [])
+    monkeypatch.setattr("agentic_hil.config._close_windows_handles", lambda handles: None)
+    monkeypatch.setattr("agentic_hil.config.validate_windows_state_root", lambda root, **kwargs: seen.append(kwargs.get("trust", WINDOWS_PATH_TRUST_DEFAULT)) or [])
+
+    project_state_directory(permissive)
+    assert seen == ["permissive"]
+    seen.clear()
+    project_state_directory(config)
+    assert seen == [WINDOWS_PATH_TRUST_DEFAULT]
 
 
 def test_an_unknown_path_trust_mode_is_refused_by_name(tmp_path: Path) -> None:
@@ -362,12 +425,12 @@ def test_an_unknown_path_trust_mode_is_refused_by_name(tmp_path: Path) -> None:
 
     assert refused.value.error_type == "config_invalid"
     assert "windows_path_trust" in json.dumps(refused.value.to_dict())
-    # The setter refuses it too, so a caller that never went through the schema
-    # cannot establish a mode the table below has no row for.
+    # The parser refuses it too, so a caller that never went through the schema
+    # cannot produce a mode the table above has no row for.
     with pytest.raises(ConfigError) as direct:
-        set_windows_path_trust("lax")
+        validated_windows_path_trust("lax")
     assert direct.value.details["field"] == "windows_path_trust"
-    assert windows_path_trust() == WINDOWS_PATH_TRUST_DEFAULT
+    assert validated_windows_path_trust(None) == WINDOWS_PATH_TRUST_DEFAULT
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
@@ -426,7 +489,6 @@ def test_a_permissive_project_does_not_weaken_the_machine_wide_device_locks(monk
     monkeypatch.setattr("agentic_hil.config.os.name", "nt")
     monkeypatch.setattr("agentic_hil.config._windows_hold_directory_chain", lambda path, create=False: [])
     monkeypatch.setattr("agentic_hil.config._close_windows_handles", lambda handles: None)
-    set_windows_path_trust("permissive")
 
     with pytest.raises(ConfigError) as refused:
         device_lock_root()
@@ -444,13 +506,15 @@ def test_the_configured_mode_does_reach_the_state_root_it_belongs_to(monkeypatch
     root.mkdir()
     findings = [{"finding": "foreign_principal", "scope": "ancestor", "path": str(tmp_path), "sids": ["S-1-1-0"]}]
     monkeypatch.setattr("agentic_hil.config.inspect_windows_path_trust", lambda path: list(findings))
+    # Straight off the documents, through the same parser load_config uses, so
+    # the mode a file names is demonstrably the mode its state_root is judged by.
+    standard = validated_windows_path_trust(None)
+    permissive = validated_windows_path_trust("permissive")
 
-    set_windows_path_trust("standard")
     with pytest.raises(ConfigError):
-        validate_windows_state_root(root, trust=windows_path_trust())
+        validate_windows_state_root(root, trust=standard)
 
-    set_windows_path_trust("permissive")
-    assert [entry["finding"] for entry in validate_windows_state_root(root, trust=windows_path_trust())] == ["foreign_principal"]
+    assert [entry["finding"] for entry in validate_windows_state_root(root, trust=permissive)] == ["foreign_principal"]
 
 
 def test_the_suite_does_not_route_around_the_check_it_tests(tmp_path: Path, isolated_config_environment: Path) -> None:

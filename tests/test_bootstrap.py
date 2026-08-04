@@ -26,23 +26,28 @@ def test_stlink_target_info_extracts_one_identity() -> None:
 
 
 def test_correlate_com_port_requires_one_serial_match() -> None:
-    """Correlation between two host inventories, and nothing is keyed on it.
+    """One hardware identity, the same one `select_probe_id` and the lock use.
 
-    Deliberately looser than `select_probe_id`: a USB descriptor reaches the port
-    enumerator with separators the debugger's own listing does not have. Nothing
-    is locked, connected to or compared for sameness on this, and a tie resolves
-    to None rather than to a guess — so the looseness can only fail to pick a
-    port, never pick the wrong one."""
+    Case folds and nothing else. This used to strip punctuation as well, on the
+    theory that a correlation keys nothing — but the port it picks is written into
+    `com_ports.<name>.device` by adoption, so a probe serial `06:6A-FF30` matching
+    a sole host port whose serial is really `066AFF30` puts a possibly different
+    device into an entry that may already allow writes. A tie guard cannot see a
+    single false match. Not correlating is the safe failure: the caller reports
+    the COM port as unavailable with the host inventory attached."""
     available = {
         "ok": True,
         "ports": [
-            {"device": "COM3", "serial_number": "06:6A-FF30"},
+            {"device": "COM3", "serial_number": "066AFF30"},
             {"device": "COM4", "serial_number": "OTHER"},
         ],
     }
-    assert correlate_com_port("066aff30", available) == {"device": "COM3", "serial_number": "06:6A-FF30"}
-    available["ports"].append({"device": "COM5", "serial_number": "066AFF30"})
-    assert correlate_com_port("066aff30", available) is None
+    assert correlate_com_port("066aff30", available) == {"device": "COM3", "serial_number": "066AFF30"}
+    # A serial the two inventories spell differently is not this probe's port as
+    # far as anything here can prove, so it is not offered as one.
+    assert correlate_com_port("06:6A-FF30", available) is None
+    available["ports"].append({"device": "COM5", "serial_number": "066aff30"})
+    assert correlate_com_port("066AFF30", available) is None
 
 
 def test_bootstrap_discovery_uses_fixed_readonly_stlink_commands(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,7 @@ import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -28,6 +28,8 @@ from agentic_hil.knowledge import remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
+    WINDOWS_PATH_TRUST_DEFAULT,
+    WINDOWS_PATH_TRUST_MODES,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
@@ -51,6 +53,7 @@ from agentic_hil.windows_principals import (
     PRINCIPAL_CLASS_APP_PACKAGE,
     PRINCIPAL_CLASS_LOOKUP_FAILED,
     PRINCIPAL_CLASS_UNRESOLVED,
+    PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
     principal_class,
     untrusted_principal_details,
 )
@@ -154,6 +157,82 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
         raise_config_validation_error(errors[0], config_path)
 
 
+@dataclass(frozen=True)
+class ValidatedDocument:
+    """Everything a configuration document decides about itself.
+
+    What ``load_config`` establishes before it looks at the machine, and
+    therefore exactly what a second reader — ``configstate.config_status`` — can
+    check without walking ACLs or stat-ing a workspace. Returned rather than
+    re-derived so the two cannot answer differently about one file."""
+
+    config_version: int
+    windows_path_trust: str
+    workspace_root: str
+    target: TargetConfig
+    debuggers: dict[str, DebuggerConfig]
+    com_ports: dict[str, ComPortConfig]
+    can_buses: dict[str, CanBusConfig]
+
+
+def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
+    """Every load-blocking check that is a pure function of the document.
+
+    The startup loader's first half, factored out so that "would a restart onto
+    these bytes come up?" is answered by running the same rules rather than by a
+    subset of them. A schema-valid file can still be a file no server can load —
+    ``workspace_root: relative``, two debuggers resolving to one probe, a
+    ``resource_id`` spelled in two cases — and classifying those as `changed`
+    tells an operator to restart into a failure.
+
+    Excluded, deliberately: everything that asks the machine rather than the
+    document. Whether ``workspace_root`` exists, the ``state_root`` ACL walk, the
+    executables on disk. Those depend on the host, are expensive on Windows, and
+    a status check runs per call.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": config_path})
+    reject_bridge_args(raw, config_path)
+    reject_removed_sections(raw, config_path)
+    reject_empty_allowed_roots(raw, config_path)
+    config_version = configured_version(raw, config_path)
+    reject_read_permissions(raw, config_path, config_version)
+    validate_config_schema(raw, config_path)
+    trust = validated_windows_path_trust(raw.get("windows_path_trust"), config_path)
+
+    workspace_value = str(raw["workspace_root"])
+    workspace_requested = Path(workspace_value).expanduser()
+    if not workspace_requested.is_absolute():
+        raise ConfigError(
+            "config_invalid",
+            "workspace_root must be an absolute path.",
+            {"path": config_path, "field": "workspace_root", "value": workspace_value},
+        )
+    workspace = workspace_requested.resolve()
+    # Lexical only: whether the directory is there, who owns it and what its ACLs
+    # say is the machine's answer and belongs to load_config.
+    validated_state_root_paths(str(raw["state_root"]), workspace, config_path)
+
+    target = target_config(mapping(raw.get("target"), "target"))
+    debuggers = {name: named_debugger_config(name, value, target) for name, value in mapping(raw.get("debuggers"), "debuggers").items()}
+    com_ports = {name: com_port_config(name, value) for name, value in mapping(raw.get("com_ports"), "com_ports").items()}
+    can_buses = {name: can_bus_config(name, value) for name, value in mapping(raw.get("can_buses"), "can_buses").items()}
+    # Before validate_debuggers, so a pair of debuggers differing only in the
+    # case of their resource_id is named as the case collision it is instead of
+    # as two probes that happen to resolve to one resource.
+    validate_resource_ids(debuggers, com_ports, can_buses)
+    validate_debuggers(debuggers)
+    return ValidatedDocument(
+        config_version=config_version,
+        windows_path_trust=trust,
+        workspace_root=str(workspace),
+        target=target,
+        debuggers=debuggers,
+        com_ports=com_ports,
+        can_buses=can_buses,
+    )
+
+
 def load_config(config_path: str | None = None, work_dir: str | None = None) -> AgenticHILConfig:
     """Parse one config file. Production entrypoints must use load_authoritative_config."""
     if config_path is None:
@@ -207,32 +286,14 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         ) from error
 
     raw: Any = loaded or {}
-    if not isinstance(raw, dict):
-        raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": resolved_config_path})
-    reject_bridge_args(raw, resolved_config_path)
-    reject_removed_sections(raw, resolved_config_path)
-    reject_empty_allowed_roots(raw, resolved_config_path)
-    config_version = configured_version(raw, resolved_config_path)
-    reject_read_permissions(raw, resolved_config_path, config_version)
-    validate_config_schema(raw, resolved_config_path)
-    # Established on every load, including one that names nothing, so a second
-    # configuration in the same process never inherits the first one's mode.
-    set_windows_path_trust(raw.get("windows_path_trust"), resolved_config_path)
+    document = validate_config_document(raw, resolved_config_path)
 
-    workspace_value = str(raw["workspace_root"])
-    workspace_requested = Path(workspace_value).expanduser()
-    if not workspace_requested.is_absolute():
-        raise ConfigError(
-            "config_invalid",
-            "workspace_root must be an absolute path.",
-            {"path": resolved_config_path, "field": "workspace_root", "value": workspace_value},
-        )
-    workspace = workspace_requested.resolve()
+    workspace = Path(document.workspace_root)
     if not workspace.is_dir():
         raise ConfigError(
             "config_invalid",
             "workspace_root must be an existing directory.",
-            {"path": resolved_config_path, "field": "workspace_root", "value": workspace_value},
+            {"path": resolved_config_path, "field": "workspace_root", "value": str(raw["workspace_root"])},
         )
     if work_dir is not None and workspace != Path(work_dir).resolve():
         raise ConfigError(
@@ -240,29 +301,18 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             "Configured workspace_root does not match the requested work directory.",
             {"workspace_root": str(workspace), "expected_workspace": str(Path(work_dir).resolve())},
         )
-    state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path)
+    state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path, document.windows_path_trust)
 
-    target_raw = mapping(raw.get("target"), "target")
-    debuggers_raw = mapping(raw.get("debuggers"), "debuggers")
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
-    com_ports_raw = mapping(raw.get("com_ports"), "com_ports")
-    can_buses_raw = mapping(raw.get("can_buses"), "can_buses")
     validation_raw = mapping(raw.get("validation"), "validation")
     reports_raw = mapping(raw.get("reports"), "reports")
     logs_raw = mapping(raw.get("logs"), "logs")
     recovery_raw = mapping(raw.get("recovery"), "recovery")
     permissions_raw = mapping(raw.get("permissions"), "permissions")
 
-    target = target_config(target_raw)
-    debuggers = {name: named_debugger_config(name, value, target) for name, value in debuggers_raw.items()}
-    com_ports = {name: com_port_config(name, value) for name, value in com_ports_raw.items()}
-    can_buses = {name: can_bus_config(name, value) for name, value in can_buses_raw.items()}
-    # Before validate_debuggers, so a pair of debuggers differing only in the
-    # case of their resource_id is named as the case collision it is instead of
-    # as two probes that happen to resolve to one resource.
-    validate_resource_ids(debuggers, com_ports, can_buses)
-    validate_debuggers(debuggers)
+    target = document.target
+    debuggers = document.debuggers
     # One configured probe has no ambiguity to resolve, so bind it and let the
     # single-board path stay free of a name it could only get wrong once.
     single = next(iter(debuggers.items())) if len(debuggers) == 1 else (None, None)
@@ -281,18 +331,19 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         debuggers=debuggers,
         debug=debug_interface_config(debug_raw),
         artifacts=artifacts_config(artifacts_raw),
-        com_ports=com_ports,
-        can_buses=can_buses,
+        com_ports=document.com_ports,
+        can_buses=document.can_buses,
         validation=validation_config(validation_raw),
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
         recovery=recovery_config(recovery_raw),
         debugger_id=single[0],
         debugger=single[1],
-        config_version=config_version,
+        config_version=document.config_version,
         permissions=project_permissions(permissions_raw),
         config_digest=config_digest(loaded_bytes),
         loaded_at=utc_now(),
+        windows_path_trust=document.windows_path_trust,
     )
 
 
@@ -564,21 +615,31 @@ def project_state_directory(config: AgenticHILConfig) -> Path:
         ]
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-    return trusted_state_directory(config.state_root, "projects", digest)
+    return trusted_state_directory(config.state_root, "projects", digest, trust=config.windows_path_trust)
 
 
-def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
+def validated_state_root_paths(value: str, workspace: Path, config_path: str) -> Path:
+    """What the two configured roots say about each other, from the text alone.
+
+    Split from ``validated_state_root`` so ``validate_config_document`` can run it
+    without creating a directory or walking an ACL — the answer is the same on
+    every host, which is what makes it safe to run from a per-call status check."""
     requested = Path(value).expanduser()
     if not requested.is_absolute():
         raise ConfigError("config_invalid", "state_root must be an absolute path.", {"path": config_path, "field": "state_root", "value": value})
     lexical = absolute_without_symlinks(requested)
     if is_path_within_frozen(lexical, workspace) or is_path_within_frozen(workspace, lexical):
         raise ConfigError("config_invalid", "state_root and workspace_root must not overlap.", {"path": config_path, "field": "state_root", "state_root": str(lexical), "workspace_root": str(workspace)})
+    return lexical
+
+
+def validated_state_root(value: str, workspace: Path, config_path: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
+    lexical = validated_state_root_paths(value, workspace, config_path)
     root = safe_directory(lexical)
     if os.name == "nt":
         # This configuration's own state_root, and the one path its
         # `windows_path_trust` key is entitled to speak for.
-        validate_windows_state_root(root, trust=windows_path_trust())
+        validate_windows_state_root(root, trust=trust)
     else:
         for index, candidate in enumerate((root, *root.parents)):
             opened = os.stat(candidate, follow_symlinks=False)
@@ -594,12 +655,19 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     return root
 
 
-def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
+def trusted_state_directory(state_root: str | Path, *parts: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
     """Create/reopen a directory derived from the already-validated state_root,
     verifying every derived component is owned by the current user, is a real
     directory, and is not writable by other users. This closes the gap where a
     foreign local user pre-creates coordination/locks/records/projects before
-    the first trusted start."""
+    the first trusted start.
+
+    ``trust`` is the mode of the configuration whose ``state_root`` this is
+    derived from — ``AgenticHILConfig.windows_path_trust`` and nothing else. It is
+    passed rather than looked up so that a directory is judged by the policy in
+    force for the project it belongs to, never by whichever document some other
+    call happened to parse last. The default is `standard`, so a caller that
+    forgets gets the stricter rule."""
     base = absolute_without_symlinks(Path(state_root))
     target = base.joinpath(*parts)
     if not parts:
@@ -609,7 +677,7 @@ def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
         _close_windows_handles(handles)
         # Derived from the state_root the same configuration named, so it is
         # covered by that configuration's mode and by nothing wider.
-        validate_windows_state_root(target, trust=windows_path_trust())
+        validate_windows_state_root(target, trust=trust)
         return target
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = _open_directory_fd(base, create=True)
@@ -635,13 +703,6 @@ def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
         os.close(descriptor)
 
 
-# Modes for the `windows_path_trust` configuration key. The default is
-# `standard`; `strict` restores the pre-0.8.0 rule for an operator who wants it
-# back; `permissive` is the explicit, visible override for an environment whose
-# ACLs do not describe its trust boundary at all.
-WINDOWS_PATH_TRUST_MODES = ("standard", "strict", "permissive")
-WINDOWS_PATH_TRUST_DEFAULT = "standard"
-
 # The security decision of hardci-hq#91, in one table. A finding refuses under a
 # mode when it is listed there and is reported otherwise.
 #
@@ -653,30 +714,53 @@ WINDOWS_PATH_TRUST_DEFAULT = "standard"
 #   SID's own structure with no lookup at all. It holds a subset of rights the
 #   operator's unpackaged processes already have in full.
 # * ``unresolved_principal`` — the local security authority was asked and
-#   answered ``ERROR_NONE_MAPPED``: nothing on this machine maps to that SID, so
-#   no token built here can carry it. A stock Windows 11 ``%LOCALAPPDATA%``
-#   really does carry such an ACE, which is why refusing it is not an option
-#   short of refusing the documented default state_root.
+#   answered ``ERROR_NONE_MAPPED`` *on a machine where that is the whole answer*:
+#   this host is in a workgroup, so its own SAM is the only account database the
+#   call consults, and it is always reachable. Nothing on this machine maps to
+#   that SID and no token built here can carry it. A stock Windows 11
+#   ``%LOCALAPPDATA%`` really does carry such an ACE — measured on 26200, an
+#   ``(OI)(CI)(M)`` grant to an ``S-1-5-21-…`` SID left by the installation image
+#   — which is why refusing it is not an option short of refusing the documented
+#   default state_root.
 #
-# Everything the check could *not* establish refuses: an ACL it could not read,
-# and a SID whose lookup failed for any reason other than that answer. Those are
-# ignorance, and a gate that lets ignorance through is a gate that opens whenever
-# the lookup behind it breaks — a live foreign account on a bad day would arrive
-# looking exactly like the benign orphan above. Keeping the two apart is
+# Everything the check could *not* establish refuses: an ACL it could not read, a
+# SID whose lookup failed for any reason other than that answer, and — this is
+# ``unresolved_foreign_principal`` — ``ERROR_NONE_MAPPED`` on a domain member,
+# where the same call also asks the domain and every trust behind it and returns
+# that code when it gets no answer. A live account, or one reachable only through
+# SID history, then arrives looking exactly like the benign orphan above, and
+# Windows authorizes on the raw SIDs in a token either way. Those are ignorance,
+# and a gate that lets ignorance through is a gate that opens whenever the lookup
+# behind it breaks. Keeping the classes apart is
 # ``windows_principals.lookup_account``'s job, and this table is why it has one.
 # Accepting unknown evidence is what `permissive` is for, and it says so in the
 # file where a later reader can see it.
 _WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
-    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "principal_lookup_failed", "acl_unreadable"}),
+    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "unresolved_foreign_principal", "principal_lookup_failed", "acl_unreadable"}),
     "strict": frozenset(
-        {"untrusted_owner", "null_dacl", "foreign_principal", "app_package_principal", "unresolved_principal", "principal_lookup_failed", "acl_unreadable"}
+        {
+            "untrusted_owner",
+            "null_dacl",
+            "foreign_principal",
+            "app_package_principal",
+            "unresolved_principal",
+            "unresolved_foreign_principal",
+            "principal_lookup_failed",
+            "acl_unreadable",
+        }
     ),
     "permissive": frozenset(),
 }
 
-# One authoritative configuration per process, so the mode it names is a process
-# property. It is established on every load, including a load that names nothing,
-# so a second configuration can never inherit the first one's mode.
+# The mode is a property of one loaded configuration, not of this process. It
+# used to be a module global set on every ``load_config``, and that made it
+# reachable from a document nothing is being served under: `project_config_set`
+# validates its candidate by loading it in-process, so an operator's stale edit
+# from `standard` to `permissive` took effect for every later derived-path check
+# — before the restart that is supposed to be what puts a new policy in force,
+# and even when the candidate was rolled back afterwards. It is now parsed here,
+# carried on ``AgenticHILConfig.windows_path_trust``, and passed explicitly to
+# each check.
 #
 # What it governs is *not* every path this process checks. It is a key in one
 # project's configuration, and it may only ever weaken that project's own
@@ -689,26 +773,17 @@ _WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
 # are by passing `trust=` explicitly; the parameter defaults to `standard`, so a
 # path whose caller forgot is checked under the stricter rule rather than the
 # looser one.
-_windows_path_trust = WINDOWS_PATH_TRUST_DEFAULT
-
-
-def windows_path_trust() -> str:
-    return _windows_path_trust
-
-
-def set_windows_path_trust(value: object, config_path: str = "") -> str:
-    global _windows_path_trust
+def validated_windows_path_trust(value: object, config_path: str = "") -> str:
+    """The mode this document names. Pure: it changes nothing outside its return."""
     if value is None:
-        _windows_path_trust = WINDOWS_PATH_TRUST_DEFAULT
-        return _windows_path_trust
+        return WINDOWS_PATH_TRUST_DEFAULT
     if not isinstance(value, str) or value not in WINDOWS_PATH_TRUST_MODES:
         raise ConfigError(
             "config_invalid",
             f"windows_path_trust must be one of {', '.join(WINDOWS_PATH_TRUST_MODES)}.",
             {"path": config_path, "field": "windows_path_trust", "value": value},
         )
-    _windows_path_trust = value
-    return _windows_path_trust
+    return value
 
 
 # The refusal texts, unchanged from before 0.8.0: what changed is which findings
@@ -719,6 +794,14 @@ _WINDOWS_TRUST_SUMMARIES = {
     ("untrusted_owner", "object"): "must have a trusted Windows owner.",
     ("principal_lookup_failed", "object"): "grants write access to a Windows principal this machine could not look up.",
     ("principal_lookup_failed", "ancestor"): "has an ancestor granting write access to a Windows principal this machine could not look up.",
+    (
+        "unresolved_foreign_principal",
+        "object",
+    ): "grants write access to a Windows SID no account here maps to, on a domain member where that answer also means the domain did not answer, so the holder may be live.",
+    (
+        "unresolved_foreign_principal",
+        "ancestor",
+    ): "has an ancestor granting write access to a Windows SID no account here maps to, on a domain member where that answer also means the domain did not answer, so the holder may be live.",
 }
 
 
@@ -905,6 +988,7 @@ def _windows_principal_findings(
     name_by_class = {
         PRINCIPAL_CLASS_ACCOUNT: "foreign_principal",
         PRINCIPAL_CLASS_LOOKUP_FAILED: "principal_lookup_failed",
+        PRINCIPAL_CLASS_UNRESOLVED_FOREIGN: "unresolved_foreign_principal",
         PRINCIPAL_CLASS_APP_PACKAGE: "app_package_principal",
         PRINCIPAL_CLASS_UNRESOLVED: "unresolved_principal",
     }
@@ -917,10 +1001,16 @@ def _windows_principal_findings(
         grouped.setdefault(holder, [])
         if sid and sid not in grouped[holder]:
             grouped[holder].append(sid)
-    # Deterministic and worst-first: the two classes that refuse come before the
-    # two that are reported, so a refusal names the account, or the lookup that
-    # did not answer, before it names a package nobody has to act on.
-    order = (PRINCIPAL_CLASS_ACCOUNT, PRINCIPAL_CLASS_LOOKUP_FAILED, PRINCIPAL_CLASS_APP_PACKAGE, PRINCIPAL_CLASS_UNRESOLVED)
+    # Deterministic and worst-first: the classes that refuse under `standard` come
+    # before the ones that are reported, so a refusal names the account, or the
+    # lookup that did not answer, before it names a package nobody has to act on.
+    order = (
+        PRINCIPAL_CLASS_ACCOUNT,
+        PRINCIPAL_CLASS_LOOKUP_FAILED,
+        PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
+        PRINCIPAL_CLASS_APP_PACKAGE,
+        PRINCIPAL_CLASS_UNRESOLVED,
+    )
     return [_trust_finding(name_by_class[holder], scope, path, principal_class=holder, sids=grouped[holder]) for holder in order if holder in grouped]
 
 

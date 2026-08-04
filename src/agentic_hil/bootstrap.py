@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -160,23 +159,30 @@ def select_probe_id(requested: str, enumerated: list[str]) -> str | None:
 def correlate_com_port(probe_id: str, available: JsonObject) -> JsonObject | None:
     """The one host serial port that carries this probe's serial, or None.
 
-    This is a correlation between two host inventories, not an identity the rest
-    of the system keys anything on, and it deliberately does not use the lock
-    rule: a USB descriptor reaches the enumerator with separators the debugger's
-    own listing does not have (``06:6A-FF30`` against ``066AFF30``), and a probe
-    serial is what is being looked for in a field somebody else formatted. So
-    punctuation is ignored here — and only here, where nothing is being locked,
-    connected to or compared for sameness. A tie still resolves to None rather
-    than to a guess, so the looseness can never pick a port; it can only fail to.
+    The identity is ``fold_hardware_id`` — the same rule ``select_probe_id``, the
+    lock key and the mismatch check use, and for the same reason. This used to
+    strip punctuation as well, on the theory that a correlation keys nothing and
+    can therefore afford to be loose. It cannot: the port it picks is written
+    into ``com_ports.<name>.device`` by adoption, so a probe serial ``AB-CD``
+    matching a *sole* host port whose serial is really ``ABCD`` puts another
+    device's port into an entry whose `allow_write` may already be true — a
+    single false match, which the tie guard is by construction blind to. One
+    identity for one physical unit, everywhere, is the only version of this that
+    cannot silently name the wrong device.
+
+    A serial the debugger and the enumerator spell differently is therefore not
+    correlated at all, and the caller reports the COM port as unavailable with
+    the host inventory attached, so the operator names it. That is a worse
+    experience than a lucky guess and a better one than a wrong file.
     """
     ports = available.get("ports") if available.get("ok") is True else None
     if not isinstance(ports, list):
         return None
-    identity = _com_serial_identity(probe_id)
+    identity = fold_hardware_id(probe_id)
     matches = [
         port
         for port in ports
-        if isinstance(port, dict) and _com_serial_identity(str(port.get("serial_number", ""))) == identity
+        if isinstance(port, dict) and fold_hardware_id(str(port.get("serial_number", ""))) == identity
     ]
     return dict(matches[0]) if len(matches) == 1 else None
 
@@ -235,15 +241,6 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             }
         }
     return template
-
-
-def _com_serial_identity(value: str) -> str:
-    """A serial number as written into a host port inventory, for correlation only.
-
-    Not an identity anything is keyed on — ``fold_hardware_id`` is that, and
-    ``select_probe_id`` uses it. Kept separate and named for its one use so the
-    two rules cannot be confused for each other again."""
-    return fold_hardware_id(re.sub(r"[^A-Za-z0-9]", "", value))
 
 
 def _discovery_failure(error_type: str, summary: str, **details: object) -> JsonObject:

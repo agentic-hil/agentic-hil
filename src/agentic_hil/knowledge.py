@@ -321,9 +321,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`windows_path_trust: standard` two findings are reported instead of refused, and both are things the "
             "machine positively established: an application-package identity (`S-1-15-2-*` / `S-1-15-3-*`), recognised "
             "from the SID itself and holding a subset of the operator's own rights, and a SID the authority answered "
-            "about by saying nothing on this machine maps to it. A lookup that could not be performed at all, and an "
-            "ACL that could not be read, stay refusals there — they are ignorance rather than a clean bill of health, "
-            "and accepting them is what `permissive` is for. On POSIX it means a group- or other-writable component. "
+            "about by saying nothing on this machine maps to it — on a machine in a workgroup, where its own SAM is "
+            "the only account database that answer can come from. On a domain member the same answer also means the "
+            "domain did not answer, so it is a refusal there (`unresolved_foreign_principal`): a live account, or one "
+            "carried only in SID history, is indistinguishable from an orphan at that point. A lookup that could not "
+            "be performed at all, and an ACL that could not be read, stay refusals too — they are ignorance rather "
+            "than a clean bill of health, and accepting them is what `permissive` is for. On POSIX it means a group- "
+            "or other-writable component. "
             "The validator only reads ACLs and modes; it never changes them."
         ),
         remediation=(
@@ -1442,12 +1446,13 @@ Every principal that holds one of those rights is classified, and the class deci
 |---|---|---|---|---|
 | `account` | a SID the local security authority resolves to a real account or group | **refuse** | **refuse** | report |
 | `app_package` | `S-1-15-2-*` / `S-1-15-3-*`, an installed packaged application | report | **refuse** | report |
-| `unresolved` | the authority answered `ERROR_NONE_MAPPED`: nothing here maps to that SID. Normally residue of software that wrote an ACE with another machine's SID, and present on a stock `%LOCALAPPDATA%` | report | **refuse** | report |
+| `unresolved` | the authority answered `ERROR_NONE_MAPPED` on a machine in a workgroup, where its own SAM is the only account database that answer can come from. Normally residue of software that wrote an ACE with another machine's SID, and present on a stock `%LOCALAPPDATA%` | report | **refuse** | report |
+| `unresolved_foreign` | the same `ERROR_NONE_MAPPED` on a domain member, where the call also asks the domain and every trust behind it and returns that code when it gets no answer. A live account, or one carried only in SID history, is indistinguishable from an orphan here | **refuse** | **refuse** | report |
 | `lookup_failed` | the authority could *not* be asked: the SID would not convert, the lookup failed for any other reason. The holder might be a live account | **refuse** | **refuse** | report |
 | ACL could not be read | a sandbox, a service account, a restricted CI runner | **refuse** | **refuse** | report |
 | NULL DACL, or an untrusted owner | grants everyone everything / the object is not the operator's | **refuse** | **refuse** | report |
 
-`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `standard` tolerates the two findings the machine positively established — an AppContainer identity, recognised from the SID's own structure, and a SID the authority answered about by saying nothing maps to it — and refuses everything it could not establish: an unreadable ACL, and a SID whose lookup failed for any other reason. A gate that lets ignorance through is a gate that opens whenever the lookup behind it breaks, so "no such account" and "I could not ask" are separate classes and only the first is tolerated. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
+`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `standard` tolerates the two findings the machine positively established — an AppContainer identity, recognised from the SID's own structure, and a SID the local authority answered about by saying nothing maps to it, where that authority was the only one asked — and refuses everything it could not establish: an unreadable ACL, a SID whose lookup failed for any other reason, and `ERROR_NONE_MAPPED` on a domain member, where the same code also means the domain did not answer. A gate that lets ignorance through is a gate that opens whenever the lookup behind it breaks, so "no such account", "nobody answered" and "I could not ask" are separate classes and only the first is tolerated. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
 
 The key governs `state_root` and everything derived from it, and nothing else. It does not govern the user configuration directory, which is read before any configuration exists and is therefore always checked under `standard`; `AGENTIC_HIL_CONFIG` is the answer there. It does not govern the MCP server executable, nor `~/.agentic-hil/device-locks` — that directory is how every project on the machine agrees who holds a board, and one project's file may not weaken the mutex another project's run depends on.
 
@@ -1455,7 +1460,7 @@ A failure raises `error_type: unsafe_configured_path` and names the offending co
 
 ## Windows 11: measured verdicts
 
-Measured 2026-08-04 on Windows 11 Pro 10.0.26200, on a profile with a packaged application installed. `%APPDATA%` and `%LOCALAPPDATA%` are standard working folders and pass.
+Measured 2026-08-04 on Windows 11 Pro 10.0.26200, on a profile with a packaged application installed, on a machine in a workgroup. `%APPDATA%` and `%LOCALAPPDATA%` are standard working folders and pass. On a domain member the `unresolved` rows below become `unresolved_foreign` and refuse under `standard`; `windows_path_trust: permissive` is the documented answer there.
 
 | Path | ACEs beyond user/SYSTEM/Administrators | Verdict |
 |---|---|---|

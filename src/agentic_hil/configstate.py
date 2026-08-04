@@ -40,7 +40,7 @@ from agentic_hil.config import (
     config_digest,
     safe_read_bytes,
     utc_now,
-    validate_config_schema,
+    validate_config_document,
 )
 from agentic_hil.knowledge import CONFIG_STALE_ERROR, remediation_fields
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -93,22 +93,33 @@ def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | No
 def _load_blocking_error(raw: bytes, path: str) -> Exception | None:
     """Why a restart onto these bytes would not produce a running server.
 
-    Deliberately only the two checks that are pure functions of the bytes: the
-    YAML parse and the shipped schema. Everything after those in
-    ``load_config`` — the state_root ACL walk, the workspace binding — depends on
-    the machine rather than on the document, is expensive on Windows, and would
-    make a per-call status check something no longer worth running per call. Run
-    only when the digest already differs, so an unchanged file still costs one
+    The YAML parse plus ``config.validate_config_document`` — the startup
+    loader's own first half, called rather than approximated. It used to stop
+    after the shipped schema, and the schema is not the loader: it accepts
+    ``workspace_root: relative``, two debuggers that resolve to one probe, a
+    ``resource_id`` spelled in two cases. Each of those makes
+    ``load_authoritative_config`` raise, and each was classified `changed`, whose
+    remediation is "restart the server to pick this up" — advice that shuts down
+    a working server and cannot bring it back.
+
+    What is still excluded is what asks the machine rather than the document: the
+    state_root ACL walk, whether ``workspace_root`` exists, the executables on
+    disk. Those depend on the host, are expensive on Windows, and this runs per
+    call. A file that fails only one of those is still reported as `changed`,
+    which is the honest answer — the document is loadable and the environment is
+    not, and the restart it recommends is what surfaces that.
+
+    Run only when the digest already differs, so an unchanged file still costs one
     read and one hash.
     """
     try:
         loaded: Any = yaml.load(raw.decode("utf-8"), Loader=UniqueKeyLoader)
     except (yaml.YAMLError, UnicodeDecodeError) as error:
         return error
-    if not isinstance(loaded, dict):
-        return ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": path})
     try:
-        validate_config_schema(loaded, path)
+        # `loaded or {}` exactly as load_config does it, so an empty file gets the
+        # same refusal here as it would at startup rather than a different one.
+        validate_config_document(loaded or {}, path)
     except ConfigError as error:
         return error
     return None
@@ -197,8 +208,9 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
             "backend_error": str(blocking),
             "summary": (
                 "The authoritative configuration has changed since this server loaded it and the file that is there "
-                "now does not load: it is not valid YAML, or it does not satisfy the configuration schema. This server "
-                "keeps enforcing the version it loaded at startup, and a restart would not replace it — it would fail. "
+                "now does not load: it is not valid YAML, it does not satisfy the configuration schema, or it fails one "
+                "of the document checks the startup loader runs — `backend_error` says which. This server keeps "
+                "enforcing the version it loaded at startup, and a restart would not replace it — it would fail. "
                 "Repair the file first, then restart."
             ),
             **remediation_fields(CONFIG_INVALID_ERROR, RUNNING_SERVER_SCOPE),

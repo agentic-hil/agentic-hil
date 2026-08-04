@@ -48,7 +48,6 @@ from agentic_hil.config import (
     trusted_persistent_executable,
     user_file_lock_path,
     user_state_root,
-    windows_path_trust,
 )
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN
@@ -1809,7 +1808,7 @@ def _doctor_path_trust_report(config: AgenticHILConfig) -> JsonObject:
     """
     from agentic_hil.windows_principals import describe_principals, principal_label
 
-    mode = windows_path_trust()
+    mode = config.windows_path_trust
     findings: list[JsonObject] = []
     # The configured mode governs this configuration's own state_root and what is
     # derived from it. The directory holding the configuration is checked under

@@ -304,8 +304,17 @@ def test_the_document_comparison_sees_a_permission_wherever_it_sits() -> None:
     # An entry that appears carrying nothing but denials is not a change.
     added = {**nested, "com_ports": {"new": {"permissions": {"allow_write": False}}}}
     assert permission_delta(surface, permission_surface(added)) == []
-    # And the mirror view holds nothing that grants anything.
-    assert permission_surface(description_view(nested)) == {}
+    # The mirror view drops the grants the schema puts somewhere, and only those.
+    assert permission_surface(description_view({"debuggers": {"dut": {"permissions": {"allow_flash": False}}}, "artifacts": {"allow_upload": False}})) == {}
+    # A grant somewhere the schema does not put one survives into the description
+    # view on purpose, so it needs the description right *and* the permissions
+    # right rather than neither. Dropping it by name is what made an entry an
+    # operator called `permissions` invisible to the compare-and-swap.
+    assert permission_surface(description_view(nested)) == {"odd[0].permissions.allow_write": False}
+    reserved = {"debuggers": {"permissions": {"probe_id": "AAA", "type": "stlink", "permissions": {"allow_flash": False}}}}
+    assert description_view(reserved) == {"debuggers": {"permissions": {"probe_id": "AAA", "type": "stlink"}}}
+    repointed = {"debuggers": {"permissions": {"probe_id": "BBB", "type": "stlink", "permissions": {"allow_flash": False}}}}
+    assert description_view(reserved) != description_view(repointed), "a repointed entry is visible whatever it is named"
 
 
 def test_a_new_device_an_agent_adds_arrives_granted_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

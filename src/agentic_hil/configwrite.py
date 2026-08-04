@@ -134,21 +134,59 @@ def permission_delta(before: dict[str, Any], after: dict[str, Any]) -> list[str]
     return sorted(path for path in set(before) | set(after) if before.get(path, False) != after.get(path, False))
 
 
+# Where the schema puts a grant, and nowhere else. `permission_surface` above is
+# deliberately name-driven at any depth, because its job is to *find* a grant
+# wherever one got in. This is the opposite job — deciding what to *drop* — and a
+# name-driven rule there removes real description. `debuggers`, `com_ports` and
+# `can_buses` are keyed by operator-chosen entry ids, and `permissions`,
+# `provenance` and `allow_anything` are all legal ids.
+_PERMISSION_ENTRY_SECTIONS = ("debuggers", "com_ports", "can_buses")
+# Grants that sit directly on a fixed section rather than inside a permissions
+# block: `debug.allow_all_symbols`, `artifacts.allow_upload`.
+_SECTION_GRANT_KEYS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
+# Top-level keys that are not part of what the bench *is*: the project grants,
+# and the audit trail the writer maintains itself.
+_TOP_LEVEL_NON_DESCRIPTION = ("permissions", "provenance")
+
+
 def description_view(node: object) -> object:
     """A document with everything that grants anything removed.
 
-    The mirror of ``permission_surface``: what is left is the description, and
-    comparing two of these says whether a change touched the bench's description
-    regardless of which key was named to do it."""
-    if isinstance(node, dict):
-        return {
-            key: description_view(value)
-            for key, value in node.items()
-            if key != "permissions" and not str(key).startswith("allow_") and key != "provenance"
-        }
-    if isinstance(node, list):
-        return [description_view(item) for item in node]
-    return node
+    The mirror of ``permission_surface``, and — unlike it — schema-aware. Two
+    callers depend on what survives: the compare-and-swap against
+    ``expect_document``, and the check for whether a change needs
+    `allow_config_description_write`. Both read a *removal* as "nothing there
+    changed", so removing more than the grants blinds them.
+
+    That is what a name-driven rule did. It dropped every mapping key called
+    `permissions` or `provenance`, and every key starting with `allow_`, at every
+    depth — and those are legal entry ids. A debugger an operator named
+    `permissions` had its whole entry deleted from this view, so its `probe_id`
+    and `type` were outside the CAS *and* outside the description-right check: a
+    concurrent repoint of that entry from board A to board B was invisible, and
+    discovery from A could still be committed onto it.
+
+    So the drops here are the schema's grant locations, spelled out. A grant that
+    turns up anywhere else is still caught — by ``permission_surface``, which
+    finds it, and now by this view too, which keeps it and therefore reports it
+    as a description change. Both rights, rather than neither."""
+    if not isinstance(node, dict):
+        return node
+    view: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _TOP_LEVEL_NON_DESCRIPTION:
+            continue
+        if key in _PERMISSION_ENTRY_SECTIONS and isinstance(value, dict):
+            view[key] = {
+                entry_id: {field: item for field, item in entry.items() if field != "permissions"} if isinstance(entry, dict) else entry
+                for entry_id, entry in value.items()
+            }
+            continue
+        if key in _SECTION_GRANT_KEYS and isinstance(value, dict):
+            view[key] = {field: item for field, item in value.items() if field not in _SECTION_GRANT_KEYS[key]}
+            continue
+        view[key] = value
+    return view
 
 
 def deny_all_permissions(section: str) -> JsonObject:

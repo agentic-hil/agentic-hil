@@ -53,10 +53,20 @@ PACKAGE_SID_PREFIX = "S-1-15-2-"
 #                the user owns, so such an ACE grants no reach that was not
 #                already there.
 # ``unresolved`` a SID the local security authority *answered about*, saying that
-#                nothing on this machine maps to it (``ERROR_NONE_MAPPED``). No
-#                token built here carries it. It is normally residue of software
-#                that wrote an ACE with a SID from another machine's image, and
-#                it is present on a stock Windows 11 ``%LOCALAPPDATA%``.
+#                nothing on this machine maps to it (``ERROR_NONE_MAPPED``), on a
+#                machine where that answer is conclusive — see
+#                ``none_mapped_is_conclusive``. No token built here carries it. It
+#                is normally residue of software that wrote an ACE with a SID from
+#                another machine's image, and it is present on a stock Windows 11
+#                ``%LOCALAPPDATA%`` (measured: an ``(OI)(CI)(M)`` ACE for an
+#                ``S-1-5-21-…`` SID from the installation image).
+# ``unresolved_foreign`` ``ERROR_NONE_MAPPED`` on a machine that has somewhere
+#                else to ask. ``LookupAccountSid`` consults trusted domains, and a
+#                trust that is unreachable, or a SID this domain controller does
+#                not know while another one in the forest does, produces exactly
+#                this answer for a SID a live token can still carry — including
+#                through SID history, which Windows authorizes on as raw SIDs.
+#                So it is *reported as* none-mapped and *treated as* ignorance.
 # ``lookup_failed`` the question could not be asked: the SID would not convert,
 #                the authority was unreachable, the call raised. This is *not*
 #                the same as ``unresolved`` and must never be folded into it. A
@@ -66,12 +76,26 @@ PACKAGE_SID_PREFIX = "S-1-15-2-"
 PRINCIPAL_CLASS_ACCOUNT = "account"
 PRINCIPAL_CLASS_APP_PACKAGE = "app_package"
 PRINCIPAL_CLASS_UNRESOLVED = "unresolved"
+PRINCIPAL_CLASS_UNRESOLVED_FOREIGN = "unresolved_foreign"
 PRINCIPAL_CLASS_LOOKUP_FAILED = "lookup_failed"
 
 # LookupAccountSid's way of saying "I looked, and there is nothing". Any other
 # failure is the lookup itself failing and means the opposite: nothing was
 # established either way.
 _ERROR_NONE_MAPPED = 1332
+
+# NETSETUP_JOIN_STATUS, from lmjoin.h. Only the domain answer changes anything
+# here; the rest are grouped as "this machine has nowhere else to ask".
+_NET_SETUP_UNKNOWN_STATUS = 0
+_NET_SETUP_DOMAIN_NAME = 3
+
+JOIN_STATE_WORKGROUP = "workgroup"
+JOIN_STATE_DOMAIN = "domain_joined"
+JOIN_STATE_UNKNOWN = "unknown"
+
+# Fixed for the life of a process: joining or leaving a domain needs a reboot.
+# Cached because it is asked once per ACE on a path being validated.
+_join_state: str | None = None
 
 _CAP_AUTHZ_APPLICATIONS = r"SOFTWARE\Microsoft\SecurityManager\CapAuthz\ApplicationsEx"
 _APPCONTAINER_MAPPINGS = r"Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings"
@@ -90,6 +114,71 @@ def _on_windows() -> bool:
     absence of an effect.
     """
     return os.name == "nt"
+
+
+def machine_join_state() -> str:
+    """Whether this machine has an authority beyond its own SAM to ask about a SID.
+
+    ``NetGetJoinInformation`` is a local read of the join configuration — it does
+    not go on the network — and it is the one fact that decides whether
+    ``ERROR_NONE_MAPPED`` is evidence or noise. Never raises; a failure is
+    ``unknown``, which is treated as the domain case because not knowing where the
+    question went is not a reason to believe the answer.
+    """
+    global _join_state
+    if _join_state is not None:
+        return _join_state
+    if not _on_windows():
+        _join_state = JOIN_STATE_WORKGROUP
+        return _join_state
+    _join_state = _query_join_state()
+    return _join_state
+
+
+def _query_join_state() -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        netapi32 = ctypes.WinDLL("netapi32", use_last_error=True)
+        get_join = netapi32.NetGetJoinInformation
+        get_join.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(ctypes.c_int)]
+        get_join.restype = wintypes.DWORD
+        free_buffer = netapi32.NetApiBufferFree
+        free_buffer.argtypes = [ctypes.c_void_p]
+        free_buffer.restype = wintypes.DWORD
+        name = wintypes.LPWSTR()
+        status = ctypes.c_int(_NET_SETUP_UNKNOWN_STATUS)
+        if get_join(None, ctypes.byref(name), ctypes.byref(status)) != 0:
+            return JOIN_STATE_UNKNOWN
+        try:
+            if status.value == _NET_SETUP_DOMAIN_NAME:
+                return JOIN_STATE_DOMAIN
+            if status.value == _NET_SETUP_UNKNOWN_STATUS:
+                return JOIN_STATE_UNKNOWN
+            return JOIN_STATE_WORKGROUP
+        finally:
+            if name:
+                free_buffer(ctypes.cast(name, ctypes.c_void_p))
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+        return JOIN_STATE_UNKNOWN
+
+
+def none_mapped_is_conclusive() -> bool:
+    """Whether ``ERROR_NONE_MAPPED`` on this machine means "nothing can carry it".
+
+    On a machine that is in a workgroup, the local SAM is the only account
+    database ``LookupAccountSid`` consults and it is always reachable, so "no such
+    account" is a fact about the SID. On a domain member the same call also asks
+    the domain and every trust behind it, and Microsoft documents
+    ``ERROR_NONE_MAPPED`` as the result when that question cannot be answered —
+    an unreachable trust, a controller that does not hold the object. A live
+    account's SID, or a SID carried only in SID history, then arrives looking
+    exactly like an orphan from an installation image. So the same return value is
+    evidence in one case and ignorance in the other, and only the first is a class
+    the default trust mode may tolerate.
+    """
+    return machine_join_state() == JOIN_STATE_WORKGROUP
 
 
 def package_sid_for_capability(sid: str) -> str | None:
@@ -222,13 +311,17 @@ def lookup_account(sid: str) -> tuple[str, str | None]:
     """What the local security authority says about one SID. Never raises.
 
     Returns ``(class, account name)``, where the class is one of
-    ``PRINCIPAL_CLASS_ACCOUNT``, ``PRINCIPAL_CLASS_UNRESOLVED`` or
-    ``PRINCIPAL_CLASS_LOOKUP_FAILED``. The distinction between the last two is
-    the whole reason this returns a class rather than an optional name: only
-    ``ERROR_NONE_MAPPED`` is the authority saying there is no such account.
-    Every other failure — a SID that will not convert, an unreachable authority,
-    a raised call — leaves the holder unknown, and unknown has to be able to
-    reach a stricter verdict than "orphan SID nobody can log on as".
+    ``PRINCIPAL_CLASS_ACCOUNT``, ``PRINCIPAL_CLASS_UNRESOLVED``,
+    ``PRINCIPAL_CLASS_UNRESOLVED_FOREIGN`` or ``PRINCIPAL_CLASS_LOOKUP_FAILED``.
+    The distinctions are the whole reason this returns a class rather than an
+    optional name. Only ``ERROR_NONE_MAPPED`` is the authority saying there is no
+    such account; every other failure — a SID that will not convert, an
+    unreachable authority, a raised call — leaves the holder unknown, and unknown
+    has to be able to reach a stricter verdict than "orphan SID nobody can log on
+    as". And ``ERROR_NONE_MAPPED`` itself is only that answer where the local SAM
+    was the only thing asked: on a domain member it also means "the question went
+    somewhere that did not answer", so it splits into its own class rather than
+    inheriting the tolerated one (``none_mapped_is_conclusive``).
 
     App-capability SIDs have no account name; the caller recognises those from
     the SID itself before asking, and the registry route below is what names
@@ -268,15 +361,20 @@ def lookup_account(sid: str) -> tuple[str, str | None]:
             ctypes.set_last_error(0)
             if not lookup(None, binary, name, ctypes.byref(name_size), domain, ctypes.byref(domain_size), ctypes.byref(use)):
                 code = ctypes.get_last_error()
-                return (PRINCIPAL_CLASS_UNRESOLVED if code == _ERROR_NONE_MAPPED else PRINCIPAL_CLASS_LOOKUP_FAILED), None
+                return (_none_mapped_class() if code == _ERROR_NONE_MAPPED else PRINCIPAL_CLASS_LOOKUP_FAILED), None
             if not name.value:
-                return PRINCIPAL_CLASS_UNRESOLVED, None
+                return _none_mapped_class(), None
             return PRINCIPAL_CLASS_ACCOUNT, (f"{domain.value}\\{name.value}" if domain.value else name.value)
         finally:
             if binary:
                 local_free(binary)
     except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
         return PRINCIPAL_CLASS_LOOKUP_FAILED, None
+
+
+def _none_mapped_class() -> str:
+    """Which class ``ERROR_NONE_MAPPED`` is on this machine."""
+    return PRINCIPAL_CLASS_UNRESOLVED if none_mapped_is_conclusive() else PRINCIPAL_CLASS_UNRESOLVED_FOREIGN
 
 
 def _account_name(sid: str) -> str | None:

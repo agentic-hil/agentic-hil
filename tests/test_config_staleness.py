@@ -24,6 +24,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -625,6 +626,34 @@ def test_the_errors_resource_serves_what_a_stale_answer_carries(tmp_path: Path, 
     assert scoped["remediation"] != unscoped["remediation"]
 
 
+def test_every_agent_facing_copy_names_the_state_a_restart_would_not_fix() -> None:
+    """A safety state is worth nothing if the guidance beside it says "restart".
+
+    `invalid` exists so that an agent does not send an operator to shut down the
+    only working server for a file that will not come up. It is in `config_stale`,
+    and the server instructions told an agent to ask for a restart on *every*
+    stale result — which turned the new state into an instruction to do the exact
+    thing it was added to prevent. Every shipped copy has to say it, because an
+    agent reads whichever one its host installed."""
+    from agentic_hil.mcp import SERVER_INSTRUCTIONS
+
+    root = Path(__file__).resolve().parents[1]
+    copies = {
+        "server instructions": SERVER_INSTRUCTIONS,
+        "packaged skill": (root / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
+        "plugin skill": (root / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
+        "AGENTS.md": (root / "AGENTS.md").read_text(encoding="utf-8"),
+        "README.md": (root / "README.md").read_text(encoding="utf-8"),
+    }
+    for name, text in copies.items():
+        assert STATE_INVALID in text, f"{name} does not name the invalid state"
+        assert "repair" in text.lower(), f"{name} does not say the file is repaired first"
+    # And the states table in the README covers all six, so a reader counting
+    # rows against the code finds the same set.
+    for state in (STATE_UNCHANGED, STATE_CHANGED, STATE_INVALID, STATE_MISSING, STATE_UNREADABLE, STATE_UNKNOWN):
+        assert f"| `{state}` |" in copies["README.md"]
+
+
 # ---------------------------------------------------------------------------
 # What a "changed" file has to be before a restart is the answer to it.
 
@@ -671,6 +700,51 @@ def test_a_changed_file_that_breaks_the_schema_is_not_called_restartable(tmp_pat
     assert status["state"] == STATE_INVALID
     assert status["error_type"] == "config_invalid"
     assert status["backend_error"]
+    with pytest.raises(ConfigError):
+        load_authoritative_config(workspace)
+
+
+@pytest.mark.parametrize(
+    ("what", "edit"),
+    [
+        # The schema types workspace_root as a string and says nothing about
+        # absoluteness; the loader refuses a relative one outright.
+        ("a relative workspace_root", lambda document: document.__setitem__("workspace_root", "relative/path")),
+        # state_root inside the workspace: two absolute strings the schema is
+        # happy with, and a pair the loader will not have.
+        ("an overlapping state_root", lambda document: document.__setitem__("state_root", str(Path(document["workspace_root"]) / "state"))),
+        # Cross-entry identity, which no per-field schema can express.
+        (
+            "two debuggers on one probe",
+            lambda document: document.__setitem__(
+                "debuggers",
+                {name: {**entry, "probe_id": "SAMESERIAL01"} for name, entry in [("dut", document["debuggers"]["dut"]), ("spare", document["debuggers"]["dut"])]},
+            ),
+        ),
+    ],
+)
+def test_a_schema_valid_file_the_loader_refuses_is_not_called_restartable(what: str, edit: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The schema is not the loader, and `changed` promises a restart works.
+
+    The status check used to stop after the YAML parse and the shipped schema, so
+    every document the loader refuses for a reason the schema cannot express was
+    classified `changed` — whose remediation is "restart the server to pick this
+    up". Following that shuts down a server that is enforcing a policy and does
+    not bring one back. Each case here is accepted by the schema and refused by
+    `load_authoritative_config`, which is the check the assertion at the end makes
+    directly rather than assuming."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    rewrite(path, edit)
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_INVALID, what
+    assert status["error_type"] == "config_invalid"
+    assert status["backend_error"]
+    assert any("repair" in step.lower() for step in status["remediation"])
+    # The claim the state makes, checked against what a restart would really do.
     with pytest.raises(ConfigError):
         load_authoritative_config(workspace)
 
