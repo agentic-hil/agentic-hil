@@ -21,3 +21,7 @@ evals/install/artifacts/
 
 # Worktrees this session creates are checkouts, not content.
 .claude/worktrees/
+
+# Review documents and transcripts from tools/agent_review_loop.py: a record of
+# how a change was produced, not the change.
+.agentic-loop/
