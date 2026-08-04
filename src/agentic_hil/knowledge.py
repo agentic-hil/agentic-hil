@@ -186,6 +186,30 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not treat an unreadable file as an unchanged one and carry on as if the answers were current.",
         ),
     ),
+    f"config_invalid:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration has changed since this server loaded it, and what is at the path now does "
+            "not load: invalid YAML, or a document the shipped schema refuses. The server is still enforcing the "
+            "version it parsed at startup, and that is the only working copy of the policy left. This is not the "
+            "ordinary `config_stale` case — a restart here does not pick the new file up, it fails, and the bench is "
+            "then served by nothing at all."
+        ),
+        remediation=(
+            "Report `config_status.backend_error`. It is the parser's or the schema validator's own message and names "
+            "the line or the field that is wrong, which is what the repair needs.",
+            "Ask the operator to repair the file and confirm it with `agentic-hil doctor`, which reads it fresh, "
+            "*before* restarting the MCP server. The order matters: the running server is the only thing still holding "
+            "the policy.",
+            "Until then, treat every answer from this server as the older file's answer, exactly as for `config_stale`.",
+        ),
+        do_not=(
+            "Do not ask for a restart to make the change take effect. There is no document to restart onto and the "
+            "server would not come back with a policy.",
+            "Do not repair the file with your own file tools, and do not call `project_config_create` to replace it. "
+            "The first is what the host deny rules exist against; the second writes a deny-by-default skeleton over "
+            "whatever the operator was in the middle of writing.",
+        ),
+    ),
     "installation_in_use": ErrorRemedy(
         meaning=(
             "A process is running out of the installation this upgrade would replace, and on Windows a file mapped as "
@@ -293,9 +317,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "A configured path, or one of its ancestor directories, can be written, deleted or re-permissioned by a "
             "principal outside the operator's own identity. On Windows that means an account other than the current "
-            "user, SYSTEM or Administrators that the local security authority can name; an application-package "
-            "identity, a SID nothing can resolve, and an ACL that could not be read are reported instead of refused "
-            "under the default `windows_path_trust: standard`. On POSIX it means a group- or other-writable component. "
+            "user, SYSTEM or Administrators that the local security authority can name. Under the default "
+            "`windows_path_trust: standard` two findings are reported instead of refused, and both are things the "
+            "machine positively established: an application-package identity (`S-1-15-2-*` / `S-1-15-3-*`), recognised "
+            "from the SID itself and holding a subset of the operator's own rights, and a SID the authority answered "
+            "about by saying nothing on this machine maps to it. A lookup that could not be performed at all, and an "
+            "ACL that could not be read, stay refusals there — they are ignorance rather than a clean bill of health, "
+            "and accepting them is what `permissive` is for. On POSIX it means a group- or other-writable component. "
             "The validator only reads ACLs and modes; it never changes them."
         ),
         remediation=(
@@ -357,7 +385,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "field is in MCP resource " + CONFIG_SCHEMA_URI + ".",
             "`windows_path_trust: permissive` accepts a state_root whose ACLs the check cannot vouch for, visibly and "
             "in the configuration file. Use it when the environment's ACLs genuinely do not describe its trust "
-            "boundary, not to make a real foreign grant go quiet.",
+            "boundary, not to make a real foreign grant go quiet. It reaches this configuration's own state_root and "
+            "the directories derived from it and nothing else: the user configuration, the MCP server executable and "
+            "the machine-wide device-lock directory stay on `standard` whatever a project file says.",
             "This is the project half only: `agentic-hil agent-install` reads and writes no configuration and no "
             "state_root, so on such a profile the agent skill and the user-level MCP registration install normally "
             "and only this project binding is left.",
@@ -377,7 +407,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Fix the ancestor the refusal names under {safe_user_root}; the location is fixed and has no override, "
-            "because an override is how two sessions stop seeing each other.",
+            "because an override is how two sessions stop seeing each other. `windows_path_trust` is not that override "
+            "either: this directory is shared by every project on the machine and is always checked under `standard`.",
             "Windows: %USERPROFILE% passes; the failure is normally a directory somebody re-permissioned below it.",
             "Full rules and the measured per-directory verdicts: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
@@ -1411,13 +1442,14 @@ Every principal that holds one of those rights is classified, and the class deci
 |---|---|---|---|---|
 | `account` | a SID the local security authority resolves to a real account or group | **refuse** | **refuse** | report |
 | `app_package` | `S-1-15-2-*` / `S-1-15-3-*`, an installed packaged application | report | **refuse** | report |
-| `unresolved` | a SID no authority here can name; normally residue of software that wrote an ACE with another machine's SID | report | **refuse** | report |
-| ACL could not be read | a sandbox, a service account, a restricted CI runner | report | **refuse** | report |
+| `unresolved` | the authority answered `ERROR_NONE_MAPPED`: nothing here maps to that SID. Normally residue of software that wrote an ACE with another machine's SID, and present on a stock `%LOCALAPPDATA%` | report | **refuse** | report |
+| `lookup_failed` | the authority could *not* be asked: the SID would not convert, the lookup failed for any other reason. The holder might be a live account | **refuse** | **refuse** | report |
+| ACL could not be read | a sandbox, a service account, a restricted CI runner | **refuse** | **refuse** | report |
 | NULL DACL, or an untrusted owner | grants everyone everything / the object is not the operator's | **refuse** | **refuse** | report |
 
-`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
+`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `standard` tolerates the two findings the machine positively established — an AppContainer identity, recognised from the SID's own structure, and a SID the authority answered about by saying nothing maps to it — and refuses everything it could not establish: an unreadable ACL, and a SID whose lookup failed for any other reason. A gate that lets ignorance through is a gate that opens whenever the lookup behind it breaks, so "no such account" and "I could not ask" are separate classes and only the first is tolerated. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
 
-The key governs `state_root` and everything derived from it. It does not govern the user configuration directory, which is read before any configuration exists and is therefore always checked under `standard`; `AGENTIC_HIL_CONFIG` is the answer there.
+The key governs `state_root` and everything derived from it, and nothing else. It does not govern the user configuration directory, which is read before any configuration exists and is therefore always checked under `standard`; `AGENTIC_HIL_CONFIG` is the answer there. It does not govern the MCP server executable, nor `~/.agentic-hil/device-locks` — that directory is how every project on the machine agrees who holds a board, and one project's file may not weaken the mutex another project's run depends on.
 
 A failure raises `error_type: unsafe_configured_path` and names the offending component in `path`, the setting in `field`, the classification in `finding`, and the active mode in `path_trust`. On Windows it also names *who* holds the right, in `untrusted_principals`. Findings that did **not** refuse are reported by `agentic-hil doctor` under `path_trust.findings`, so a degraded environment is named rather than silent.
 

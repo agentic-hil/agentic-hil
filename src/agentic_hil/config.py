@@ -49,6 +49,7 @@ from agentic_hil.types import (
 from agentic_hil.windows_principals import (
     PRINCIPAL_CLASS_ACCOUNT,
     PRINCIPAL_CLASS_APP_PACKAGE,
+    PRINCIPAL_CLASS_LOOKUP_FAILED,
     PRINCIPAL_CLASS_UNRESOLVED,
     principal_class,
     untrusted_principal_details,
@@ -575,7 +576,9 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
         raise ConfigError("config_invalid", "state_root and workspace_root must not overlap.", {"path": config_path, "field": "state_root", "state_root": str(lexical), "workspace_root": str(workspace)})
     root = safe_directory(lexical)
     if os.name == "nt":
-        validate_windows_state_root(root)
+        # This configuration's own state_root, and the one path its
+        # `windows_path_trust` key is entitled to speak for.
+        validate_windows_state_root(root, trust=windows_path_trust())
     else:
         for index, candidate in enumerate((root, *root.parents)):
             opened = os.stat(candidate, follow_symlinks=False)
@@ -604,7 +607,9 @@ def trusted_state_directory(state_root: str | Path, *parts: str) -> Path:
     if os.name == "nt":
         handles = _windows_hold_directory_chain(target, create=True)
         _close_windows_handles(handles)
-        validate_windows_state_root(target)
+        # Derived from the state_root the same configuration named, so it is
+        # covered by that configuration's mode and by nothing wider.
+        validate_windows_state_root(target, trust=windows_path_trust())
         return target
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = _open_directory_fd(base, create=True)
@@ -639,17 +644,51 @@ WINDOWS_PATH_TRUST_DEFAULT = "standard"
 
 # The security decision of hardci-hq#91, in one table. A finding refuses under a
 # mode when it is listed there and is reported otherwise.
+#
+# The line `standard` draws is between evidence and ignorance, not between
+# comfortable and inconvenient. It tolerates exactly two findings, and both are
+# things the machine positively established:
+#
+# * ``app_package_principal`` — an AppContainer identity, recognised from the
+#   SID's own structure with no lookup at all. It holds a subset of rights the
+#   operator's unpackaged processes already have in full.
+# * ``unresolved_principal`` — the local security authority was asked and
+#   answered ``ERROR_NONE_MAPPED``: nothing on this machine maps to that SID, so
+#   no token built here can carry it. A stock Windows 11 ``%LOCALAPPDATA%``
+#   really does carry such an ACE, which is why refusing it is not an option
+#   short of refusing the documented default state_root.
+#
+# Everything the check could *not* establish refuses: an ACL it could not read,
+# and a SID whose lookup failed for any reason other than that answer. Those are
+# ignorance, and a gate that lets ignorance through is a gate that opens whenever
+# the lookup behind it breaks — a live foreign account on a bad day would arrive
+# looking exactly like the benign orphan above. Keeping the two apart is
+# ``windows_principals.lookup_account``'s job, and this table is why it has one.
+# Accepting unknown evidence is what `permissive` is for, and it says so in the
+# file where a later reader can see it.
 _WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
-    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal"}),
-    "strict": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "app_package_principal", "unresolved_principal", "acl_unreadable"}),
+    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "principal_lookup_failed", "acl_unreadable"}),
+    "strict": frozenset(
+        {"untrusted_owner", "null_dacl", "foreign_principal", "app_package_principal", "unresolved_principal", "principal_lookup_failed", "acl_unreadable"}
+    ),
     "permissive": frozenset(),
 }
 
 # One authoritative configuration per process, so the mode it names is a process
 # property. It is established on every load, including a load that names nothing,
-# so a second configuration can never inherit the first one's mode. Paths checked
-# before any configuration exists — the user configuration directory itself — are
-# checked under the default, because there is nothing yet to read the key from.
+# so a second configuration can never inherit the first one's mode.
+#
+# What it governs is *not* every path this process checks. It is a key in one
+# project's configuration, and it may only ever weaken that project's own
+# `state_root` and the directories derived from it. The user configuration, the
+# MCP server executable and the machine-wide device-lock directory are checked
+# under `standard` whatever it says: the first is read before any configuration
+# exists (so there is nothing to read the key from), and the last is shared by
+# every project on the machine — a `permissive` project must not be able to open
+# the mutex state that protects another project's boards. Callers say which they
+# are by passing `trust=` explicitly; the parameter defaults to `standard`, so a
+# path whose caller forgot is checked under the stricter rule rather than the
+# looser one.
 _windows_path_trust = WINDOWS_PATH_TRUST_DEFAULT
 
 
@@ -678,6 +717,8 @@ _WINDOWS_TRUST_SUMMARIES = {
     ("acl_unreadable", "object"): "Windows ownership and ACL could not be inspected.",
     ("acl_unreadable", "ancestor"): "ancestor ACL could not be inspected.",
     ("untrusted_owner", "object"): "must have a trusted Windows owner.",
+    ("principal_lookup_failed", "object"): "grants write access to a Windows principal this machine could not look up.",
+    ("principal_lookup_failed", "ancestor"): "has an ancestor granting write access to a Windows principal this machine could not look up.",
 }
 
 
@@ -694,7 +735,7 @@ def _trust_finding(name: str, scope: str, path: Path, **extra: object) -> JsonOb
     return {"finding": name, "scope": scope, "path": str(path), **extra}
 
 
-def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root") -> list[JsonObject]:
+def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root", trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> list[JsonObject]:
     """Refuse a Windows path whose ACLs put it outside the operator's control.
 
     What is defended: the authoritative configuration is the permission policy
@@ -711,11 +752,18 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
     *sandboxed subset* of rights the same user's unpackaged processes already
     have in full.
 
+    ``trust`` is the policy this particular path is checked under, and it is the
+    caller's to state rather than this function's to look up. A configuration's
+    `windows_path_trust` reaches its own `state_root` and what is derived from
+    it; nothing else in this process is that configuration's to weaken. The
+    default is `standard`, so the failure mode of forgetting is a check that is
+    too strict rather than one that is too loose.
+
     Returns every finding, including the ones that did not refuse, so `doctor`
     can name a degraded environment instead of the tool going quiet about it.
     """
     findings = inspect_windows_path_trust(root)
-    mode = windows_path_trust()
+    mode = trust if trust in _WINDOWS_PATH_TRUST_REFUSALS else WINDOWS_PATH_TRUST_DEFAULT
     refusing = _WINDOWS_PATH_TRUST_REFUSALS[mode]
     for finding in findings:
         if finding["finding"] not in refusing:
@@ -856,20 +904,23 @@ def _windows_principal_findings(
     """
     name_by_class = {
         PRINCIPAL_CLASS_ACCOUNT: "foreign_principal",
+        PRINCIPAL_CLASS_LOOKUP_FAILED: "principal_lookup_failed",
         PRINCIPAL_CLASS_APP_PACKAGE: "app_package_principal",
         PRINCIPAL_CLASS_UNRESOLVED: "unresolved_principal",
     }
     grouped: dict[str, list[str]] = {}
     for sid in windows_acl_principals_holding(advapi32, dacl, current_sid, access_mask, include_inherit_only=include_inherit_only):
-        # A SID that could not even be stringified cannot be classified either,
-        # so it is ignorance and lands in `unresolved` rather than in a verdict.
-        holder = principal_class(sid) if sid else PRINCIPAL_CLASS_UNRESOLVED
+        # A SID that could not even be stringified cannot be classified either.
+        # That is ignorance about a live right, not a resolved absence, so it
+        # lands in `lookup_failed` and refuses rather than in the tolerated class.
+        holder = principal_class(sid) if sid else PRINCIPAL_CLASS_LOOKUP_FAILED
         grouped.setdefault(holder, [])
         if sid and sid not in grouped[holder]:
             grouped[holder].append(sid)
-    # Deterministic and worst-first, so the refusal names the account before it
-    # names a package nobody has to act on.
-    order = (PRINCIPAL_CLASS_ACCOUNT, PRINCIPAL_CLASS_APP_PACKAGE, PRINCIPAL_CLASS_UNRESOLVED)
+    # Deterministic and worst-first: the two classes that refuse come before the
+    # two that are reported, so a refusal names the account, or the lookup that
+    # did not answer, before it names a package nobody has to act on.
+    order = (PRINCIPAL_CLASS_ACCOUNT, PRINCIPAL_CLASS_LOOKUP_FAILED, PRINCIPAL_CLASS_APP_PACKAGE, PRINCIPAL_CLASS_UNRESOLVED)
     return [_trust_finding(name_by_class[holder], scope, path, principal_class=holder, sids=grouped[holder]) for holder in order if holder in grouped]
 
 
@@ -1194,6 +1245,13 @@ def secure_user_directory(directory: str | Path, *, field: str = "user_config", 
     ``field`` names the configuration setting the refusal is about. It selects
     the remediation attached to the result, so a caller told which directory
     failed is also told where that particular directory may live instead.
+
+    Everything reached through here — the user configuration and its lock, the
+    machine-wide device-lock directory, the default state root chosen before any
+    file exists — is checked under `standard` on Windows and is deliberately out
+    of reach of any configuration's `windows_path_trust`. A key inside one
+    project's file may relax that project's own state_root; it may not relax the
+    directory every project on this machine coordinates through.
     """
     path = absolute_without_symlinks(Path(directory))
     if os.name == "nt":
@@ -1224,11 +1282,15 @@ def secure_user_directory(directory: str | Path, *, field: str = "user_config", 
     return path
 
 
-def secure_optional_read_text(file_path: str | Path, *, encoding: str = "utf-8") -> str | None:
-    """Read a trusted user file or return None when it is absent.
+def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
+    """Read a trusted user file as bytes, or return None when it is absent.
 
     The directory chain, file type, link count, owner, and write permissions are
     validated while the opened file descriptor/handle pins the object.
+
+    Bytes rather than text, because a caller that needs both a digest of a file
+    and the document inside it must take one snapshot and answer out of it; the
+    digest is over the exact bytes and a second read can straddle an edit.
     """
     path = absolute_without_symlinks(Path(file_path))
     secure_user_directory(path.parent)
@@ -1243,9 +1305,17 @@ def secure_optional_read_text(file_path: str | Path, *, encoding: str = "utf-8")
                     "User configuration files must be owned by the current user and not writable by other users.",
                     {"field": "user_config", "path": str(path)},
                 )
-            return handle.read().decode(encoding)
+            return handle.read()
     except FileNotFoundError:
         return None
+
+
+def secure_optional_read_text(file_path: str | Path, *, encoding: str = "utf-8") -> str | None:
+    """The same read, decoded. Raises ``UnicodeDecodeError`` on bytes that are not
+    text in ``encoding``; callers that answer for a file somebody else wrote have
+    to normalize that rather than let it out as an internal error."""
+    raw = secure_optional_read_bytes(file_path)
+    return None if raw is None else raw.decode(encoding)
 
 
 def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:

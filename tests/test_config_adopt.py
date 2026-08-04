@@ -40,7 +40,9 @@ from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, is_unset, plan_adoption, pro
 from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import adopt_hardware, doctor, init_config
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, load_authoritative_config
+from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
+from agentic_hil.coordination import HardwareCoordinator
 from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT, CONFIG_WRITE_RIGHT
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import fold_hardware_id
@@ -1082,3 +1084,204 @@ def test_the_write_goes_through_the_one_door(tmp_path: Path, monkeypatch: pytest
     assert seen[0]["actor"] == "agent"
     assert seen[0]["via"] == f"mcp:{PROJECT_CONFIG_ADOPT}"
     assert all(sorted(change) == ["key", "value"] for change in seen[0]["changes"])
+
+
+# ---------------------------------------------------------------------------
+# The plan was decided against a document, and the write is that document's.
+
+
+def test_a_probe_id_that_moves_during_the_read_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mixed-board file this module refuses, arriving by the back door.
+
+    `probe_id` is read before discovery and, when it is already set, decides
+    which physical probe is read at all. It is then not one of the keys the write
+    carries, so a per-key expectation cannot cover it: somebody repointing the
+    entry from A to B while A was being read would have A's controller, A's
+    toolchain and A's COM device committed into an entry that now names B. That
+    is a configuration describing two boards, which is exactly what
+    `_different_board` exists to prevent when the disagreement is visible.
+    """
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch)
+    real = project_config_adopt_hardware.__globals__["project_config_set"]
+
+    def repoint_then_write(*args: Any, **kwargs: Any) -> dict:
+        # Another writer, inside the window where the probe was being read.
+        document = document_of(path)
+        document["debuggers"]["dut"]["probe_id"] = "0011002B3038510934333935"
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.adopt.project_config_set", repoint_then_write)
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_changed_underneath"
+    assert refused["retry_safe"] is True
+    after = document_of(path)
+    assert after["debuggers"]["dut"]["probe_id"] == "0011002B3038510934333935"
+    assert after["debuggers"]["dut"]["executable"] is None, "nothing of the read board reached the entry"
+    assert after["target"]["controller"] == "unknown-controller"
+
+
+def test_a_backend_change_during_the_read_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`type` decided the plan and is outside every write door.
+
+    The executable is carried only because the entry's `type` matches the backend
+    discovery ran on. `type` is not a settable key, so the only way to notice it
+    moved is to compare the document the plan was made against."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch)
+    real = project_config_adopt_hardware.__globals__["project_config_set"]
+
+    def retype_then_write(*args: Any, **kwargs: Any) -> dict:
+        document = document_of(path)
+        document["debuggers"]["dut"]["type"] = "pyocd"
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.adopt.project_config_set", retype_then_write)
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_changed_underneath"
+    assert refused["document_changed"] is True
+    assert document_of(path)["debuggers"]["dut"]["executable"] is None
+
+
+def test_a_permission_changed_during_the_read_does_not_refuse_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The document check is on the description, and for a reason.
+
+    Nothing this path plans reads a permission — it cannot name one — so a
+    concurrent grant must not turn a correct plan into a refusal. Comparing the
+    whole document would make every unrelated write by another process a reason
+    to throw a hardware read away."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch)
+    real = project_config_adopt_hardware.__globals__["project_config_set"]
+
+    def grant_then_write(*args: Any, **kwargs: Any) -> dict:
+        document = document_of(path)
+        document["debuggers"]["dut"]["permissions"]["allow_reset"] = True
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.adopt.project_config_set", grant_then_write)
+    tools = service(workspace)
+    try:
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert applied["ok"] is True, applied
+    after = document_of(path)
+    assert after["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
+    assert after["debuggers"]["dut"]["permissions"]["allow_reset"] is True, "and the other writer's grant survived"
+
+
+# ---------------------------------------------------------------------------
+# A debugger that carries its own target.
+
+
+def test_a_per_debugger_target_is_reported_rather_than_written_to_the_wrong_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`target.controller` at the top level is a different board's setting here.
+
+    An entry with its own `target:` block overrides the project target for
+    everything that runs on that probe, so writing the detected controller into
+    the top-level block would not reach the board that was read — it would change
+    the fallback the other entries use. The closed key model has no
+    `debuggers.<name>.target.*` key, so the honest answer is to say where the
+    value belongs and leave both targets alone."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["debuggers"]["dut"]["target"] = {"name": "own-target", "controller": "unknown-controller"}
+    document["debuggers"]["spare"] = {"type": "stlink", "executable": FAKE_STLINK.as_posix(), "permissions": {}}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    attached(monkeypatch)
+
+    tools = service(workspace)
+    try:
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True, "debugger_id": "dut"})
+    finally:
+        tools.close()
+
+    assert applied["ok"] is True, applied
+    assert not [item for item in applied["carried"] if item["key"] == "target.controller"]
+    reported = [item for item in applied["unavailable"] if item["key"] == "debuggers.dut.target.controller"]
+    assert len(reported) == 1, applied["unavailable"]
+    assert reported[0]["discovered_value"] == "stm32f446re"
+    assert "debuggers.dut.target" in reported[0]["next_step"]
+    after = document_of(path)
+    # Neither target moved, and the identity of the read board still landed.
+    assert after["target"]["controller"] == "unknown-controller"
+    assert after["debuggers"]["dut"]["target"]["controller"] == "unknown-controller"
+    assert after["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
+
+
+# ---------------------------------------------------------------------------
+# Giving the board back is a checked claim, not an assumption.
+
+
+def test_a_lease_that_will_not_release_is_not_reported_as_a_clean_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`release` returns False and leaves the board quarantined and held.
+
+    Discarding that answer reported successful discovery, wrote the
+    configuration, and returned `ok: true` with `cleanup_required: false` about a
+    bench that needs `agentic-hil recover` before anything else touches it."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+    attached(monkeypatch)
+
+    def refusing_release(self: Any, lease: Any, **kwargs: Any) -> bool:
+        lease.quarantine("lease_release_retry", RuntimeError("durable record could not be written"))
+        return False
+
+    monkeypatch.setattr(HardwareCoordinator, "release_lease", refusing_release)
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "resource_quarantined"
+    assert refused["cleanup_required"] is True
+    assert refused["quarantined"] is True
+    assert refused["retry_safe"] is False
+    # The read did happen and its result is still handed over; what did not
+    # happen is the write.
+    assert refused["hardware_discovery"]["probe_id"] == PROBE_SERIAL
+    assert path.read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# A configuration that will not parse is still this tool's answer to give.
+
+
+def test_a_configuration_that_is_not_utf8_is_refused_rather_than_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading the document is the first thing this does.
+
+    A file saved as UTF-16 by a Windows editor made the decode escape as an
+    internal error from under the MCP layer, on a tool whose whole contract is a
+    structured answer."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch)
+    tools = service(workspace)
+    try:
+        path.write_bytes(b"\xff\xfeversion: 2\n")
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_unreadable"
+    assert refused["backend_error"]
+    assert refused["config_status"]["state"] == STATE_UNREADABLE

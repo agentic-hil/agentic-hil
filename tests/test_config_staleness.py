@@ -29,10 +29,12 @@ import pytest
 import yaml
 from conftest import FAKE_PYOCD, FAKE_STLINK, write_authoritative_config
 
+from agentic_hil import configwrite
 from agentic_hil.cli import doctor
 from agentic_hil.config import ConfigError, config_digest, load_authoritative_config
 from agentic_hil.configstate import (
     STATE_CHANGED,
+    STATE_INVALID,
     STATE_MISSING,
     STATE_UNCHANGED,
     STATE_UNKNOWN,
@@ -621,3 +623,195 @@ def test_the_errors_resource_serves_what_a_stale_answer_carries(tmp_path: Path, 
     assert gone["remediation"] == scoped["remediation"]
     assert gone["do_not"] == scoped["do_not"]
     assert scoped["remediation"] != unscoped["remediation"]
+
+
+# ---------------------------------------------------------------------------
+# What a "changed" file has to be before a restart is the answer to it.
+
+
+def test_a_changed_file_that_will_not_parse_is_not_called_restartable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`changed` says "restart the server to serve the file that exists now".
+
+    On a document that does not parse, that instruction is false in the worst
+    direction: the restart fails, and the operator has swapped a server enforcing
+    an older policy for no server at all. Checking only UTF-8 before hashing
+    classified exactly that file as a restartable change."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    path.write_text(path.read_text(encoding="utf-8") + "\n  broken: [unclosed\n", encoding="utf-8")
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_INVALID
+    assert status["error_type"] == "config_invalid"
+    assert status["reload_required"] is True
+    assert status["current_digest"] and status["current_digest"] != status["loaded_digest"]
+    assert status["backend_error"]
+    assert any("repair" in step.lower() for step in status["remediation"])
+    assert any("restart" in step.lower() for step in status["do_not"])
+    # The claim the state makes, checked against what a restart would really do.
+    with pytest.raises(ConfigError):
+        load_authoritative_config(workspace)
+
+
+def test_a_changed_file_that_breaks_the_schema_is_not_called_restartable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parseable YAML is not the same as a loadable configuration.
+
+    A document the shipped schema refuses fails the same restart for the same
+    reason, so it gets the same state rather than the one whose remedy is to
+    restart onto it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    rewrite(path, lambda document: document.__setitem__("debuggers", {"dut": {"type": "not-a-backend"}}))
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_INVALID
+    assert status["error_type"] == "config_invalid"
+    assert status["backend_error"]
+    with pytest.raises(ConfigError):
+        load_authoritative_config(workspace)
+
+
+def test_a_changed_file_that_still_loads_is_still_a_restartable_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check above must not turn every edit into a repair job.
+
+    An ordinary operator edit — the one the whole module exists for — is still
+    `changed`, and still says a restart is what picks it up."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    switch_to_pyocd(path)
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_CHANGED
+    assert status["error_type"] == CONFIG_STALE_ERROR
+    assert status["reload_required"] is True
+
+
+def test_an_unreachable_path_is_unreadable_rather_than_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Gone" and "cannot be got at" send an operator to different places.
+
+    `missing` carries restore-the-file remediation, and a stat that fails on an
+    ancestor is not evidence that the file was deleted — the file may be sitting
+    right there behind a directory that is no longer traversable. Asking
+    `os.path.lexists` for a second opinion answered False for every such failure
+    and turned all of them into `missing`."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    def blocked(file_path, **kwargs):
+        raise PermissionError(13, "access is denied")
+
+    monkeypatch.setattr("agentic_hil.configstate.safe_read_bytes", blocked)
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_UNREADABLE
+    assert status["error_type"] == "config_unreadable"
+    assert "access is denied" in status["backend_error"]
+
+
+def test_a_deleted_file_is_still_reported_as_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side of the same line: only the originating error decides."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+
+    path.unlink()
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_MISSING
+    assert status["error_type"] == "config_file_not_found"
+
+
+# ---------------------------------------------------------------------------
+# One answer describes one version of the file.
+
+
+def test_describe_reads_the_status_and_the_document_from_one_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two reads can straddle an edit, and then one answer describes two files.
+
+    The status was computed first and the document read after it. An edit in
+    between returned `state: unchanged` beside values from a document that is not
+    the unchanged one — a caller comparing the two halves of that answer is
+    comparing two documents without being told."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    seen: list[bytes] = []
+    real = configwrite.secure_optional_read_bytes
+
+    def edit_then_read(file_path):
+        # The edit lands where the second read used to pick it up. There is only
+        # one read now, so both halves of the answer have to move together.
+        if os.path.normcase(str(file_path)) == os.path.normcase(str(path)) and not seen:
+            switch_to_pyocd(path)
+        raw = real(file_path)
+        if os.path.normcase(str(file_path)) == os.path.normcase(str(path)):
+            seen.append(raw or b"")
+        return raw
+
+    monkeypatch.setattr("agentic_hil.configwrite.secure_optional_read_bytes", edit_then_read)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+    finally:
+        tools.close()
+
+    assert len(seen) == 1, "two reads of one file can straddle an edit"
+    assert described["config_status"]["current_digest"] == config_digest(seen[0])
+    # Not `unchanged`, because the document the keys below came from is not the
+    # one this server loaded — which is precisely the pairing that used to be
+    # reportable the wrong way round.
+    assert described["config_status"]["state"] == STATE_CHANGED
+    backend = next(entry for entry in described["writable_keys"] + described["locked_keys"] if entry["key"] == "debuggers.dut.executable")
+    assert backend["current_value"] == FAKE_PYOCD.as_posix()
+
+
+def test_a_configuration_that_will_not_parse_still_gets_the_block_it_promises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`project_config_describe` carries `config_status` whatever the state is.
+
+    That is what it is for, so a refusal from it has to as well. A malformed or
+    non-UTF-8 file used to escape as an internal error from under the MCP layer
+    instead — on the one tool documented to answer while everything else is
+    refusing."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    try:
+        path.write_text(path.read_text(encoding="utf-8") + "\nbroken: [unclosed\n", encoding="utf-8")
+        malformed = tools.call(PROJECT_CONFIG_DESCRIBE)
+        path.write_bytes(b"\xff\xfeversion: 2\n")
+        undecodable = tools.call(PROJECT_CONFIG_DESCRIBE)
+    finally:
+        tools.close()
+
+    assert malformed["ok"] is False
+    assert malformed["error_type"] == "config_invalid"
+    assert malformed["config_status"]["state"] == STATE_INVALID
+    # And the half nothing else can report once the document is unusable.
+    assert malformed["permissions_in_force"][CONFIG_DESCRIPTION_RIGHT] is True
+    assert malformed["writable_keys"] == []
+
+    assert undecodable["ok"] is False
+    assert undecodable["error_type"] == "config_unreadable"
+    assert undecodable["config_status"]["state"] == STATE_UNREADABLE
+    assert undecodable["permissions_in_force"][CONFIG_DESCRIPTION_RIGHT] is True
+
+
+def test_a_write_to_a_configuration_that_will_not_parse_is_refused_in_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same for the write door, which reads the document before it changes it."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    before = path.read_text(encoding="utf-8")
+    try:
+        path.write_text(before + "\nbroken: [unclosed\n", encoding="utf-8")
+        refused = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": "target.name", "value": "renamed"}]})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "config_invalid"
+    assert refused["config_status"]["state"] == STATE_INVALID
+    assert "line" in refused, "the parser's own position, so the file can be repaired"

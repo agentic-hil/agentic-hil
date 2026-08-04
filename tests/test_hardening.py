@@ -227,11 +227,22 @@ WINDOWS_TRUST_TABLE = [
     # of the operator's own rights, and the operator's unpackaged processes can
     # already rewrite the file in full. Reported, not refused.
     ("app_package_principal", {"strict"}),
-    # A SID nothing here can resolve names no token this machine can build.
+    # The authority was asked and answered ERROR_NONE_MAPPED: no token this
+    # machine builds can carry that SID. A stock Windows 11 %LOCALAPPDATA%
+    # carries one, so refusing it means refusing the documented default
+    # state_root. Reported under `standard`.
     ("unresolved_principal", {"strict"}),
-    # Ignorance, not a verdict. Refusing it locked out every sandbox, service
-    # account and CI runner rather than only the untrustworthy ones.
-    ("acl_unreadable", {"strict"}),
+    # The authority could not be asked at all. Not the same claim as the row
+    # above and deliberately not tolerated with it: the holder might be a live
+    # account, and a class reachable by breaking the lookup is a class that lets
+    # a foreign grant through on the day the lookup breaks.
+    ("principal_lookup_failed", {"standard", "strict"}),
+    # Ignorance about the whole ACL. `permissive` is the documented answer for an
+    # environment whose ACLs genuinely do not describe its trust boundary — a
+    # sandbox, a service account, a restricted CI runner — and it says so in the
+    # configuration file where a later reader can see it, which accepting it
+    # silently under the default did not.
+    ("acl_unreadable", {"standard", "strict"}),
 ]
 
 
@@ -248,35 +259,60 @@ def test_which_windows_finding_refuses_under_which_mode(finding: str, refused_un
         lambda root: [{"finding": finding, "scope": "ancestor", "path": str(root.parent), "sids": ["S-1-5-21-1-2-3-1001"]}],
     )
     for mode in WINDOWS_PATH_TRUST_MODES:
-        set_windows_path_trust(mode)
         if mode in refused_under:
             with pytest.raises(ConfigError) as refused:
-                validate_windows_state_root(tmp_path)
+                validate_windows_state_root(tmp_path, trust=mode)
             assert refused.value.error_type == "unsafe_configured_path"
             assert refused.value.details["finding"] == finding
             assert refused.value.details["path_trust"] == mode
         else:
-            assert [entry["finding"] for entry in validate_windows_state_root(tmp_path)] == [finding]
+            assert [entry["finding"] for entry in validate_windows_state_root(tmp_path, trust=mode)] == [finding]
+
+
+@pytest.mark.parametrize(("finding", "refused_under"), WINDOWS_TRUST_TABLE)
+def test_a_path_is_checked_under_standard_unless_its_caller_says_otherwise(finding: str, refused_under: set[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The configured mode reaches a path only because a caller passed it.
+
+    `windows_path_trust` lives in one project's configuration and may weaken that
+    project's own state_root. The user configuration, the MCP server executable
+    and `~/.agentic-hil/device-locks` go through callers that pass nothing, and
+    the machine-wide lock directory is the sharp case: a `permissive` project
+    could otherwise open the mutex state that protects another project's boards.
+    Defaulting to `standard` also means the failure mode of forgetting is a check
+    that is too strict rather than one that is too loose.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.config.inspect_windows_path_trust",
+        lambda root: [{"finding": finding, "scope": "ancestor", "path": str(root.parent), "sids": ["S-1-5-21-1-2-3-1001"]}],
+    )
+    set_windows_path_trust("permissive")
+
+    if "standard" in refused_under:
+        with pytest.raises(ConfigError) as refused:
+            validate_windows_state_root(tmp_path)
+        assert refused.value.details["path_trust"] == "standard"
+    else:
+        assert [entry["finding"] for entry in validate_windows_state_root(tmp_path)] == [finding]
 
 
 def test_a_tolerated_finding_is_returned_rather_than_discarded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A restricted environment has to be nameable, not silent.
 
     `doctor` reports what `standard` accepted; if the validator dropped it there
-    would be nothing to report and a sandbox would look like a healthy host.
+    would be nothing to report and a profile carrying an orphan ACE would look
+    exactly like one that carries none.
     """
     monkeypatch.setattr(
         "agentic_hil.config.inspect_windows_path_trust",
         lambda root: [
-            {"finding": "acl_unreadable", "scope": "ancestor", "path": str(root.parent), "winerror": 5},
+            {"finding": "unresolved_principal", "scope": "ancestor", "path": str(root.parent), "sids": ["S-1-5-21-9-9-9-2273314122"]},
             {"finding": "app_package_principal", "scope": "object", "path": str(root), "sids": ["S-1-15-3-1-2-3"]},
         ],
     )
-    set_windows_path_trust("standard")
 
-    findings = validate_windows_state_root(tmp_path)
+    findings = validate_windows_state_root(tmp_path, trust="standard")
 
-    assert [entry["finding"] for entry in findings] == ["acl_unreadable", "app_package_principal"]
+    assert [entry["finding"] for entry in findings] == ["unresolved_principal", "app_package_principal"]
 
 
 def test_a_refused_windows_path_names_the_holder_and_the_active_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -341,7 +377,6 @@ def test_the_standard_windows_user_directories_are_not_refused() -> None:
     Against the real ACLs of the machine the suite runs on, and against the real
     defaults `init` derives, because that is where the refusal was met.
     """
-    set_windows_path_trust("standard")
     roots = [user_state_root()]
     for variable in ("APPDATA", "LOCALAPPDATA", "TEMP"):
         value = os.environ.get(variable)
@@ -350,7 +385,7 @@ def test_the_standard_windows_user_directories_are_not_refused() -> None:
             candidate.mkdir(parents=True, exist_ok=True)
             roots.append(candidate)
     for root in roots:
-        validate_windows_state_root(root, field="state_root", label=str(root))
+        validate_windows_state_root(root, field="state_root", label=str(root), trust="standard")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
@@ -366,14 +401,56 @@ def test_a_real_foreign_account_still_refuses_under_the_relaxed_default(tmp_path
     if grant.returncode != 0:
         pytest.skip(f"could not set temporary test ACL: {grant.stderr}")
     try:
-        set_windows_path_trust("standard")
         with pytest.raises(ConfigError) as refused:
-            validate_windows_state_root(root)
+            validate_windows_state_root(root, trust="standard")
         assert refused.value.details["finding"] == "foreign_principal"
-        set_windows_path_trust("permissive")
-        assert any(entry["finding"] == "foreign_principal" for entry in validate_windows_state_root(root))
+        assert any(entry["finding"] == "foreign_principal" for entry in validate_windows_state_root(root, trust="permissive"))
     finally:
         subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
+
+
+def test_a_permissive_project_does_not_weaken_the_machine_wide_device_locks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """One project's key may not open another project's mutex.
+
+    `~/.agentic-hil/device-locks` is the single place every process on this
+    machine agrees to look for who holds a board, and it is shared across
+    projects by construction. A `permissive` configuration is entitled to weaken
+    its own state_root and nothing else; if the mode reached here, loading a
+    permissive project would let a foreign principal forge or remove the hold
+    that protects a board another project is driving.
+    """
+    from agentic_hil.bench import device_lock_root
+
+    findings = [{"finding": "foreign_principal", "scope": "ancestor", "path": str(tmp_path), "sids": ["S-1-1-0"]}]
+    monkeypatch.setattr("agentic_hil.config.inspect_windows_path_trust", lambda root: list(findings))
+    monkeypatch.setattr("agentic_hil.config.os.name", "nt")
+    monkeypatch.setattr("agentic_hil.config._windows_hold_directory_chain", lambda path, create=False: [])
+    monkeypatch.setattr("agentic_hil.config._close_windows_handles", lambda handles: None)
+    set_windows_path_trust("permissive")
+
+    with pytest.raises(ConfigError) as refused:
+        device_lock_root()
+
+    assert refused.value.details["field"] == "device_lock_root"
+    assert refused.value.details["path_trust"] == WINDOWS_PATH_TRUST_DEFAULT, "the project's mode never reached this directory"
+
+
+def test_the_configured_mode_does_reach_the_state_root_it_belongs_to(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The other half: `permissive` is not decorative.
+
+    Narrowing what the key governs is only correct if it still governs the thing
+    an operator sets it for."""
+    root = tmp_path / "state"
+    root.mkdir()
+    findings = [{"finding": "foreign_principal", "scope": "ancestor", "path": str(tmp_path), "sids": ["S-1-1-0"]}]
+    monkeypatch.setattr("agentic_hil.config.inspect_windows_path_trust", lambda path: list(findings))
+
+    set_windows_path_trust("standard")
+    with pytest.raises(ConfigError):
+        validate_windows_state_root(root, trust=windows_path_trust())
+
+    set_windows_path_trust("permissive")
+    assert [entry["finding"] for entry in validate_windows_state_root(root, trust=windows_path_trust())] == ["foreign_principal"]
 
 
 def test_the_suite_does_not_route_around_the_check_it_tests(tmp_path: Path, isolated_config_environment: Path) -> None:

@@ -116,34 +116,57 @@ def test_a_principal_is_classified_by_what_it_is_not_by_where_it_appears(monkeyp
     """The class decides the refusal, so it is the thing worth pinning.
 
     Structure answers for a package identity without any lookup. Everything else
-    turns on whether the local security authority names an account for it —
-    which is the difference between "somebody can exercise this right" and "this
-    SID belongs to nothing that can log on here".
+    turns on what the local security authority said — which is the difference
+    between "somebody can exercise this right" and "this SID belongs to nothing
+    that can log on here".
     """
     monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "_account_name", lambda sid: "BUILTIN\\Everyone" if sid == "S-1-1-0" else None)
+    monkeypatch.setattr(
+        windows_principals,
+        "lookup_account",
+        lambda sid: ("account", "BUILTIN\\Everyone") if sid == "S-1-1-0" else ("unresolved", None),
+    )
 
     assert principal_class(CAPABILITY_SID) == "app_package"
     assert principal_class(PACKAGE_SID) == "app_package"
     assert principal_class("S-1-1-0") == "account"
     assert principal_class("S-1-5-21-923859167-1023467973-1024582151-2273314122") == "unresolved"
-    assert principal_class("") == "unresolved"
+    # An ACE whose SID would not even stringify. Nothing was established about
+    # who holds that right, so it is ignorance and not an absent account.
+    assert principal_class("") == "lookup_failed"
 
 
-def test_a_broken_lookup_reports_ignorance_rather_than_a_holder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A lookup that cannot run has not found an account; it has found nothing.
+def test_a_broken_lookup_is_not_the_same_as_an_absent_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """"There is no such account" and "I could not ask" are different verdicts.
 
-    Reporting it as an account would refuse a path on the strength of a failure
-    in the code that was only trying to name somebody.
+    `unresolved` is tolerated under the default trust mode, because a stock
+    Windows profile really does carry orphan SIDs on %LOCALAPPDATA%. So a lookup
+    that merely failed must not land there: it would make a live foreign account
+    pass the gate on any day the authority was unreachable, and would let a
+    broken lookup be the way through the check rather than an obstacle to it.
     """
 
     def explode(sid: str):
         raise OSError("lookup unavailable")
 
     monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "_account_name", explode)
+    monkeypatch.setattr(windows_principals, "lookup_account", explode)
 
-    assert principal_class("S-1-5-21-1-2-3-1001") == "unresolved"
+    assert principal_class("S-1-5-21-1-2-3-1001") == "lookup_failed"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows account lookup")
+def test_an_orphan_sid_is_told_apart_from_an_unaskable_one_against_the_real_authority() -> None:
+    """The distinction is only worth anything if the real API makes it.
+
+    Against this machine's own security authority: a SID that resolves is an
+    account, and a well-formed SID nothing maps to comes back `unresolved`
+    rather than `lookup_failed` — that is `ERROR_NONE_MAPPED` being read as the
+    answer it is. A SID that is not a SID at all cannot be asked about.
+    """
+    assert windows_principals.lookup_account("S-1-1-0")[0] == "account"
+    assert windows_principals.lookup_account("S-1-5-21-923859167-1023467973-1024582151-2273314122") == ("unresolved", None)
+    assert windows_principals.lookup_account("not-a-sid") == ("lookup_failed", None)
 
 
 def test_a_described_principal_carries_the_class_that_decided_the_verdict(resolvable_package: None) -> None:

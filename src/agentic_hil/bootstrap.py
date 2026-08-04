@@ -9,7 +9,7 @@ import yaml
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
-from agentic_hil.types import JsonObject
+from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
 
@@ -41,9 +41,10 @@ def discover_attached_hardware(
     among what is enumerated and never adds to it: a serial that is not attached
     is refused naming the ones that are. Without it, more than one probe is
     ``ambiguous_hardware`` rather than a silent choice — picking one is how the
-    wrong board ends up in a configuration. Selection matches by hardware
-    identity rather than by exact string, the same rule the COM correlation below
-    and every device lock key in this repository follow.
+    wrong board ends up in a configuration. Selection folds case with
+    ``fold_hardware_id``, which is the identity every device lock key and every
+    probe comparison in this repository uses, so the probe this selects, the probe
+    that gets locked and the probe a mismatch check names are one probe.
 
     ``before_connect`` is called with the enumerated spelling of the selected
     serial after enumeration and before the HOTPLUG connect — the last point at
@@ -139,26 +140,43 @@ def discover_attached_hardware(
 def select_probe_id(requested: str, enumerated: list[str]) -> str | None:
     """The enumerated spelling of a requested probe, or None if it is not attached.
 
-    Matched on hardware identity, not on the exact characters. A probe serial is
-    an opaque hardware id rather than a path: one ST-Link is ``0669FF…`` to
-    STM32CubeProgrammer and ``0669ff…`` to udev, and every device lock key in
-    this repository folds it for exactly that reason. Exact membership would
-    answer ``adapter_not_found`` — "plug the board in" — for a board that is
-    plugged in, differing only in case."""
-    identity = _hardware_identity(requested)
-    matches = [found for found in enumerated if _hardware_identity(found) == identity]
+    Matched with ``fold_hardware_id`` and with nothing else, because selection is
+    the same question as locking and comparing: *which physical unit is this*. One
+    ST-Link is ``0669FF…`` to STM32CubeProgrammer and ``0669ff…`` to udev, so case
+    has to fold or exact membership answers ``adapter_not_found`` — "plug the
+    board in" — for a board that is plugged in.
+
+    It folds case and no more. A looser rule here than the one the lock key and
+    the mismatch check use is worse than a strict one: a request for ``AB-CD``
+    would select the attached ``ABCD``, take the lock for a *different* key, and
+    HOTPLUG-connect to a board the rest of the system does not think this call is
+    about. The later mismatch check would catch it, but only after something had
+    already been said to the wrong physical board."""
+    identity = fold_hardware_id(requested)
+    matches = [found for found in enumerated if fold_hardware_id(found) == identity]
     return matches[0] if len(matches) == 1 else None
 
 
 def correlate_com_port(probe_id: str, available: JsonObject) -> JsonObject | None:
+    """The one host serial port that carries this probe's serial, or None.
+
+    This is a correlation between two host inventories, not an identity the rest
+    of the system keys anything on, and it deliberately does not use the lock
+    rule: a USB descriptor reaches the enumerator with separators the debugger's
+    own listing does not have (``06:6A-FF30`` against ``066AFF30``), and a probe
+    serial is what is being looked for in a field somebody else formatted. So
+    punctuation is ignored here — and only here, where nothing is being locked,
+    connected to or compared for sameness. A tie still resolves to None rather
+    than to a guess, so the looseness can never pick a port; it can only fail to.
+    """
     ports = available.get("ports") if available.get("ok") is True else None
     if not isinstance(ports, list):
         return None
-    identity = _hardware_identity(probe_id)
+    identity = _com_serial_identity(probe_id)
     matches = [
         port
         for port in ports
-        if isinstance(port, dict) and _hardware_identity(str(port.get("serial_number", ""))) == identity
+        if isinstance(port, dict) and _com_serial_identity(str(port.get("serial_number", ""))) == identity
     ]
     return dict(matches[0]) if len(matches) == 1 else None
 
@@ -219,8 +237,13 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
     return template
 
 
-def _hardware_identity(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "", value).upper()
+def _com_serial_identity(value: str) -> str:
+    """A serial number as written into a host port inventory, for correlation only.
+
+    Not an identity anything is keyed on — ``fold_hardware_id`` is that, and
+    ``select_probe_id`` uses it. Kept separate and named for its one use so the
+    two rules cannot be confused for each other again."""
+    return fold_hardware_id(re.sub(r"[^A-Za-z0-9]", "", value))
 
 
 def _discovery_failure(error_type: str, summary: str, **details: object) -> JsonObject:

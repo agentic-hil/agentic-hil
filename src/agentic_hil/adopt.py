@@ -40,8 +40,11 @@ the grants, the scalar-only shape, the closed key model, the before/after
 comparison of every permission in the document, the refusal while hardware is
 held, the validate-before-replace and the ``provenance`` record are all the ones
 that were already there. There is no second way to write this file. The plan is
-carried into that write as an expectation per key, so a placeholder somebody else
-filled while the probe was being read refuses the write instead of losing to it.
+carried into that write as an expectation per key *and* as the description of the
+document it was decided against, so a placeholder somebody else filled while the
+probe was being read refuses the write instead of losing to it — and so does a
+change to something the plan depended on but cannot set, such as the entry's
+``type`` or the ``probe_id`` that decided which physical board was read.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ import yaml
 
 from agentic_hil.bootstrap import discover_attached_hardware
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
+from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     ACTOR_AGENT,
     NOT_STARTED,
@@ -331,7 +335,32 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
 
     detected = discovery.get("target")
     controller = str(detected.get("controller") or "").lower() if isinstance(detected, dict) else ""
-    if controller:
+    if controller and isinstance(debugger.get("target"), dict):
+        # This entry carries its own `target:` block, and `bind_debugger` gives
+        # that block to everything that runs on this probe. Writing the detected
+        # controller into the top-level `target:` would therefore not reach this
+        # board at all — it would change the fallback the *other* entries use,
+        # which is a different board, from a call that named this one. The closed
+        # key model has no `debuggers.<name>.target.*` key, so there is nowhere
+        # correct to put it, and putting it somewhere incorrect is worse than
+        # reporting that it could not be placed.
+        unavailable.append(
+            {
+                "key": f"debuggers.{debugger_name}.target.controller",
+                "discovered_value": controller,
+                "reason": (
+                    f"`debuggers.{debugger_name}` has its own `target:` block, which overrides the project target for "
+                    "everything that runs on this probe. The detected controller belongs in that block, and this path "
+                    "cannot write it: `target.controller` at the top level is the target other entries fall back to, "
+                    "so carrying it there would change a different board's configuration from a call about this one."
+                ),
+                "next_step": (
+                    f"Set `controller: {controller}` inside `debuggers.{debugger_name}.target` in the configuration "
+                    f"file, or remove that block so `debuggers.{debugger_name}` uses the project target this path can fill in."
+                ),
+            }
+        )
+    elif controller:
         _propose(carried, already, kept, key="target.controller", section="target", field="controller", current=_mapping(document, "target").get("controller"), value=controller)
 
     matched_port = discovery.get("com_port")
@@ -419,7 +448,11 @@ def _guarded(workspace: Path, existing: AgenticHILConfig | None, arguments: Json
     try:
         return _adopt(workspace, existing, arguments, coordinator, open_holds=open_holds, actor=actor, via=via)
     except ConfigError as error:
-        return {"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}
+        # Reading the document is the first thing this does, so a file that will
+        # not decode or will not parse arrives here — as a refusal that says so,
+        # carrying the state of the configuration, rather than as an internal
+        # error from underneath the MCP layer.
+        return with_config_status({"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}, config_status(existing))
 
 
 def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonObject, coordinator: HardwareCoordinator | None, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
@@ -520,6 +553,17 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         # somebody chose" rule would hold only against values chosen before the
         # read started.
         expect={str(item["key"]): item["previous_value"] for item in carried},
+        # And the document those decisions were taken against, whole. The keys
+        # this write names are not the only inputs to the plan: `probe_id` when
+        # it was already set decided which physical probe was read at all, `type`
+        # decided whether the executable could be carried, and which entries
+        # exist decided which entry receives any of it. None of those is a key
+        # this tool can set, so no per-key expectation can cover them — and a
+        # `probe_id` that moves from A to B inside the read window would
+        # otherwise commit A's controller, executable and COM device into an
+        # entry that now names B. That is precisely the mixed-board file this
+        # module refuses to produce, arriving by the back door.
+        expect_document=document,
     )
     if not overall_success(write):
         # The refusal is the answer, and the values stay in it: an agent that may
@@ -688,10 +732,51 @@ def _discover_exclusively(
             **_combined_status(held),
             "retry_safe": False,
         }
+    released = True
     for lease in reversed(held):
         if lease.state == "active":
-            lease.release()
+            # `release` returns False for a durable-record or lock-release
+            # failure and leaves the lease registered, blocking and quarantined.
+            # Discarding that answer reported a clean read of a board this
+            # process is still holding, and let the configuration write go ahead
+            # under it — the one place where "the hardware is fine now" has to be
+            # a checked claim rather than an assumption.
+            released = lease.release() and released
+    status = _combined_status(held)
+    if not released or status["cleanup_required"] or status["quarantined"]:
+        return {}, _release_refusal(discovery, status)
     return discovery, None
+
+
+def _release_refusal(discovery: JsonObject, status: JsonObject) -> JsonObject:
+    """The probe was read and this process could not give it back.
+
+    Nothing is written after this. The read itself succeeded, so its result is
+    carried for the operator to read, but a configuration written now would be
+    written by a process holding quarantined hardware — and the answer would say
+    `ok: true` about a bench that needs `agentic-hil recover` before anything
+    else touches it.
+    """
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_ADOPT,
+        "error_type": "resource_quarantined",
+        "summary": (
+            "The attached probe was read and the lease on it could not be released cleanly, so the board is "
+            "quarantined and nothing was written to the configuration. What was discovered is under "
+            "`hardware_discovery`; the bench has to be resolved before it can be carried into the file."
+        ),
+        "hardware_discovery": discovery,
+        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        # The read is what happened; the release is what did not. Both are said,
+        # and neither is inferred from the other.
+        "side_effect_committed": bool(discovery.get("side_effect_committed", False)),
+        "side_effect_status": str(discovery.get("side_effect_status") or "not_started"),
+        "hardware_state": str(discovery.get("hardware_state") or "unknown"),
+        **remediation_fields("resource_quarantined"),
+        **status,
+        "retry_safe": False,
+    }
 
 
 def _combined_status(held: list[HardwareLease]) -> JsonObject:

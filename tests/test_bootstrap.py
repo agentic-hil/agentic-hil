@@ -7,8 +7,14 @@ import yaml
 
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
-from agentic_hil.bootstrap import apply_discovery_to_template, correlate_com_port, discover_attached_hardware
+from agentic_hil.bootstrap import (
+    apply_discovery_to_template,
+    correlate_com_port,
+    discover_attached_hardware,
+    select_probe_id,
+)
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, init_config
+from agentic_hil.types import fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -19,7 +25,14 @@ def test_stlink_target_info_extracts_one_identity() -> None:
     assert stlink_target_info("Device name : STM32F446RE\n") is None
 
 
-def test_correlate_com_port_requires_one_exact_serial_match() -> None:
+def test_correlate_com_port_requires_one_serial_match() -> None:
+    """Correlation between two host inventories, and nothing is keyed on it.
+
+    Deliberately looser than `select_probe_id`: a USB descriptor reaches the port
+    enumerator with separators the debugger's own listing does not have. Nothing
+    is locked, connected to or compared for sameness on this, and a tie resolves
+    to None rather than to a guess — so the looseness can only fail to pick a
+    port, never pick the wrong one."""
     available = {
         "ok": True,
         "ports": [
@@ -133,6 +146,30 @@ def test_a_serial_that_is_not_attached_is_still_refused_naming_the_ones_that_are
     assert result["error_type"] == "adapter_not_found"
     assert result["requested_probe_id"] == "066AFF495451"
     assert [entry["probe_id"] for entry in result["probes"]] == ["0669FF303430"]
+
+
+def test_selection_folds_exactly_what_the_lock_key_folds_and_no_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Selection, locking and comparison have to name one probe.
+
+    Selection used to strip every non-alphanumeric character, while lock keys and
+    the adoption mismatch check only case-fold. A request for `06-69FF303430`
+    therefore selected the attached `0669FF303430`, and the HOTPLUG connect went
+    to a board the rest of the system does not think this call is about — the
+    lock taken is keyed on a different identity, and the mismatch check that
+    would have caught it runs after something was already said to that board.
+    """
+    commands: list[list[str]] = []
+    _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\n", commands=commands)
+
+    result = discover_attached_hardware(probe_id="06-69FF303430")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert len(commands) == 1, "nothing was said to any board"
+    # And the folding that is the lock's own still selects.
+    assert select_probe_id("0669ff303430", ["0669FF303430"]) == "0669FF303430"
+    assert select_probe_id("06-69FF303430", ["0669FF303430"]) is None
+    assert fold_hardware_id("0669ff303430") == fold_hardware_id("0669FF303430")
 
 
 def test_nothing_reaches_the_board_when_before_connect_refuses(monkeypatch: pytest.MonkeyPatch) -> None:

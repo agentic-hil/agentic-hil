@@ -24,6 +24,7 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
+    WINDOWS_PATH_TRUST_DEFAULT,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
@@ -1810,15 +1811,24 @@ def _doctor_path_trust_report(config: AgenticHILConfig) -> JsonObject:
 
     mode = windows_path_trust()
     findings: list[JsonObject] = []
+    # The configured mode governs this configuration's own state_root and what is
+    # derived from it. The directory holding the configuration is checked under
+    # `standard` whatever the file says — it is read before any configuration
+    # exists — so the report says which rule each path was actually judged by
+    # rather than implying one mode covered both.
+    governing = {"user_config": WINDOWS_PATH_TRUST_DEFAULT, "state_root": mode}
     for field, path in (("user_config", Path(config.config_path).parent), ("state_root", Path(config.state_root))):
         try:
             inspected = inspect_windows_path_trust(path)
         except OSError as error:
             inspected = [{"finding": "acl_unreadable", "scope": "object", "path": str(path), "backend_error": str(error)}]
-        findings.extend({"field": field, **finding} for finding in inspected)
-    report: JsonObject = {"mode": mode, "ok": not findings, "findings": findings}
+        findings.extend({"field": field, "path_trust": governing[field], **finding} for finding in inspected)
+    report: JsonObject = {"mode": mode, "path_trust_by_field": governing, "ok": not findings, "findings": findings}
     if not findings:
-        report["summary"] = f"Every path this configuration names passes the Windows trust check under windows_path_trust: {mode}."
+        report["summary"] = (
+            f"Every path this configuration names passes the Windows trust check; state_root under "
+            f"windows_path_trust: {mode}, the configuration directory under {WINDOWS_PATH_TRUST_DEFAULT}."
+        )
         return report
     sids = [str(sid) for finding in findings for sid in finding.get("sids", []) if sid]
     principals = describe_principals(sids)
@@ -1828,7 +1838,10 @@ def _doctor_path_trust_report(config: AgenticHILConfig) -> JsonObject:
     if holders:
         parts.append(f"rights are held by {holders}")
     if unreadable:
-        parts.append(f"{unreadable} ACL(s) could not be read, which is unknown rather than unsafe")
+        parts.append(
+            f"{unreadable} ACL(s) could not be read, which is unknown rather than unsafe and is refused under "
+            f"{WINDOWS_PATH_TRUST_DEFAULT}"
+        )
     report["summary"] = ". ".join(parts) + ". Nothing was changed; see the platform-paths reference for what each finding means."
     if principals:
         report["principals"] = principals
