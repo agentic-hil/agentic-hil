@@ -498,6 +498,12 @@ def test_the_mode_is_bound_to_the_configuration_that_named_it(tmp_path: Path) ->
     assert load_config(str(write_config(tmp_path / "second_plain"))).windows_path_trust == WINDOWS_PATH_TRUST_DEFAULT
 
 
+# Windows-only in substance: on POSIX `project_state_directory` never reaches the
+# trust check, so there is nothing for the assertion to observe. It used to force
+# the branch with `monkeypatch.setattr("agentic_hil.config.os.name", "nt")`, which
+# writes to the shared `os` module — `pathlib` then picks WindowsPath and pytest
+# itself dies with `cannot instantiate 'WindowsPath'` on every POSIX runner.
+@pytest.mark.skipif(os.name != "nt", reason="the trust check only runs on Windows")
 def test_a_derived_state_directory_is_judged_by_its_own_configurations_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Which mode reaches `state_root/projects/<digest>` and the coordination tree.
 
@@ -577,6 +583,7 @@ def test_a_real_foreign_account_still_refuses_under_the_relaxed_default(tmp_path
         subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the trust check only runs on Windows")
 def test_a_permissive_project_does_not_weaken_the_machine_wide_device_locks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """One project's key may not open another project's mutex.
 
