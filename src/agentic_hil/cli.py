@@ -17,6 +17,7 @@ from pathlib import Path, PurePath
 import yaml
 
 from agentic_hil import __version__
+from agentic_hil.adopt import project_config_adopt_hardware
 from agentic_hil.bootstrap import apply_discovery_to_template, discover_attached_hardware, load_project_profile
 from agentic_hil.comports import list_available_com_ports
 from agentic_hil.comstdio import run_com_stdio
@@ -48,6 +49,7 @@ from agentic_hil.config import (
     user_state_root,
     windows_path_trust,
 )
+from agentic_hil.configwrite import ACTOR_HUMAN
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
@@ -142,6 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
 
+    adopt_parser = subparsers.add_parser(
+        "adopt-hardware",
+        help="carry an attached board's identity into an existing config: probe id, backend executable, controller, COM device. Fills only what is unset; never touches permissions",
+    )
+    adopt_parser.add_argument("--debugger", default=None, help="which configured debugger entry receives the values; only needed with more than one")
+    adopt_parser.add_argument("--com-port", default=None, help="which com_ports entry receives the discovered device; created with every permission false if it does not exist")
+    adopt_parser.add_argument("--probe-id", default=None, help="which attached probe this is about; only needed when more than one is attached")
+    adopt_parser.add_argument("--dry-run", action="store_true", help="report what would be filled in and write nothing")
+
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
@@ -208,6 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "init":
         return init_project(args.config, args.agent, args.force)
+    if args.command == "adopt-hardware":
+        return adopt_hardware(debugger_id=args.debugger, com_port_id=args.com_port, probe_id=args.probe_id, dry_run=args.dry_run)
     if args.command == "doctor":
         return doctor(args.config)
     if args.command == "debugger-probes":
@@ -1001,6 +1014,42 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "hardware_discovery": discovery,
         "next_steps": init_next_steps(available_com_ports, target_path),
     }
+
+
+def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = None, probe_id: str | None = None, dry_run: bool = False) -> JsonObject:
+    """Carry the attached board into this project's configuration, as the operator.
+
+    The same computation and the same write path the MCP tool uses, run under the
+    authority `agentic-hil init` already runs under: a person at a terminal, in
+    their own project. So the description grant is not consulted here — a
+    placeholder configuration has it false, and requiring it would mean editing
+    the YAML this command exists to stop anyone editing.
+
+    That is not a hole an agent with a shell can widen. This command takes no
+    value from its caller: the probe serial, the toolchain path, the controller
+    and the COM device all come from what is attached to this machine. It fills
+    only what is unset, so it cannot repoint a bench somebody configured. And it
+    names no permission, which the before/after comparison inside the write path
+    enforces from the document rather than from the request. The same shell
+    already has `agentic-hil init --force`, which rewrites the whole file and
+    resets every grant in it to false — strictly more destructive, and of no use
+    to anyone trying to gain something.
+
+    The grant is what differs, and only the grant. Reading the probe goes through
+    the same coordinator every other hardware call on this machine goes through,
+    so this command waits for nothing, quarantines nothing and reads nothing that
+    an MCP server or another terminal is holding — a person's authority over
+    their own configuration is not authority over somebody else's running bench.
+    """
+    config = load_cli_authoritative_config(None)
+    return project_config_adopt_hardware(
+        Path(config.work_dir),
+        config,
+        {"apply": not dry_run, "debugger_id": debugger_id, "com_port_id": com_port_id, "probe_id": probe_id},
+        frontend="operator-cli",
+        actor=ACTOR_HUMAN,
+        via="cli:adopt-hardware",
+    )
 
 
 def initialized_config_path(workspace: Path) -> Path:

@@ -228,6 +228,20 @@ With the first set, an agent calls `project_config_describe` — which keys are 
 
 Named keys with scalar values, each checked against the shipped schema. No document and no subtree can be sent, so the file stays something the agent did not author. A write is refused while a run or a session holds hardware, the changed document is validated before it replaces the working one, and `provenance` records what moved, when, and through which call. The MCP resource `agentic-hil://reference/config-shape` is the full description, with a worked example and what deliberately cannot be done.
 
+### A board attached after the configuration was written
+
+`agentic-hil setup` discovers hardware once. Run it with nothing plugged in and it writes placeholders — `probe_id: null`, `executable: null`, `controller: "unknown-controller"` — which is the common case, because installing the tool and connecting the board are two separate moments.
+
+```bash
+agentic-hil adopt-hardware          # --dry-run to see the plan first
+```
+
+It reads the attached probe and fills in what is still unset: the probe serial, the backend's executable, the detected controller, and the COM device the probe itself exposes. Nothing else — it supplies no value of its own, and its arguments only select (`--probe-id` among several attached boards, `--debugger` and `--com-port` among configured entries). A key that already holds a value nobody generated is reported as a disagreement and left alone, so a bench somebody set up is never repointed because something else happens to be plugged in — and an entry that already names a probe with a *different* probe attached is refused whole rather than partly carried, because the identity keys describe one board between them. A `com_ports` entry it creates arrives with every permission `false`, written by the server.
+
+Reading a probe is a hardware call like any other here: it takes the same machine-wide lock, so a board another MCP server, test-reactor run or terminal is holding answers `device_busy` instead of being connected to behind its owner's back, and the read is written into the same audit trail. On a configuration written before `version: 2`, where reading still needs `allow_probe`, an entry that denies it denies this too.
+
+An agent does the same over MCP with `project_config_adopt_hardware`, which returns the plan and writes only with `{"apply": true}` and `permissions.allow_config_description_write`. Without that permission it still returns the exact keys and values, so a refusal ends with a person copying one command rather than transcribing a 24-character serial. Both paths go through `project_config_set`, so both are recorded in `provenance` and neither can touch a `permissions:` block.
+
 ### Migration
 
 A configuration written before this release has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Nothing infers the new model from a missing key, so an update never widens what a bench already allows. Migrating is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.
@@ -248,7 +262,7 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
 | Diagnostics | `get_last_report`, `classify_last_error` | structured error classification with likely causes |
 | Project setup | `project_config_create` | generates this workspace's configuration from attached hardware when it has none; takes no arguments and writes every permission `false`, including `permissions.allow_config_write`, so it succeeds once and then refuses itself |
-| Project config | `project_config_describe`, `project_config_set` | field-wise changes to an existing configuration, gated by `allow_config_description_write` (what the bench is) and `allow_config_permissions_write` (the `permissions:` blocks). `describe` needs no permission and says which keys are open in this state; `set` takes named keys with scalar values |
+| Project config | `project_config_describe`, `project_config_set`, `project_config_adopt_hardware` | field-wise changes to an existing configuration, gated by `allow_config_description_write` (what the bench is) and `allow_config_permissions_write` (the `permissions:` blocks). `describe` needs no permission and says which keys are open in this state; `set` takes named keys with scalar values; `adopt_hardware` reads the attached probe and fills in the identity keys that are still unset, through `set` |
 | Debug sessions | `debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 | Run boundary | `bench_run_start`, `bench_run_stop`, `bench_run_status` | declares the devices of a multi-call run and holds them for its whole duration; without it each call holds its device only for its own duration |
 
@@ -331,6 +345,7 @@ The `agentic_hil` fixture uses the same discovered config or absolute-path overr
 agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
 agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
 agentic-hil init [--agent <agent>]                             # project half
+agentic-hil adopt-hardware [--dry-run]                         # board plugged in after init: fill in what is unset
 agentic-hil doctor
 agentic-hil debugger-probes
 agentic-hil com-ports

@@ -121,6 +121,24 @@ reload_required field and ask the operator to restart it.
 `agentic-hil://reference/config-shape` describes the whole shape, a worked
 example, and what deliberately cannot be done.
 
+A configuration written before the board was plugged in holds placeholders:
+`probe_id: null`, `executable: null`, `controller: "unknown-controller"`. Do not
+print those for a person to retype. `project_config_adopt_hardware` reads the
+attached probe and fills in the identity keys that are still unset — the probe
+serial, the backend's executable, the detected controller, and the probe's own
+COM device. It supplies no value of its own; its arguments only select, and it
+returns the plan unless you send `{"apply": true}`. A key that already holds
+somebody's value comes back under `kept` and is left alone. Several attached
+probes, none at all, or no serial port carrying the probe's serial: each is an
+answer naming what to do next rather than a choice made for you. An entry that
+already names a probe with a different one attached is `hardware_mismatch` and
+no plan at all. Reading the probe is a hardware call: it takes the same
+machine-wide lock every board read takes, so a board somebody else holds answers
+`device_busy` and nothing is read. Refused for
+want of `permissions.allow_config_description_write`, it still returns the exact
+keys and values, so the operator gets one command to run — `agentic-hil
+adopt-hardware` — and not a serial to transcribe.
+
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.
