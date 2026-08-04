@@ -76,13 +76,22 @@ class DebuggerPermissions:
 
     ``allow_probe`` exists only for version 1 files. From version 2 on there is
     no read permission: exclusivity replaced it, and a version 2 config that
-    still carries the key is refused rather than reinterpreted."""
+    still carries the key is refused rather than reinterpreted.
+
+    ``allow_debug_execution`` is what separates observing a halted target from
+    running it. Attaching a debug session halts the core, which is a read;
+    resuming it executes firmware and actuates whatever that firmware drives, so
+    it is a state change and needs its own grant. Halting and stopping a session
+    stay ungated in the other direction: they are containment, and a
+    containment operation that needed a permission would leave a running target
+    nobody may stop."""
 
     allow_probe: bool = False
     allow_flash: bool = False
     allow_reset: bool = False
     allow_raw_debugger_commands: bool = False
     allow_mass_erase: bool = False
+    allow_debug_execution: bool = False
 
 
 @dataclass(frozen=True)

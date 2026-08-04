@@ -610,6 +610,8 @@ class AgenticHILToolService:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
         if name == "reset_target" and not self.debugger_permissions.allow_reset:
             return self._invoke_dispatch(lambda: self.reset_target(args.get("mode", "run")))
+        if name == "debug_continue" and not self.debugger_permissions.allow_debug_execution:
+            return self._invoke_dispatch(lambda: self.debug_continue(args))
         if name == "probe_target" and not self.config.probe_allowed():
             return self._invoke_dispatch(self.probe_target)
         if name == "debugger_probes_list" and not self.config.probe_allowed():

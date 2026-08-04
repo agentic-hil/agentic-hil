@@ -317,6 +317,16 @@ Default cases:
 the rest of the host checkout are not mounted. This supports uncommitted
 documentation work without exposing repository-local secrets.
 
+`target.mode: "published"` measures the guide's own published path: the link an
+engineer hands an agent, and an install from the package index. The host fetches
+the release wheel for `target.expected_version` from PyPI while the plan is
+built — outside the agent's container — verifies it against the sha256 the index
+records, and digests its package tree. That digest is what the installed package
+is compared against, so a same-name, same-version package the agent produced
+itself is rejected rather than staged and executed as the trusted
+implementation. Building the plan therefore needs network access to the index,
+including for `--dry-run`.
+
 For release evaluation, use `target.mode: "remote"` with immutable values:
 
 ```json

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -2918,6 +2919,152 @@ def test_a_classical_bus_still_sends_classical_frames(tmp_path: Path, monkeypatc
         session.close()
 
     assert session.bus.sent[0].fields["is_fd"] is False
+
+
+# ---------------------------------------------------------------------------
+# SocketCAN bit timing belongs to the interface, so it is checked there.
+
+
+def _socketcan_link(monkeypatch: pytest.MonkeyPatch, **fields: object):
+    """Answer the link query with a described interface instead of this host's."""
+    from agentic_hil import can as can_module
+
+    link = can_module.SocketCanLink(**{"channel": "vcan0", "found": True, "kind": "can", "bitrate": None, "reason": "", **fields})
+    monkeypatch.setattr(can_module, "socketcan_link", lambda channel, *args, **kwargs: link)
+    return link
+
+
+def test_a_socketcan_interface_timed_differently_is_refused_before_it_is_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """python-can cannot carry a bitrate to SocketCAN at all.
+
+    Linux CAN timing is set on the interface, so a configuration naming 500000
+    over a 250 kbit/s interface used to open silently and then either hear
+    nothing or put error frames on somebody else's bus, while every report kept
+    repeating the number nobody applied."""
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, bitrate=250000)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    bitrate: 500000\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == "can_buses.bench.bitrate"
+    assert result["configured_bitrate"] == 500000
+    assert result["interface_bitrate"] == 250000
+    assert result["side_effect_committed"] is False
+    assert module.opened == [], "a bus timed differently from this configuration must not be opened"
+
+
+def test_an_unconfigured_socketcan_interface_is_refused_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CAN link that was never given timing reports bitrate 0 and cannot talk."""
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, bitrate=0)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert result["field"] == "can_buses.bench.bitrate"
+    assert "no bit timing configured" in result["summary"]
+    assert module.opened == []
+
+
+def test_a_matching_socketcan_interface_opens_and_is_reported_as_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, bitrate=500000)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    bitrate: 500000\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+    try:
+        assert result["ok"] is True, result
+        assert result["bitrate_verified"] is True
+        assert result["interface_bitrate"] == 500000
+        assert result["session"].status()["bitrate_verified"] is True
+        # Never handed to python-can, which discards it for this backend: the
+        # interface is where the value was checked and where it holds.
+        assert "bitrate" not in module.opened[0].kwargs
+    finally:
+        result["session"].close()
+
+
+def test_an_unreadable_socketcan_timing_is_reported_rather_than_assumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A virtual bus has no timing, and an absent interface fails its own open.
+
+    Neither contradicts the configuration, so neither is refused here — but the
+    session says the bitrate is unconfirmed instead of repeating it as fact."""
+    from agentic_hil.can import open_python_can_adapter
+
+    _fake_can_module(monkeypatch)
+    _socketcan_link(monkeypatch, found=True, kind="vcan", bitrate=None, reason="interface vcan0 is of kind vcan, which carries no CAN bit timing")
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+    try:
+        assert result["ok"] is True, result
+        assert result["bitrate_verified"] is False
+        assert "vcan" in result["bitrate_unverified_reason"]
+        assert result["session"].status()["bitrate_verified"] is False
+    finally:
+        result["session"].close()
+
+
+def _netlink_attribute(kind: int, payload: bytes) -> bytes:
+    header = struct.pack("=HH", 4 + len(payload), kind)
+    body = header + payload
+    return body + b"\x00" * (-len(body) % 4)
+
+
+def _netlink_link_message(name: str, kind: str, bitrate: int | None) -> bytes:
+    info = _netlink_attribute(1, kind.encode() + b"\x00")  # IFLA_INFO_KIND
+    if bitrate is not None:
+        bittiming = struct.pack("=8I", bitrate, 0, 0, 0, 0, 0, 0, 0)
+        info += _netlink_attribute(2, _netlink_attribute(1, bittiming))  # IFLA_INFO_DATA / IFLA_CAN_BITTIMING
+    attributes = _netlink_attribute(3, name.encode() + b"\x00") + _netlink_attribute(18, info)  # IFLA_IFNAME, IFLA_LINKINFO
+    body = struct.pack("=BBHiII", 0, 0, 0, 1, 0, 0) + attributes
+    return struct.pack("=IHHII", 16 + len(body), 16, 0, 1, 0) + body  # RTM_NEWLINK
+
+
+def test_the_kernels_bit_timing_is_read_out_of_the_link_dump() -> None:
+    """The wire format, tested without a CAN device on the machine."""
+    from agentic_hil.can import socketcan_link_from_netlink
+
+    stream = _netlink_link_message("can0", "can", 250000) + _netlink_link_message("can1", "can", 1000000)
+
+    link = socketcan_link_from_netlink(stream, "can1")
+
+    assert link.found is True
+    assert link.kind == "can"
+    assert link.bitrate == 1000000
+
+
+@pytest.mark.parametrize(
+    ("channel", "kind", "bitrate"),
+    [("vcan0", "vcan", None), ("can0", "can", None)],
+)
+def test_a_link_without_readable_timing_verifies_nothing(channel: str, kind: str, bitrate: int | None) -> None:
+    from agentic_hil.can import socketcan_link_from_netlink
+
+    link = socketcan_link_from_netlink(_netlink_link_message(channel, kind, bitrate), channel)
+
+    assert link.found is True
+    assert link.bitrate is None
+    assert link.status() == {"bitrate_verified": False, "bitrate_unverified_reason": link.reason}
+
+
+def test_an_absent_interface_is_not_a_verified_match() -> None:
+    from agentic_hil.can import socketcan_link_from_netlink
+
+    link = socketcan_link_from_netlink(_netlink_link_message("can0", "can", 500000), "can9")
+
+    assert link.found is False
+    assert link.bitrate is None
 
 
 # ---------------------------------------------------------------------------

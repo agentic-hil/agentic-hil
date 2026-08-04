@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import stat
 import subprocess
@@ -393,6 +394,33 @@ def safe_user_launcher(path: Path) -> tuple[bool, str]:
     if not safe:
         return safe, script_detail
     return True, f"launcher={resolved}; {script_detail}"
+
+
+def package_matches_trusted_source(
+    target: dict[str, Any],
+    installed_digest: str | None,
+    package_tree_detail: str,
+) -> tuple[bool, str]:
+    """Whether the installed package is byte-for-byte the artifact under test.
+
+    Every mode compares against a digest the host recorded before the container
+    ran: the local snapshot, the committed tree at the expected commit, or — for
+    a published target — the official release artifact fetched from the index
+    outside the agent's reach.
+
+    A missing digest is a failure, never a pass. The published arm used to treat
+    any computable digest as a match, which made this check "a package of that
+    name exists": the agent owns the package tree and its dist-info, so a
+    modified or fabricated same-name/version package satisfied it, was staged as
+    the verifier's trusted implementation, and then answered for the installation
+    and MCP behaviour it was supposed to be measured against."""
+    expected_digest = target.get("expected_package_digest")
+    observed = installed_digest or "<unavailable>"
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        return False, f"digest={observed}; no trusted release digest was recorded for this target"
+    if installed_digest != expected_digest:
+        return False, f"digest={observed}; expected={expected_digest}; {package_tree_detail}"
+    return True, f"digest={observed}; {package_tree_detail}"
 
 
 def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bool, str]:
@@ -1108,14 +1136,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 installed_digest = source_digest(inspected_package)
             except Exception as error:
                 package_tree_detail = f"{type(error).__name__}: {error}"
-        expected_digest = target["expected_package_digest"]
-        if expected_digest is None:
-            # Published mode: nothing on this host digests to a released wheel.
-            package_matches = installed_digest is not None
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against"
-        else:
-            package_matches = installed_digest == expected_digest
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}"
+        package_matches, digest_detail = package_matches_trusted_source(target, installed_digest, package_tree_detail)
         checks.append(Check("installed package matches trusted source", package_matches, digest_detail))
         if package_matches and evidence_ok and inspected_package is not None:
             try:

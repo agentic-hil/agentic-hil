@@ -25,6 +25,7 @@ debuggers:
       allow_reset: true
       allow_raw_debugger_commands: false
       allow_mass_erase: false
+      allow_debug_execution: true  # debug_continue lets the firmware run
 
 artifacts:
   allowed_roots: ["."]       # the whole workspace, recursively; name directories to narrow it

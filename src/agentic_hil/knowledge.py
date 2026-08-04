@@ -574,7 +574,12 @@ def debugger_backends_document() -> JsonObject:
                 "allowed as configured. Every action that writes or changes state is denied unless "
                 "`debuggers.<name>.permissions` grants it. The permissions belong to the operator."
             ),
-            "fields": ["allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"],
+            "fields": ["allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase", "allow_debug_execution"],
+            "resuming_the_target": (
+                "`debug_continue` needs `allow_debug_execution`. A debug session attaches to a halted core, which is a "
+                "read; letting it run again executes firmware and actuates whatever that firmware drives. "
+                "`debug_halt` and `debug_stop_session` need no grant: they are containment."
+            ),
             "default": False,
             "reading": (
                 "What protects a read is exclusivity, not a grant: every device a run declares is locked machine-wide "
@@ -942,6 +947,7 @@ debuggers:
       allow_reset: true
       allow_raw_debugger_commands: false
       allow_mass_erase: false
+      allow_debug_execution: true # debug_continue runs the firmware
 
 com_ports:
   dut_uart:

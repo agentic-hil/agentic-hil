@@ -6,12 +6,13 @@ that an update quietly widens what an existing bench allows.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import write_config
+from conftest import FAKE_GDB, write_config
 
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
@@ -238,3 +239,80 @@ def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:
     assert "allow_probe: " not in DEFAULT_CONFIG_TEMPLATE
     assert "allow_flash: false" in DEFAULT_CONFIG_TEMPLATE
     assert "allow_mass_erase: false" in DEFAULT_CONFIG_TEMPLATE
+    assert "allow_debug_execution: false" in DEFAULT_CONFIG_TEMPLATE
+
+
+# ---------------------------------------------------------------------------
+# Watching a target is a read. Letting it run is not.
+
+
+def debug_service(workspace: Path, *, may_execute: bool):
+    """A read-free bench with a fake GDB, granting execution or nothing."""
+    permissions = {**NO_PERMISSIONS, "allow_debug_execution": may_execute}
+    config_path = write_config(workspace, gdb_executable=FAKE_GDB, permissions=permissions, config_version=CURRENT_CONFIG_VERSION)
+    elf_path = workspace / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def gdb_commands(workspace: Path, started: dict) -> list[str]:
+    """Every MI command the session log recorded, which is what reached the target."""
+    log = json.loads((workspace / started["log_path"]).read_text(encoding="utf-8"))
+    return [str(entry.get("command")) for entry in log["gdb_commands"]]
+
+
+def test_a_read_free_bench_may_attach_to_a_target_but_not_run_it(tmp_path: Path) -> None:
+    """Attaching halts the core; continuing executes firmware.
+
+    Version 2 made every read free, and a debug session is a read — but
+    `-exec-continue` runs the code on the board and actuates whatever it drives,
+    so it stays a write and needs `allow_debug_execution`."""
+    service = debug_service(tmp_path, may_execute=False)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": 10.0})
+        assert started["ok"] is True, started
+
+        continued = service.call("debug_continue", {"timeout_s": 5})
+
+        assert continued["ok"] is False
+        assert continued["error_type"] == "permission_denied"
+        assert "allow_debug_execution" in continued["summary"]
+        assert "-exec-continue" not in gdb_commands(tmp_path, started)
+        # Containment is never gated: a target this bench may not start must
+        # still be one it can stop.
+        assert service.call("debug_halt", {"timeout_s": 5}).get("error_type") != "permission_denied"
+    finally:
+        service.close()
+
+
+def test_the_execution_grant_is_what_lets_the_target_run(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, may_execute=True)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": 10.0})
+        assert started["ok"] is True, started
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+
+        continued = service.call("debug_continue", {"timeout_s": 5})
+
+        assert continued["ok"] is True, continued
+        assert continued["stop_reason"] == "breakpoint_hit"
+        assert "-exec-continue" in gdb_commands(tmp_path, started)
+    finally:
+        service.close()
+
+
+def test_the_refusal_does_not_depend_on_a_session_being_open(tmp_path: Path) -> None:
+    """The permission decides before the session state does.
+
+    A refusal that answered `session_not_active` first would report the grant as
+    missing only for callers who already hold a session, and would say nothing
+    about the bench's policy to anyone else."""
+    service = debug_service(tmp_path, may_execute=False)
+    try:
+        refused = service.call("debug_continue", {"timeout_s": 5})
+
+        assert refused["error_type"] == "permission_denied"
+        assert refused["ok"] is False
+    finally:
+        service.close()

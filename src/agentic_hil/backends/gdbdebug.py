@@ -380,6 +380,11 @@ class GdbDebugSessions:
 
     def continue_execution(self, timeout_s: float | None = None) -> JsonObject:
         tool = "debug_continue"
+        # Before the session is even looked at: this is the one debug call that
+        # lets the target run, and a refusal must not depend on whether a
+        # session happens to be open.
+        if not self.config.debugger.permissions.allow_debug_execution:
+            return self._report(self._permission_denied(tool, "Resuming target execution requires allow_debug_execution in the authoritative config."))
         session_result = self._require_session(tool)
         if not session_result["ok"]:
             return self._report(session_result)

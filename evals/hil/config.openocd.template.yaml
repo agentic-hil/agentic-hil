@@ -25,6 +25,8 @@ debuggers:
       allow_reset: true
       allow_raw_debugger_commands: false
       allow_mass_erase: false
+      # The plan runs the target to a breakpoint, which resumes execution.
+      allow_debug_execution: true
 
 debug:
   gdb_executable: null

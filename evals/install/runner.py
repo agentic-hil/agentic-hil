@@ -4,6 +4,7 @@ import argparse
 import collections
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -16,7 +17,10 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
+import zipfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -164,6 +168,110 @@ def committed_package_digest(repository: Path, commit: str) -> str:
         return source_digest(extracted / "src" / "agentic_hil")
 
 
+PYPI_RELEASE_URL = "https://pypi.org/pypi/agentic-hil/{version}/json"
+PYPI_FILE_HOST = "files.pythonhosted.org"
+RELEASE_FETCH_TIMEOUT_S = 60
+
+
+@functools.lru_cache(maxsize=8)
+def published_release(version: str) -> dict[str, Any]:
+    """The official release artifact for ``version``, digested on the host.
+
+    Published jobs used to record no package digest at all, because no tree on
+    the host digests to a released wheel. That left the verifier comparing the
+    installed package against nothing: the agent owns the package tree and its
+    dist-info, so a modified or fabricated package of the right name and version
+    passed as the trusted implementation and then answered for its own
+    evaluation.
+
+    So the wheel is fetched here instead — outside the agent's container, before
+    any model runs — checked against the sha256 the index records for it, and
+    digested with the same function the verifier applies to the installed tree.
+    An install from this repository at the released version yields the same
+    package files, so the anchor holds for both routes the published arm
+    accepts."""
+    document = _release_metadata(version)
+    artifact = _release_wheel(document, version)
+    payload = _fetch(artifact["url"])
+    observed = hashlib.sha256(payload).hexdigest()
+    if observed != artifact["sha256"]:
+        raise ValueError(
+            f"downloaded {artifact['filename']} does not match the sha256 the index records: "
+            f"{observed} != {artifact['sha256']}"
+        )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        wheel = root / artifact["filename"]
+        wheel.write_bytes(payload)
+        extracted = root / "wheel"
+        _extract_wheel(wheel, extracted)
+        package = extracted / "agentic_hil"
+        if not package.is_dir():
+            raise ValueError(f"{artifact['filename']} contains no agentic_hil package")
+        digest = source_digest(package)
+    return {
+        "package_digest": digest,
+        "filename": artifact["filename"],
+        "url": artifact["url"],
+        "sha256": artifact["sha256"],
+    }
+
+
+def _release_metadata(version: str) -> dict[str, Any]:
+    document = json.loads(_fetch(PYPI_RELEASE_URL.format(version=urllib.parse.quote(version))))
+    if not isinstance(document, dict):
+        raise ValueError(f"package index returned no release document for agentic-hil {version}")
+    return document
+
+
+def _release_wheel(document: dict[str, Any], version: str) -> dict[str, str]:
+    """The one built distribution this release publishes, or a refusal.
+
+    Exactly one, because a release that offers several is a release where
+    "the official artifact" is a choice, and a choice is what this anchor may
+    not have."""
+    files = document.get("urls")
+    if not isinstance(files, list):
+        raise ValueError(f"package index lists no files for agentic-hil {version}")
+    wheels = [item for item in files if isinstance(item, dict) and item.get("packagetype") == "bdist_wheel"]
+    if len(wheels) != 1:
+        raise ValueError(f"agentic-hil {version} publishes {len(wheels)} wheels; exactly one is required")
+    wheel = wheels[0]
+    url = str(wheel.get("url", ""))
+    filename = str(wheel.get("filename", ""))
+    sha256 = str((wheel.get("digests") or {}).get("sha256", ""))
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != PYPI_FILE_HOST:
+        raise ValueError(f"release artifact is not served from {PYPI_FILE_HOST}: {url}")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ValueError(f"package index records no sha256 for {filename or url}")
+    if not filename.startswith(f"agentic_hil-{version}-"):
+        raise ValueError(f"release artifact {filename} is not agentic-hil {version}")
+    return {"url": url, "filename": filename, "sha256": sha256}
+
+
+def _fetch(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=RELEASE_FETCH_TIMEOUT_S) as response:  # noqa: S310 - https is enforced by the caller
+        return response.read()
+
+
+def _extract_wheel(wheel: Path, destination: Path) -> None:
+    """Unpack a wheel without letting its own names decide where bytes land."""
+    with zipfile.ZipFile(wheel) as bundle:
+        for entry in bundle.infolist():
+            if entry.is_dir():
+                continue
+            if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError(f"{wheel.name} contains a symlink: {entry.filename}")
+            target = destination / entry.filename
+            resolved = os.path.normpath(target)
+            if not str(resolved).startswith(str(destination) + os.sep):
+                raise ValueError(f"{wheel.name} contains an escaping path: {entry.filename}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bundle.read(entry))
+
+
 def job_payload(
     matrix: Matrix,
     case: Case,
@@ -178,9 +286,12 @@ def job_payload(
         target["expected_package_digest"] = source_digest(source_root / "src" / "agentic_hil")
     elif matrix.target.mode == "published":
         # A released wheel is built, not checked out, so no tree here digests to
-        # it. What ties the install to this release is the recorded version and
-        # the absence of a direct reference, both checked separately.
-        target["expected_package_digest"] = None
+        # it — the artifact itself is fetched from the index on this host, where
+        # the agent cannot reach it, and that is what the install is compared
+        # against.
+        release = published_release(matrix.target.expected_version)
+        target["expected_package_digest"] = release["package_digest"]
+        target["release_artifact"] = {key: release[key] for key in ("filename", "url", "sha256")}
     else:
         target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
     target["source_git"] = git_metadata(host_source_root)

@@ -364,6 +364,37 @@ steps:
     assert not (tmp_path / "build" / "new").exists()
 
 
+def test_preflight_refuses_running_the_target_without_the_execution_grant(tmp_path: Path) -> None:
+    """`run_until_breakpoint` continues the target, so it is a write.
+
+    The plan is refused before anything is flashed or attached: preflight is the
+    only diagnosis an operator gets, and it names the flag that fired."""
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                permissions={"allow_probe": True, "allow_flash": True, "allow_reset": True, "allow_debug_execution": False},
+            )
+        ),
+    )
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {debugger: dut, action: run_until_breakpoint, location: test_done}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[1].action"
+    assert result["validation_error"]["permission"] == "allow_debug_execution"
+    assert service.calls == []
+
+
 def test_preflight_enforces_symbol_allowlist_before_hardware_actions(tmp_path: Path) -> None:
     config = load_config(
         str(

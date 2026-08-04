@@ -136,6 +136,7 @@ def test_generated_configuration_grants_nothing_at_all(tmp_path: Path, monkeypat
             "allow_reset": False,
             "allow_raw_debugger_commands": False,
             "allow_mass_erase": False,
+            "allow_debug_execution": False,
         }
         assert document["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
         assert document["artifacts"]["allow_upload"] is False

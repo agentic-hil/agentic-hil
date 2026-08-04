@@ -153,6 +153,7 @@ debuggers:
       allow_reset: true
       allow_raw_debugger_commands: false
       allow_mass_erase: false
+      allow_debug_execution: true  # `debug_continue` runs the firmware; attaching only halts it
   probe_b:                   # a second, independently controlled board
     type: "openocd"
     probe_id: "0669FF505153" # pin the physical probe so boards cannot swap silently

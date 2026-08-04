@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import os
 import re
+import socket
+import struct
 import subprocess
 import time
 from contextlib import suppress
@@ -204,7 +206,12 @@ class CanBusService:
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise error
                 return recommit_report_with_status(self.config, written, session.lease.status())
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
+        # The audit records what the bitrate is worth as well as what it says: on
+        # SocketCAN the number in the configuration is the interface's, and this
+        # is where a later reader learns whether it was confirmed against it.
+        start_record: JsonObject = {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate}
+        start_record.update({key: opened[key] for key in ("bitrate_verified", "interface_bitrate", "bitrate_unverified_reason") if key in opened})
+        audit_error = append_jsonl_audited(self.config, session.log_path, start_record)
         result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "frames_drained": cleared.get("frames_drained", 0), "session": self._session_status(session), "summary": "CAN bus session started."}
         if audit_error is not None:
             session.audit_broken = True
@@ -452,8 +459,199 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
     return open_python_can_adapter(config, bus_id, bus_config, clear_rx_queue)
 
 
+# ---------------------------------------------------------------------------
+# What a SocketCAN interface is actually timed at.
+#
+# SocketCAN is the one backend that cannot be told a bitrate. Linux CAN bit
+# timing belongs to the network interface — `ip link set can0 type can bitrate
+# 500000` — and python-can discards the value for this backend, so a
+# configuration naming 500000 opens a 250 kbit/s interface without a word and
+# then either hears nothing or disturbs the bus with error frames while every
+# report keeps repeating the number nobody applied.
+#
+# The other unsendable fields (listen_only, data_bitrate) are refused outright,
+# because nothing can check them. Timing is different: the kernel will say what
+# the interface is set to, so the configured value is compared against the wire
+# and a bus timed differently is refused before it is opened. What cannot be
+# read is not invented — a virtual interface has no timing at all, and an
+# interface that is simply absent fails its own open — so those open as before
+# and say plainly that the bitrate is unconfirmed.
+NETLINK_ROUTE = 0
+RTM_NEWLINK = 16
+RTM_GETLINK = 18
+NLM_F_REQUEST = 0x0001
+NLM_F_ROOT = 0x0100
+NLM_F_MATCH = 0x0200
+NLMSG_ERROR = 2
+NLMSG_DONE = 3
+IFLA_IFNAME = 3
+IFLA_LINKINFO = 18
+IFLA_INFO_KIND = 1
+IFLA_INFO_DATA = 2
+IFLA_CAN_BITTIMING = 1
+NETLINK_HEADER = "=IHHII"
+NETLINK_HEADER_BYTES = 16
+IFINFOMSG_BYTES = 16
+NETLINK_RECEIVE_BYTES = 65536
+NETLINK_TIMEOUT_S = 1.0
+CAN_LINK_KINDS = frozenset({"can"})
+
+
+@dataclass(frozen=True)
+class SocketCanLink:
+    """One SocketCAN interface as the kernel describes it.
+
+    ``bitrate`` is None whenever the interface has no readable bit timing: it
+    does not exist, the query could not be made, or it is a virtual bus that has
+    none. None never means "matches"; it means nothing was verified."""
+
+    channel: str
+    found: bool
+    kind: str | None
+    bitrate: int | None
+    reason: str
+
+    def status(self) -> JsonObject:
+        result: JsonObject = {"bitrate_verified": self.bitrate is not None}
+        if self.bitrate is not None:
+            result["interface_bitrate"] = self.bitrate
+        else:
+            result["bitrate_unverified_reason"] = self.reason
+        return result
+
+
+def _netlink_attributes(payload: bytes) -> dict[int, bytes]:
+    attributes: dict[int, bytes] = {}
+    offset = 0
+    while offset + 4 <= len(payload):
+        length, kind = struct.unpack_from("=HH", payload, offset)
+        if length < 4 or offset + length > len(payload):
+            break
+        # The nested/byte-order flags are not part of the type.
+        attributes[kind & 0x3FFF] = payload[offset + 4 : offset + length]
+        offset += (length + 3) & ~3
+    return attributes
+
+
+def _netlink_string(value: bytes | None) -> str | None:
+    if value is None:
+        return None
+    return value.split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+
+def socketcan_link_from_netlink(stream: bytes, channel: str) -> SocketCanLink:
+    """Read one interface out of an RTM_GETLINK dump.
+
+    Split from the socket so the wire format is testable without a CAN device
+    on the machine running the tests."""
+    offset = 0
+    while offset + NETLINK_HEADER_BYTES <= len(stream):
+        length, message_type, _flags, _seq, _pid = struct.unpack_from(NETLINK_HEADER, stream, offset)
+        if length < NETLINK_HEADER_BYTES or offset + length > len(stream):
+            break
+        body = stream[offset + NETLINK_HEADER_BYTES : offset + length]
+        offset += (length + 3) & ~3
+        if message_type in {NLMSG_DONE, NLMSG_ERROR}:
+            break
+        if message_type != RTM_NEWLINK or len(body) < IFINFOMSG_BYTES:
+            continue
+        attributes = _netlink_attributes(body[IFINFOMSG_BYTES:])
+        if _netlink_string(attributes.get(IFLA_IFNAME)) != channel:
+            continue
+        link_info = _netlink_attributes(attributes.get(IFLA_LINKINFO, b""))
+        kind = _netlink_string(link_info.get(IFLA_INFO_KIND))
+        if kind not in CAN_LINK_KINDS:
+            return SocketCanLink(channel, True, kind, None, f"interface {channel} is of kind {kind or 'unknown'}, which carries no CAN bit timing")
+        timing = _netlink_attributes(link_info.get(IFLA_INFO_DATA, b"")).get(IFLA_CAN_BITTIMING)
+        if timing is None or len(timing) < 4:
+            return SocketCanLink(channel, True, kind, None, f"interface {channel} reports no bit timing")
+        return SocketCanLink(channel, True, kind, int(struct.unpack_from("=I", timing)[0]), "")
+    return SocketCanLink(channel, False, None, None, f"interface {channel} was not found on this host")
+
+
+def socketcan_link(channel: str, timeout_s: float = NETLINK_TIMEOUT_S) -> SocketCanLink:
+    """Ask the kernel what ``channel`` is timed at, or say why that is unknown.
+
+    Never raises: a host with no netlink, a refused socket and a missing
+    interface are all "nothing was verified", which is a different answer from
+    "the timing matches" and is reported as such."""
+    family = getattr(socket, "AF_NETLINK", None)
+    if family is None:
+        return SocketCanLink(channel, False, None, None, "netlink is not available on this platform")
+    request = struct.pack(
+        NETLINK_HEADER,
+        NETLINK_HEADER_BYTES + IFINFOMSG_BYTES,
+        RTM_GETLINK,
+        NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH,
+        1,
+        0,
+    ) + struct.pack("=BBHiII", socket.AF_UNSPEC, 0, 0, 0, 0, 0)
+    try:
+        with socket.socket(family, socket.SOCK_RAW, NETLINK_ROUTE) as netlink:
+            netlink.settimeout(timeout_s)
+            netlink.bind((0, 0))
+            netlink.send(request)
+            deadline = time.monotonic() + timeout_s
+            stream = b""
+            while time.monotonic() < deadline:
+                chunk = netlink.recv(NETLINK_RECEIVE_BYTES)
+                if not chunk:
+                    break
+                stream += chunk
+                link = socketcan_link_from_netlink(stream, channel)
+                if link.found or _netlink_dump_complete(chunk):
+                    return link
+            return SocketCanLink(channel, False, None, None, f"interface {channel} was not found before the netlink query timed out")
+    except OSError as error:
+        return SocketCanLink(channel, False, None, None, f"the netlink query for {channel} failed: {error}")
+
+
+def _netlink_dump_complete(chunk: bytes) -> bool:
+    offset = 0
+    while offset + NETLINK_HEADER_BYTES <= len(chunk):
+        length, message_type, _flags, _seq, _pid = struct.unpack_from(NETLINK_HEADER, chunk, offset)
+        if length < NETLINK_HEADER_BYTES:
+            return True
+        if message_type in {NLMSG_DONE, NLMSG_ERROR}:
+            return True
+        offset += (length + 3) & ~3
+    return False
+
+
+def socketcan_bitrate_refusal(bus_id: str, bus_config: CanBusConfig, link: SocketCanLink) -> JsonObject | None:
+    """Refuse a bus whose interface is demonstrably timed at something else."""
+    if link.bitrate is None or link.bitrate == bus_config.bitrate:
+        return None
+    observed = (
+        "the interface has no bit timing configured (bitrate 0)"
+        if link.bitrate == 0
+        else f"the interface is configured at {link.bitrate}"
+    )
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "backend": "socketcan",
+        "error_type": "config_invalid",
+        "field": f"can_buses.{bus_id}.bitrate",
+        "channel": bus_config.channel,
+        "configured_bitrate": bus_config.bitrate,
+        "interface_bitrate": link.bitrate,
+        "summary": (
+            f"SocketCAN bit timing belongs to the interface, not to this session: {bus_config.channel} cannot be told a "
+            f"bitrate when it is opened. The configuration asks for {bus_config.bitrate} and {observed}, so the bus is not "
+            f"opened. Set the interface with `ip link set {bus_config.channel} type can bitrate {bus_config.bitrate}`, or "
+            "correct the configured bitrate to the one this bench runs at."
+        ),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+    }
+
+
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object, timeout_s: float, fd: bool = False):
+    def __init__(self, adapter_name: str, bus: object, timeout_s: float, fd: bool = False, link: SocketCanLink | None = None):
         self.adapter_name = adapter_name
         self.bus = bus
         self.timeout_s = timeout_s
@@ -461,6 +659,10 @@ class PythonCanAdapterSession:
         # A message built without it is transmitted as a classical frame, which
         # silently truncates the payloads an FD configuration exists to allow.
         self.fd = fd
+        # What the SocketCAN interface itself is timed at, when that could be
+        # read. Kept so status answers with the bus that exists rather than only
+        # with the bitrate the configuration asked for.
+        self.link = link
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
@@ -495,7 +697,10 @@ class PythonCanAdapterSession:
         return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
 
     def status(self) -> JsonObject:
-        return {"active": self.active, "backend": self.adapter_name}
+        result: JsonObject = {"active": self.active, "backend": self.adapter_name}
+        if self.link is not None:
+            result.update(self.link.status())
+        return result
 
 
 def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
@@ -514,12 +719,20 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     prepared = python_can_arguments(can, bus_id, bus_config, interface)
     if not prepared["ok"]:
         return prepared
+    link: SocketCanLink | None = None
+    if interface == "socketcan":
+        # Before the open, because a bus opened at the wrong timing has already
+        # put error frames on somebody else's wire.
+        link = socketcan_link(bus_config.channel)
+        mismatch = socketcan_bitrate_refusal(bus_id, bus_config, link)
+        if mismatch is not None:
+            return mismatch
     try:
         bus = can.Bus(**prepared["arguments"])
         shutdown = getattr(bus, "shutdown", None)
         provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
         try:
-            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s, bus_config.fd)
+            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s, bus_config.fd, link)
         except BaseException as primary_error:
             try:
                 if callable(shutdown):
@@ -530,7 +743,10 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
             discharge_provisional_handle(provisional)
             raise
         discharge_provisional_handle(provisional)
-        return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
+        opened: JsonObject = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
+        if link is not None:
+            opened.update(link.status())
+        return opened
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
 
@@ -552,9 +768,13 @@ def python_can_arguments(can: object, bus_id: str, bus_config: CanBusConfig, int
         which this configuration does not describe, so ``data_bitrate`` cannot
         be honoured.
     ``socketcan``
-        neither. Listen-only and the data-phase bitrate are properties of the
-        network interface, set with ``ip link set <channel> type can ...``
-        before this server ever opens it.
+        none of them, and not the arbitration ``bitrate`` either. Listen-only
+        and all bit timing are properties of the network interface, set with
+        ``ip link set <channel> type can ...`` before this server ever opens it,
+        and a ``bitrate`` handed to ``can.Bus`` for this backend is discarded.
+        It is therefore not passed: the value is verified against the interface
+        by ``socketcan_link`` instead, which is the only place it can mean
+        anything.
 
     ``pcanbasic_dll`` reaches neither: python-can loads PCANBasic from its own
     fixed location. All three are supported by ``adapter: process``, which is
@@ -562,10 +782,11 @@ def python_can_arguments(can: object, bus_id: str, bus_config: CanBusConfig, int
     arguments: JsonObject = {
         "interface": interface,
         "channel": bus_config.channel,
-        "bitrate": bus_config.bitrate,
         "fd": bus_config.fd,
         "receive_own_messages": bus_config.receive_own_messages,
     }
+    if interface != "socketcan":
+        arguments["bitrate"] = bus_config.bitrate
     unsupported: list[str] = []
     if bus_config.listen_only:
         if interface == "pcan":

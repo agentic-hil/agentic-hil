@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
+import io
+import json
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
 
+from evals.install import runner
 from evals.install.config import load_matrix
 from evals.install.runner import expected_mcp_tools, job_payload
+from evals.install.source import source_digest
 from evals.install.verifier import target_mcp_tools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -150,3 +156,107 @@ def test_eval_image_allocates_an_unused_non_root_uid() -> None:
     assert "useradd --create-home --user-group --shell /bin/bash eval" in dockerfile
     assert "--uid 1000" not in dockerfile
     assert "\nUSER eval\n" in dockerfile
+
+
+# ---------------------------------------------------------------------------
+# A published target is anchored to the release, fetched outside the container.
+
+
+def _wheel_bytes(version: str, source: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("agentic_hil/__init__.py", source)
+        bundle.writestr(f"agentic_hil-{version}.dist-info/METADATA", f"Name: agentic-hil\nVersion: {version}\n")
+    return buffer.getvalue()
+
+
+def _index_document(version: str, payload: bytes, **overrides: object) -> dict:
+    artifact = {
+        "packagetype": "bdist_wheel",
+        "filename": f"agentic_hil-{version}-py3-none-any.whl",
+        "url": f"https://files.pythonhosted.org/packages/ab/agentic_hil-{version}-py3-none-any.whl",
+        "digests": {"sha256": hashlib.sha256(payload).hexdigest()},
+        **overrides,
+    }
+    return {"urls": [artifact, {"packagetype": "sdist", "filename": f"agentic_hil-{version}.tar.gz"}]}
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, document: dict, payload: bytes) -> list[str]:
+    fetched: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        fetched.append(url)
+        return json.dumps(document).encode("utf-8") if url.startswith("https://pypi.org/") else payload
+
+    runner.published_release.cache_clear()
+    monkeypatch.setattr(runner, "_fetch", fetch)
+    return fetched
+
+
+def test_a_published_target_is_digested_from_the_official_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The trust anchor the published arm had none of.
+
+    Nothing on the host digests to a released wheel, so the wheel itself is
+    fetched here — where the agent's container cannot reach it — checked
+    against the index's own sha256, and digested exactly as the verifier
+    digests the installed package tree."""
+    payload = _wheel_bytes("1.2.3", "__version__ = '1.2.3'\n")
+    fetched = _serve(monkeypatch, _index_document("1.2.3", payload), payload)
+
+    release = runner.published_release("1.2.3")
+
+    unpacked = tmp_path / "agentic_hil"
+    unpacked.mkdir()
+    (unpacked / "__init__.py").write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    assert release["package_digest"] == source_digest(unpacked)
+    assert release["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert fetched[0] == "https://pypi.org/pypi/agentic-hil/1.2.3/json"
+
+
+def test_a_release_artifact_that_does_not_match_the_index_digest_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _wheel_bytes("1.2.3", "__version__ = '1.2.3'\n")
+    document = _index_document("1.2.3", _wheel_bytes("1.2.3", "something else\n"))
+    _serve(monkeypatch, document, payload)
+
+    with pytest.raises(ValueError, match="does not match the sha256"):
+        runner.published_release("1.2.3")
+
+
+def test_a_release_artifact_from_another_host_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _wheel_bytes("1.2.3", "__version__ = '1.2.3'\n")
+    document = _index_document("1.2.3", payload, url="https://example.invalid/agentic_hil-1.2.3-py3-none-any.whl")
+    _serve(monkeypatch, document, payload)
+
+    with pytest.raises(ValueError, match="files.pythonhosted.org"):
+        runner.published_release("1.2.3")
+
+
+def test_a_published_job_carries_the_release_digest_and_names_the_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    published = dataclasses.replace(
+        matrix.target,
+        mode="published",
+        guide_url="https://raw.githubusercontent.com/agentic-hil/agentic-hil/main/AI_AGENT_QUICKSTART.md",
+    )
+    payload = _wheel_bytes(published.expected_version, "__version__ = 'x'\n")
+    _serve(monkeypatch, _index_document(published.expected_version, payload), payload)
+
+    payload_document = job_payload(
+        dataclasses.replace(matrix, target=published),
+        matrix.cases[0],
+        matrix.jobs[0],
+        None,
+        REPOSITORY_ROOT,
+    )
+
+    target = payload_document["target"]
+    assert re.fullmatch(r"[0-9a-f]{64}", target["expected_package_digest"])
+    assert target["release_artifact"]["filename"].startswith(f"agentic_hil-{published.expected_version}-")
+    assert target["release_artifact"]["url"].startswith("https://files.pythonhosted.org/")

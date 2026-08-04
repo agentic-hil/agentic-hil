@@ -1238,6 +1238,8 @@ debuggers:
       allow_reset: false
       allow_raw_debugger_commands: false
       allow_mass_erase: false
+      # Resuming a halted target runs its firmware. Reading it does not.
+      allow_debug_execution: false
 
 debug:
   gdb_executable: null
@@ -1324,7 +1326,7 @@ recovery:
 # write class of decision 0018, per section, plus the project-scoped grants that
 # close the configuration behind the agent.
 GENERATED_WRITE_PERMISSIONS = {
-    "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
+    "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase", "allow_debug_execution"),
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
@@ -2318,6 +2320,7 @@ def debugger_permissions(raw: JsonObject) -> DebuggerPermissions:
         allow_reset=bool(raw.get("allow_reset", False)),
         allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
         allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
+        allow_debug_execution=bool(raw.get("allow_debug_execution", False)),
     )
 
 
@@ -2589,7 +2592,7 @@ def reject_read_permissions(raw: JsonObject, config_path: str, version: int) -> 
                         "field": f"{section}.{name}.permissions.{flag}",
                         "migration": {
                             "remove": f"{section}.<name>.permissions.{flag}",
-                            "keep": "allow_flash, allow_reset, allow_write, allow_mass_erase and allow_raw_debugger_commands are unchanged and still deny-by-default",
+                            "keep": "allow_flash, allow_reset, allow_write, allow_mass_erase, allow_raw_debugger_commands and allow_debug_execution are unchanged and still deny-by-default",
                             "instead": "Declare the device in the test description; it is locked for the whole run, and a device the description does not name is refused.",
                         },
                     },

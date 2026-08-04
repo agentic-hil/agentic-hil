@@ -32,6 +32,11 @@
         "allow_mass_erase": {
           "type": "boolean",
           "default": false
+        },
+        "allow_debug_execution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a debug session may resume the target with debug_continue. Attaching halts the core, which is a read; letting it run again executes firmware and actuates whatever that firmware drives, so it is a state change and needs its own grant. Halting and stopping a session are containment and stay available without it."
         }
       },
       "default": {}

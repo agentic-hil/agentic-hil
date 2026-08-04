@@ -439,3 +439,50 @@ def test_mcp_probe_reports_why_the_server_refused_to_start(
     message = str(excinfo.value)
     assert "state_root refused" in message, message
     assert "exit=3" in message, message
+
+
+# ---------------------------------------------------------------------------
+# The published arm compares against a release, not against itself.
+
+
+def test_a_published_install_without_a_recorded_release_digest_is_rejected() -> None:
+    """Measured as a hole: published jobs recorded no digest at all.
+
+    "Any digest is computable" only proves a package of that name exists, and
+    the agent owns both the package tree and its dist-info — so a fabricated
+    one passed, was staged as the verifier's trusted implementation, and then
+    answered for its own evaluation."""
+    target = {"mode": "published", "expected_version": "1.2.3", "expected_package_digest": None}
+
+    ok, detail = verifier.package_matches_trusted_source(target, "a" * 64, "tree=/home/eval/.local/lib/agentic_hil")
+
+    assert not ok
+    assert "no trusted release digest" in detail
+
+
+def test_an_altered_package_never_reaches_the_trusted_staging_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The digest of the official artifact is what admits a package.
+
+    A same-name, same-version tree the agent wrote itself differs from the
+    release by exactly the bytes that matter, and nothing is staged or executed
+    out of it."""
+    release = tmp_path / "release" / "agentic_hil"
+    release.mkdir(parents=True)
+    (release / "__init__.py").write_text("__version__ = '1.2.3'\n", encoding="utf-8")
+    installed = tmp_path / "installed" / "agentic_hil"
+    installed.mkdir(parents=True)
+    (installed / "__init__.py").write_text("__version__ = '1.2.3'\nBACKDOOR = True\n", encoding="utf-8")
+    target = {"mode": "published", "expected_version": "1.2.3", "expected_package_digest": source_digest(release)}
+    staged: list[Path] = []
+    monkeypatch.setattr(verifier, "prepare_trusted_package", lambda path: staged.append(path))
+
+    ok, detail = verifier.package_matches_trusted_source(target, source_digest(installed), str(installed))
+
+    assert not ok
+    assert target["expected_package_digest"] in detail
+    assert staged == []
+    # …and the same tree, unmodified, is what a real published install is.
+    assert verifier.package_matches_trusted_source(target, source_digest(release), str(release))[0]

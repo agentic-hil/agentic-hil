@@ -111,6 +111,9 @@ def test_discovery_applies_project_requirements() -> None:
         "allow_reset": True,
         "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
+        # The profile above asks for nothing here, and a grant nobody asked for
+        # is never written: resuming the target stays denied.
+        "allow_debug_execution": False,
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
     assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}

@@ -662,6 +662,10 @@ class TestReactor:
                     return preflight_error(index, step, "action", "A debug session must be started before this action.")
                 if debug_active != debugger_id:
                     return preflight_error(index, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": debug_active})
+                # run_until_breakpoint continues the target: it is the plan step
+                # that runs firmware, and reading a halted board is not.
+                if step.action == "run_until_breakpoint" and not permissions.allow_debug_execution:
+                    return preflight_error(index, step, "action", "Running the target to a breakpoint requires allow_debug_execution on this debugger.", {"permission": "allow_debug_execution"})
                 symbol = breakpoint_symbol(step.arguments.get("location")) if step.action == "run_until_breakpoint" else step.arguments.get("symbol")
                 if symbol is None and not self.config.debug.allow_all_symbols:
                     return preflight_error(index, step, "location", "File/line breakpoints require debug.allow_all_symbols.")

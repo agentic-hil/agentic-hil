@@ -137,6 +137,7 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
                 "allow_reset": bool(requested_permissions.get("allow_reset", False)),
                 "allow_raw_debugger_commands": False,
                 "allow_mass_erase": False,
+                "allow_debug_execution": bool(requested_permissions.get("allow_debug_execution", False)),
             },
         }
     }
