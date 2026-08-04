@@ -242,6 +242,24 @@ Reading a probe is a hardware call like any other here: it takes the same machin
 
 An agent does the same over MCP with `project_config_adopt_hardware`, which returns the plan and writes only with `{"apply": true}` and `permissions.allow_config_description_write`. Without that permission it still returns the exact keys and values, so a refusal ends with a person copying one command rather than transcribing a 24-character serial. Both paths go through `project_config_set`, so both are recorded in `provenance` and neither can touch a `permissions:` block.
 
+### Changing it while the server runs
+
+The MCP server parses this file once, at startup, and answers out of that version until it exits. Nothing reloads it: a policy that changed under a held board would move the rules during the run they govern, and a server bound to a policy must not be able to widen its own grants from a file that moved underneath it.
+
+What the answers do say is whether the two still match. Every result carries a `config_status` block once they do not, plus a flat `config_stale: true`; `debugger_info`, `project_config_describe` and `agentic-hil doctor` carry it in every case, so "this is the configuration in force" is a positive statement and not an absence. The comparison is a SHA-256 of the exact bytes the running server parsed against the bytes on disk now — not a modification time, which calls a `git checkout` that restored identical content a change and misses two writes inside one timestamp tick. `state` is one of five, and they do not share a remedy:
+
+| `state` | What it says | What fixes it | `config_stale` |
+|---|---|---|---|
+| `unchanged` | `current_digest` equals `loaded_digest`; the file on disk is byte-for-byte the one in force | nothing | absent |
+| `changed` | the two digests differ | restart the MCP server; it loads the file that exists now | `true` |
+| `missing` | the file is gone, so `current_digest` is `null` and there is nothing to restart onto | restore the file, *then* restart | `true` |
+| `unreadable` | it is there and will not open — an ACL, a path component that is no longer a directory, bytes that are no longer UTF-8. `current_digest` is `null` and `backend_error` names the failure | make it readable and valid, *then* restart | `true` |
+| `unknown` | this configuration did not come from a file this process read, so no comparison was made | nothing; `reload_required` is `false` and there is no claim to act on | absent |
+
+While the file is `missing`, `project_config_describe` answers out of the loaded policy rather than refusing: `permissions_in_force` is what this server is still enforcing and `document_source: loaded_policy` says the values came from memory, not from a document that could be compared. `agentic-hil doctor` re-reads the file on every invocation and is therefore always current, which is why its `config_status.loaded_digest` is the value to compare a running server's against — if they differ, that server is answering out of the older file.
+
+One thing does follow the file while the server runs, and it can only ever narrow: `project_config_describe` and `project_config_set` gate on the narrower of the permissions this server loaded and the ones on disk. A permission an operator revokes therefore binds on the next call, and one they add needs the restart.
+
 ### Migration
 
 A configuration written before this release has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Nothing infers the new model from a missing key, so an update never widens what a bench already allows. Migrating is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.

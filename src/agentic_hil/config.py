@@ -14,6 +14,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import replace
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -54,6 +55,7 @@ from agentic_hil.windows_principals import (
 )
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
+CONFIG_DIGEST_ALGORITHM = "sha256"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
@@ -109,6 +111,24 @@ def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, de
 UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping)
 
 
+def config_digest(data: bytes) -> str:
+    """A fingerprint of the exact bytes a configuration was parsed from.
+
+    The content and nothing else. A modification time is the cheaper comparison
+    and it is wrong in both directions here: a file rewritten with the same
+    bytes — a `git checkout`, an editor's save-on-close, a re-run of `init` — did
+    not change the policy and must not be reported as if it had, and two writes
+    inside one timestamp tick are invisible to it, on filesystems whose
+    granularity is a whole second or two. A hash answers the only question that
+    matters, which is whether the document in force is still the document on
+    disk."""
+    return f"{CONFIG_DIGEST_ALGORITHM}:{hashlib.sha256(data).hexdigest()}"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def config_schema_text() -> str:
     return resources.files("agentic_hil").joinpath(CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8")
 
@@ -140,8 +160,10 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     config_file = absolute_without_symlinks(Path(config_path).expanduser())
     resolved_config_path = str(config_file)
 
+    loaded_bytes = b""
     try:
-        loaded = yaml.load(safe_read_text(config_file), Loader=UniqueKeyLoader)
+        loaded_bytes = safe_read_bytes(config_file)
+        loaded = yaml.load(loaded_bytes.decode("utf-8"), Loader=UniqueKeyLoader)
     except FileNotFoundError as error:
         raise ConfigError(
             "config_file_not_found",
@@ -268,6 +290,8 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         debugger=single[1],
         config_version=config_version,
         permissions=project_permissions(permissions_raw),
+        config_digest=config_digest(loaded_bytes),
+        loaded_at=utc_now(),
     )
 
 
@@ -1424,6 +1448,21 @@ GENERATED_WRITE_PERMISSIONS = {
 # every one false and a regenerated one carries every one over: whichever list is
 # short is the one that hands out a grant nobody set or drops one somebody did.
 GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+
+
+def permission_summary(config: AgenticHILConfig) -> JsonObject:
+    """Every grant a loaded configuration holds, by name.
+
+    Read off the parsed policy rather than off a document, which is what makes
+    it the answer when there is no document left to read: a server whose
+    configuration was removed underneath it still enforces what it loaded, and
+    this is the only shape in which an operator can be shown what that is."""
+    return {
+        **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
+        "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
+        "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
+        "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
+    }
 
 
 def authoritative_config_target(workspace: Path) -> Path:

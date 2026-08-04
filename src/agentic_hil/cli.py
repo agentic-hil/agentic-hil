@@ -49,9 +49,10 @@ from agentic_hil.config import (
     user_state_root,
     windows_path_trust,
 )
+from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import RUNNING_SERVER_COMPARISON, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -1754,10 +1755,26 @@ def doctor(config_path: str | None = None) -> JsonObject:
         summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}."
     if undetermined:
         summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
+    # Checked at the end, against the configuration this run was decided by. The
+    # probe checks spawn debugger processes and take seconds, so the file can
+    # move inside a single `doctor`; a report printed out of a document that has
+    # since been replaced is the same defect at a smaller scale. The block also
+    # publishes the digest that makes a running server's staleness diagnosable
+    # from here, which is the disagreement that produced this: `doctor` said
+    # pyocd and `debugger_info` said stlink in the same minute, and nothing named
+    # the difference.
+    status = {**config_status(config), "compare_with_running_server": RUNNING_SERVER_COMPARISON}
+    report = with_config_status(
+        {
+            "ok": all_ok,
+            "tool": "agentic_hil_doctor",
+            "summary": summary,
+        },
+        status,
+        prominent=True,
+    )
     return {
-        "ok": all_ok,
-        "tool": "agentic_hil_doctor",
-        "summary": summary,
+        **report,
         "config_path": config.config_path,
         "installation": _doctor_installation_report(),
         **({"path_trust": _doctor_path_trust_report(config)} if os.name == "nt" else {}),

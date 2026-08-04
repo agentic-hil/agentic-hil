@@ -16,13 +16,12 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
-    GENERATED_PROJECT_PERMISSIONS,
-    GENERATED_WRITE_PERMISSIONS,
     ConfigError,
     authoritative_config_target,
     carry_over_permissions,
     deny_every_write,
     load_authoritative_config,
+    permission_summary,
     provisionable_state_root,
     secure_atomic_write_text,
     secure_optional_read_text,
@@ -30,6 +29,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
+from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     PROJECT_CONFIG_DESCRIBE,
     PROJECT_CONFIG_SET,
@@ -117,11 +117,26 @@ class AgenticHILToolService:
         return self.config.debugger.permissions if self.config.debugger is not None else DebuggerPermissions()
 
     def debugger_info(self) -> JsonObject:
+        """Which debugger backend this server drives, and which file said so.
+
+        The configuration is named in every case, including the two refusals.
+        This is the answer an operator compares against `agentic-hil doctor`, and
+        the two came apart silently once already: `doctor` read the file and said
+        `pyocd` while this said `stlink` out of the version loaded at startup,
+        with nothing anywhere to say which was which.
+
+        The file is sampled after the backend has answered, never before.
+        `backend.info()` runs a version subprocess and is allowed seconds; a
+        status taken before it would report an edit made during that window as
+        `unchanged`, which is the one answer this block exists to stop being
+        given by accident."""
         if self.config.debugger is None:
-            return unbound_debugger_error("debugger_info", self.config)
-        if not self.config.probe_allowed():
-            return tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
-        return self.backend.info()
+            result = unbound_debugger_error("debugger_info", self.config)
+        elif not self.config.probe_allowed():
+            result = tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
+        else:
+            result = self.backend.info()
+        return with_config_status(result, config_status(self.config), prominent=True)
 
     def debugger_probes_list(self) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -289,8 +304,28 @@ class AgenticHILToolService:
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         with self._lifecycle_lock:
             if self._state != "open":
-                return {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
-            return self._call_unlocked(name, arguments)
+                result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
+            else:
+                result = self._call_unlocked(name, arguments)
+            # A configuration that has moved since startup belongs in every
+            # answer, not only in the two that name it outright: a caller reading
+            # a flash result has the same reason to know that the policy it was
+            # decided by is no longer the policy on disk. Answers that already
+            # carry the block — `debugger_info`, and the configuration tools —
+            # are left alone, so there is one statement per result and it always
+            # comes from the same check.
+            #
+            # Prominence is decided by the tool that was *asked for*, not by
+            # which code path answered it. `debugger_info` and
+            # `project_config_describe` promise the block in every case, and
+            # several of their answers never reach the body that attaches it: the
+            # unbound-probe refusal is returned from the gate below, and a
+            # `ConfigError` out of the describe path is caught before its own
+            # result is built. Deciding here means an early refusal from one of
+            # those two carries the same statement as a success.
+            if "config_status" in result:
+                return result
+            return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -973,6 +1008,19 @@ def debugger_tools() -> set[str]:
     }
 
 
+def prominent_config_status_tools() -> set[str]:
+    """The tools that state which configuration decided the answer, always.
+
+    Every other result carries the block only when there is something to report.
+    These two are where an operator goes to compare two answers about one bench —
+    `debugger_info` against `agentic-hil doctor`, and `project_config_describe`
+    for what the file leaves open — so for them "nothing has moved" has to be a
+    statement rather than an absence. It holds for their refusals too: a call
+    that is refused still answered out of some configuration, and which one it
+    was is exactly what the operator is trying to establish."""
+    return {"debugger_info", PROJECT_CONFIG_DESCRIBE}
+
+
 def debugger_effect_tools() -> set[str]:
     return {
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
@@ -1075,7 +1123,14 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
             return _rolled_back(target_path, previous_text, error)
 
     created = current is None
-    return {
+    # One check, one answer. A server that started without a configuration binds
+    # what this call wrote and has nothing to reload; one that already had a
+    # configuration is now serving a file that no longer exists in that form, and
+    # `reload_required` here has to be the same fact that the staleness block in
+    # every following answer reports, or an operator gets "no change" from one
+    # mechanism and "restart needed" from the other.
+    status = config_status(existing) if existing is not None else None
+    result = {
         "ok": True,
         "tool": PROJECT_CONFIG_CREATE,
         "summary": (
@@ -1088,13 +1143,13 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "workspace_root": written.workspace_root,
         "state_root": written.state_root,
         "optional_override": f"{CONFIG_ENV}={written.config_path}",
-        "permissions": _permission_summary(written),
+        "permissions": permission_summary(written),
         "dropped_entries": dropped,
         # A server that started without a configuration binds the one it just
         # wrote. A server that already had one keeps serving what it loaded,
         # because swapping a configuration under open sessions and held device
         # leases is not something a tool call may do behind their back.
-        "reload_required": existing is not None,
+        "reload_required": status is not None and bool(status["reload_required"]),
         "hardware_discovery": discovery,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
@@ -1102,6 +1157,7 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "cleanup_required": False,
         "next_steps": _generated_next_steps(written, created=created),
     }
+    return result if status is None else with_config_status(result, status)
 
 
 def _configuration_on_disk(workspace: Path) -> AgenticHILConfig | None:
@@ -1153,15 +1209,6 @@ def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject
             "agentic_hil_version": __version__,
         },
         **configured,
-    }
-
-
-def _permission_summary(config: AgenticHILConfig) -> JsonObject:
-    return {
-        **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
-        "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
-        "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
-        "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
     }
 
 
@@ -1261,21 +1308,32 @@ class UnprovisionedToolService:
 
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         service = self._bind()
+        # Once a configuration exists this object is a forwarder and nothing
+        # else. Every call goes through the bound service, including
+        # `project_config_create`: that service is what attaches the staleness
+        # block to a result, and the sequence this class exists for — start with
+        # no configuration, create one, let the operator edit it, call create
+        # again — ends in exactly the refusal that would otherwise be returned
+        # around it. A `permission_denied` from an edited file, with nothing to
+        # say the file had been edited, is the silence this whole block reports.
+        if service is not None:
+            return service.call(name, arguments)
         if name == PROJECT_CONFIG_CREATE:
             validation_error = validate_tool_arguments(name, arguments if isinstance(arguments, dict) else {})
             if validation_error is not None:
                 return validation_error
-            result = project_config_create(self.workspace, service.config if service is not None else None)
+            # The genuinely unprovisioned case, and the only one that bootstraps:
+            # there is no configuration to be gated by, so the gate is the path
+            # re-read under the lock inside `project_config_create`.
+            result = project_config_create(self.workspace, None)
             if overall_success(result):
                 # Bind what this call just wrote, so the tools it unblocks are
                 # usable from the session that unblocked them.
                 self._bind()
             return result
-        if service is None:
-            if name not in MCP_TOOL_NAMES:
-                return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
-            return unprovisioned_tool_error(name, self.workspace)
-        return service.call(name, arguments)
+        if name not in MCP_TOOL_NAMES:
+            return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
+        return unprovisioned_tool_error(name, self.workspace)
 
     def close(self) -> None:
         with self._lock:
