@@ -13,7 +13,7 @@ never land in the tree the implementer is about to commit, and "do not edit the
 code" stops being a promise the prompt has to extract. The one path it may write
 outside that checkout is the review document the next implementer round reads.
 
-Three properties make it safe to run unattended:
+Two further properties make it safe to run unattended:
 
 * Every round must produce at least one commit. A fix round that changes nothing
   is a stalled loop, not progress, so it stops instead of burning the remaining
@@ -85,7 +85,9 @@ NO_TASK = (
     "the code does it correctly."
 )
 
-# Where a branch is most likely to have forked from, best guess first.
+# Refs a branch may have forked from. All of them are tried, and disagreement
+# between them is reported rather than resolved by order: a repository holding
+# both 'main' and 'master' has been seen to make first-match pick the wrong one.
 MAIN_BRANCH_CANDIDATES = ("origin/HEAD", "origin/main", "origin/master", "main", "master")
 
 
@@ -213,6 +215,10 @@ def run_agent(
             process.stdin.write(prompt)
             process.stdin.close()
         except OSError as error:  # the agent exited before reading the prompt
+            # It may still be alive and holding the working tree; do not leave it
+            # running just because it stopped listening.
+            _terminate_tree(process)
+            reader.join(timeout=10)
             raise AgentError(f"{prefix} refused the prompt: {error}") from error
 
         try:
@@ -733,7 +739,8 @@ def perform_review(
     diff_range: str,
     previous_review: Path | None,
     commit: str,
-) -> tuple[Verdict, Path]:
+) -> tuple[Verdict, Path] | None:
+    """Run one review round. Returns None under --dry-run, where there is no verdict."""
     options = setup.options
     review_path = setup.review_dir / f"round-{number:02d}.md"
     last_message_path = setup.log_dir / f"round-{number:02d}-verdict.txt"
@@ -749,6 +756,8 @@ def perform_review(
         options.dry_run,
         env=reviewer_env(setup.checkout, options.dry_run),
     )
+    if options.dry_run:
+        return None
     verdict = corroborate(parse_verdict(last_message_path, review_path), review_path)
     record.review_file = str(review_path)
     record.status = verdict.status
@@ -925,7 +934,12 @@ def main(argv: list[str] | None = None) -> int:
             rounds.append(record)
             print(f"\n{'=' * 72}\nround 0 (review of existing commits)\n{'=' * 72}")
             print(f"  range: {initial_range}")
-            verdict, review_path = perform_review(setup, record, 0, initial_range, None, baseline)
+            reviewed = perform_review(setup, record, 0, initial_range, None, baseline)
+            if reviewed is None:  # --dry-run: the commands were printed, nothing ran
+                print("\n[dry-run] stopping after the initial review; no verdict was produced.")
+                exit_code = EXIT_CLEAN
+                raise _Done
+            verdict, review_path = reviewed
             if verdict.is_clean:
                 print("\nthe existing commits reviewed clean; nothing for the implementer to do.")
                 exit_code = EXIT_CLEAN
@@ -970,13 +984,13 @@ def main(argv: list[str] | None = None) -> int:
             diff_range = f"{last_head}..{head}" if head != last_head else f"{baseline}..{head}"
             last_head = head
 
-            if options.dry_run:
-                perform_review(setup, record, number, diff_range, previous_review, head)
+            reviewed = perform_review(setup, record, number, diff_range, previous_review, head)
+            if reviewed is None:  # --dry-run
                 print("\n[dry-run] stopping after one round; no verdict was produced.")
                 exit_code = EXIT_CLEAN
                 break
 
-            verdict, review_path = perform_review(setup, record, number, diff_range, previous_review, head)
+            verdict, review_path = reviewed
             if verdict.is_clean:
                 print(f"\nreview came back clean after {number} round(s).")
                 exit_code = EXIT_CLEAN
