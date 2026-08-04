@@ -749,6 +749,83 @@ def test_a_schema_valid_file_the_loader_refuses_is_not_called_restartable(what: 
         load_authoritative_config(workspace)
 
 
+@pytest.mark.parametrize(
+    ("what", "edit"),
+    [
+        # `pin_configured_paths`. Every one of these is a plain string the schema
+        # types as a string, and each is refused at config.py's workspace
+        # containment check on every startup there will ever be.
+        ("a reports directory outside the workspace", lambda document: document.__setitem__("reports", {"directory": "../outside"})),
+        ("a logs directory outside the workspace", lambda document: document.__setitem__("logs", {"directory": "../outside"})),
+        (
+            "an upload directory outside the workspace",
+            lambda document: document.__setitem__("artifacts", {"upload_directory": "../outside", "allowed_roots": ["build"]}),
+        ),
+        (
+            "an allowed root outside the workspace",
+            lambda document: document.__setitem__("artifacts", {"upload_directory": "uploads", "allowed_roots": ["../outside"]}),
+        ),
+        # The workspace binding. An absolute, existing, non-overlapping directory
+        # that is simply not the one this server was started in.
+        ("a workspace_root bound somewhere else", lambda document: document.__setitem__("workspace_root", str(Path(document["workspace_root"]).parent))),
+        # `pin_configured_executables`. Required because the entry's grants are
+        # on, so the missing binary is a startup failure rather than a disabled
+        # board.
+        (
+            "a debugger executable that is not installed",
+            lambda document: document["debuggers"]["dut"].update({"executable": str(Path(document["workspace_root"]).parent / "no-such-programmer.exe")}),
+        ),
+    ],
+)
+def test_a_document_valid_file_the_loader_still_refuses_is_not_called_restartable(what: str, edit: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The document rules are not the loader either.
+
+    Running `validate_config_document` closed the schema gap and left a second
+    one behind it: the loader also pins every configured output path inside the
+    workspace, checks the workspace it is bound to, and resolves every configured
+    executable. `reports.directory: ../outside` is the plainest case — schema-
+    valid, document-valid, and refused at every startup — and it was being
+    reported as `changed`, whose remediation is "restart the server to pick this
+    up".
+
+    Each case asserts the state *and* then performs the restart the state is a
+    claim about, so the two cannot drift."""
+    workspace, path = bench(tmp_path, monkeypatch, device_grants={"allow_flash": True})
+    config = load_authoritative_config(workspace)
+
+    rewrite(path, edit)
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_INVALID, what
+    assert status["error_type"] == "config_invalid"
+    assert status["backend_error"], what
+    assert any("repair" in step.lower() for step in status["remediation"])
+    # The claim the state makes, checked against what a restart would really do.
+    with pytest.raises(ConfigError):
+        load_authoritative_config(workspace)
+
+
+def test_judging_a_candidate_document_puts_nothing_on_the_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The document being judged is not in force, so nothing about it may land.
+
+    Startup creates `state_root` before walking its ACLs. A status check runs per
+    call, against a file the operator may still be editing and may roll back, so
+    borrowing that step would scatter directories for configurations nobody
+    chose. What is already there is walked; what is not is left unjudged rather
+    than created to be judged."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+    unwritten = Path(os.environ["APPDATA"]) / "config-staleness" / "never-created-state"
+
+    rewrite(path, lambda document: document.__setitem__("state_root", str(unwritten)))
+
+    status = config_status(config)
+
+    assert status["state"] == STATE_CHANGED
+    assert not unwritten.exists()
+
+
 def test_a_changed_file_that_still_loads_is_still_a_restartable_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check above must not turn every edit into a repair job.
 

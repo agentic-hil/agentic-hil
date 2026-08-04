@@ -51,6 +51,8 @@ from agentic_hil.types import (
 from agentic_hil.windows_principals import (
     PRINCIPAL_CLASS_ACCOUNT,
     PRINCIPAL_CLASS_APP_PACKAGE,
+    PRINCIPAL_CLASS_ENTRA,
+    PRINCIPAL_CLASS_LOGON_SESSION,
     PRINCIPAL_CLASS_LOOKUP_FAILED,
     PRINCIPAL_CLASS_UNRESOLVED,
     PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
@@ -302,7 +304,19 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             {"workspace_root": str(workspace), "expected_workspace": str(Path(work_dir).resolve())},
         )
     state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path, document.windows_path_trust)
+    return assembled_config(raw, document, resolved_config_path, state_root, config_digest(loaded_bytes))
 
+
+def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path: str, state_root: Path, digest: str) -> AgenticHILConfig:
+    """The document and its already-validated roots as one ``AgenticHILConfig``.
+
+    Split out of ``load_config`` so that "would a restart onto these bytes come
+    up?" can be answered by running the *rest* of startup — the path pinning, the
+    executable resolution, the post-pinning probe rules — against the same object
+    those steps see at startup, instead of against an approximation of it.
+    Assembles and validates nothing on its own; every check is either behind it in
+    the document validation or ahead of it in the pinning.
+    """
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
     validation_raw = mapping(raw.get("validation"), "validation")
@@ -311,6 +325,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
     recovery_raw = mapping(raw.get("recovery"), "recovery")
     permissions_raw = mapping(raw.get("permissions"), "permissions")
 
+    workspace = Path(document.workspace_root)
     target = document.target
     debuggers = document.debuggers
     # One configured probe has no ambiguity to resolve, so bind it and let the
@@ -341,7 +356,7 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         debugger=single[1],
         config_version=document.config_version,
         permissions=project_permissions(permissions_raw),
-        config_digest=config_digest(loaded_bytes),
+        config_digest=digest,
         loaded_at=utc_now(),
         windows_path_trust=document.windows_path_trust,
     )
@@ -410,6 +425,89 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
             {"path": str(resolved), "expected_path": str(project_config_path(workspace)), "workspace_root": config.workspace_root},
         )
     return validate_pinned_probe_ownership(pin_configured_paths(pin_configured_executables(config)))
+
+
+def candidate_startup_error(raw: Any, config_path: str, running: AgenticHILConfig) -> ConfigError | None:
+    """Why a restart onto this document would not produce a running server.
+
+    ``load_authoritative_config`` without the loading: every check it makes that a
+    document can fail, run in its order, against the object ``assembled_config``
+    builds — so this answers with startup's own code rather than with a subset of
+    it that has to be kept in step by hand.
+
+    That subset is what this replaces. ``validate_config_document`` alone accepts
+    ``reports.directory: ../outside``, a ``workspace_root`` pointing somewhere
+    else, a debugger whose executable is not installed; each of those is refused
+    by ``pin_configured_paths``, by the workspace binding, or by
+    ``pin_configured_executables``, and each was being reported as `changed` —
+    whose remediation is "restart the server to pick this up". Restarting on that
+    advice shuts down a server that is enforcing a policy and does not bring it
+    back.
+
+    Side-effect-free, and that is a requirement rather than a property: the
+    document being judged is not in force, so nothing about it may reach the
+    machine. The one startup step that writes — ``safe_directory`` creating
+    ``state_root`` before the trust walk — is therefore replaced by
+    ``validate_state_root_trust(only_existing=True)``, which judges the part of
+    that chain that is already there and stays silent about the part that is not.
+
+    ``running`` supplies what startup takes from its environment: the workspace it
+    was started in, which a candidate must still be bound to. Its digest is
+    borrowed only so the assembled object is complete; nothing reads it.
+
+    Cost: one stat per configured output path, one ``which`` per unresolved
+    executable, and on Windows an ACL walk of the state_root chain. Paid only on
+    a file whose digest already differs — that is, only while the server is
+    already reporting itself stale, which is exactly when the answer decides what
+    an operator does next.
+    """
+    try:
+        _validate_candidate(raw, config_path, running)
+    except ConfigError as error:
+        return error
+    except (OSError, ValueError) as error:
+        # Not a refusal any of these checks wrote, but this runs inside every tool
+        # result: a path that will not resolve, a stat that fails on an ancestor,
+        # must not turn a status field into an unhandled exception on the answer it
+        # was attached to. It is also not a pass — whatever stopped the check here
+        # would meet the same startup, so it goes back as a reason the restart
+        # would not come up rather than as silence.
+        return error
+    return None
+
+
+def _validate_candidate(raw: Any, config_path: str, running: AgenticHILConfig) -> None:
+    document = validate_config_document(raw, config_path)
+    workspace = Path(document.workspace_root)
+    if not workspace.is_dir():
+        raise ConfigError(
+            "config_invalid",
+            "workspace_root must be an existing directory.",
+            {"path": config_path, "field": "workspace_root", "value": str(raw["workspace_root"])},
+        )
+    candidate_path = Path(config_path)
+    if is_path_within_frozen(candidate_path, workspace) or is_path_within(candidate_path, workspace):
+        raise ConfigError(
+            "config_invalid",
+            "The authoritative config must be stored outside the workspace.",
+            {"path": config_path, "workspace_root": str(workspace)},
+        )
+    if workspace != Path(running.workspace_root):
+        raise ConfigError(
+            "config_invalid",
+            "The authoritative config is bound to a different workspace.",
+            {"path": config_path, "workspace_root": str(workspace), "expected_workspace": running.workspace_root},
+        )
+    if not os.environ.get(CONFIG_ENV) and candidate_path.resolve() != project_config_path(workspace):
+        raise ConfigError(
+            "config_invalid",
+            "The automatically discovered config is not canonical for this workspace.",
+            {"path": config_path, "expected_path": str(project_config_path(workspace)), "workspace_root": str(workspace)},
+        )
+    state_root = validated_state_root_paths(str(raw["state_root"]), workspace, config_path)
+    validate_state_root_trust(state_root, trust=document.windows_path_trust, only_existing=True)
+    candidate = assembled_config(raw, document, config_path, state_root, running.config_digest)
+    validate_pinned_probe_ownership(pin_configured_paths(pin_configured_executables(candidate)))
 
 
 def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -636,23 +734,50 @@ def validated_state_root_paths(value: str, workspace: Path, config_path: str) ->
 def validated_state_root(value: str, workspace: Path, config_path: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
     lexical = validated_state_root_paths(value, workspace, config_path)
     root = safe_directory(lexical)
-    if os.name == "nt":
-        # This configuration's own state_root, and the one path its
-        # `windows_path_trust` key is entitled to speak for.
-        validate_windows_state_root(root, trust=trust)
-    else:
-        for index, candidate in enumerate((root, *root.parents)):
-            opened = os.stat(candidate, follow_symlinks=False)
-            mode = stat.S_IMODE(opened.st_mode)
-            # The final state_root must never be group/world writable. The sticky
-            # bit only excuses ANCESTORS (e.g. /tmp 01777), where the sticky bit
-            # still stops other users from replacing existing entries; it does
-            # not stop them from pre-creating our derived subdirectories inside a
-            # world-writable final root.
-            unsafe_write = bool(mode & 0o022) and (index == 0 or not bool(mode & stat.S_ISVTX))
-            if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
-                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
+    validate_state_root_trust(root, trust=trust)
     return root
+
+
+def validate_state_root_trust(root: Path, *, trust: str = WINDOWS_PATH_TRUST_DEFAULT, only_existing: bool = False) -> None:
+    """The trust rules for a state_root that is already on disk.
+
+    Split from ``validated_state_root`` so that a caller which may not *create*
+    anything can still run the same rules. ``validated_state_root`` calls
+    ``safe_directory`` first and therefore always passes a chain that exists;
+    ``only_existing`` is for the candidate check, which is answering a question
+    about a document that is not in force and must not put a directory on the
+    machine for it.
+
+    Under ``only_existing`` a component that is not there yet is not judged — not
+    guessed at, and not held against the path. Everything that *is* there is
+    judged by exactly the rule startup would apply to it, so this can only ever
+    find a subset of what startup finds. What it cannot see is the ACL a
+    not-yet-created directory will end up with, which on Windows is inherited from
+    the parent that was just checked and on POSIX is this process's own umask.
+
+    This configuration's own state_root is the one path its `windows_path_trust`
+    key is entitled to speak for, which is why ``trust`` is passed and never
+    looked up.
+    """
+    if os.name == "nt":
+        validate_windows_state_root(root, trust=trust, only_existing=only_existing)
+        return
+    for index, candidate in enumerate((root, *root.parents)):
+        try:
+            opened = os.stat(candidate, follow_symlinks=False)
+        except OSError:
+            if only_existing:
+                continue
+            raise
+        mode = stat.S_IMODE(opened.st_mode)
+        # The final state_root must never be group/world writable. The sticky
+        # bit only excuses ANCESTORS (e.g. /tmp 01777), where the sticky bit
+        # still stops other users from replacing existing entries; it does
+        # not stop them from pre-creating our derived subdirectories inside a
+        # world-writable final root.
+        unsafe_write = bool(mode & 0o022) and (index == 0 or not bool(mode & stat.S_ISVTX))
+        if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
+            raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
 
 
 def trusted_state_directory(state_root: str | Path, *parts: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
@@ -714,10 +839,12 @@ def trusted_state_directory(state_root: str | Path, *parts: str, trust: str = WI
 #   SID's own structure with no lookup at all. It holds a subset of rights the
 #   operator's unpackaged processes already have in full.
 # * ``unresolved_principal`` — the local security authority was asked and
-#   answered ``ERROR_NONE_MAPPED`` *on a machine where that is the whole answer*:
-#   this host is in a workgroup, so its own SAM is the only account database the
-#   call consults, and it is always reachable. Nothing on this machine maps to
-#   that SID and no token built here can carry it. A stock Windows 11
+#   answered ``ERROR_NONE_MAPPED`` *on a machine where that is the whole answer*
+#   *about a SID of the one form that answer can be conclusive for*: this host is
+#   in a workgroup and joined to no Entra tenant, so its own SAM is the only
+#   account database the call consults and it is always reachable, and the SID is
+#   ``S-1-5-21-<a>-<b>-<c>-<rid>``, an account somewhere. Nothing on this machine
+#   maps to it and no token built here can carry it. A stock Windows 11
 #   ``%LOCALAPPDATA%`` really does carry such an ACE — measured on 26200, an
 #   ``(OI)(CI)(M)`` grant to an ``S-1-5-21-…`` SID left by the installation image
 #   — which is why refusing it is not an option short of refusing the documented
@@ -725,24 +852,47 @@ def trusted_state_directory(state_root: str | Path, *parts: str, trust: str = WI
 #
 # Everything the check could *not* establish refuses: an ACL it could not read, a
 # SID whose lookup failed for any reason other than that answer, and — this is
-# ``unresolved_foreign_principal`` — ``ERROR_NONE_MAPPED`` on a domain member,
-# where the same call also asks the domain and every trust behind it and returns
-# that code when it gets no answer. A live account, or one reachable only through
-# SID history, then arrives looking exactly like the benign orphan above, and
-# Windows authorizes on the raw SIDs in a token either way. Those are ignorance,
-# and a gate that lets ignorance through is a gate that opens whenever the lookup
-# behind it breaks. Keeping the classes apart is
+# ``unresolved_foreign_principal`` — ``ERROR_NONE_MAPPED`` where it settles
+# nothing. That is a domain member, where the same call also asks the domain and
+# every trust behind it and returns that code when it gets no answer; it is also,
+# on any machine, a SID whose form has no account name to be missing in the first
+# place. A live account, or one reachable only through SID history, then arrives
+# looking exactly like the benign orphan above, and Windows authorizes on the raw
+# SIDs in a token either way.
+#
+# Two of those nameless forms are named rather than lumped in, because the
+# refusal is worth nothing if an operator cannot tell what it is looking at:
+# ``logon_session_principal`` (``S-1-5-5-*``, one live logon session, carried in
+# that session's tokens) and ``entra_principal`` (``S-1-12-1-*``, a principal of a
+# directory this machine did not ask). Both refuse under `standard` for the same
+# reason the general case does.
+#
+# Those are ignorance, and a gate that lets ignorance through is a gate that opens
+# whenever the lookup behind it breaks. Keeping the classes apart is
 # ``windows_principals.lookup_account``'s job, and this table is why it has one.
 # Accepting unknown evidence is what `permissive` is for, and it says so in the
 # file where a later reader can see it.
 _WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
-    "standard": frozenset({"untrusted_owner", "null_dacl", "foreign_principal", "unresolved_foreign_principal", "principal_lookup_failed", "acl_unreadable"}),
+    "standard": frozenset(
+        {
+            "untrusted_owner",
+            "null_dacl",
+            "foreign_principal",
+            "logon_session_principal",
+            "entra_principal",
+            "unresolved_foreign_principal",
+            "principal_lookup_failed",
+            "acl_unreadable",
+        }
+    ),
     "strict": frozenset(
         {
             "untrusted_owner",
             "null_dacl",
             "foreign_principal",
             "app_package_principal",
+            "logon_session_principal",
+            "entra_principal",
             "unresolved_principal",
             "unresolved_foreign_principal",
             "principal_lookup_failed",
@@ -797,11 +947,27 @@ _WINDOWS_TRUST_SUMMARIES = {
     (
         "unresolved_foreign_principal",
         "object",
-    ): "grants write access to a Windows SID no account here maps to, on a domain member where that answer also means the domain did not answer, so the holder may be live.",
+    ): "grants write access to a Windows SID no account here maps to, where that answer settles nothing: this machine has a domain or Entra authority that may not have answered, or the SID is not of a form that has an account name to be missing. The holder may be live.",
     (
         "unresolved_foreign_principal",
         "ancestor",
-    ): "has an ancestor granting write access to a Windows SID no account here maps to, on a domain member where that answer also means the domain did not answer, so the holder may be live.",
+    ): "has an ancestor granting write access to a Windows SID no account here maps to, where that answer settles nothing: this machine has a domain or Entra authority that may not have answered, or the SID is not of a form that has an account name to be missing. The holder may be live.",
+    (
+        "logon_session_principal",
+        "object",
+    ): "grants write access to a Windows logon session SID (S-1-5-5-*). That names one live logon session and is carried in its access tokens, so the right is being held now.",
+    (
+        "logon_session_principal",
+        "ancestor",
+    ): "has an ancestor granting write access to a Windows logon session SID (S-1-5-5-*). That names one live logon session and is carried in its access tokens, so the right is being held now.",
+    (
+        "entra_principal",
+        "object",
+    ): "grants write access to an Entra ID principal (S-1-12-1-*) this machine could not name. The directory that could name it was not asked, so the holder may be live.",
+    (
+        "entra_principal",
+        "ancestor",
+    ): "has an ancestor granting write access to an Entra ID principal (S-1-12-1-*) this machine could not name. The directory that could name it was not asked, so the holder may be live.",
 }
 
 
@@ -818,7 +984,14 @@ def _trust_finding(name: str, scope: str, path: Path, **extra: object) -> JsonOb
     return {"finding": name, "scope": scope, "path": str(path), **extra}
 
 
-def validate_windows_state_root(root: Path, *, field: str = "state_root", label: str = "state_root", trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> list[JsonObject]:
+def validate_windows_state_root(
+    root: Path,
+    *,
+    field: str = "state_root",
+    label: str = "state_root",
+    trust: str = WINDOWS_PATH_TRUST_DEFAULT,
+    only_existing: bool = False,
+) -> list[JsonObject]:
     """Refuse a Windows path whose ACLs put it outside the operator's control.
 
     What is defended: the authoritative configuration is the permission policy
@@ -844,8 +1017,16 @@ def validate_windows_state_root(root: Path, *, field: str = "state_root", label:
 
     Returns every finding, including the ones that did not refuse, so `doctor`
     can name a degraded environment instead of the tool going quiet about it.
+
+    ``only_existing`` drops findings about a component that is not on disk. Every
+    caller that creates the chain first leaves it False and is unaffected — the
+    findings all concern paths that exist. It is for the caller that may not
+    create anything, where "the ACL could not be read" is the reader saying the
+    directory is not there yet rather than a verdict about it.
     """
     findings = inspect_windows_path_trust(root)
+    if only_existing:
+        findings = [finding for finding in findings if Path(str(finding["path"])).exists()]
     mode = trust if trust in _WINDOWS_PATH_TRUST_REFUSALS else WINDOWS_PATH_TRUST_DEFAULT
     refusing = _WINDOWS_PATH_TRUST_REFUSALS[mode]
     for finding in findings:
@@ -987,6 +1168,8 @@ def _windows_principal_findings(
     """
     name_by_class = {
         PRINCIPAL_CLASS_ACCOUNT: "foreign_principal",
+        PRINCIPAL_CLASS_LOGON_SESSION: "logon_session_principal",
+        PRINCIPAL_CLASS_ENTRA: "entra_principal",
         PRINCIPAL_CLASS_LOOKUP_FAILED: "principal_lookup_failed",
         PRINCIPAL_CLASS_UNRESOLVED_FOREIGN: "unresolved_foreign_principal",
         PRINCIPAL_CLASS_APP_PACKAGE: "app_package_principal",
@@ -1006,6 +1189,11 @@ def _windows_principal_findings(
     # lookup that did not answer, before it names a package nobody has to act on.
     order = (
         PRINCIPAL_CLASS_ACCOUNT,
+        # A live logon session and an Entra principal are the two nameless forms
+        # this machine can say something positive about, so they are named before
+        # the general "that answer settles nothing" class.
+        PRINCIPAL_CLASS_LOGON_SESSION,
+        PRINCIPAL_CLASS_ENTRA,
         PRINCIPAL_CLASS_LOOKUP_FAILED,
         PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
         PRINCIPAL_CLASS_APP_PACKAGE,

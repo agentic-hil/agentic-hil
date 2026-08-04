@@ -27,6 +27,7 @@ from importlib import resources
 from pathlib import Path
 
 from agentic_hil.types import JsonObject
+from agentic_hil.windows_principals import JOIN_STATE_DOMAIN, JOIN_STATE_ENTRA, JOIN_STATE_WORKGROUP, machine_join_state
 
 RESOURCE_SCHEME = "agentic-hil"
 
@@ -81,9 +82,10 @@ class ErrorRemedy:
     do_not: tuple[str, ...] = ()
 
     def as_json(self) -> JsonObject:
-        payload: JsonObject = {"meaning": self.meaning, "remediation": list(self.remediation)}
+        values = _substitutions()
+        payload: JsonObject = {"meaning": self.meaning.format(**values), "remediation": [step.format(**values) for step in self.remediation]}
         if self.do_not:
-            payload["do_not"] = list(self.do_not)
+            payload["do_not"] = [step.format(**values) for step in self.do_not]
         return payload
 
 
@@ -110,11 +112,57 @@ def safe_user_config_suggestion() -> str:
     return str(Path(safe_user_root()) / "projects" / "<workspace-name>" / "config.yaml")
 
 
+def standard_profile_verdict() -> str:
+    """What the standard Windows profile folders do *on this machine*.
+
+    "%USERPROFILE%, %APPDATA% and %LOCALAPPDATA% all pass from 0.8.0 on" was
+    written from a measurement, and the measurement was taken in a workgroup. It
+    does not carry to every host, and the reason is the same one that made the
+    trust classes worth splitting: what lets ``%LOCALAPPDATA%`` pass is an ACE for
+    a SID the local authority answers ``ERROR_NONE_MAPPED`` about, and that answer
+    is only a clean bill where the local SAM was the only thing asked. On a domain
+    member or an Entra-joined machine the identical ACE is `unresolved_foreign`
+    and refuses under `standard`.
+
+    So a remedy string is the wrong place for a flat promise. Attached to a
+    refusal, "move to %LOCALAPPDATA%" or "retry, it passes" sends a domain user
+    straight back into the same refusal, and the second failure looks like the
+    tool being broken rather than like advice that never applied to them.
+
+    Never raises and costs one cached local read; the join state is fixed for the
+    life of the process.
+    """
+    if os.name != "nt":
+        return (
+            "POSIX: a component that is group- or other-writable is what fails. Ancestors may be sticky "
+            "world-writable (/tmp, 01777); the final directory may not."
+        )
+    join_state = machine_join_state()
+    if join_state == JOIN_STATE_WORKGROUP:
+        return (
+            "Windows: this machine is in a workgroup, which is the join state the published verdicts were measured "
+            "in, and %USERPROFILE%, %APPDATA% and %LOCALAPPDATA% pass there on a stock profile from 0.8.0 on. What "
+            "still fails is a real account other than the operator holding write, delete or WRITE_DAC somewhere on "
+            "the path."
+        )
+    authority = "joined to an Entra tenant" if join_state == JOIN_STATE_ENTRA else ("joined to a domain" if join_state == JOIN_STATE_DOMAIN else "of an undetermined join state")
+    return (
+        f"Windows: this machine is {authority}, so the published '%APPDATA% and %LOCALAPPDATA% pass' verdicts do "
+        "not apply to it and moving there is not the answer. Those folders pass in a workgroup because the SIDs on "
+        "them answer ERROR_NONE_MAPPED and nothing else was asked; here the same answer also means an authority did "
+        "not answer, so they classify as `unresolved_foreign` and refuse under `windows_path_trust: standard`. Use a "
+        f"directory that carries no such ACE — {safe_user_root()} inherits from %USERPROFILE% and is created by this "
+        "tool — and read the refusal's own `finding` and `untrusted_principals`, or `path_trust.findings` from "
+        "`agentic-hil doctor`, for what was actually seen on the path you tried."
+    )
+
+
 def _substitutions() -> dict[str, str]:
     return {
         "safe_user_root": safe_user_root(),
         "safe_state_root": safe_state_root_suggestion(),
         "safe_user_config": safe_user_config_suggestion(),
+        "standard_profile_verdict": standard_profile_verdict(),
     }
 
 
@@ -332,11 +380,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Move the path under {safe_user_root}, whose every ancestor passes the check on a stock profile.",
-            "Windows: %USERPROFILE%, %APPDATA% and %LOCALAPPDATA% all pass from 0.8.0 on. What still fails is a real "
-            "account other than the operator holding write, delete or WRITE_DAC somewhere on the path.",
-            "On Windows the refusal carries `untrusted_principals`: the SID that holds the right, and the application "
-            "package it belongs to when the SID resolves. That names who to ask, so the choice between moving the path "
-            "and having the operator revoke the grant is an informed one.",
+            "{standard_profile_verdict}",
+            "On Windows the refusal carries `finding`, the class that decided it, and `untrusted_principals`: the SID "
+            "that holds the right, and the application package it belongs to when the SID resolves. Those name who to "
+            "ask, so the choice between moving the path and having the operator revoke the grant is an informed one.",
             "`windows_path_trust: permissive` in the authoritative configuration is the visible, documented override "
             "for an environment whose ACLs do not describe its trust boundary. It weakens the check and says so in "
             "the file; redirecting %APPDATA% or %LOCALAPPDATA% to silence the refusal does the same thing invisibly.",
@@ -353,13 +400,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The directory or file holding the authoritative configuration can be written or replaced by a nameable "
             "account other than the operator. The authoritative configuration is the permission policy for hardware, "
             "so an account that can rewrite it can grant itself flashing or mass erase. On Windows the refusal names "
-            "the holder in `untrusted_principals` when the SID resolves. The standard per-user locations %APPDATA% and "
-            "%LOCALAPPDATA% are not this case and are not refused."
+            "the holder in `untrusted_principals` when the SID resolves. Whether the discovered default under "
+            "%APPDATA% is itself this case depends on the machine, and this directory is always checked under "
+            "`standard` because it is read before any configuration exists: {standard_profile_verdict}"
         ),
         remediation=(
             "AGENTIC_HIL_CONFIG is the supported answer here, not a workaround: it is how a project binds to a "
             "configuration outside the discovered default, and a refused default is precisely what it is for.",
             "Create {safe_user_root}/projects/<workspace-name>/ and move config.yaml there.",
+            "{standard_profile_verdict}",
             "Point the server at it with an absolute path: AGENTIC_HIL_CONFIG={safe_user_config}",
             "Set AGENTIC_HIL_CONFIG in the host's user-level or managed environment, never in a repository-controlled "
             "file such as .vscode/mcp.json, .mcp.json, .codex/config.toml, or opencode.json.",
@@ -384,9 +433,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "choosing one is the answer to a refused default rather than a workaround for it.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
             "`agentic-hil init` derives the default state_root from %LOCALAPPDATA% on Windows and $XDG_STATE_HOME on "
-            "POSIX, and validates before writing anything. Both standard locations pass from 0.8.0 on, so a refusal "
-            "here names something specific to this machine; read `untrusted_principals` for who holds the right. Every "
-            "field is in MCP resource " + CONFIG_SCHEMA_URI + ".",
+            "POSIX, and validates before writing anything. Whether that default passes depends on this machine: "
+            "{standard_profile_verdict} Read `finding` and `untrusted_principals` for what was seen and who holds the "
+            "right. Every field is in MCP resource " + CONFIG_SCHEMA_URI + ".",
             "`windows_path_trust: permissive` accepts a state_root whose ACLs the check cannot vouch for, visibly and "
             "in the configuration file. Use it when the environment's ACLs genuinely do not describe its trust "
             "boundary, not to make a real foreign grant go quiet. It reaches this configuration's own state_root and "
@@ -617,7 +666,12 @@ def catalogue_entry(key: str) -> JsonObject | None:
     entry: JsonObject = {"error_type": error_type}
     if scope:
         entry["scope"] = scope
-    entry["meaning"] = remedy.meaning
+    # `meaning` is substituted like the steps are. What a refusal *means* can turn
+    # on the machine as much as what to do about it does — whether the discovered
+    # default under %APPDATA% is itself the case being described depends on this
+    # host's join state — and a placeholder that reached a reader verbatim would be
+    # worse than the flat claim it replaced.
+    entry["meaning"] = remedy.meaning.format(**values)
     entry["remediation"] = [step.format(**values) for step in remedy.remediation]
     if remedy.do_not:
         entry["do_not"] = [step.format(**values) for step in remedy.do_not]
@@ -1446,13 +1500,19 @@ Every principal that holds one of those rights is classified, and the class deci
 |---|---|---|---|---|
 | `account` | a SID the local security authority resolves to a real account or group | **refuse** | **refuse** | report |
 | `app_package` | `S-1-15-2-*` / `S-1-15-3-*`, an installed packaged application | report | **refuse** | report |
-| `unresolved` | the authority answered `ERROR_NONE_MAPPED` on a machine in a workgroup, where its own SAM is the only account database that answer can come from. Normally residue of software that wrote an ACE with another machine's SID, and present on a stock `%LOCALAPPDATA%` | report | **refuse** | report |
-| `unresolved_foreign` | the same `ERROR_NONE_MAPPED` on a domain member, where the call also asks the domain and every trust behind it and returns that code when it gets no answer. A live account, or one carried only in SID history, is indistinguishable from an orphan here | **refuse** | **refuse** | report |
+| `unresolved` | the authority answered `ERROR_NONE_MAPPED` about an `S-1-5-21-<a>-<b>-<c>-<rid>` SID, on a machine in a workgroup and joined to no Entra tenant, where its own SAM is the only account database that answer can come from. Normally residue of software that wrote an ACE with another machine's SID, and present on a stock `%LOCALAPPDATA%` | report | **refuse** | report |
+| `logon_session` | `S-1-5-5-<high>-<low>`, recognised from the SID alone. It names one live logon session and is carried in that session's access tokens; it has no account name, so `ERROR_NONE_MAPPED` is its normal answer and says nothing about it | **refuse** | **refuse** | report |
+| `entra` | `S-1-12-1-*`, an Entra ID (Azure AD) principal the lookup declined to name. The directory that could name it was not asked | **refuse** | **refuse** | report |
+| `unresolved_foreign` | `ERROR_NONE_MAPPED` where it settles nothing. On a domain member the call also asks the domain and every trust behind it and returns that code when it gets no answer, so a live account — or one carried only in SID history — is indistinguishable from an orphan. On any machine, a SID whose form has no account name to be missing lands here too | **refuse** | **refuse** | report |
 | `lookup_failed` | the authority could *not* be asked: the SID would not convert, the lookup failed for any other reason. The holder might be a live account | **refuse** | **refuse** | report |
 | ACL could not be read | a sandbox, a service account, a restricted CI runner | **refuse** | **refuse** | report |
 | NULL DACL, or an untrusted owner | grants everyone everything / the object is not the operator's | **refuse** | **refuse** | report |
 
-`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `standard` tolerates the two findings the machine positively established — an AppContainer identity, recognised from the SID's own structure, and a SID the local authority answered about by saying nothing maps to it, where that authority was the only one asked — and refuses everything it could not establish: an unreadable ACL, a SID whose lookup failed for any other reason, and `ERROR_NONE_MAPPED` on a domain member, where the same code also means the domain did not answer. A gate that lets ignorance through is a gate that opens whenever the lookup behind it breaks, so "no such account", "nobody answered" and "I could not ask" are separate classes and only the first is tolerated. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
+`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `standard` tolerates the two findings the machine positively established — an AppContainer identity, recognised from the SID's own structure, and an `S-1-5-21-*` account SID the local authority answered about by saying nothing maps to it, where that authority was the only one asked — and refuses everything it could not establish: an unreadable ACL, a SID whose lookup failed for any other reason, and `ERROR_NONE_MAPPED` wherever it settles nothing. A gate that lets ignorance through is a gate that opens whenever the lookup behind it breaks, so "no such account", "nobody answered" and "I could not ask" are separate classes and only the first is tolerated.
+
+The tolerance is granted by SID form and not by join state alone, because "no account name" and "nothing here can carry it" are not the same claim. A logon session SID `S-1-5-5-*` has no account name *by construction*, returns the same `ERROR_NONE_MAPPED`, and identifies a session whose tokens carry it right now; an `S-1-12-1-*` Entra principal is the same with a directory behind it instead of a session. Join state alone would have tolerated both on a workgroup machine. Join state is still asked, and asked twice: `NetGetJoinInformation` reports the classic NT domain relationship, and it answers "workgroup" for an Entra-joined machine, so `NetGetAadJoinInformation` is consulted whenever the first says workgroup.
+
+`strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
 
 The key governs `state_root` and everything derived from it, and nothing else. It does not govern the user configuration directory, which is read before any configuration exists and is therefore always checked under `standard`; `AGENTIC_HIL_CONFIG` is the answer there. It does not govern the MCP server executable, nor `~/.agentic-hil/device-locks` — that directory is how every project on the machine agrees who holds a board, and one project's file may not weaken the mutex another project's run depends on.
 
@@ -1460,7 +1520,7 @@ A failure raises `error_type: unsafe_configured_path` and names the offending co
 
 ## Windows 11: measured verdicts
 
-Measured 2026-08-04 on Windows 11 Pro 10.0.26200, on a profile with a packaged application installed, on a machine in a workgroup. `%APPDATA%` and `%LOCALAPPDATA%` are standard working folders and pass. On a domain member the `unresolved` rows below become `unresolved_foreign` and refuse under `standard`; `windows_path_trust: permissive` is the documented answer there.
+Measured 2026-08-04 on Windows 11 Pro 10.0.26200, on a profile with a packaged application installed, on a machine in a workgroup and joined to no Entra tenant. `%APPDATA%` and `%LOCALAPPDATA%` are standard working folders and pass **there**. The join state is part of the measurement and not a detail of it: on a domain member or an Entra-joined machine the `unresolved` rows below become `unresolved_foreign` and refuse under `standard`, so these verdicts must not be read as a promise about every host. A refusal's own remediation states which case the machine it ran on is in; `windows_path_trust: permissive`, or a directory carrying no such ACE, is the answer where they do refuse.
 
 | Path | ACEs beyond user/SYSTEM/Administrators | Verdict |
 |---|---|---|

@@ -37,10 +37,10 @@ from agentic_hil.config import (
     CONFIG_DIGEST_ALGORITHM,
     ConfigError,
     UniqueKeyLoader,
+    candidate_startup_error,
     config_digest,
     safe_read_bytes,
     utc_now,
-    validate_config_document,
 )
 from agentic_hil.knowledge import CONFIG_STALE_ERROR, remediation_fields
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -90,24 +90,26 @@ def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | No
         return None, error
 
 
-def _load_blocking_error(raw: bytes, path: str) -> Exception | None:
+def _load_blocking_error(raw: bytes, config: AgenticHILConfig) -> Exception | None:
     """Why a restart onto these bytes would not produce a running server.
 
-    The YAML parse plus ``config.validate_config_document`` — the startup
-    loader's own first half, called rather than approximated. It used to stop
-    after the shipped schema, and the schema is not the loader: it accepts
-    ``workspace_root: relative``, two debuggers that resolve to one probe, a
-    ``resource_id`` spelled in two cases. Each of those makes
-    ``load_authoritative_config`` raise, and each was classified `changed`, whose
-    remediation is "restart the server to pick this up" — advice that shuts down
-    a working server and cannot bring it back.
+    The YAML parse plus ``config.candidate_startup_error`` — the startup loader's
+    own checks, called rather than approximated. It used to stop after the shipped
+    schema, and the schema is not the loader; then it stopped after
+    ``validate_config_document``, and the document rules are not the loader
+    either. Both left a file that will not load classified `changed`, whose
+    remediation is "restart the server to pick this up" — advice that shuts down a
+    working server and cannot bring it back. ``reports.directory: ../outside`` is
+    the plainest case: schema-valid, document-valid, and refused by
+    ``pin_configured_paths`` at every startup there will ever be.
 
-    What is still excluded is what asks the machine rather than the document: the
-    state_root ACL walk, whether ``workspace_root`` exists, the executables on
-    disk. Those depend on the host, are expensive on Windows, and this runs per
-    call. A file that fails only one of those is still reported as `changed`,
-    which is the honest answer — the document is loadable and the environment is
-    not, and the restart it recommends is what surfaces that.
+    So the whole of the loader runs here now, minus its one side effect: startup
+    creates ``state_root`` before walking its ACLs, and a question about a document
+    that is not in force may not put a directory on the machine. That part of the
+    chain which already exists is walked; the part that does not is left unjudged
+    rather than guessed at. What survives is the only remaining way a `changed`
+    verdict can be optimistic, and it is bounded to one thing that startup
+    creates for itself.
 
     Run only when the digest already differs, so an unchanged file still costs one
     read and one hash.
@@ -116,13 +118,9 @@ def _load_blocking_error(raw: bytes, path: str) -> Exception | None:
         loaded: Any = yaml.load(raw.decode("utf-8"), Loader=UniqueKeyLoader)
     except (yaml.YAMLError, UnicodeDecodeError) as error:
         return error
-    try:
-        # `loaded or {}` exactly as load_config does it, so an empty file gets the
-        # same refusal here as it would at startup rather than a different one.
-        validate_config_document(loaded or {}, path)
-    except ConfigError as error:
-        return error
-    return None
+    # `loaded or {}` exactly as load_config does it, so an empty file gets the
+    # same refusal here as it would at startup rather than a different one.
+    return candidate_startup_error(loaded or {}, str(config.config_path), config)
 
 
 def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | None, Exception | None] | None = None) -> JsonObject:
@@ -197,7 +195,7 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
     # a document that will not load is worse than saying nothing — it sends an
     # operator to shut down a server that is enforcing a policy and cannot come
     # back with one.
-    blocking = _load_blocking_error(raw, str(path))
+    blocking = _load_blocking_error(raw, config)
     if blocking is not None:
         return {
             **base,
@@ -209,7 +207,9 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
             "summary": (
                 "The authoritative configuration has changed since this server loaded it and the file that is there "
                 "now does not load: it is not valid YAML, it does not satisfy the configuration schema, or it fails one "
-                "of the document checks the startup loader runs — `backend_error` says which. This server keeps "
+                "of the checks the startup loader runs — a document rule, the workspace it is bound to, an output path "
+                "that leaves the workspace, a configured executable that is not installed, the state_root trust rules. "
+                "`backend_error` says which. This server keeps "
                 "enforcing the version it loaded at startup, and a restart would not replace it — it would fail. "
                 "Repair the file first, then restart."
             ),

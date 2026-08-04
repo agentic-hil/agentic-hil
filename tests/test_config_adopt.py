@@ -1121,6 +1121,33 @@ def test_an_entry_named_like_a_reserved_key_is_still_covered_by_the_document_che
     assert after["debuggers"]["permissions"]["probe_id"] is None, "the call wrote nothing at all"
 
 
+def test_an_entry_named_like_a_reserved_key_can_still_be_adopted_into(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Being covered by the comparison is only half of being usable.
+
+    The test above proves a concurrent edit to `debuggers.permissions` is seen.
+    This is the other half: with nothing but `allow_config_description_write`, the
+    entry can actually be filled in. The permission surface read every key under
+    such an entry as a grant — `debuggers.permissions.probe_id` came back as a
+    moved permission — so adoption refused with `permission_denied` naming
+    `allow_config_permissions_write`, and the operator's only way out was to
+    rename their board."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["debuggers"] = {"permissions": document["debuggers"]["dut"]}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    attached(monkeypatch)
+    tools = service(workspace)
+    try:
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True, "debugger_id": "permissions"})
+    finally:
+        tools.close()
+
+    assert applied["ok"] is True, applied
+    after = document_of(path)
+    assert after["debuggers"]["permissions"]["probe_id"] == PROBE_SERIAL
+    assert after["debuggers"]["permissions"]["permissions"] == document["debuggers"]["permissions"]["permissions"], "no grant moved"
+
+
 def test_the_plan_is_a_pure_reading_of_a_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No document, no plan: with nothing configured there is no entry to fill.
 

@@ -100,25 +100,42 @@ NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status":
 # Reading what is actually in a document.
 
 
-def permission_surface(node: object, prefix: str = "") -> dict[str, Any]:
+def permission_surface(node: object, prefix: str = "", *, entry_ids: bool = False) -> dict[str, Any]:
     """Every value in a document that decides what may be done, by dotted path.
 
-    Deliberately not driven by the key model. This walks whatever the document
-    actually contains and collects two things at any depth: a key named
-    ``allow_*``, and every leaf inside a mapping named ``permissions``. A guard
-    that understood only the paths the key model produces would be blind exactly
-    where something that got around the key model would land.
+    Almost entirely name-driven rather than key-model-driven. This walks whatever
+    the document actually contains and collects two things at any depth: a key
+    named ``allow_*``, and every leaf inside a mapping named ``permissions``. A
+    guard that understood only the paths the key model produces would be blind
+    exactly where something that got around the key model would land.
+
+    The one place it has to know the schema is the level directly under
+    ``debuggers``, ``com_ports`` and ``can_buses``, because that level is not
+    field names at all — it is operator-chosen entry ids, and ``permissions``,
+    ``provenance`` and ``allow_anything`` are all legal ones. Reading them as
+    grant names made every field of such an entry a permission: repointing
+    ``debuggers.permissions`` at another board produced a permission delta and
+    demanded ``allow_config_permissions_write``, while `project_config_describe`
+    went on offering the same key as description-writable. The entry is still
+    walked, so its real ``permissions`` block is still found, one level further
+    down where the schema actually puts it.
+
+    A *scalar* under an id level is still read as a grant. An entry is a mapping
+    in every section here, so a scalar there is not an entry that happens to be
+    called ``allow_flash`` — it is the shape this walk exists to catch, and it
+    keeps catching it.
     """
     found: dict[str, Any] = {}
     if isinstance(node, dict):
         for key, value in node.items():
             path = f"{prefix}.{key}" if prefix else str(key)
-            if str(key).startswith("allow_"):
+            named_entry = entry_ids and isinstance(value, dict)
+            if str(key).startswith("allow_") and not named_entry:
                 found[path] = value
-            elif str(key) == "permissions" and isinstance(value, dict):
+            elif str(key) == "permissions" and isinstance(value, dict) and not named_entry:
                 for flag, granted in value.items():
                     found[f"{path}.{flag}"] = granted
-            found.update(permission_surface(value, path))
+            found.update(permission_surface(value, path, entry_ids=not prefix and str(key) in CONFIG_NAMED_SECTIONS))
     elif isinstance(node, list):
         for index, value in enumerate(node):
             found.update(permission_surface(value, f"{prefix}[{index}]"))
@@ -135,12 +152,14 @@ def permission_delta(before: dict[str, Any], after: dict[str, Any]) -> list[str]
 
 
 # Where the schema puts a grant, and nowhere else. `permission_surface` above is
-# deliberately name-driven at any depth, because its job is to *find* a grant
+# name-driven at every depth but one, because its job is to *find* a grant
 # wherever one got in. This is the opposite job — deciding what to *drop* — and a
-# name-driven rule there removes real description. `debuggers`, `com_ports` and
-# `can_buses` are keyed by operator-chosen entry ids, and `permissions`,
-# `provenance` and `allow_anything` are all legal ids.
-_PERMISSION_ENTRY_SECTIONS = ("debuggers", "com_ports", "can_buses")
+# name-driven rule there removes real description. Both stop at the same place
+# and for the same reason: `debuggers`, `com_ports` and `can_buses`
+# (`CONFIG_NAMED_SECTIONS`) are keyed by operator-chosen entry ids, and
+# `permissions`, `provenance` and `allow_anything` are all legal ids. One tuple
+# for both so the finder and the dropper cannot disagree about where an id level
+# is.
 # Grants that sit directly on a fixed section rather than inside a permissions
 # block: `debug.allow_all_symbols`, `artifacts.allow_upload`.
 _SECTION_GRANT_KEYS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
@@ -176,7 +195,7 @@ def description_view(node: object) -> object:
     for key, value in node.items():
         if key in _TOP_LEVEL_NON_DESCRIPTION:
             continue
-        if key in _PERMISSION_ENTRY_SECTIONS and isinstance(value, dict):
+        if key in CONFIG_NAMED_SECTIONS and isinstance(value, dict):
             view[key] = {
                 entry_id: {field: item for field, item in entry.items() if field != "permissions"} if isinstance(entry, dict) else entry
                 for entry_id, entry in value.items()

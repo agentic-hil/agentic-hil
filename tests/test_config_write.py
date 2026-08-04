@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,55 @@ def test_the_description_grant_alone_opens_the_description_and_nothing_else(tmp_
     finally:
         tools.close()
     assert document_of(path)["permissions"][CONFIG_PERMISSIONS_RIGHT] is False
+
+
+def test_a_reserved_looking_entry_id_is_writable_on_the_description_grant_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented split, checked on the ids that look like the other half.
+
+    `permissions`, `provenance` and `allow_anything` are legal debugger, COM and
+    CAN entry ids, and the permission surface read every one of them as a grant:
+    changing `debuggers.permissions.probe_id` produced a permission delta named
+    after the entry, so `project_config_describe` offered the key as
+    description-writable and `project_config_set` then demanded
+    `allow_config_permissions_write` for it. The entry was unusable under the
+    split the tool documents.
+
+    End to end rather than through the projection, because the projection was
+    already right and the write was not."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["debuggers"] = {"permissions": document["debuggers"]["dut"]}
+    document["com_ports"] = {"provenance": document["com_ports"]["dut_uart"]}
+    document["can_buses"] = {"allow_anything": document["can_buses"]["body"]}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+        keys = {"debuggers.permissions.probe_id": "AAA0001", "com_ports.provenance.baudrate": 9600, "can_buses.allow_anything.channel": "PCAN_USBBUS2"}
+        # Each is offered on the description grant, which is the promise the write
+        # then has to keep.
+        offered = {entry["key"]: entry["right"] for entry in described["writable_keys"]}
+        assert {key: offered.get(key) for key in keys} == dict.fromkeys(keys, CONFIG_DESCRIPTION_RIGHT)
+
+        applied = tools.call(PROJECT_CONFIG_SET, changes(*keys.items()))
+        assert applied["ok"] is True, applied
+    finally:
+        tools.close()
+
+    after = document_of(path)
+    assert after["debuggers"]["permissions"]["probe_id"] == "AAA0001"
+    assert after["com_ports"]["provenance"]["baudrate"] == 9600
+    assert after["can_buses"]["allow_anything"]["channel"] == "PCAN_USBBUS2"
+    # The entries' own grants are untouched, and still need the other right.
+    assert after["debuggers"]["permissions"]["permissions"] == document["debuggers"]["permissions"]["permissions"]
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.permissions.permissions.allow_flash", True)))
+    finally:
+        tools.close()
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
 
 
 def test_the_permissions_grant_alone_opens_the_permissions_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,6 +365,44 @@ def test_the_document_comparison_sees_a_permission_wherever_it_sits() -> None:
     assert description_view(reserved) == {"debuggers": {"permissions": {"probe_id": "AAA", "type": "stlink"}}}
     repointed = {"debuggers": {"permissions": {"probe_id": "BBB", "type": "stlink", "permissions": {"allow_flash": False}}}}
     assert description_view(reserved) != description_view(repointed), "a repointed entry is visible whatever it is named"
+
+
+def test_an_entry_id_that_looks_like_a_grant_is_read_as_the_id_it_is() -> None:
+    """The one level where this walk has to know the schema.
+
+    Directly under `debuggers`, `com_ports` and `can_buses` the keys are not
+    field names — they are entry ids the operator chose, and `permissions`,
+    `provenance` and `allow_anything` are all legal ones. Reading them as grant
+    names made every field of such an entry a permission: repointing
+    `debuggers.permissions` at another board produced the delta
+    `debuggers.permissions.probe_id` and demanded
+    `allow_config_permissions_write`, while `project_config_describe` went on
+    offering the same key as description-writable. The entry's real grants sit one
+    level further down, where the schema puts them, and are still found there."""
+    named = {
+        "debuggers": {
+            "permissions": {"probe_id": "AAA", "type": "stlink", "permissions": {"allow_flash": False}},
+            "allow_anything": {"probe_id": "BBB", "type": "stlink", "permissions": {"allow_flash": False}},
+        }
+    }
+
+    assert permission_surface(named) == {
+        "debuggers.permissions.permissions.allow_flash": False,
+        "debuggers.allow_anything.permissions.allow_flash": False,
+    }
+    repointed = deepcopy(named)
+    repointed["debuggers"]["permissions"]["probe_id"] = "CCC"
+    repointed["debuggers"]["allow_anything"]["probe_id"] = "DDD"
+    assert permission_delta(permission_surface(named), permission_surface(repointed)) == []
+    # And the entries' own grants are still grants, at the depth the schema uses.
+    widened = deepcopy(named)
+    widened["debuggers"]["allow_anything"]["permissions"]["allow_flash"] = True
+    assert permission_delta(permission_surface(named), permission_surface(widened)) == ["debuggers.allow_anything.permissions.allow_flash"]
+    # An entry is a mapping in every one of these sections, so a *scalar* under an
+    # id level is not an entry that happens to be called `allow_flash`. That is
+    # the shape this walk exists to catch, and narrowing the rule to entry ids
+    # must not stop it catching it.
+    assert permission_surface({"debuggers": {"allow_flash": True}}) == {"debuggers.allow_flash": True}
 
 
 def test_a_new_device_an_agent_adds_arrives_granted_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

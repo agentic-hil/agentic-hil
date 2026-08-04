@@ -66,8 +66,11 @@ from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig
 from agentic_hil.windows_principals import (
     JOIN_STATE_DOMAIN,
+    JOIN_STATE_ENTRA,
     JOIN_STATE_UNKNOWN,
     JOIN_STATE_WORKGROUP,
+    PRINCIPAL_CLASS_ENTRA,
+    PRINCIPAL_CLASS_LOGON_SESSION,
     PRINCIPAL_CLASS_UNRESOLVED,
     PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
 )
@@ -240,11 +243,20 @@ WINDOWS_TRUST_TABLE = [
     # it means refusing the documented default state_root. Reported under
     # `standard`.
     ("unresolved_principal", {"strict"}),
-    # The same return value on a domain member, where it also means "the domain
-    # did not answer". A live account, or one reachable only through SID history,
-    # arrives looking exactly like the orphan above, so it is the ignorance case
-    # and refuses under the default.
+    # The same return value where it establishes nothing: on a domain or Entra
+    # member, where it also means "the directory did not answer", and on any
+    # machine for a SID whose form has no account name to be missing. A live
+    # account, or one reachable only through SID history, arrives looking exactly
+    # like the orphan above, so it is the ignorance case and refuses under the
+    # default.
     ("unresolved_foreign_principal", {"standard", "strict"}),
+    # A logon session SID names one live session and rides in its tokens. It has
+    # no account name at all, so the tolerated class was reachable by *being* one
+    # — the same ERROR_NONE_MAPPED, the opposite meaning.
+    ("logon_session_principal", {"standard", "strict"}),
+    # An Entra principal belongs to a directory this machine did not ask, so a
+    # lookup that declined to name it settles nothing about whether it is live.
+    ("entra_principal", {"standard", "strict"}),
     # The authority could not be asked at all. Not the same claim as the rows
     # above and deliberately not tolerated with them: the holder might be a live
     # account, and a class reachable by breaking the lookup is a class that lets
@@ -321,6 +333,9 @@ def test_a_tolerated_finding_is_returned_rather_than_discarded(monkeypatch: pyte
     assert [entry["finding"] for entry in findings] == ["unresolved_principal", "app_package_principal"]
 
 
+ORPHAN_ACCOUNT_SID = "S-1-5-21-923859167-1023467973-1024582151-2273314122"
+
+
 @pytest.mark.parametrize(
     ("join_state", "expected"),
     [
@@ -333,6 +348,10 @@ def test_a_tolerated_finding_is_returned_rather_than_discarded(monkeypatch: pyte
         # when that question is not answered. A live account, or one reachable
         # only through SID history, is indistinguishable from an orphan here.
         (JOIN_STATE_DOMAIN, PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+        # An Entra tenant is an authority too, and NetGetJoinInformation does not
+        # know about it — it answers "workgroup" for such a machine, which is why
+        # the join state is asked twice.
+        (JOIN_STATE_ENTRA, PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
         # And not knowing where the question went is not a reason to believe the
         # answer.
         (JOIN_STATE_UNKNOWN, PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
@@ -345,12 +364,98 @@ def test_none_mapped_is_only_evidence_where_nothing_else_was_asked(join_state: s
     SID" everywhere, which made a tolerated class reachable on a domain member by
     a trust that simply did not answer — a live foreign SID passing the default
     gate while holding write on a replaceable path. The machine's join state is a
-    local read (`NetGetJoinInformation`), so it establishes which meaning applies
-    without depending on the lookup that is in question."""
+    local read (`NetGetJoinInformation` plus `NetGetAadJoinInformation`), so it
+    establishes which meaning applies without depending on the lookup that is in
+    question."""
     monkeypatch.setattr(windows_principals, "_join_state", join_state)
 
-    assert windows_principals._none_mapped_class() == expected
+    assert windows_principals._none_mapped_class(ORPHAN_ACCOUNT_SID) == expected
     assert windows_principals.none_mapped_is_conclusive() is (join_state == JOIN_STATE_WORKGROUP)
+
+
+@pytest.mark.parametrize(
+    ("sid", "expected"),
+    [
+        # The measured case the tolerated class exists for: an account SID from
+        # some other machine's SAM, left on %LOCALAPPDATA% by the installation
+        # image. Four sub-authorities under S-1-5-21, an account somewhere.
+        (ORPHAN_ACCOUNT_SID, PRINCIPAL_CLASS_UNRESOLVED),
+        # A logon session SID. Microsoft documents LookupAccountSid as returning
+        # ERROR_NONE_MAPPED for it — it has no account name to return — while
+        # S-1-5-5-X-Y identifies a live logon session and is carried in that
+        # session's access tokens. Reading the join state alone tolerated it: an
+        # ACE for another session's logon SID passed `standard` on a workgroup
+        # machine while the holder was logged on at that moment.
+        ("S-1-5-5-0-1234567", PRINCIPAL_CLASS_LOGON_SESSION),
+        ("s-1-5-5-0-99", PRINCIPAL_CLASS_LOGON_SESSION),
+        # An Entra ID principal. Classic join state says nothing about it, and
+        # the directory that could name it was not asked.
+        ("S-1-12-1-1234567890-1234567890-1234567890-1234567890", PRINCIPAL_CLASS_ENTRA),
+        # Everything else nameless falls to the ignorance class rather than
+        # inheriting the tolerated one. A tolerated class must be reached by
+        # matching what it describes, never by failing to match anything.
+        ("S-1-5-80-3880718306-3832830129-1677859214-2598158968-1052248003", PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+        ("S-1-5-21-1-2-3", PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+        ("S-1-5-21-1-2-3-4-5", PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+        ("S-1-18-1", PRINCIPAL_CLASS_UNRESOLVED_FOREIGN),
+    ],
+)
+def test_a_nameless_sid_is_tolerated_only_when_its_form_says_it_can_be(sid: str, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"No account name" and "nothing here can carry it" are not the same claim.
+
+    A workgroup machine's SAM being the only authority asked is necessary for
+    ERROR_NONE_MAPPED to be a clean bill, and it was being treated as sufficient.
+    Several SID forms have no account name *by construction* and answer with the
+    same code while naming something an access token carries right now. So the
+    tolerance is granted positively — to the one form the answer can be about —
+    and every other form keeps the verdict it would have had on a domain member.
+    """
+    monkeypatch.setattr(windows_principals, "_join_state", JOIN_STATE_WORKGROUP)
+
+    assert windows_principals._none_mapped_class(sid) == expected
+
+
+def test_an_entra_joined_machine_is_not_read_as_having_nowhere_to_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NetGetJoinInformation calls an Entra-joined machine a workgroup member.
+
+    That API describes the classic NT domain relationship and predates Entra, so
+    a machine with a whole cloud directory behind its identities answers
+    NetSetupWorkgroupName. Taking that at face value is how "the local SAM is the
+    only thing asked" became false without anything in the answer changing.
+
+    The second read is also only made in the case where it can change anything: a
+    domain member is already not tolerating none-mapped, so there is nothing for
+    an Entra answer to add.
+    """
+    asked: list[str] = []
+
+    def entra_joined() -> bool:
+        asked.append("entra")
+        return True
+
+    assert windows_principals.join_state_for(3, entra_joined) == JOIN_STATE_DOMAIN
+    assert windows_principals.join_state_for(0, entra_joined) == JOIN_STATE_UNKNOWN
+    assert asked == []
+    assert windows_principals.join_state_for(2, entra_joined) == JOIN_STATE_ENTRA
+    assert windows_principals.join_state_for(2, lambda: False) == JOIN_STATE_WORKGROUP
+    assert asked == ["entra"]
+
+    monkeypatch.setattr(windows_principals, "_join_state", JOIN_STATE_ENTRA)
+    assert windows_principals.none_mapped_is_conclusive() is False
+    assert windows_principals._none_mapped_class(ORPHAN_ACCOUNT_SID) == PRINCIPAL_CLASS_UNRESOLVED_FOREIGN
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows join APIs")
+def test_the_entra_join_read_answers_this_machine_without_raising() -> None:
+    """Against the real netapi32, not a stand-in.
+
+    The point of the call is that it fails soft: a machine where
+    NetGetAadJoinInformation is unavailable, or answers an error because nothing
+    is joined, must get a bool and not an exception on a path that runs inside
+    every ACL classification.
+    """
+    assert isinstance(windows_principals._entra_joined(), bool)
+    assert windows_principals._query_join_state() in {JOIN_STATE_WORKGROUP, JOIN_STATE_DOMAIN, JOIN_STATE_ENTRA, JOIN_STATE_UNKNOWN}
 
 
 def test_a_refused_windows_path_names_the_holder_and_the_active_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
