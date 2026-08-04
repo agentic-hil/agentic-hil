@@ -73,7 +73,11 @@ SKIPPED_DIRECTORIES = frozenset(
 )
 # Generated output and local agent state, by path rather than by name so that
 # ".claude-plugin" — which is content — is not caught with ".claude".
-SKIPPED_PATHS = frozenset({".agentic-hil", ".claude", "evals/install/artifacts"})
+# ".agentic-loop" holds review documents and agent transcripts from
+# tools/agent_review_loop.py. A transcript quotes whatever the agents discussed,
+# so one that mentions a version is reporting a conversation, not tracking the
+# release -- and running the loop in this tree used to fail this gate.
+SKIPPED_PATHS = frozenset({".agentic-hil", ".agentic-loop", ".claude", "evals/install/artifacts"})
 SKIPPED_NAMES = frozenset({"package-lock.json", "uv.lock", "poetry.lock"})
 SKIPPED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico", ".whl", ".gz", ".zip"})
 MAX_SWEPT_BYTES = 4_000_000
