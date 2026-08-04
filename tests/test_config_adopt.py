@@ -28,6 +28,7 @@ the failure mode that would make this path worse than the retyping.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -933,6 +934,11 @@ def test_a_version_one_configuration_that_grants_probing_is_carried_in(tmp_path:
     """The grant is consulted, not required: an open version 1 file works."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, config_version=None, permissions={"allow_probe": True}, **{CONFIG_DESCRIPTION_RIGHT: True})
     attached(monkeypatch)
+    # A placeholder names no executable, so granting hardware access makes the
+    # startup resolve one off PATH. Without this the test asserts that a
+    # debugger happens to be installed on the machine running it: it passed on a
+    # bench that has OpenOCD and failed on every CI runner that does not.
+    monkeypatch.setattr(shutil, "which", lambda _name: str(FAKE_STLINK))
     tools = service(workspace)
     try:
         applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
