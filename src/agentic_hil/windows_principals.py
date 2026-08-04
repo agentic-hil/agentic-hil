@@ -39,6 +39,26 @@ from agentic_hil.types import JsonObject
 CAPABILITY_SID_PREFIX = "S-1-15-3-"
 PACKAGE_SID_PREFIX = "S-1-15-2-"
 
+# What a principal is, which is what decides whether holding a right on a path is
+# a reason to refuse it. Measured on Windows 11 26200, see PLATFORM_PATHS.
+#
+# ``account``    a SID the local security authority resolves to a real account or
+#                group. Somebody can log on as it, or be a member of it, and
+#                therefore actually exercise the right.
+# ``app_package``an application-package or app-capability identity
+#                (``S-1-15-2-*`` / ``S-1-15-3-*``). It is a facet of software this
+#                user installed and it runs in an AppContainer, i.e. with a
+#                *subset* of the user's own rights. Any ordinary unpackaged
+#                process of the same user already has full access to everything
+#                the user owns, so such an ACE grants no reach that was not
+#                already there.
+# ``unresolved`` a SID no authority on this machine can name. No token built here
+#                carries it. It is normally residue of software that wrote an ACE
+#                with a SID from another machine's image.
+PRINCIPAL_CLASS_ACCOUNT = "account"
+PRINCIPAL_CLASS_APP_PACKAGE = "app_package"
+PRINCIPAL_CLASS_UNRESOLVED = "unresolved"
+
 _CAP_AUTHZ_APPLICATIONS = r"SOFTWARE\Microsoft\SecurityManager\CapAuthz\ApplicationsEx"
 _APPCONTAINER_MAPPINGS = r"Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings"
 
@@ -65,12 +85,33 @@ def package_sid_for_capability(sid: str) -> str | None:
     return PACKAGE_SID_PREFIX + sid[len(CAPABILITY_SID_PREFIX) :]
 
 
+def principal_class(sid: str) -> str:
+    """Which of the three kinds of principal this SID is. Never raises.
+
+    Structure decides first, because an application-package identity is
+    recognisable from the SID alone and needs no lookup. Everything else depends
+    on whether the local security authority can name an account for it; a lookup
+    that fails, for any reason including a broken lookup, reports ignorance
+    rather than inventing a holder.
+    """
+    if not sid:
+        return PRINCIPAL_CLASS_UNRESOLVED
+    if sid.startswith(CAPABILITY_SID_PREFIX) or sid.startswith(PACKAGE_SID_PREFIX):
+        return PRINCIPAL_CLASS_APP_PACKAGE
+    if not _on_windows():
+        return PRINCIPAL_CLASS_UNRESOLVED
+    try:
+        return PRINCIPAL_CLASS_ACCOUNT if _account_name(sid) else PRINCIPAL_CLASS_UNRESOLVED
+    except Exception:
+        return PRINCIPAL_CLASS_UNRESOLVED
+
+
 def describe_principal(sid: str) -> JsonObject:
     """What is known about one SID: always its ``sid``, more when it resolves.
 
-    Adds ``account`` for a SID the local security authority can name, and for an
-    app-capability SID ``package``, ``package_family``, ``display_name`` and
-    ``package_sid`` when the registry answers. Never raises.
+    Adds ``principal_class``, ``account`` for a SID the local security authority
+    can name, and for an app-capability SID ``package``, ``package_family``,
+    ``display_name`` and ``package_sid`` when the registry answers. Never raises.
     """
     described: JsonObject = {"sid": sid}
     if not sid or not _on_windows():
@@ -89,6 +130,13 @@ def _resolve_into(sid: str, described: JsonObject) -> None:
     if account:
         described["account"] = account
     package_sid = package_sid_for_capability(sid)
+    described["principal_class"] = (
+        PRINCIPAL_CLASS_APP_PACKAGE
+        if package_sid is not None or sid.startswith(PACKAGE_SID_PREFIX)
+        else PRINCIPAL_CLASS_ACCOUNT
+        if account
+        else PRINCIPAL_CLASS_UNRESOLVED
+    )
     if package_sid is None:
         return
     described["kind"] = "app_capability"
