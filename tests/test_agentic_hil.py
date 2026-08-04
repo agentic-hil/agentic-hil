@@ -1763,8 +1763,9 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
     # Underscored identifiers in backticks are tool names; these are the import
-    # name, two error types, and two result fields any tool can carry.
-    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found", "config_status", "config_stale"}
+    # name, the error types the skill names, and the result fields any tool can
+    # carry. The list grows with every documented field: hardci-hq#90.
+    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found", "device_busy", "hardware_mismatch", "config_status", "config_stale"}
 
     referenced = {
         token
@@ -2749,8 +2750,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 35
-    assert len(set(MCP_TOOL_NAMES)) == 35
+    assert len(MCP_TOOL_NAMES) == 36
+    assert len(set(MCP_TOOL_NAMES)) == 36
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a

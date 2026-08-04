@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentic_hil.adopt import PROJECT_CONFIG_ADOPT
 from agentic_hil.config import (
     load_authoritative_config,
     project_config_path,
@@ -287,6 +288,7 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
     it takes named keys with scalar values — never a document, never a path.
     """
     assert sorted(name for name in MCP_TOOL_NAMES if "config" in name) == [
+        PROJECT_CONFIG_ADOPT,
         PROJECT_CONFIG_CREATE,
         PROJECT_CONFIG_DESCRIBE,
         PROJECT_CONFIG_SET,
@@ -300,6 +302,15 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
     # No object and no array: a subtree is content the agent authored, and a
     # subtree can carry a permissions: block inside it.
     assert set(change["properties"]["value"]["type"]) == {"string", "number", "integer", "boolean", "null"}
+    # The adoption path selects and never supplies: one boolean deciding whether
+    # to write, and three names choosing which probe and which entries this is
+    # about. Nothing here could put a caller's own value into the file.
+    adopt = TOOL_SCHEMAS[PROJECT_CONFIG_ADOPT]
+    assert sorted(adopt["properties"]) == ["apply", "com_port_id", "debugger_id", "probe_id"]
+    assert adopt["additionalProperties"] is False
+    assert adopt.get("required") is None
+    assert adopt["properties"]["apply"]["type"] == "boolean"
+    assert all(adopt["properties"][name]["type"] == "string" for name in ("com_port_id", "debugger_id", "probe_id"))
 
 
 def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

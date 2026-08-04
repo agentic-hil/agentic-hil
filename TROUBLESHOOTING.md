@@ -117,6 +117,28 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 `doctor` distinguishes three answers, and only one is a failure: `unsupported` means the backend enumerated its target types and this one is absent; `undetermined` means this host could not answer at all — no toolchain, or the enumeration failed — and stays green with `undetermined_reason` saying why. Full detail: `agentic-hil://reference/target-support`.
 
+## 5b. The board was plugged in after `setup` ran
+
+Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
+
+Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the deny-by-default skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments.
+
+Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since.
+
+```bash
+agentic-hil adopt-hardware --dry-run   # what it would fill in
+agentic-hil adopt-hardware
+agentic-hil doctor
+```
+
+It fills in the probe serial, the backend's executable, the detected controller and the COM device the probe exposes — only where the file has nothing there. A key that already holds a value comes back under `kept` with what the hardware says beside it, never overwritten, and no permission is touched. With more than one probe attached it refuses and lists the serials; name one with `--probe-id`. With more than one debugger or COM port configured, `--debugger` and `--com-port` say which entry this is about.
+
+Three things it will not do. `debuggers.<name>.type` decides which program drives the board, so a discovered ST-Link toolchain is not written into an entry whose type is `openocd`; the result says so and names the entry — that one line is the only edit the workflow above can need, and it is the one field that is not a board's identity. A `com_ports` entry it creates arrives with every permission `false` — writing to a port stays yours to grant. And an entry that already names a probe is never repointed at a different attached one: that answers `hardware_mismatch` and writes nothing, because the controller, the COM device and the toolchain path all describe the attached board and carrying them beside another board's serial would give you a configuration pointing at two boards at once.
+
+It reads the probe the way every other command here reaches hardware, so `device_busy` means a board an MCP server, a `test-reactor` run or another terminal is holding: close that first rather than retrying. `resource_quarantined` means this bench has unresolved cleanup — `agentic-hil recover`, once you know the bench is in a safe state.
+
+An agent does the same over MCP with `project_config_adopt_hardware`, which needs `permissions.allow_config_description_write`. Without it the call is refused and still returns the exact keys and values, so what you get is one command to run rather than a serial to transcribe.
+
 ## 6. `adapter_not_found`
 
 Symptom: OpenOCD starts but Agentic HIL reports `error_type: "adapter_not_found"`.

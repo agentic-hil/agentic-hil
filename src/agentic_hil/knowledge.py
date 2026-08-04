@@ -1137,12 +1137,13 @@ A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's ow
 
 ## Changing it over MCP
 
-Two calls, and they are the only door. The file itself is protected by deny rules `agentic-hil setup` writes into the host, so an agent's own file tools cannot touch it — that is the precondition for this door, not a contradiction of it.
+These calls are the only door. The file itself is protected by deny rules `agentic-hil setup` writes into the host, so an agent's own file tools cannot touch it — that is the precondition for this door, not a contradiction of it.
 
 | Call | Does |
 |---|---|
 | `project_config_describe` | answers, for **this** configuration in **this** state, which keys you may change right now, which you may not, and which grant would open a locked one. Needs no permission; reading is free. |
 | `project_config_set` | sets named keys, field-wise, after checking each value against the schema. |
+| `project_config_adopt_hardware` | reads the attached probe and fills in the identity keys that are still unset, through `project_config_set`. Supplies no value of its own. |
 | `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. Contributes no permission value: the grants on disk are carried over unchanged. |
 
 ### The two rights
@@ -1189,11 +1190,35 @@ The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, 
 
 A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.
 
+## A board plugged in after this file was written
+
+`agentic-hil setup` discovers hardware once. Run with nothing attached, it writes placeholders — `probe_id: null`, `executable: null`, `controller: "unknown-controller"`, no `com_ports` entry — and that is the common case, because installing the tool and connecting the board are two separate moments.
+
+`project_config_adopt_hardware` is the way back in. It reads what is attached and fills in what the file has nothing for.
+
+```json
+{{"name": "project_config_adopt_hardware", "arguments": {{"apply": true}}}}
+```
+
+| Property | Rule |
+|---|---|
+| what it carries | `debuggers.<name>.probe_id`, `debuggers.<name>.executable`, `target.controller`, `com_ports.<name>.device`. Identity, and only identity — what an attached probe hands you. |
+| where the values come from | hardware discovery on this machine. The arguments *select* (`probe_id`, `debugger_id`, `com_port_id`) and never supply, so nothing of yours can reach the file through it. |
+| what counts as unset | absent, `null`, empty, or exactly the placeholder the shipped skeleton writes. Anything else is a value somebody chose: it comes back under `kept`, with what the hardware says beside it, and is not replaced. |
+| what it writes through | `project_config_set`, so the same grants, the same schema check, the same validate-before-replace, the same `provenance` record. Without `apply` it writes nothing at all. |
+| permissions | it cannot name one. `permissions_changed` in the result is the file's own before/after answer, not a claim. |
+| more than one probe attached | `ambiguous_hardware`, listing every attached serial. Name one as `probe_id`. It never chooses a board. |
+| nothing attached, or no port carrying the probe's serial | said as such, with the host's serial ports listed, rather than guessed. |
+| a probe already named, and a different one attached | `hardware_mismatch`, and nothing is planned. The keys describe one board between them, so carrying only the unset ones would leave a `probe_id` naming one Nucleo beside another's controller and COM port. |
+| the board is busy | reading a probe takes the same machine-wide lock every hardware call takes, so a board another server, run or terminal is holding answers `device_busy` and nothing is read. |
+| version 1 configurations | reading a probe there still needs `allow_probe` on the entry, and this is a probe read: `permission_denied` if it is false, exactly as `probe_target` answers. |
+| refused | `permission_denied` on `{CONFIG_DESCRIPTION_RIGHT}` still returns the plan. Report the keys and values it names and let the operator run `agentic-hil adopt-hardware`. |
+
 ## Getting from "board attached" to a valid change
 
 1. `project_config_describe` — what may this caller change right now.
-2. `debugger_probes_list` / `com_ports_list` — what is actually attached.
-3. `project_config_set` — enter it.
+2. `project_config_adopt_hardware` — what is attached, and which keys it would fill in. Nothing is written yet.
+3. The same call with `{{"apply": true}}`, or `project_config_set` for a key it left alone.
 4. The server keeps serving the configuration it loaded at startup; the result says `reload_required`. Ask the operator to restart the MCP server before relying on the change.
 """
 

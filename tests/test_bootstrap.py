@@ -82,6 +82,80 @@ def test_target_not_detected_is_clean_bootstrap_failure(monkeypatch: pytest.Monk
     assert result["hardware_state"] == "unchanged"
 
 
+def _fixed_stlink(monkeypatch: pytest.MonkeyPatch, listing: str, *, commands: list[list[str]] | None = None) -> None:
+    """The real discovery path with only the two ST-Link processes replaced.
+
+    Everything selection does — folding, refusing, choosing the enumerated
+    spelling — runs for real; a test that mocked `discover_attached_hardware`
+    itself would be testing its own forwarding."""
+    responses = iter(
+        [
+            CompletedCommand(listing, "", 0, False, False),
+            CompletedCommand("ST-LINK SN : IGNORED\nDevice name : STM32F446RE\n", "", 0, False, False),
+        ]
+    )
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        if commands is not None:
+            commands.append(command)
+        return next(responses)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr("agentic_hil.bootstrap.list_available_com_ports", lambda tool: {"ok": True, "ports": []})
+
+
+def test_a_requested_probe_is_matched_by_hardware_identity_not_by_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`abcdef` selects the probe enumerated as `ABCDEF`.
+
+    A probe serial is an opaque hardware id, and every device lock key in this
+    repository folds it for that reason: one ST-Link is `0669FF…` to
+    STM32CubeProgrammer and `0669ff…` to udev. Exact string membership answered
+    `adapter_not_found` — "plug the board in" — for a board that is plugged in.
+    The enumerated spelling is what goes on to the toolchain and into the file."""
+    commands: list[list[str]] = []
+    _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\nST-LINK SN : 066AFF495451\n", commands=commands)
+
+    result = discover_attached_hardware(probe_id="0669ff303430")
+
+    assert result["ok"] is True, result
+    assert result["probe_id"] == "0669FF303430"
+    assert commands[1][-1] == "sn=0669FF303430"
+
+
+def test_a_serial_that_is_not_attached_is_still_refused_naming_the_ones_that_are(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Folding selects among what is attached; it never adds to it."""
+    _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\n")
+
+    result = discover_attached_hardware(probe_id="066AFF495451")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["requested_probe_id"] == "066AFF495451"
+    assert [entry["probe_id"] for entry in result["probes"]] == ["0669FF303430"]
+
+
+def test_nothing_reaches_the_board_when_before_connect_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hook runs after enumeration and before anything is said to one probe.
+
+    That is where a caller takes the machine-wide lock on the probe it is about
+    to talk to, so the HOTPLUG connect must not have happened when it refuses."""
+    commands: list[list[str]] = []
+    _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\n", commands=commands)
+    seen: list[str] = []
+
+    def refuse(probe_id: str) -> dict:
+        seen.append(probe_id)
+        return {"ok": False, "error_type": "device_busy", "summary": "held elsewhere"}
+
+    result = discover_attached_hardware(before_connect=refuse)
+
+    assert result == {"ok": False, "error_type": "device_busy", "summary": "held elsewhere"}
+    assert seen == ["0669FF303430"], "the hook is given the enumerated spelling"
+    assert len(commands) == 1, "only the enumeration ran"
+    assert commands[0][-3:] == ["-q", "-l", "st-link-only"]
+
+
 def test_discovery_applies_project_requirements() -> None:
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     profile = {
