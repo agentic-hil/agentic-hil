@@ -180,6 +180,28 @@ MCP_TOOLS: list[JsonObject] = [
             required=["changes"],
         ),
     },
+    # Arguments select, never supply. Which of several attached probes, which
+    # configured entry receives it — and nothing that could put a value of the
+    # caller's choosing into the file. The values come from what is attached to
+    # this machine, exactly as project_config_create's do.
+    {
+        "name": "project_config_adopt_hardware",
+        "description": (
+            "Read the attached probe and carry its identity into this project's configuration: probe id, the backend's "
+            "executable, the detected controller, and the probe's own COM device. Use this when a configuration was "
+            "written before the board was plugged in and holds placeholders, instead of printing values for a person to "
+            "retype. Returns the plan by default and writes only with apply:true, through project_config_set and its "
+            "permissions. A key that already holds a value nobody generated is reported, never overwritten."
+        ),
+        "inputSchema": object_schema(
+            {
+                "apply": {"type": "boolean", "default": False, "description": "Write the plan. Without it the call reads hardware and the configuration and changes nothing."},
+                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Only needed when more than one is attached; it selects among them and never adds one."},
+                "debugger_id": {**NONEMPTY_STRING, "description": "Which configured debugger entry receives the values. Only needed when the configuration declares more than one."},
+                "com_port_id": {**NONEMPTY_STRING, "description": "Which com_ports entry receives the discovered device. Created with every permission false if it does not exist."},
+            }
+        ),
+    },
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

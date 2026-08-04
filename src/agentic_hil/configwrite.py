@@ -71,12 +71,26 @@ from agentic_hil.types import AgenticHILConfig, JsonObject
 PROJECT_CONFIG_SET = "project_config_set"
 PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 
+# Who is changing the file, in `provenance`'s own two words. Not a decoration:
+# the description grant exists to gate *the agent*, and a person at the CLI is
+# the one that grant belongs to — `agentic-hil init` consults no permission
+# either, and `init --force` rewrites the whole file including every grant in it.
+# So the actor decides whether the description grant is consulted, and it is
+# recorded so the file says which of the two moved it.
+#
+# The permissions half is waived for nobody. The before/after comparison further
+# down reads the document rather than the request and refuses a permission that
+# moved without `allow_config_permissions_write`, whoever asked.
+ACTOR_AGENT = "agent"
+ACTOR_HUMAN = "human"
+ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
+
 # One comment line, rewritten rather than appended, so a file changed a hundred
 # times does not grow a hundred lines of banner. It sits in the header because
 # the header is what a person reads first, and a generated header states that
 # every permission below is false — true when it was written, and something a
 # later reader must not go on believing without being told the file has moved.
-CHANGE_MARKER_PREFIX = "# Changed by an agent through mcp:"
+CHANGE_MARKER_PREFIX = "# Changed by "
 NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 
@@ -147,7 +161,7 @@ def deny_all_permissions(section: str) -> JsonObject:
 # The document on disk.
 
 
-def _authoritative_path(workspace: Path, existing: AgenticHILConfig) -> Path:
+def authoritative_write_target(workspace: Path, existing: AgenticHILConfig) -> Path:
     """The file this call may touch, or a refusal.
 
     Two rules have to agree: this workspace's authoritative location, and the
@@ -168,7 +182,7 @@ def _authoritative_path(workspace: Path, existing: AgenticHILConfig) -> Path:
     return target
 
 
-def _load_document(target_path: Path) -> tuple[str, JsonObject]:
+def load_config_document(target_path: Path) -> tuple[str, JsonObject]:
     text = secure_optional_read_text(target_path)
     if text is None:
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"path": str(target_path)})
@@ -196,18 +210,21 @@ def _header(text: str) -> str:
     return "".join(kept)
 
 
-def _marked_header(text: str, timestamp: str) -> str:
+def _marked_header(text: str, timestamp: str, actor: str, via: str) -> str:
     """The header, with exactly one line saying the file has been changed since.
 
     One line, and it replaces the previous one rather than following it — a file
     changed a hundred times must not grow a hundred banners. It matters because a
     generated header states that every permission below is false, which was true
     when it was written and is the kind of thing a later reader keeps believing
-    unless something in front of them says the file has moved."""
+    unless something in front of them says the file has moved. It names the actor
+    because "an agent changed this" and "you changed this" are different things to
+    read at the top of a policy file."""
     header = _header(text)
     if header and not header.endswith("\n"):  # pragma: no cover - splitlines(keepends) preserves the newline
         header += "\n"
-    return f"{header}{CHANGE_MARKER_PREFIX}{PROJECT_CONFIG_SET} at {timestamp}; `provenance` below records what moved.\n"
+    phrase = ACTOR_PHRASES.get(actor, actor)
+    return f"{header}{CHANGE_MARKER_PREFIX}{phrase} through {via} at {timestamp}; `provenance` below records what moved.\n"
 
 
 def _utc_now() -> str:
@@ -278,10 +295,17 @@ def project_config_set(
     changes: object,
     *,
     open_holds: JsonObject | None = None,
+    actor: str = ACTOR_AGENT,
+    via: str = f"mcp:{PROJECT_CONFIG_SET}",
 ) -> JsonObject:
-    """Set named configuration keys, or refuse and change nothing."""
+    """Set named configuration keys, or refuse and change nothing.
+
+    ``actor`` and ``via`` say who is asking and through what, and both end up in
+    ``provenance``. ``ACTOR_HUMAN`` is a person at the CLI, which is the
+    authority ``agentic-hil init`` already runs under; it waives the description
+    grant and nothing else."""
     try:
-        return _project_config_set(workspace, existing, changes, open_holds=open_holds)
+        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via)
     except ConfigError as error:
         return {"tool": PROJECT_CONFIG_SET, **error.to_dict(), **NOT_STARTED}
 
@@ -290,7 +314,7 @@ def _invalid(field: str, summary: str, **extra: object) -> JsonObject:
     return {"ok": False, "tool": PROJECT_CONFIG_SET, "error_type": "invalid_argument", "field": field, "summary": summary, "reference": CONFIG_SHAPE_URI, **extra, **NOT_STARTED}
 
 
-def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, changes: object, *, open_holds: JsonObject | None) -> JsonObject:
+def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, changes: object, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
     if open_holds:
@@ -299,10 +323,14 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
     if isinstance(requested, dict):
         return requested
 
-    target_path = _authoritative_path(workspace, existing)
+    target_path = authoritative_write_target(workspace, existing)
     with secure_user_file_lock(target_path):
-        previous_text, document = _load_document(target_path)
+        previous_text, document = load_config_document(target_path)
         rights = granted_rights(existing, document)
+        # An operator at the CLI is the person the description grant belongs to,
+        # so it is not consulted for them; the permissions grant is consulted for
+        # everybody, and layer 3 below enforces that from the document itself.
+        rights = {**rights, CONFIG_DESCRIPTION_RIGHT: rights[CONFIG_DESCRIPTION_RIGHT] or actor == ACTOR_HUMAN}
 
         # 1. The key model. A permissions key never resolves to the description
         #    grant, so this alone already separates the two halves.
@@ -346,8 +374,8 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
             return _permission_denied(PROJECT_CONFIG_SET, CONFIG_DESCRIPTION_RIGHT, [item["key"] for item in applied], target_path)
 
         timestamp = _utc_now()
-        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp)
-        text = _marked_header(previous_text, timestamp) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
+        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp, actor, via)
+        text = _marked_header(previous_text, timestamp, actor, via) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
 
         # 3. Validate, then replace. write_generated_config loads the new text
         #    from a temporary file first, so a change that would not load never
@@ -503,7 +531,7 @@ def _missing_required_fields(document: JsonObject, created_entries: list[str]) -
     return sorted(missing)
 
 
-def _record_provenance(document: JsonObject, keys: list[str], timestamp: str) -> None:
+def _record_provenance(document: JsonObject, keys: list[str], timestamp: str, actor: str, via: str) -> None:
     """Record what moved, when, and through which call.
 
     ``created_by`` and ``created_at`` are left exactly as they were: they answer
@@ -515,8 +543,8 @@ def _record_provenance(document: JsonObject, keys: list[str], timestamp: str) ->
         provenance = {}
         document["provenance"] = provenance
     previous = provenance.get("modification_count")
-    provenance["last_modified_by"] = "agent"
-    provenance["last_modified_via"] = f"mcp:{PROJECT_CONFIG_SET}"
+    provenance["last_modified_by"] = actor
+    provenance["last_modified_via"] = via
     provenance["last_modified_at"] = timestamp
     provenance["last_modified_keys"] = sorted(keys)
     provenance["modification_count"] = (previous if isinstance(previous, int) and not isinstance(previous, bool) and previous >= 0 else 0) + 1
@@ -575,8 +603,8 @@ def project_config_describe(workspace: Path, existing: AgenticHILConfig | None, 
 def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None, *, open_holds: JsonObject | None) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to describe.", {"workspace_root": str(workspace)})
-    target_path = _authoritative_path(workspace, existing)
-    _, document = _load_document(target_path)
+    target_path = authoritative_write_target(workspace, existing)
+    _, document = load_config_document(target_path)
     rights = granted_rights(existing, document)
 
     writable: list[JsonObject] = []
@@ -708,11 +736,15 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
 
 
 __all__ = [
+    "ACTOR_AGENT",
+    "ACTOR_HUMAN",
     "PROJECT_CONFIG_DESCRIBE",
     "PROJECT_CONFIG_SET",
+    "authoritative_write_target",
     "deny_all_permissions",
     "description_view",
     "granted_rights",
+    "load_config_document",
     "permission_delta",
     "permission_surface",
     "project_config_describe",

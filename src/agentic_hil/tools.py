@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from agentic_hil import __version__
+from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, project_config_adopt_hardware
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bootstrap import apply_discovery_to_template, discover_attached_hardware
 from agentic_hil.can import CanBusService
@@ -340,6 +341,7 @@ class AgenticHILToolService:
             PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config),
             PROJECT_CONFIG_DESCRIBE: lambda: project_config_describe(Path(self.config.work_dir), self.config, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_SET: lambda: project_config_set(Path(self.config.work_dir), self.config, args.get("changes"), open_holds=self.open_hardware_holds()),
+            PROJECT_CONFIG_ADOPT: lambda: project_config_adopt_hardware(Path(self.config.work_dir), self.config, args, open_holds=self.open_hardware_holds()),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:

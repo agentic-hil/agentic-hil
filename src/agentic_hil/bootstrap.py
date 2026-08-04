@@ -24,12 +24,18 @@ def load_project_profile(workspace: Path) -> JsonObject | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def discover_attached_hardware(timeout_s: float = 10.0) -> JsonObject:
+def discover_attached_hardware(timeout_s: float = 10.0, *, probe_id: str | None = None) -> JsonObject:
     """Discover one attached STM32 bench before runtime policy exists.
 
     Commands are fixed here rather than supplied by project data. Discovery may
     enumerate ST-Link probes and connect in HOTPLUG mode, but cannot reset,
     halt, erase, flash, or open a serial port.
+
+    ``probe_id`` names which of several attached probes this is about. It selects
+    among what is enumerated and never adds to it: a serial that is not attached
+    is refused naming the ones that are. Without it, more than one probe is
+    ``ambiguous_hardware`` rather than a silent choice — picking one is how the
+    wrong board ends up in a configuration.
     """
     executable = find_stm32_programmer_cli()
     com_ports = list_available_com_ports("bootstrap_com_ports")
@@ -48,16 +54,26 @@ def discover_attached_hardware(timeout_s: float = 10.0) -> JsonObject:
         return _discovery_failure("probe_discovery_failed", "STM32CubeProgrammer returned an invalid probe listing.", executable=executable, com_ports=com_ports)
     if not probe_ids:
         return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports)
-    if len(probe_ids) != 1:
+    if probe_id is not None and probe_id not in probe_ids:
+        return _discovery_failure(
+            "adapter_not_found",
+            f"No attached ST-Link probe has the serial '{probe_id}'. Selection chooses among the probes that are attached; it does not add one.",
+            executable=executable,
+            requested_probe_id=probe_id,
+            probes=[{"probe_id": found} for found in probe_ids],
+            com_ports=com_ports,
+        )
+    if probe_id is None and len(probe_ids) != 1:
         return _discovery_failure(
             "ambiguous_hardware",
-            "More than one ST-Link probe is attached; setup will not choose a board.",
+            "More than one ST-Link probe is attached; discovery will not choose a board.",
             executable=executable,
-            probes=[{"probe_id": probe_id} for probe_id in probe_ids],
+            probes=[{"probe_id": found} for found in probe_ids],
+            next_step="Ask which board this is about and name its serial as probe_id; every attached serial is listed under `probes`.",
             com_ports=com_ports,
         )
 
-    probe_id = probe_ids[0]
+    probe_id = probe_id or probe_ids[0]
     probed = spawn_command(
         [*invocation(executable), "-q", "-c", "port=SWD", "mode=HOTPLUG", f"sn={probe_id}"],
         cwd,

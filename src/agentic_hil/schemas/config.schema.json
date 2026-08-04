@@ -132,11 +132,11 @@
             "agent",
             "human"
           ],
-          "description": "Who made the most recent field-wise change. Written by project_config_set; a person editing this file by hand leaves it as it was, which is itself the signal that the recorded change is not the newest one."
+          "description": "Who made the most recent field-wise change. Written by project_config_set: \"agent\" when the change came over MCP, \"human\" when a person ran a command such as agentic-hil adopt-hardware. Editing this file by hand leaves it as it was, which is itself the signal that the recorded change is not the newest one."
         },
         "last_modified_via": {
           "type": "string",
-          "description": "The call that made the most recent change, e.g. mcp:project_config_set."
+          "description": "The call that made the most recent change, e.g. mcp:project_config_set or cli:adopt-hardware."
         },
         "last_modified_at": {
           "type": "string",
