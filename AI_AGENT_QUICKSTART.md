@@ -93,7 +93,7 @@ One command instead of `agent-install`, `init` and `doctor` separately. It retur
 | Also | checks that a persistent trusted executable exists to register | runs `doctor` |
 | Cwd | anywhere; needs and creates no workspace and no config | the firmware project root |
 
-Each half rolls back only its own writes; **a failing project half never removes an installed skill or MCP registration.** Where the config location is refused (a stock Windows profile rejects `%APPDATA%`; MCP resource `agentic-hil://reference/platform-paths`), `setup` returns `ok: false` with `scopes.user.ok: true` — the agent is installed and working. Fix the location `steps.config` names, run `init` alone, do not rerun `agent-install`, and do not read the refusal as "nothing was installed".
+Each half rolls back only its own writes; **a failing project half never removes an installed skill or MCP registration.** Where the config location is refused (`%APPDATA%` and `%LOCALAPPDATA%` are standard folders and pass; what is refused is a path some *other* named account can write — MCP resource `agentic-hil://reference/platform-paths`), `setup` returns `ok: false` with `scopes.user.ok: true` — the agent is installed and working. Fix the location `steps.config` names, run `init` alone, do not rerun `agent-install`, and do not read the refusal as "nothing was installed".
 
 `--force` on `setup` and `agent-install` repairs a managed skill or MCP entry. It never rewrites an authoritative config; only `agentic-hil init --force` does, and that is operator policy — ask first.
 

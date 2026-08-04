@@ -8,10 +8,12 @@ from pathlib import Path
 
 # Captured before any test monkeypatches HOME.
 REAL_HOME = Path(os.path.expanduser("~"))
-REAL_LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or REAL_HOME / "AppData" / "Local")
-# Windows rejects trust-boundary paths below the replaceable per-user Temp ACL,
-# so use protected Local AppData there, exactly as the sandbox fixture does.
-LAUNCHER_ROOT = (REAL_LOCAL_APPDATA if os.name == "nt" else REAL_HOME) / f"agentic-hil-pytest-launcher-{os.getpid()}"
+# The profile root on every platform. It used to divert to Local AppData on
+# Windows because the trust check refused the per-user Temp ACL; it no longer
+# does, and Local AppData was the wrong place anyway — a packaged host process
+# has its writes there redirected into its own LocalCache, so the launcher never
+# landed where the path said it did.
+LAUNCHER_ROOT = REAL_HOME / f"agentic-hil-pytest-launcher-{os.getpid()}"
 
 
 def trusted_launcher() -> Path:

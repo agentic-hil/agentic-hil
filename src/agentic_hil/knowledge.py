@@ -209,16 +209,23 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "unsafe_configured_path": ErrorRemedy(
         meaning=(
-            "A configured path, or one of its ancestor directories, can be replaced or re-permissioned by a principal "
-            "other than the current user, SYSTEM, or Administrators. The validator only reads ACLs; it never changes them."
+            "A configured path, or one of its ancestor directories, can be written, deleted or re-permissioned by a "
+            "principal outside the operator's own identity. On Windows that means an account other than the current "
+            "user, SYSTEM or Administrators that the local security authority can name; an application-package "
+            "identity, a SID nothing can resolve, and an ACL that could not be read are reported instead of refused "
+            "under the default `windows_path_trust: standard`. On POSIX it means a group- or other-writable component. "
+            "The validator only reads ACLs and modes; it never changes them."
         ),
         remediation=(
             "Move the path under {safe_user_root}, whose every ancestor passes the check on a stock profile.",
-            "Windows: %USERPROFILE% passes; %APPDATA% and %LOCALAPPDATA% do not on a profile where AppData carries an "
-            "app-capability ACE (S-1-15-3-*, FullControl) that both inherit.",
+            "Windows: %USERPROFILE%, %APPDATA% and %LOCALAPPDATA% all pass from 0.8.0 on. What still fails is a real "
+            "account other than the operator holding write, delete or WRITE_DAC somewhere on the path.",
             "On Windows the refusal carries `untrusted_principals`: the SID that holds the right, and the application "
             "package it belongs to when the SID resolves. That names who to ask, so the choice between moving the path "
             "and having the operator revoke the grant is an informed one.",
+            "`windows_path_trust: permissive` in the authoritative configuration is the visible, documented override "
+            "for an environment whose ACLs do not describe its trust boundary. It weakens the check and says so in "
+            "the file; redirecting %APPDATA% or %LOCALAPPDATA% to silence the refusal does the same thing invisibly.",
             "Re-run the command that failed. Nothing else has to change.",
             "Full rules and the measured per-directory verdicts: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
@@ -229,10 +236,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "unsafe_configured_path:user_config": ErrorRemedy(
         meaning=(
-            "The directory or file holding the authoritative configuration has an untrusted ancestor. On a Windows 11 "
-            "profile where an installed packaged application holds an app-capability ACE on AppData, the documented "
-            "default under %APPDATA% is exactly this case. On Windows the refusal names the holder in "
-            "`untrusted_principals` when the SID resolves to a package."
+            "The directory or file holding the authoritative configuration can be written or replaced by a nameable "
+            "account other than the operator. The authoritative configuration is the permission policy for hardware, "
+            "so an account that can rewrite it can grant itself flashing or mass erase. On Windows the refusal names "
+            "the holder in `untrusted_principals` when the SID resolves. The standard per-user locations %APPDATA% and "
+            "%LOCALAPPDATA% are not this case and are not refused."
         ),
         remediation=(
             "AGENTIC_HIL_CONFIG is the supported answer here, not a workaround: it is how a project binds to a "
@@ -241,18 +249,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Point the server at it with an absolute path: AGENTIC_HIL_CONFIG={safe_user_config}",
             "Set AGENTIC_HIL_CONFIG in the host's user-level or managed environment, never in a repository-controlled "
             "file such as .vscode/mcp.json, .mcp.json, .codex/config.toml, or opencode.json.",
+            "`windows_path_trust` does not govern this directory: it is read before any configuration exists, so it is "
+            "always checked under `standard`. Moving the file is the only answer here.",
             "Re-run `agentic-hil doctor` to confirm the new location loads.",
         ),
         do_not=(
-            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. The grant belongs to "
-            "an installed application, which re-applies it; relaxing it weakens every application in the profile.",
+            "Do not change the ACL or the owner of %APPDATA%, %LOCALAPPDATA%, or AppData itself. A grant that belongs "
+            "to an installed application is re-applied by it, and relaxing it weakens every application in the profile.",
         ),
     ),
     "unsafe_configured_path:state_root": ErrorRemedy(
         meaning=(
             "state_root, one of its ancestors, or a directory derived from it failed the trust check. state_root holds "
-            "hardware leases, quarantine incidents, and canonical reports, so a replaceable ancestor would let another "
-            "local principal forge them."
+            "hardware leases, quarantine incidents, and canonical reports, so an account other than the operator that "
+            "can replace it could forge them."
         ),
         remediation=(
             "Set `state_root: {safe_state_root}` in the authoritative configuration. state_root is a first-class "
@@ -260,15 +270,17 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "choosing one is the answer to a refused default rather than a workaround for it.",
             "state_root must be absolute and must not overlap workspace_root in either direction.",
             "`agentic-hil init` derives the default state_root from %LOCALAPPDATA% on Windows and $XDG_STATE_HOME on "
-            "POSIX, and validates before writing anything. On a stock Windows profile that default is rejected, so it "
-            "cannot produce a usable file: write the configuration at {safe_user_config} yourself with "
-            "`state_root: {safe_state_root}` (every field is in MCP resource "
-            + CONFIG_SCHEMA_URI
-            + "), then set AGENTIC_HIL_CONFIG to that absolute path.",
+            "POSIX, and validates before writing anything. Both standard locations pass from 0.8.0 on, so a refusal "
+            "here names something specific to this machine; read `untrusted_principals` for who holds the right. Every "
+            "field is in MCP resource " + CONFIG_SCHEMA_URI + ".",
+            "`windows_path_trust: permissive` accepts a state_root whose ACLs the check cannot vouch for, visibly and "
+            "in the configuration file. Use it when the environment's ACLs genuinely do not describe its trust "
+            "boundary, not to make a real foreign grant go quiet.",
             "This is the project half only: `agentic-hil agent-install` reads and writes no configuration and no "
             "state_root, so on such a profile the agent skill and the user-level MCP registration install normally "
             "and only this project binding is left.",
-            "Re-run `agentic-hil doctor`; it reports the first path that still fails.",
+            "Re-run `agentic-hil doctor`; it reports the first path that still fails, and `path_trust.findings` lists "
+            "what it saw and accepted.",
         ),
         do_not=(
             "Do not change the ACL or the owner of the rejected directory, and do not move state_root inside "
@@ -1266,34 +1278,61 @@ PLATFORM_PATHS_DOCUMENT = """# Path trust rules and where files may live
 
 Every configured path is checked before it is used, so that no other local principal can replace the configuration that grants hardware permissions, or the state that records leases and quarantines. The validator only reads ACLs and modes. It never changes them, and neither should you.
 
+## What the check defends, and what it does not
+
+It defends the authoritative configuration and `state_root` against **principals outside the operator's own identity**: another local or domain account, a service account, anything the local security authority can name that is not the current user, `SYSTEM` or `BUILTIN\\Administrators`.
+
+It does not defend against code running as the operator, and no ACL check can. The operator owns these objects and holds FullControl on them, so every ordinary process of that user can rewrite the policy file whenever it likes. That is the boundary of the design.
+
+This is why an application-package identity is not a refusal. An `S-1-15-2-*` package SID or `S-1-15-3-*` app-capability SID belongs to software the operator installed, and it runs in an AppContainer — with a *subset* of the operator's rights, not a superset. It reaches nothing that an ordinary unpackaged process of the same user does not already reach in full.
+
 ## What is checked
 
 | Scope | Windows | POSIX |
 |---|---|---|
 | final directory, owner | current user, `SYSTEM`, or `BUILTIN\\Administrators` | current euid |
-| final directory, rights | no other principal holds `0x500D0116` (write, delete, WRITE_DAC, WRITE_OWNER) | not group- or other-writable |
-| every ancestor | no other principal holds `0x100D0040` (DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER); inherit-only ACEs are excluded | not group- or other-writable unless sticky (`01777`) |
+| final directory, rights | no untrusted principal holds `0x500D0116` (write, delete, WRITE_DAC, WRITE_OWNER) | not group- or other-writable |
+| every ancestor | no untrusted principal holds `0x100D0040` (DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER); inherit-only ACEs are excluded | not group- or other-writable unless sticky (`01777`) |
 
-A failure raises `error_type: unsafe_configured_path` and names the offending component in `path` and the setting in `field`. On Windows it also names *who* holds the right, in `untrusted_principals`.
+During the operation itself the path is also held open: every component is opened without `FILE_SHARE_DELETE`, which blocks a rename or delete of any of them for the duration. That is structural and does not depend on who holds which right.
 
-## Windows 11: measured verdicts on an affected profile
+## What "untrusted" means on Windows
 
-| Path | Verdict | Reason |
+Every principal that holds one of those rights is classified, and the class decides the verdict:
+
+| Class | What it is | `standard` (default) | `strict` | `permissive` |
+|---|---|---|---|---|
+| `account` | a SID the local security authority resolves to a real account or group | **refuse** | **refuse** | report |
+| `app_package` | `S-1-15-2-*` / `S-1-15-3-*`, an installed packaged application | report | **refuse** | report |
+| `unresolved` | a SID no authority here can name; normally residue of software that wrote an ACE with another machine's SID | report | **refuse** | report |
+| ACL could not be read | a sandbox, a service account, a restricted CI runner | report | **refuse** | report |
+| NULL DACL, or an untrusted owner | grants everyone everything / the object is not the operator's | **refuse** | **refuse** | report |
+
+`windows_path_trust: standard | strict | permissive` is a top-level key in the authoritative configuration. `strict` is the rule as it stood before 0.8.0. `permissive` is the explicit, visible override for an environment whose ACLs do not describe its trust boundary; it lives in the configuration file, where a later reader can see which policy was in force. Redirecting `%APPDATA%` or `%LOCALAPPDATA%` until the refusal stops does the same thing invisibly and is not a supported answer.
+
+The key governs `state_root` and everything derived from it. It does not govern the user configuration directory, which is read before any configuration exists and is therefore always checked under `standard`; `AGENTIC_HIL_CONFIG` is the answer there.
+
+A failure raises `error_type: unsafe_configured_path` and names the offending component in `path`, the setting in `field`, the classification in `finding`, and the active mode in `path_trust`. On Windows it also names *who* holds the right, in `untrusted_principals`. Findings that did **not** refuse are reported by `agentic-hil doctor` under `path_trust.findings`, so a degraded environment is named rather than silent.
+
+## Windows 11: measured verdicts
+
+Measured 2026-08-04 on Windows 11 Pro 10.0.26200, on a profile with a packaged application installed. `%APPDATA%` and `%LOCALAPPDATA%` are standard working folders and pass.
+
+| Path | ACEs beyond user/SYSTEM/Administrators | Verdict |
 |---|---|---|
-| `C:\\` | pass | `SYSTEM`, `Administrators` |
-| `C:\\Users` | pass | `SYSTEM`, `Administrators` |
-| `C:\\Users\\<user>` | pass | `SYSTEM`, `Administrators`, `<user>` |
-| `C:\\Users\\<user>\\AppData` | **fail** | app-capability ACE `S-1-15-3-*` with FullControl |
-| `%APPDATA%` = `...\\AppData\\Roaming` | **fail** | inherits the AppData ACE |
-| `%LOCALAPPDATA%` = `...\\AppData\\Local` | **fail** | inherits the AppData ACE |
-| `C:\\Users\\<user>\\.agentic-hil` | pass | no ancestor below the profile root |
-| `C:\\Users\\Default\\AppData` | pass | no capability ACE at all |
+| `C:\\` | app-capability SID, mask `0x001000a1` — no write, delete or WRITE_DAC | pass |
+| `C:\\Users` | app-capability SID, mask `0x00100021` | pass |
+| `C:\\Users\\<user>` | app-capability SID, mask `0x00100020` | pass |
+| `C:\\Users\\<user>\\AppData` | app-capability SID, FullControl, effective on the directory | pass (`app_package`) |
+| `%APPDATA%` = `...\\AppData\\Roaming` | the same, inherited | pass (`app_package`) |
+| `%LOCALAPPDATA%` = `...\\AppData\\Local` | the same, plus an unresolvable `S-1-5-21-*` with Modify | pass (`app_package`, `unresolved`) |
+| `%TEMP%` = `...\\AppData\\Local\\Temp` | the same, plus a second unresolvable `S-1-5-21-*` with Modify | pass (`app_package`, `unresolved`) |
+| `C:\\Users\\<user>\\.agentic-hil` | none | pass |
+| any of them with `Everyone` granted Modify | `S-1-1-0`, which resolves | **fail** (`account`) |
 
-`S-1-15-3-*` is an app-capability SID belonging to a packaged application. It is none of the three trusted principals and it holds FullControl, so the ancestor check fails there. Two ACEs of that SID sit on `AppData`: one inherit-only, which the check correctly skips, and one effective on the directory itself, which really does carry DELETE and WRITE_DAC. The refusal is not a false positive.
+Two ACEs of the capability SID sit on `AppData`: one inherit-only, which the check skips, and one effective on the directory itself, which really does carry DELETE and WRITE_DAC. The grant is real. It is also the normal state of a normal installation, and it is held by software the operator installed and runs as themselves, which is why it is reported and not refused.
 
-It is also not a Windows default. `C:\\Users\\Default` is the template every new profile is copied from and it carries no such ACE, so the grant arrives later, with an installed application. Whether your profile is affected is therefore a property of what is installed on it.
-
-Consequence where it is present: the built-in defaults `%APPDATA%\\agentic-hil` (configuration) and `%LOCALAPPDATA%\\agentic-hil` (state) are rejected, and every config load hits it — as does `agentic-hil init`, which writes them.
+The `S-1-5-21-*` SIDs on `AppData\\Local` and `Temp` resolve to no account, appear nowhere in this machine's registry, and belong to no profile on it. Nothing here can build a token that carries them.
 
 ## The refusal names the holder
 
@@ -1307,6 +1346,7 @@ An `unsafe_configured_path` refusal on Windows carries `untrusted_principals`, o
   "untrusted_principals": [
     {
       "sid": "S-1-15-3-3557520199-...",
+      "principal_class": "app_package",
       "kind": "app_capability",
       "package_sid": "S-1-15-2-3557520199-...",
       "package_family": "<name>_<publisher-id>",
@@ -1325,10 +1365,10 @@ Knowing the package turns "an unknown principal has rights here" into a decision
 
 ## The override is the supported answer, not a workaround
 
-`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case.
+`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case. From 0.8.0 the standard Windows folders are not that case: `%APPDATA%` and `%LOCALAPPDATA%` pass, and `init` needs none of this.
 
 ```text
-# Windows, on a profile where %APPDATA% is refused
+# Windows, where the discovered default is genuinely refused
 AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<workspace-name>\\config.yaml
 
 # inside that config.yaml
@@ -1346,7 +1386,7 @@ Only the project half touches the paths above. User scope is per user, per machi
 | Command | Scope | Touches | On a profile that rejects the paths above |
 |---|---|---|---|
 | `agentic-hil agent-install --agent <agent>` | user, once per user and agent | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; reads and writes no configuration and no `state_root` |
-| `agentic-hil init [--agent <agent>]` | project, once per workspace | the authoritative configuration and `state_root`, then `doctor` | refuses; those are exactly the rejected paths |
+| `agentic-hil init [--agent <agent>]` | project, once per workspace | the authoritative configuration and `state_root`, then `doctor` | refuses; those are exactly the rejected paths. The standard `%APPDATA%` / `%LOCALAPPDATA%` defaults are not rejected |
 | `agentic-hil setup --agent <agent>` | both, in order | both of the above | the user half completes and stays; the project half refuses and rolls back only itself |
 
 A rejected configuration location therefore leaves the agent installed and working. Fix the location as below, then run `agentic-hil init` alone; `agent-install` need not run again for this user, on this project or any other.
@@ -1355,8 +1395,8 @@ A rejected configuration location therefore leaves the agent installed and worki
 
 | Item | Windows | POSIX |
 |---|---|---|
-| authoritative configuration | `%USERPROFILE%\\.agentic-hil\\projects\\<workspace-name>\\config.yaml`, selected by `AGENTIC_HIL_CONFIG` | default `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml` passes |
-| `state_root` | `%USERPROFILE%\\.agentic-hil\\state` | default `$XDG_STATE_HOME/agentic-hil` passes |
+| authoritative configuration | default `%APPDATA%\\agentic-hil\\projects\\<name>-<digest>\\config.yaml` passes; if it is refused, `%USERPROFILE%\\.agentic-hil\\projects\\<workspace-name>\\config.yaml` selected by `AGENTIC_HIL_CONFIG` | default `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml` passes |
+| `state_root` | default `%LOCALAPPDATA%\\agentic-hil` passes; if it is refused, `%USERPROFILE%\\.agentic-hil\\state` | default `$XDG_STATE_HOME/agentic-hil` passes |
 | device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed |
 
 The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other — which is the failure it exists to prevent. The home directory is chosen because it is the only location whose ancestors pass this check on a stock profile of either platform: a directory shared across *users* (`C:\\ProgramData`, `/var/lib`) is either writable by principals the check rejects or needs root to create, so exclusivity reaches every process of one user rather than every user of one machine.
@@ -1371,7 +1411,9 @@ Rules that hold on both platforms:
 
 ## Do not
 
-Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. The ancestor is rejected precisely because a second principal can replace it; changing that removes the guarantee rather than meeting it. On `AppData` it also does not hold: the application that made the grant re-applies it.
+Do not relax an ACL, take ownership, or grant yourself rights on a rejected path or any ancestor to make the check pass. What is rejected under `standard` is a real account other than the operator holding write there; changing the ACL removes the guarantee rather than meeting it. On `AppData` it also does not hold: the application that made the grant re-applies it.
+
+Do not redirect `%APPDATA%` or `%LOCALAPPDATA%` to make a refusal stop. That is invisible, is recorded nowhere, and leaves the next reader unable to tell which policy was actually in force. If a refusal has to be overridden, override it in the configuration with `windows_path_trust`, where it is written down.
 
 Removing the grant is the operator's call, not the tool's, and it is made through the application that holds it — not by editing the ACL underneath it. Moving the configuration and `state_root` needs no privileges, changes nothing on the system, and is the answer this project supports.
 """
