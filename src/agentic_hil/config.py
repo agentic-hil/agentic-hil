@@ -533,6 +533,30 @@ def project_state_directory(config: AgenticHILConfig) -> Path:
     return trusted_state_directory(config.state_root, "projects", digest)
 
 
+def untrusted_directory_reason(opened: os.stat_result, *, final: bool, final_owners: frozenset[int]) -> str | None:
+    """Why one POSIX directory component of a trust boundary is not trustworthy.
+
+    Ownership is checked on **every** component, not only on the last one. An
+    ancestor owned by another local identity passes a mode check while it is
+    0755 and is still a directory that identity may chmod tomorrow, and then
+    replace everything underneath — the authoritative configuration, the state
+    root, a user MCP configuration, a launcher this server already validated.
+    A check that stops at the final directory therefore proves nothing about
+    what will be there afterwards.
+
+    The sticky bit excuses an ancestor's *write* bits and nothing else. ``/tmp``
+    is 01777 and still refuses to let a stranger replace entries it does not
+    own, so a root-owned sticky ancestor stays acceptable; a sticky ancestor
+    owned by somebody else does not, because its owner can take the sticky bit
+    off again.
+    """
+    mode = stat.S_IMODE(opened.st_mode)
+    if bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX)):
+        return "writable_by_other_users"
+    owners = final_owners if final else frozenset({0, os.geteuid()})
+    return None if opened.st_uid in owners else "foreign_owner"
+
+
 def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     requested = Path(value).expanduser()
     if not requested.is_absolute():
@@ -544,17 +568,14 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     if os.name == "nt":
         validate_windows_state_root(root)
     else:
+        owners = frozenset({os.geteuid()})
         for index, candidate in enumerate((root, *root.parents)):
-            opened = os.stat(candidate, follow_symlinks=False)
-            mode = stat.S_IMODE(opened.st_mode)
-            # The final state_root must never be group/world writable. The sticky
-            # bit only excuses ANCESTORS (e.g. /tmp 01777), where the sticky bit
-            # still stops other users from replacing existing entries; it does
-            # not stop them from pre-creating our derived subdirectories inside a
-            # world-writable final root.
-            unsafe_write = bool(mode & 0o022) and (index == 0 or not bool(mode & stat.S_ISVTX))
-            if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
-                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
+            # The final state_root must never be group/world writable, and no
+            # component of the path may belong to another local identity; see
+            # untrusted_directory_reason for why an ancestor counts.
+            reason = untrusted_directory_reason(os.stat(candidate, follow_symlinks=False), final=index == 0, final_owners=owners)
+            if reason is not None:
+                raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate), "reason": reason})
     return root
 
 
@@ -920,7 +941,52 @@ def configured_executable(
             "Configured executable must be an existing single-link regular file.",
             {"field": field, "path": str(resolved)},
         )
+    validate_trusted_program_file(resolved, field, label="Configured executable")
     return str(resolved)
+
+
+def validate_trusted_program_file(path: Path, field: str, *, label: str) -> None:
+    """Refuse a configured program or script another local identity could swap.
+
+    Everything this validates is code: the file is spawned, or handed to OpenOCD
+    as Tcl, which is the same thing one step removed. Existence and a single
+    link say the object is real; they say nothing about who may replace it
+    before it runs. A world-writable ``openocd`` or an OpenOCD script in a
+    group-writable directory is a program whose contents belong to whoever
+    holds that write bit, and this server would run it as the server user on a
+    call that needs no hardware permission at all.
+
+    The rule is the one the MCP launcher already lives under: the file belongs
+    to root or to us, no other user may write it, and no component of the path
+    to it belongs to a stranger or is replaceable. ``path`` must already be
+    fully resolved — every caller resolves before validating, so the chain
+    opened here is the chain that will be executed.
+    """
+    if os.name == "nt":
+        validate_windows_state_root(path, field=field, label=label)
+        return
+    owners = frozenset({0, os.geteuid()})
+    descriptors = _hold_posix_directory_chain(path.parent)
+    try:
+        for index, descriptor in enumerate(descriptors):
+            reason = untrusted_directory_reason(os.fstat(descriptor), final=index == len(descriptors) - 1, final_owners=owners)
+            if reason is not None:
+                raise ConfigError(
+                    "unsafe_configured_path",
+                    f"{label} has an untrusted or replaceable parent directory, so another local user could replace the program before it runs.",
+                    {"field": field, "path": str(path), "directory": str(path.parents[len(descriptors) - 1 - index]), "reason": reason},
+                )
+        opened = os.stat(path.name, dir_fd=descriptors[-1], follow_symlinks=False)
+        mode = stat.S_IMODE(opened.st_mode)
+        if opened.st_uid not in owners or bool(mode & 0o022):
+            raise ConfigError(
+                "unsafe_configured_path",
+                f"{label} must belong to root or the current user and must not be writable by other users.",
+                {"field": field, "path": str(path), "uid": opened.st_uid, "mode": f"{mode:04o}"},
+            )
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def disabled_executable_path(config: AgenticHILConfig, field: str) -> str:
@@ -949,6 +1015,9 @@ def configured_external_file(config: AgenticHILConfig, value: str, field: str) -
             "Configured debugger file must be an existing single-link regular file.",
             {"field": field, "path": str(resolved)},
         )
+    # An OpenOCD interface/target script is Tcl that OpenOCD executes, so it is
+    # held to the same trust rule as the executable that reads it.
+    validate_trusted_program_file(resolved, field, label="Configured debugger script")
     return str(resolved)
 
 
@@ -1024,17 +1093,14 @@ def secure_user_directory(directory: str | Path, *, field: str = "user_config", 
 
     descriptors = _hold_posix_directory_chain(path, create=True)
     try:
-        euid = os.geteuid()
+        owners = frozenset({os.geteuid()})
         for index, descriptor in enumerate(descriptors):
-            opened = os.fstat(descriptor)
-            mode = stat.S_IMODE(opened.st_mode)
-            final = index == len(descriptors) - 1
-            unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
-            if (final and opened.st_uid != euid) or unsafe_write:
+            reason = untrusted_directory_reason(os.fstat(descriptor), final=index == len(descriptors) - 1, final_owners=owners)
+            if reason is not None:
                 raise ConfigError(
                     "unsafe_configured_path",
                     f"{label} must be owned by the current user and must have no replaceable components.",
-                    {"field": field, "path": str(path)},
+                    {"field": field, "path": str(path), "reason": reason},
                 )
     finally:
         for descriptor in reversed(descriptors):
@@ -1467,13 +1533,12 @@ def trusted_persistent_executable(
 
     def trusted_parent_chain(candidate: Path) -> list[int]:
         descriptors = _hold_posix_directory_chain(candidate.parent)
+        owners = frozenset({0, os.geteuid()})
         try:
             for index, descriptor in enumerate(descriptors):
                 opened = os.fstat(descriptor)
-                mode = stat.S_IMODE(opened.st_mode)
-                final = index == len(descriptors) - 1
-                unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
-                if unsafe_write or (final and opened.st_uid not in {0, os.geteuid()}):
+                reason = untrusted_directory_reason(opened, final=index == len(descriptors) - 1, final_owners=owners)
+                if reason is not None:
                     # Name the component and its mode: the caller cannot fix a
                     # directory the message does not identify, and one bad
                     # ancestor of a shared prefix condemns every launcher below.
@@ -1483,7 +1548,7 @@ def trusted_persistent_executable(
                     raise ConfigError(
                         "mcp_command_untrusted",
                         "The MCP server executable has an untrusted or replaceable parent directory.",
-                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{stat.S_IMODE(opened.st_mode):04o}", "uid": opened.st_uid, "reason": reason},
                     )
             return descriptors
         except BaseException:

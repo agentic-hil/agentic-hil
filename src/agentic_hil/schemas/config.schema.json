@@ -452,14 +452,16 @@
               "null"
             ],
             "minimum": 1,
-            "default": null
+            "default": null,
+            "description": "CAN FD data-phase bitrate. Carried by adapter: process only. The peak and socketcan adapters cannot be given it, and naming it for one of them is refused at session start rather than ignored; on SocketCAN it belongs to the interface (ip link set <channel> type can ... dbitrate ...)."
           },
           "pcanbasic_dll": {
             "type": [
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "description": "Path to the PCANBasic library. Carried by adapter: process only; python-can loads PCANBasic from its own location, so naming it for a direct adapter is refused at session start rather than ignored. Not settable over MCP: it names code this server loads."
           },
           "executable": {
             "type": [
@@ -484,7 +486,8 @@
           },
           "listen_only": {
             "type": "boolean",
-            "default": false
+            "default": false,
+            "description": "Receive without sending dominant ACK bits. Honoured by the peak and process adapters. On SocketCAN listen-only belongs to the interface (ip link set <channel> type can ... listen-only on), so naming it for a socketcan bus is refused at session start rather than ignored."
           },
           "max_buffer_frames": {
             "type": "integer",

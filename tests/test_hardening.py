@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from support import owner_only_write
 
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
@@ -1235,9 +1237,10 @@ def test_authoritative_config_pins_debugger_and_openocd_scripts(tmp_path: Path, 
     host = tmp_path / "tools"
     interface_cfg = host / "trusted-interface.cfg"
     target_cfg = host / "trusted-target.cfg"
-    interface_cfg.parent.mkdir(parents=True)
-    interface_cfg.write_text("# trusted interface\n", encoding="utf-8")
-    target_cfg.write_text("# trusted target\n", encoding="utf-8")
+    # Owner-only, not the ambient umask: OpenOCD executes these scripts as Tcl,
+    # so one another local user could write is refused rather than pinned.
+    owner_only_write(interface_cfg, "# trusted interface\n")
+    owner_only_write(target_cfg, "# trusted target\n")
     config_path = write_authoritative_config(
         workspace,
         monkeypatch,
@@ -2631,3 +2634,413 @@ def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
         assert "--uid" not in service.backend._connection_args()
     finally:
         service.close()
+
+
+# ---------------------------------------------------------------------------
+# Trust boundaries: who may replace a program, a script, or a directory of them.
+
+
+def _foreign_owner(info: os.stat_result) -> os.stat_result:
+    """The same stat, reported as belonging to another local identity.
+
+    A test cannot chown without root, and the property under test is exactly
+    what happens when a component belongs to somebody else, so ownership is
+    what is faked — never the mode, which the filesystem can carry for real."""
+    fields = list(info)
+    fields[4] = info.st_uid + 4242
+    return os.stat_result(fields)
+
+
+def _report_foreign_owner(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Make one existing directory or file look foreign-owned to every check."""
+    inode = path.stat().st_ino
+    real_stat, real_fstat = os.stat, os.fstat
+
+    def fake_stat(target, *args, **kwargs):
+        info = real_stat(target, *args, **kwargs)
+        return _foreign_owner(info) if info.st_ino == inode else info
+
+    def fake_fstat(descriptor):
+        info = real_fstat(descriptor)
+        return _foreign_owner(info) if info.st_ino == inode else info
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership rules")
+def test_a_foreign_owned_ancestor_is_refused_by_every_posix_trust_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ancestor is checked for ownership too, not only for its mode.
+
+    A stranger's 0755 directory passes a mode check today and is a directory
+    that stranger may chmod tomorrow, and then replace everything under it. The
+    state root, a user configuration directory and a launcher all sit at the
+    bottom of such a chain, so all three have to refuse it."""
+    from agentic_hil.config import secure_user_directory, trusted_persistent_executable
+
+    middle = tmp_path / "middle"
+    leaf = middle / "leaf"
+    leaf.mkdir(parents=True, mode=0o700)
+    middle.chmod(0o755)
+    launcher = leaf / "agentic-hil"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o700)
+
+    # Owned by us, every component 0755 or tighter: all three accept it.
+    assert validated_state_root(str(leaf), tmp_path / "workspace", "config.yaml") == leaf
+    assert secure_user_directory(leaf) == leaf
+    assert trusted_persistent_executable(str(launcher), workspace=tmp_path / "workspace") == str(launcher)
+
+    _report_foreign_owner(monkeypatch, middle)
+
+    with pytest.raises(ConfigError) as state_root_error:
+        validated_state_root(str(leaf), tmp_path / "workspace", "config.yaml")
+    assert state_root_error.value.to_dict()["error_type"] == "unsafe_configured_path"
+    with pytest.raises(ConfigError) as user_directory_error:
+        secure_user_directory(leaf)
+    assert user_directory_error.value.to_dict()["error_type"] == "unsafe_configured_path"
+    with pytest.raises(ConfigError) as launcher_error:
+        trusted_persistent_executable(str(launcher), workspace=tmp_path / "workspace")
+    assert launcher_error.value.to_dict()["error_type"] == "mcp_command_untrusted"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership rules")
+def test_a_root_owned_system_ancestor_is_still_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule is "root or us", not "us": /, /home and /tmp belong to root."""
+    from agentic_hil.config import secure_user_directory
+
+    leaf = tmp_path / "state"
+    leaf.mkdir(mode=0o700)
+    real_stat, real_fstat = os.stat, os.fstat
+    inode = tmp_path.stat().st_ino
+
+    def as_root(info: os.stat_result) -> os.stat_result:
+        fields = list(info)
+        fields[4] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "stat", lambda target, *a, **k: (lambda info: as_root(info) if info.st_ino == inode else info)(real_stat(target, *a, **k)))
+    monkeypatch.setattr(os, "fstat", lambda fd: (lambda info: as_root(info) if info.st_ino == inode else info)(real_fstat(fd)))
+
+    assert validated_state_root(str(leaf), tmp_path / "workspace", "config.yaml") == leaf
+    assert secure_user_directory(leaf) == leaf
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_a_world_writable_debugger_executable_is_refused_and_never_spawned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file a `.py` executable names is run through this interpreter.
+
+    Reading a bench needs no device permission, so `debugger_info` spawns the
+    configured program on a board whose every grant is false. A program another
+    local user may rewrite is therefore refused before anything can spawn it."""
+    spawned: list[list[str]] = []
+    monkeypatch.setattr("agentic_hil.backends.common.spawn_managed_process", lambda command, **kwargs: spawned.append(command))
+    attacker_owned = tmp_path.parent / f"attacker-{tmp_path.name}.py"
+    attacker_owned.write_text("print('pwned')\n", encoding="utf-8")
+    attacker_owned.chmod(0o777)
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, debugger_type="stlink", debugger_executable=attacker_owned)
+
+    with pytest.raises(ConfigError) as error:
+        load_authoritative_config(workspace)
+
+    detail = error.value.to_dict()
+    assert detail["error_type"] == "unsafe_configured_path"
+    assert detail["field"] == "debuggers.dut.executable"
+    assert spawned == [], "an untrusted executable must never reach a spawn"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership rules")
+def test_a_foreign_owned_debugger_executable_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stranger_owned = tmp_path.parent / f"stranger-{tmp_path.name}.py"
+    stranger_owned.write_text("print('pwned')\n", encoding="utf-8")
+    stranger_owned.chmod(0o700)
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, debugger_type="stlink", debugger_executable=stranger_owned)
+    _report_foreign_owner(monkeypatch, stranger_owned)
+
+    with pytest.raises(ConfigError) as error:
+        load_authoritative_config(workspace)
+
+    assert error.value.to_dict()["error_type"] == "unsafe_configured_path"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_a_group_writable_openocd_script_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OpenOCD interface/target script is Tcl that OpenOCD executes."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    script = Path(os.environ["AGENTIC_HIL_CONFIG"]).parent / "interface.cfg"
+    script.chmod(0o664)
+
+    with pytest.raises(ConfigError) as error:
+        load_authoritative_config(workspace)
+
+    detail = error.value.to_dict()
+    assert detail["error_type"] == "unsafe_configured_path"
+    assert detail["field"] == "debuggers.dut.interface_cfg"
+
+
+# ---------------------------------------------------------------------------
+# What a direct CAN adapter is actually told, and what it refuses to be told.
+
+
+class _FakeCanMessage:
+    def __init__(self, **fields: object) -> None:
+        self.fields = fields
+
+
+class _FakeCanBus:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.sent: list[_FakeCanMessage] = []
+
+    def send(self, message: _FakeCanMessage, timeout: float | None = None) -> None:
+        self.sent.append(message)
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _fake_can_module(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    opened: list[_FakeCanBus] = []
+
+    def bus(**kwargs: object) -> _FakeCanBus:
+        created = _FakeCanBus(**kwargs)
+        opened.append(created)
+        return created
+
+    module = SimpleNamespace(
+        Bus=bus,
+        Message=lambda **fields: _FakeCanMessage(**fields),
+        BusState=SimpleNamespace(ACTIVE="ACTIVE", PASSIVE="PASSIVE"),
+        opened=opened,
+    )
+    monkeypatch.setitem(sys.modules, "can", module)
+    return module
+
+
+def test_a_passive_peak_bus_is_opened_passive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`listen_only: true` has to reach the backend, or it is not listen-only.
+
+    A PEAK bus opened without it acknowledges every frame on the wire with a
+    dominant bit while the configuration says the bench only observes."""
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "peak"\n    channel: "PCAN_USBBUS1"\n    listen_only: true\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is True, result
+    assert module.opened[0].kwargs["state"] == "PASSIVE"
+    assert module.opened[0].kwargs["interface"] == "pcan"
+    result["session"].close()
+
+
+def test_a_socketcan_bus_that_asks_for_listen_only_is_refused_not_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """python-can cannot put a SocketCAN interface into listen-only.
+
+    Opening it anyway would leave a bus this configuration calls silent
+    acknowledging every frame, so the session is refused instead."""
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    listen_only: true\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == "can_buses.bench.listen_only"
+    assert result["side_effect_committed"] is False
+    assert module.opened == [], "a bus that cannot be told what it was configured with must not be opened"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "extra", "field"),
+    [
+        ("peak", "    fd: true\n    data_bitrate: 2000000\n", "data_bitrate"),
+        ("socketcan", "    fd: true\n    data_bitrate: 2000000\n", "data_bitrate"),
+        ("peak", '    pcanbasic_dll: "/opt/pcan/libpcanbasic.so"\n', "pcanbasic_dll"),
+    ],
+)
+def test_a_direct_adapter_refuses_the_fields_it_cannot_carry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str, extra: str, field: str) -> None:
+    from agentic_hil.can import open_python_can_adapter
+
+    module = _fake_can_module(monkeypatch)
+    channel = "PCAN_USBBUS1" if adapter == "peak" else "vcan0"
+    config = load_test_config(tmp_path, can_buses_yaml=f'can_buses:\n  bench:\n    adapter: "{adapter}"\n    channel: "{channel}"\n{extra}')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "config_invalid"
+    assert result["field"] == f"can_buses.bench.{field}"
+    assert module.opened == []
+
+
+def test_an_fd_bus_sends_fd_frames_and_carries_more_than_eight_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An FD configuration defaults to 64-byte payloads, so the frames it sends
+    have to say they are FD; a classical frame cannot carry them at all."""
+    from agentic_hil.can import CanFrame, open_python_can_adapter
+
+    _fake_can_module(monkeypatch)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n    fd: true\n')
+    bus_config = config.can_buses["bench"]
+    assert bus_config.max_frame_data_bytes == 64
+
+    result = open_python_can_adapter(config, "bench", bus_config, False)
+    session = result["session"]
+    try:
+        payload = bytes(range(16))
+        assert payload_frame(bus_config, {"frame_id": "0x123", "data_hex": payload.hex()})["ok"] is True
+        assert session.send(CanFrame(id=0x123, extended=False, rtr=False, data=payload))["ok"] is True
+    finally:
+        session.close()
+
+    sent = session.bus.sent[0].fields
+    assert sent["is_fd"] is True
+    assert sent["data"] == payload
+
+
+def test_a_classical_bus_still_sends_classical_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.can import CanFrame, open_python_can_adapter
+
+    _fake_can_module(monkeypatch)
+    config = load_test_config(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+    session = result["session"]
+    try:
+        session.send(CanFrame(id=0x1, extended=False, rtr=False, data=b"\x01"))
+    finally:
+        session.close()
+
+    assert session.bus.sent[0].fields["is_fd"] is False
+
+
+# ---------------------------------------------------------------------------
+# A stimulus that was only half delivered is not a stimulus that was delivered.
+
+
+class _ShortWriteSerial:
+    """A handle that accepts a bounded number of bytes per write, like a driver
+    whose transmit buffer is full and whose write timeout has expired."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, accept_per_write: list[int]) -> None:
+        self.accept_per_write = list(accept_per_write)
+        self.written = bytearray()
+
+    def write(self, data: bytes) -> int:
+        accepted = self.accept_per_write.pop(0) if self.accept_per_write else 0
+        accepted = min(accepted, len(data))
+        self.written.extend(data[:accepted])
+        return accepted
+
+    def flush(self) -> None:
+        return None
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def _com_session(tmp_path: Path, handle: object) -> tuple[ComPortService, ComPortSession]:
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(tmp_path / "com.jsonl"), start_reader=False)
+    service.sessions["dut"] = session
+    return service, session
+
+
+def test_a_short_serial_write_is_not_reported_as_delivered(tmp_path: Path) -> None:
+    """The count pyserial returns is the only evidence of what went out.
+
+    Discarding it turns a truncated stimulus into a green result and an audit
+    log that disagrees with the wire — the exact shape of a false green."""
+    handle = _ShortWriteSerial([3])
+    service, session = _com_session(tmp_path, handle)
+    try:
+        result = service.write_bytes("dut", b"ABCDEFGH")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "serial_write_incomplete"
+    assert result["bytes_written"] == 3
+    assert result["bytes_requested"] == 8
+    assert result["side_effect_committed"] is True
+    assert result["side_effect_status"] == "partial"
+    assert result["retry_safe"] is False
+    assert result["quarantined"] is True
+    assert handle.written == b"ABC"
+    logged = [json.loads(line) for line in Path(session.log_path).read_text(encoding="utf-8").splitlines()]
+    transmitted = [entry for entry in logged if entry.get("direction") == "tx"]
+    assert [entry["bytes"] for entry in transmitted] == [3]
+    assert [entry["hex"] for entry in transmitted] == [b"ABC".hex()], "only confirmed bytes may be audited"
+
+
+def test_a_write_the_port_finishes_on_a_later_attempt_is_a_success(tmp_path: Path) -> None:
+    """A short write is ordinary with `write_timeout_s: 0`; the remainder is
+    offered again inside a bounded deadline rather than failed immediately."""
+    handle = _ShortWriteSerial([3, 0, 5])
+    service, session = _com_session(tmp_path, handle)
+    try:
+        result = service.write_bytes("dut", b"ABCDEFGH")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["bytes_written"] == 8
+    assert handle.written == b"ABCDEFGH"
+    logged = [json.loads(line) for line in Path(session.log_path).read_text(encoding="utf-8").splitlines()]
+    assert [entry["bytes"] for entry in logged if entry.get("direction") == "tx"] == [8]
+
+
+def test_a_serial_handle_that_reports_no_count_confirms_nothing(tmp_path: Path) -> None:
+    """An unknown count is not a delivery, and must not be recorded as one."""
+    handle = SimpleNamespace(is_open=True, in_waiting=0, write=lambda data: None, flush=lambda: None, close=lambda: None)
+    service, session = _com_session(tmp_path, handle)
+    try:
+        result = service.write_bytes("dut", b"ABCDEFGH")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "serial_write_incomplete"
+    assert result["bytes_written"] == 0
+    assert result["side_effect_committed"] is False
+    assert result["retry_safe"] is True
+    logged = [json.loads(line) for line in Path(session.log_path).read_text(encoding="utf-8").splitlines()]
+    assert [entry["bytes"] for entry in logged if entry.get("direction") == "tx"] == [0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX umask")
+def test_the_test_sandbox_is_owner_only_whatever_the_ambient_umask_is(tmp_path: Path) -> None:
+    """The suite's own sandbox stands in for a developer's home, config and
+    state directories, and the product refuses any of them another user could
+    write. Inheriting the ambient umask makes them 0775 on any machine using
+    `umask 002`, which turns every path check in the suite into a failure that
+    says nothing about the code under test."""
+    from support import owner_only_directory, owner_only_write
+
+    sandbox = Path(os.environ["XDG_STATE_HOME"]).parent
+    for directory in (sandbox, sandbox / "home", sandbox / "config", sandbox / "state"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+
+    previous = os.umask(0o002)
+    try:
+        created = owner_only_directory(tmp_path / "nested" / "deep")
+        written = owner_only_write(tmp_path / "nested" / "deep" / "user.json", "{}\n")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "nested").stat().st_mode) == 0o700
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600

@@ -12,7 +12,12 @@ import yaml
 
 pytest_plugins = ["pytester"]
 
-from support import remove_trusted_launcher  # noqa: E402
+from support import (  # noqa: E402
+    owner_only_directory,
+    owner_only_write,
+    remove_trusted_launcher,
+    trusted_program,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -22,15 +27,19 @@ def _clean_up_trusted_launcher() -> Iterator[None]:
     remove_trusted_launcher()
 
 ROOT = Path(__file__).resolve().parents[1]
-FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
-FAKE_OPENOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_openocd_no_target.py"
-FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
-FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
-FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"
-FAKE_STLINK_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py"
-FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
-FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
-FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
+# Never the committed copy: the product refuses a configured program that lives
+# where another local identity could replace it, and a checkout under `umask
+# 002` is group-writable. `trusted_program` copies each fake once per session
+# into a directory that satisfies the rule.
+FAKE_OPENOCD = trusted_program(ROOT / "tests" / "fixtures" / "fake_openocd.py")
+FAKE_OPENOCD_NO_TARGET = trusted_program(ROOT / "tests" / "fixtures" / "fake_openocd_no_target.py")
+FAKE_STLINK = trusted_program(ROOT / "tests" / "fixtures" / "fake_stlink.py")
+FAKE_STLINK_UNCONFIRMED = trusted_program(ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py")
+FAKE_STLINK_NO_TARGET = trusted_program(ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py")
+FAKE_STLINK_NO_PROBE = trusted_program(ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py")
+FAKE_PYOCD = trusted_program(ROOT / "tests" / "fixtures" / "fake_pyocd.py")
+FAKE_PYOCD_UNKNOWN_TARGET = trusted_program(ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py")
+FAKE_GDB = trusted_program(ROOT / "tests" / "fixtures" / "fake_gdb.py")
 
 
 
@@ -51,7 +60,13 @@ def isolated_config_environment(
     config_root = test_sandbox / "config"
     state_root = test_sandbox / "state"
     request.addfinalizer(lambda: shutil.rmtree(test_sandbox, ignore_errors=True))
-    home_root.mkdir(parents=True)
+    # Explicit modes, never the ambient umask. These stand in for a developer's
+    # home, config and state directories, and the product refuses any of them
+    # that another user could write. Under the common `umask 002` an inherited
+    # mode is 0775, which turns every path check in the suite into a failure
+    # that says nothing about the code under test.
+    for directory in (test_sandbox, home_root, config_root, state_root):
+        directory.mkdir(mode=0o700, parents=True)
     monkeypatch.setenv("HOME", str(home_root))
     monkeypatch.setenv("USERPROFILE", str(home_root))
     monkeypatch.setenv("APPDATA", str(config_root))
@@ -93,7 +108,7 @@ def write_config(
     allowed_roots: list[str] | None = None,
     omit_allowed_roots: bool = False,
 ) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(directory)
     workspace_root = (workspace_root or directory).resolve()
     state_root = (state_root or Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME") or directory.parent / "user-state") / "agentic-hil").resolve()
     if debugger_executable is None:
@@ -128,12 +143,13 @@ def write_config(
     # the key and is therefore read under the historical ["build"].
     artifact_roots_line = "" if omit_allowed_roots else f"  allowed_roots: {json.dumps(allowed_roots if allowed_roots is not None else ['build'])}\n"
     config_path = config_path or directory / ".agentic-hil" / "config.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(config_path.parent)
     # No `version:` by default: the bulk of the suite exercises the file a
     # project already has on disk, which is read under version 1 and still needs
     # a granted read. A test that wants the version 2 model asks for it.
     version_line = "" if config_version is None else f"version: {config_version}\n"
-    config_path.write_text(
+    owner_only_write(
+        config_path,
         f"""{version_line}workspace_root: {workspace_root.as_posix()!r}
 state_root: {state_root.as_posix()!r}
 target:
@@ -154,7 +170,6 @@ artifacts:
 logs:
   directory: ".agentic-hil/logs"
 {recovery_lines}""",
-        encoding="utf-8",
     )
     return config_path
 
@@ -216,8 +231,8 @@ def write_authoritative_config(
     config_root: Path | None = None,
     **kwargs,
 ) -> Path:
-    workspace.mkdir(parents=True, exist_ok=True)
-    root = (config_root or workspace.parent / "user-config").resolve()
+    owner_only_directory(workspace)
+    root = owner_only_directory((config_root or workspace.parent / "user-config").resolve())
     monkeypatch.setenv("APPDATA", str(root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root))
     from agentic_hil.config import project_config_path
@@ -226,9 +241,9 @@ def write_authoritative_config(
     # Enabled OpenOCD access requires scripts outside the authorized workspace.
     interface_cfg = config_path.parent / "interface.cfg"
     target_cfg = config_path.parent / "target.cfg"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    interface_cfg.write_text("# test interface\n", encoding="utf-8")
-    target_cfg.write_text("# test target\n", encoding="utf-8")
+    owner_only_directory(config_path.parent)
+    owner_only_write(interface_cfg, "# test interface\n")
+    owner_only_write(target_cfg, "# test target\n")
     kwargs.setdefault("interface_cfg", interface_cfg.as_posix())
     kwargs.setdefault("target_cfg", target_cfg.as_posix())
     # Extra probes need the same absolute scripts: an OpenOCD entry that keeps

@@ -658,7 +658,8 @@ CONFIG_WRITE_RIGHT = "allow_config_write"
 CONFIG_RIGHTS: dict[str, str] = {
     CONFIG_DESCRIPTION_RIGHT: (
         "Set the description of the bench field-wise: what hardware is there and how it is reached. "
-        "Never a permissions: block, so it cannot widen what may be done to the hardware."
+        "Never a permissions: block, so it cannot widen what may be done to the hardware, and never a "
+        "field that names a program or a script, so it cannot choose the code this server runs."
     ),
     CONFIG_PERMISSIONS_RIGHT: (
         "Set the permissions: blocks field-wise, including these two keys themselves. This is the grant "
@@ -690,6 +691,27 @@ class ConfigKeyRule:
         return f"{entry}.permissions.<flag>" if self.under_permissions else f"{entry}.<field>"
 
 
+# Fields that choose CODE rather than describe hardware, by section. None of
+# them is settable over MCP by any grant.
+#
+# Each one ends as a program this server runs or a library it loads. A debugger
+# `executable` is spawned; OpenOCD reads `interface_cfg`/`target_cfg` as Tcl and
+# executes what is in them; a CAN `executable` is spawned by the process bridge
+# and `adapter` is what selects that bridge; `pcanbasic_dll` names a library.
+#
+# They have to be outside the description grant rather than merely inside the
+# permissions one, because a permission is not what gates them: reading a bench
+# needs no device permission in a version 2 file, so `debugger_info` runs the
+# configured program on a board whose every grant is false, and a read-only CAN
+# session starts the configured bridge. A caller that could set one of these
+# would pick the code the next read executes, with no hardware permission in
+# sight. None of them is a value an attached probe hands you either, which is
+# the thing this grant exists to let an agent enter, so nothing is lost.
+CODE_BEARING_FIELDS: dict[str, tuple[str, ...]] = {
+    "debuggers": ("executable", "interface_cfg", "target_cfg"),
+    "can_buses": ("adapter", "executable", "pcanbasic_dll"),
+}
+
 CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # The description half. `target` and `can_buses` are whole sections in the
     # decision; `debuggers` and `com_ports` are the named subsets, because the
@@ -697,7 +719,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # limits, DTR/RTS) changes what a call does to the board rather than what the
     # board is, and none of it is what an attached probe hands you.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id",)),
     ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # The permissions half, every block of it.
@@ -766,9 +788,15 @@ def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
     everything the schema declares for that node except ``permissions`` (which
     belongs to the other right) and except keys the schema marks deprecated —
     ``allow_probe`` and ``allow_read`` exist only for version 1 files and are
-    refused outright in a version 2 one."""
+    refused outright in a version 2 one.
+
+    ``CODE_BEARING_FIELDS`` is subtracted either way. The ban belongs to the
+    field, not to the list that happens to mention it, so a rule that named one
+    explicitly and a rule that derives its fields from the schema are both
+    covered — including a field the schema gains later."""
+    forbidden = frozenset(CODE_BEARING_FIELDS.get(rule.section, ()))
     if rule.fields:
-        return rule.fields
+        return tuple(name for name in rule.fields if name not in forbidden)
     properties = _section_entry_schema(config_schema_document(), rule).get("properties")
     if not isinstance(properties, dict):
         return ()
@@ -776,7 +804,7 @@ def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
         sorted(
             name
             for name, node in properties.items()
-            if name != "permissions" and not (isinstance(node, dict) and node.get("deprecated") is True)
+            if name != "permissions" and name not in forbidden and not (isinstance(node, dict) and node.get("deprecated") is True)
         )
     )
 
@@ -1091,6 +1119,7 @@ The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, 
 | widening your own permissions with only the description grant | refused twice over: the key does not resolve to the description grant, and the permissions actually present in the document are compared before and after the change. A permission that changed without `{CONFIG_PERMISSIONS_RIGHT}` fails the write. |
 | changing anything while a run is open | a run holds devices under the policy this file states. Changing the policy underneath it is refused; close the run with `bench_run_stop` first. |
 | deleting a key, an entry, or the file | nothing on this surface removes configuration. Regenerating one costs an operator their settings. |
+| choosing the code this server runs — `debuggers.<name>.executable`, `interface_cfg`, `target_cfg`, `can_buses.<name>.adapter`, `executable`, `pcanbasic_dll` | not settable over MCP by any grant. Each names a program that gets spawned or a script that gets executed, and reading a bench needs no device permission, so a caller who could set one would choose the code the next read runs while every hardware permission stayed false. An operator writes these in the file. |
 | `version`, `workspace_root`, `state_root`, `artifacts`, `debug`, `validation`, `recovery` | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
 
 A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.

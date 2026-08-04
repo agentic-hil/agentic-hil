@@ -185,7 +185,11 @@ can_buses:
     adapter: "socketcan"     # or "peak", or "process" for a custom bridge
     channel: "can0"
     bitrate: 500000
-    listen_only: true        # receive without sending dominant ACK bits
+    # listen_only (receive without sending dominant ACK bits) is honoured by the
+    # peak and process adapters. On SocketCAN it belongs to the interface, not to
+    # this file: `ip link set can0 type can bitrate 500000 listen-only on`. Naming
+    # it here for a SocketCAN bus is refused rather than ignored, so a bus this
+    # file calls silent is never one that acknowledges.
     permissions:
       allow_write: false
 ```

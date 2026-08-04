@@ -36,6 +36,12 @@ from agentic_hil.report import (
 )
 from agentic_hil.types import AgenticHILConfig, ComPortConfig, JsonObject
 
+# How long a short write is given to finish beyond the port's own write timeout.
+# The schema permits `write_timeout_s: 0`, which makes every write non-blocking
+# and a short one ordinary, so a bounded grace period is what turns the common
+# case back into a complete write without letting a wedged port hold the caller.
+PARTIAL_WRITE_COMPLETION_S = 1.0
+
 
 def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
     try:
@@ -315,7 +321,7 @@ class ComPortService:
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
         try:
-            session.serial_handle.write(data)
+            confirmed = self._write_confirmed(session, data)
             flush = getattr(session.serial_handle, "flush", None)
             if callable(flush):
                 flush()
@@ -331,13 +337,69 @@ class ComPortService:
             if not isinstance(error, Exception):
                 raise
             return result
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
-        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        # Only the bytes the handle confirmed are audited, whether or not they
+        # are all of them: a log that records the whole payload after a short
+        # write is a log that disagrees with the wire.
+        delivered = data[:confirmed]
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": confirmed, "hex": delivered.hex(), "text": decode_bytes(delivered, session.port_config.encoding)})
+        if confirmed == len(data):
+            result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": confirmed, "data": data_result(delivered, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        else:
+            # Part of a stimulus is not a smaller stimulus: the peer has half a
+            # frame and the target is in a state nobody asked for, so this is a
+            # failure with the effect named, not a success with a smaller count.
+            result = {
+                "ok": False,
+                "tool": tool,
+                "port_id": port_id,
+                "error_type": "serial_write_incomplete",
+                "summary": "COM port accepted only part of the stimulus within the write deadline.",
+                "bytes_written": confirmed,
+                "bytes_requested": len(data),
+                "data": data_result(delivered, session.port_config.encoding),
+                "likely_causes": likely_causes("serial_write_incomplete"),
+                "log_path": display_path(self.config, session.log_path),
+                "side_effect_committed": confirmed > 0,
+                "side_effect_status": "partial" if confirmed else "not_started",
+                "retry_safe": confirmed == 0,
+            }
+            if confirmed:
+                # Nothing here knows what the target made of half a stimulus, so
+                # the resource is held until somebody says the bench is safe.
+                session.lease.quarantine("com_write_partial")
+                result.update({"cleanup_required": True, "quarantined": True})
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
             return mark_audit_failure(result, audit_error)
         return result
+
+    def _write_confirmed(self, session: ComPortSession, data: bytes) -> int:
+        """Write every byte, and return how many the handle confirmed.
+
+        pyserial returns the number of bytes it accepted, and that number can be
+        smaller than the payload without any exception being raised —
+        `write_timeout_s` may be zero, which the schema permits and which makes
+        a non-blocking write the normal case. A discarded return value therefore
+        turns a truncated stimulus into a reported success, which is the shape a
+        false green in a HIL run takes.
+
+        The remainder is offered again until it is gone or the deadline passes,
+        so an ordinary short write completes and a wedged port does not block
+        the caller. A handle that reports no count at all is treated as having
+        confirmed nothing: an unknown count is not a delivery."""
+        deadline = time.monotonic() + max(session.port_config.write_timeout_s, PARTIAL_WRITE_COMPLETION_S)
+        confirmed = 0
+        while confirmed < len(data):
+            written = session.serial_handle.write(data[confirmed:])
+            if not isinstance(written, int) or isinstance(written, bool) or not 0 <= written <= len(data) - confirmed:
+                return confirmed
+            confirmed += written
+            if confirmed >= len(data) or time.monotonic() >= deadline:
+                break
+            if written == 0:
+                time.sleep(0.01)
+        return confirmed
 
     def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
         return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
@@ -642,4 +704,5 @@ def likely_causes(error_type: str) -> list[str]:
         "com_port_open_failed": ["configured COM port device does not exist", "COM port is already open in another program", "USB serial adapter is unplugged or driver is missing"],
         "serial_read_failed": ["COM port was disconnected", "serial driver reported an I/O error", "another process interfered with the port"],
         "serial_write_failed": ["COM port was disconnected", "serial driver write timed out", "target or USB serial adapter stopped responding"],
+        "serial_write_incomplete": ["peer stopped reading and the driver buffer filled up", "write_timeout_s is too short for this payload at this baud rate", "flow control (RTS/CTS or XON/XOFF) is holding the line off"],
     }.get(error_type, ["inspect the COM port log for details"])

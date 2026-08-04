@@ -36,6 +36,7 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.contracts import TOOL_SCHEMAS
 from agentic_hil.knowledge import (
+    CODE_BEARING_FIELDS,
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_KEY_RULES,
     CONFIG_PERMISSIONS_RIGHT,
@@ -444,25 +445,29 @@ def test_a_value_the_shipped_schema_refuses_never_reaches_the_file(tmp_path: Pat
 def test_a_change_that_would_make_the_file_invalid_does_not_destroy_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Passes the schema, fails the authoritative rules. The valid file survives.
 
-    An executable inside the workspace is exactly that: a string, so the schema
-    takes it, and refused at load, because repository content must not be able to
-    name the program that drives the board."""
+    Two `resource_id` values that differ only in case are exactly that: strings,
+    so the schema takes them, and refused at load, because a lock key folds case
+    and those two buses would silently share one lock."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_bytes()
-    inside = workspace / "tools" / "openocd.exe"
-    inside.parent.mkdir(parents=True, exist_ok=True)
-    inside.write_text("#!/bin/sh\n", encoding="utf-8")
     tools = service(workspace)
     try:
-        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.executable", inside.as_posix())))
+        refused = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(
+                ("can_buses.body.resource_id", "BENCH-1"),
+                ("can_buses.spare.channel", "vcan9"),
+                ("can_buses.spare.resource_id", "bench-1"),
+            ),
+        )
     finally:
         tools.close()
 
     assert refused["ok"] is not True
-    assert refused["error_type"] in {"unsafe_configured_path", "config_invalid", "executable_not_found"}, refused
+    assert refused["error_type"] in {"unsafe_configured_path", "config_invalid"}, refused
     assert path.read_bytes() == before
     # Still loads, and still the file it was.
-    assert load_authoritative_config(workspace).debuggers["dut"].executable != inside.as_posix()
+    assert "spare" not in load_authoritative_config(workspace).can_buses
 
 
 def test_one_bad_key_refuses_the_whole_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -673,10 +678,14 @@ def test_the_can_bus_half_of_the_decision_covers_every_field_but_the_permissions
     """`can_buses.<n>.*` in the decision is derived, not transcribed.
 
     A field added to the schema becomes settable without a second edit, and
-    cannot be silently left out of one either."""
+    cannot be silently left out of one either — except the fields that choose
+    code rather than describe hardware, which are subtracted by name."""
     entry_schema = config_schema()["properties"]["can_buses"]["additionalProperties"]["properties"]
 
-    assert set(config_rule_fields(_rule("can_buses", under_permissions=False))) == set(entry_schema) - {"permissions"}
+    covered = set(config_rule_fields(_rule("can_buses", under_permissions=False)))
+
+    assert covered == set(entry_schema) - {"permissions"} - set(CODE_BEARING_FIELDS["can_buses"])
+    assert covered, "the derivation must still cover the describing fields"
 
 
 # ---------------------------------------------------------------------------
@@ -823,3 +832,68 @@ def test_setup_still_denies_the_agents_own_file_tools_on_the_configuration(tmp_p
     assert len(patterns) == 2
     assert any(pattern.startswith("//") and pattern.endswith("/config/**") for pattern in patterns), patterns
     assert any(pattern.startswith("//") and pattern.endswith("/state/**") for pattern in patterns), patterns
+
+
+# ---------------------------------------------------------------------------
+# The description grant describes hardware. It never chooses code.
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("debuggers.dut.executable", "/opt/attacker/openocd.py"),
+        ("debuggers.dut.interface_cfg", "/opt/attacker/interface.cfg"),
+        ("debuggers.dut.target_cfg", "/opt/attacker/target.cfg"),
+        ("can_buses.body.adapter", "process"),
+        ("can_buses.body.executable", "/opt/attacker/bridge.py"),
+        ("can_buses.body.pcanbasic_dll", "/opt/attacker/libpcanbasic.so"),
+    ],
+)
+def test_the_description_grant_cannot_choose_the_code_this_server_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, value: str) -> None:
+    """Every one of these names a program that gets spawned or a script that
+    gets executed, and reading a bench needs no device permission in a version 2
+    file: `debugger_info` runs the configured program, and a read-only CAN
+    session starts the configured bridge. A caller that could set one would pick
+    the code the next read executes with every hardware permission still false,
+    so they are not on this surface at all — not under the other grant either."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True, CONFIG_PERMISSIONS_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+        refused = tools.call(PROJECT_CONFIG_SET, changes((key, value)))
+    finally:
+        tools.close()
+
+    assert key not in {entry["key"] for entry in described["writable_keys"]}
+    assert key not in {entry["key"] for entry in described["locked_keys"]}
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["rejected_key"] == key
+    assert path.read_bytes() == before, "a refusal must not write anything"
+
+
+def test_no_settable_key_anywhere_names_a_code_bearing_field() -> None:
+    """Stated once, for the whole key model rather than for one rule.
+
+    The ban belongs to the field, so a rule that lists one explicitly and a rule
+    that derives its fields from the schema are both covered — including a
+    field the schema gains later."""
+    for rule in CONFIG_KEY_RULES:
+        forbidden = set(CODE_BEARING_FIELDS.get(rule.section, ()))
+        assert not forbidden & set(config_rule_fields(rule)), rule.section
+    for section, fields in CODE_BEARING_FIELDS.items():
+        for field in fields:
+            assert resolve_config_key(f"{section}.entry.{field}") is None
+    assert not {entry["key"] for entry in config_key_catalogue()} & {
+        f"{section}.<name>.{field}" for section, fields in CODE_BEARING_FIELDS.items() for field in fields
+    }
+
+
+def test_every_code_bearing_field_is_a_field_the_schema_declares() -> None:
+    """A field subtracted by name has to exist, or the subtraction is a typo
+    that quietly protects nothing."""
+    properties = config_schema()["properties"]
+    for section, fields in CODE_BEARING_FIELDS.items():
+        declared = properties[section]["additionalProperties"]["properties"]
+        assert set(fields) <= set(declared), section

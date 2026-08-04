@@ -22,7 +22,7 @@ from conftest import (
     write_config,
 )
 from fixtures import fake_openocd
-from support import trusted_launcher
+from support import owner_only_directory, owner_only_write, trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil.artifacts import ArtifactManager
@@ -962,8 +962,7 @@ def test_register_agent_mcp_codex_preserves_existing_toml(tmp_path: Path, monkey
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     cfg = home / ".codex" / "config.toml"
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text('[mcp_servers.other]\ncommand = "other"\n', encoding="utf-8")
+    owner_only_write(cfg, '[mcp_servers.other]\ncommand = "other"\n')
     register_agent_mcp("codex")
     text = cfg.read_text(encoding="utf-8")
     assert "[mcp_servers.other]" in text
@@ -975,8 +974,7 @@ def test_register_agent_mcp_opencode_writes_and_merges(tmp_path: Path, monkeypat
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / ".config" / "opencode" / "opencode.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"mcp": {"other": {"type": "local", "command": ["x"]}}}), encoding="utf-8")
+    owner_only_write(path, json.dumps({"mcp": {"other": {"type": "local", "command": ["x"]}}}))
     result = register_agent_mcp("opencode")
     assert result["ok"] is True
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -1152,8 +1150,7 @@ def test_register_agent_mcp_codex_reports_semantic_unmanaged_entry_conflict(
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
-    path.parent.mkdir(parents=True)
-    path.write_text(existing, encoding="utf-8")
+    owner_only_write(path, existing)
 
     result = register_agent_mcp("codex")
 
@@ -1179,10 +1176,9 @@ def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = agent_config_path(agent, home)
-    path.parent.mkdir(parents=True, exist_ok=True)
     seeded = fixture_content(agent, "unsafe-existing-config")
     assert seeded is not None
-    path.write_text(seeded, encoding="utf-8")
+    owner_only_write(path, seeded)
 
     result = register_agent_mcp(agent, force=True)
 
@@ -1204,9 +1200,8 @@ def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
-    path.parent.mkdir(parents=True)
     existing = '[mcp_servers."agentic-hil"\ncommand = "custom"\n'
-    path.write_text(existing, encoding="utf-8")
+    owner_only_write(path, existing)
 
     result = register_agent_mcp("codex", force=True)
 
@@ -1226,16 +1221,15 @@ def test_register_agent_mcp_codex_migrates_managed_workspace_command_without_for
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / ".codex" / "config.toml"
-    path.parent.mkdir(parents=True)
     stale = str(workspace / "old-venv" / "agentic-hil")
-    path.write_text(
+    owner_only_write(
+        path,
         "# >>> agentic-hil mcp (managed) >>>\n"
         "[mcp_servers.agentic-hil]\n"
         f"command = {json.dumps(stale)}\n"
         'args = ["mcp-stdio"]\n'
         "enabled = true\n"
         "# <<< agentic-hil mcp (managed) <<<\n",
-        encoding="utf-8",
     )
 
     result = register_agent_mcp("codex")
@@ -1263,8 +1257,7 @@ def test_register_agent_mcp_rejects_duplicate_json_keys_without_changes(
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(existing, encoding="utf-8")
+    owner_only_write(path, existing)
 
     result = register_agent_mcp(agent, force=True)
 
@@ -1299,8 +1292,7 @@ def test_register_agent_mcp_force_preserves_unmanaged_json_entry_and_reports_con
     home = _isolated_home(tmp_path, monkeypatch)
     _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(existing, encoding="utf-8")
+    owner_only_write(path, existing)
 
     result = register_agent_mcp(agent, force=True)
 
@@ -1385,8 +1377,7 @@ def test_the_write_restriction_keeps_what_the_operator_wrote(
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     settings = home / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_bytes(b'{"permissions": {"deny": ["Bash(curl *)"], "allow": ["Read(~/notes)"]}}\n')
+    owner_only_write(settings, '{"permissions": {"deny": ["Bash(curl *)"], "allow": ["Read(~/notes)"]}}\n')
 
     restriction = restrict_agent_write_access("claude-code", tmp_path / "cfg" / "config.yaml", tmp_path / "state")
 
@@ -1411,8 +1402,7 @@ def test_the_write_restriction_is_left_to_the_sandbox_for_codex(tmp_path: Path) 
 
 def _claude_settings(home: Path, deny: list[str]) -> Path:
     settings = home / ".claude" / "settings.json"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(json.dumps({"permissions": {"deny": deny}}) + "\n", encoding="utf-8")
+    owner_only_write(settings, json.dumps({"permissions": {"deny": deny}}) + "\n")
     return settings
 
 
@@ -1591,7 +1581,7 @@ def _opencode_edit_subject(worktree: str, filepath: str) -> str:
 
 def _opencode_permission_file(home: Path) -> Path:
     path = home / ".config" / "opencode" / "opencode.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(path.parent)
     return path
 
 
@@ -1614,7 +1604,7 @@ def test_setup_writes_no_opencode_restriction_and_says_so(
     home = _isolated_home(tmp_path, monkeypatch)
     config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
     opencode_json = _opencode_permission_file(home)
-    opencode_json.write_text(json.dumps({"permission": {"edit": {"src/**": "allow"}}}) + "\n", encoding="utf-8")
+    owner_only_write(opencode_json, json.dumps({"permission": {"edit": {"src/**": "allow"}}}) + "\n")
     before = opencode_json.read_text(encoding="utf-8")
 
     restriction = restrict_agent_write_access("opencode", config_path, state_root)
@@ -1648,7 +1638,7 @@ def test_a_repeat_setup_takes_back_the_inert_opencode_patterns(
         "src/**": "allow",  # theirs
     }
     opencode_json = _opencode_permission_file(home)
-    opencode_json.write_text(json.dumps({"permission": {"edit": initial}}) + "\n", encoding="utf-8")
+    owner_only_write(opencode_json, json.dumps({"permission": {"edit": initial}}) + "\n")
 
     restriction = restrict_agent_write_access("opencode", config_path, state_root)
 
@@ -1669,7 +1659,7 @@ def test_the_opencode_cleanup_settles_after_one_run(
     home = _isolated_home(tmp_path, monkeypatch)
     config_path, state_root = tmp_path / "cfg" / "config.yaml", tmp_path / "state"
     opencode_json = _opencode_permission_file(home)
-    opencode_json.write_text(json.dumps({"permission": {"edit": {f"{state_root.as_posix()}/**": "deny"}}}) + "\n", encoding="utf-8")
+    owner_only_write(opencode_json, json.dumps({"permission": {"edit": {f"{state_root.as_posix()}/**": "deny"}}}) + "\n")
 
     assert restrict_agent_write_access("opencode", config_path, state_root)["ok"] is True
     migrated = opencode_json.read_text(encoding="utf-8")
@@ -1794,9 +1784,8 @@ def test_register_agent_mcp_never_repoints_an_operator_owned_absolute_command(
     )
     container = "mcpServers" if agent == "claude-code" else "mcp"
     path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
     existing = json.dumps({container: {"agentic-hil": entry}})
-    path.write_text(existing, encoding="utf-8")
+    owner_only_write(path, existing)
 
     result = register_agent_mcp(agent)
 
@@ -1836,8 +1825,7 @@ def test_register_agent_mcp_migrates_recognized_legacy_json_entry(
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
     path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document), encoding="utf-8")
+    owner_only_write(path, json.dumps(document))
 
     result = register_agent_mcp(agent)
 
@@ -1876,8 +1864,7 @@ def test_register_agent_mcp_migrates_managed_workspace_command_without_force(
         else {"type": "local", "command": [stale, "mcp-stdio"], "enabled": True}
     )
     path = home / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({container: {"agentic-hil": entry}}), encoding="utf-8")
+    owner_only_write(path, json.dumps({container: {"agentic-hil": entry}}))
 
     result = register_agent_mcp(agent)
 
@@ -1997,8 +1984,8 @@ def test_trusted_persistent_executable_accepts_safe_pipx_style_symlink(tmp_path:
     launcher_dir = tmp_path / "home" / ".local" / "bin"
     target_dir = tmp_path / "home" / ".local" / "share" / "pipx" / "venvs" / "agentic-hil" / "bin"
     workspace.mkdir()
-    launcher_dir.mkdir(parents=True)
-    target_dir.mkdir(parents=True)
+    owner_only_directory(launcher_dir)
+    owner_only_directory(target_dir)
     target = target_dir / "agentic-hil"
     target.write_text("#!/bin/sh\n", encoding="utf-8")
     target.chmod(0o700)
@@ -2019,7 +2006,7 @@ def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
     launcher_dir = tmp_path / "home" / ".local" / "bin"
     workspace.mkdir()
     cache.mkdir()
-    launcher_dir.mkdir(parents=True)
+    owner_only_directory(launcher_dir)
     forbidden_root = workspace if forbidden_kind == "workspace" else cache
     target = forbidden_root / "agentic-hil"
     target.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -2036,11 +2023,11 @@ def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
 def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_path: Path) -> None:
     state_dir = tmp_path / "home" / ".local" / "state" / "agentic-hil"
-    state_dir.mkdir(parents=True)
+    owner_only_directory(state_dir)
     for directory in (tmp_path / "home", tmp_path / "home" / ".local", tmp_path / "home" / ".local" / "state"):
         directory.chmod(0o775)
     launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
-    launcher.parent.mkdir(parents=True)
+    owner_only_directory(launcher.parent)
     launcher.parent.chmod(0o775)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o775)
@@ -2068,9 +2055,9 @@ def test_setup_smooths_group_writable_home_and_succeeds(
 
     home = Path.home()
     state_parent = user_state_root().parent
-    state_parent.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(state_parent)
     config_home = isolated_config_environment
-    config_home.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(config_home)
     writable = [home, config_home, state_parent]
     for directory in writable:
         directory.chmod(0o775)
@@ -2621,11 +2608,12 @@ def test_skill_install_supports_agent_aliases() -> None:
 
 def _legacy_skill(name: str, managed: bool) -> Path:
     path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    owner_only_directory(path.parent)
     origin = "  origin: Agentic HIL\n" if managed else "  origin: someone else\n"
     # Bytes, not write_text: the installer never translates newlines, so a file
     # it wrote has LF endings on every platform.
     path.write_bytes(f"---\nname: {name}\nmetadata:\n{origin}---\n\nOlder copy.\n".encode())
+    path.chmod(0o600)
     return path
 
 
@@ -2666,9 +2654,8 @@ def test_skill_install_does_not_plant_the_directory_it_removes() -> None:
 def test_skill_install_ignores_a_foreign_directory_at_the_old_name() -> None:
     # Whatever occupies the superseded name must not become a precondition of
     # installing under the current one.
-    stranger = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup"
-    stranger.mkdir(parents=True)
-    (stranger / "notes.txt").write_bytes(b"someone else's file\n")
+    stranger = owner_only_directory(Path.home() / ".claude" / "skills" / "agentic-hil-config-setup")
+    owner_only_write(stranger / "notes.txt", "someone else's file\n")
 
     result = install_skill("claude-code")
 
@@ -2690,9 +2677,8 @@ def test_skill_install_keeps_a_foreign_skill_that_uses_an_old_name() -> None:
 
 def test_skill_install_force_preserves_unmanaged_skill_and_reports_conflict() -> None:
     target = Path.home() / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
-    target.parent.mkdir(parents=True)
     existing = "---\nname: unrelated-user-skill\n---\nKeep this content.\n"
-    target.write_text(existing, encoding="utf-8")
+    owner_only_write(target, existing)
 
     result = install_skill("claude-code", force=True)
 

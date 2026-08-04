@@ -453,17 +453,21 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
 
 
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object, timeout_s: float):
+    def __init__(self, adapter_name: str, bus: object, timeout_s: float, fd: bool = False):
         self.adapter_name = adapter_name
         self.bus = bus
         self.timeout_s = timeout_s
+        # The bus was opened for CAN FD, so the frames put on it have to say so.
+        # A message built without it is transmitted as a classical frame, which
+        # silently truncates the payloads an FD configuration exists to allow.
+        self.fd = fd
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
         try:
             import can
 
-            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data)
+            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data, is_fd=self.fd)
             self.bus.send(message, timeout=self.timeout_s)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
@@ -506,13 +510,16 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         import can
     except ImportError:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False}
+    interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
+    prepared = python_can_arguments(can, bus_id, bus_config, interface)
+    if not prepared["ok"]:
+        return prepared
     try:
-        interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
-        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+        bus = can.Bus(**prepared["arguments"])
         shutdown = getattr(bus, "shutdown", None)
         provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
         try:
-            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s, bus_config.fd)
         except BaseException as primary_error:
             try:
                 if callable(shutdown):
@@ -526,6 +533,69 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
     except Exception as error:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
+
+
+def python_can_arguments(can: object, bus_id: str, bus_config: CanBusConfig, interface: str) -> JsonObject:
+    """What ``can.Bus`` is opened with, or a refusal naming the field it cannot take.
+
+    Every configured field that the chosen backend can be told is mapped here.
+    A field it cannot be told is **refused**, never dropped: a ``listen_only``
+    the backend never sees is a bus that acknowledges every frame on it with a
+    dominant bit while the configuration on disk says it stays silent, and that
+    is worse than a refusal, because nothing anywhere says it happened.
+
+    What each direct backend can take:
+
+    ``pcan``
+        ``listen_only`` through PCAN's own passive bus state. Data-phase timing
+        is not reachable: python-can wants PCAN FD clock and prescaler values,
+        which this configuration does not describe, so ``data_bitrate`` cannot
+        be honoured.
+    ``socketcan``
+        neither. Listen-only and the data-phase bitrate are properties of the
+        network interface, set with ``ip link set <channel> type can ...``
+        before this server ever opens it.
+
+    ``pcanbasic_dll`` reaches neither: python-can loads PCANBasic from its own
+    fixed location. All three are supported by ``adapter: process``, which is
+    the answer a refusal points at."""
+    arguments: JsonObject = {
+        "interface": interface,
+        "channel": bus_config.channel,
+        "bitrate": bus_config.bitrate,
+        "fd": bus_config.fd,
+        "receive_own_messages": bus_config.receive_own_messages,
+    }
+    unsupported: list[str] = []
+    if bus_config.listen_only:
+        if interface == "pcan":
+            arguments["state"] = can.BusState.PASSIVE
+        else:
+            unsupported.append("listen_only")
+    if bus_config.data_bitrate is not None:
+        unsupported.append("data_bitrate")
+    if bus_config.pcanbasic_dll is not None:
+        unsupported.append("pcanbasic_dll")
+    if unsupported:
+        return {
+            "ok": False,
+            "tool": "can_session_start",
+            "bus_id": bus_id,
+            "adapter": bus_config.adapter,
+            "backend": interface,
+            "error_type": "config_invalid",
+            "field": f"can_buses.{bus_id}.{unsupported[0]}",
+            "unsupported_fields": unsupported,
+            "summary": (
+                f"The {bus_config.adapter} adapter cannot be given {', '.join(unsupported)}, and this bus is not opened while "
+                "the configuration asks for something the hardware will not be told. Remove the field, set it on the "
+                "interface itself, or use adapter: process, which carries all of them."
+            ),
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": True,
+        }
+    return {"ok": True, "arguments": arguments}
 
 
 class ProcessCanAdapterSession(ProcessBridgeSession):

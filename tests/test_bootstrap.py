@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import trusted_program
 
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
@@ -123,7 +124,9 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
         """target:\n  name: demo\n  controller: stm32f446ret6\ndebuggers:\n  dut:\n    permissions:\n      allow_probe: true\n      allow_flash: true\n      allow_reset: true\ncom_ports:\n  uart:\n    baudrate: 115200\n    permissions:\n      allow_read: true\n      allow_write: false\n""",
         encoding="utf-8",
     )
-    executable = Path(__file__).resolve()
+    # A trusted copy, not the checkout: loading the generated configuration pins
+    # the executable and refuses one another local user could replace.
+    executable = trusted_program(Path(__file__).resolve())
     monkeypatch.setattr(
         "agentic_hil.cli.discover_attached_hardware",
         lambda: {

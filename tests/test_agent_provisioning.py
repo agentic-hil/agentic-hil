@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import trusted_program
 
 from agentic_hil.config import (
     load_authoritative_config,
@@ -32,8 +33,10 @@ from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
-# outside the workspace, because loading the configuration pins the executable.
-FAKE_PROGRAMMER = Path(__file__).resolve()
+# outside the workspace and outside anything another local user could replace,
+# because loading the configuration pins the executable and refuses one that is
+# not trusted — a repository checkout is not, under the common `umask 002`.
+FAKE_PROGRAMMER = trusted_program(Path(__file__).resolve())
 
 
 def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
