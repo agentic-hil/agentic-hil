@@ -231,8 +231,11 @@ def test_a_rejected_path_does_not_send_a_domain_user_back_to_a_location_that_ref
     retry there, and the second failure reads as the tool being broken.
     """
     monkeypatch.setattr("agentic_hil.knowledge.machine_join_state", lambda: JOIN_STATE_DOMAIN)
-    monkeypatch.setattr("agentic_hil.knowledge.os.name", "nt")
-    details: JsonObject = {"path": str(Path.home() / "AppData" / "Local")}
+    # Pin the predicate, not `os.name`: patching the shared module makes `pathlib`
+    # select WindowsPath, which cannot be instantiated on POSIX, so this test died
+    # on both POSIX runners before it reached the remediation it is about.
+    monkeypatch.setattr("agentic_hil.knowledge.running_on_windows", lambda: True)
+    details: JsonObject = {"path": "C:\\Users\\example\\AppData\\Local"}
     if field is not None:
         details["field"] = field
 

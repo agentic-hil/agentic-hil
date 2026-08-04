@@ -112,6 +112,17 @@ def safe_user_config_suggestion() -> str:
     return str(Path(safe_user_root()) / "projects" / "<workspace-name>" / "config.yaml")
 
 
+def running_on_windows() -> bool:
+    """The platform test, named so a test can pin it without touching ``os``.
+
+    ``monkeypatch.setattr("agentic_hil.knowledge.os.name", "nt")`` reaches the
+    shared module, so `pathlib` then selects ``WindowsPath`` — which cannot be
+    instantiated on POSIX, and every later ``Path.home()`` in the same test dies
+    before the behaviour under test is ever reached.
+    """
+    return os.name == "nt"
+
+
 def standard_profile_verdict() -> str:
     """What the standard Windows profile folders do *on this machine*.
 
@@ -132,7 +143,7 @@ def standard_profile_verdict() -> str:
     Never raises and costs one cached local read; the join state is fixed for the
     life of the process.
     """
-    if os.name != "nt":
+    if not running_on_windows():
         return (
             "POSIX: a component that is group- or other-writable is what fails. Ancestors may be sticky "
             "world-writable (/tmp, 01777); the final directory may not."
@@ -1569,7 +1580,7 @@ Knowing the package turns "an unknown principal has rights here" into a decision
 
 ## The override is the supported answer, not a workaround
 
-`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case. From 0.8.0 the standard Windows folders are not that case: `%APPDATA%` and `%LOCALAPPDATA%` pass, and `init` needs none of this.
+`AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory that the discovered defaults do not cover, and a default location the trust check refuses is exactly that case. From 0.8.0 the standard Windows folders are usually not that case, and `init` then needs none of this — but whether `%APPDATA%` and `%LOCALAPPDATA%` pass depends on how this machine is joined, because what lets them pass is an ACE for a SID the local authority cannot map. A refusal states the verdict for the machine in front of you; do not read a general promise here.
 
 ```text
 # Windows, where the discovered default is genuinely refused
@@ -1590,7 +1601,7 @@ Only the project half touches the paths above. User scope is per user, per machi
 | Command | Scope | Touches | On a profile that rejects the paths above |
 |---|---|---|---|
 | `agentic-hil agent-install --agent <agent>` | user, once per user and agent | the agent's skill directory and its user-level MCP config, both under the home directory; checks that a persistent trusted executable exists | completes; reads and writes no configuration and no `state_root` |
-| `agentic-hil init [--agent <agent>]` | project, once per workspace | the authoritative configuration and `state_root`, then `doctor` | refuses; those are exactly the rejected paths. The standard `%APPDATA%` / `%LOCALAPPDATA%` defaults are not rejected |
+| `agentic-hil init [--agent <agent>]` | project, once per workspace | the authoritative configuration and `state_root`, then `doctor` | refuses; those are exactly the rejected paths. Whether the standard `%APPDATA%` / `%LOCALAPPDATA%` defaults are rejected depends on how the machine is joined — a refusal names the verdict for this one |
 | `agentic-hil setup --agent <agent>` | both, in order | both of the above | the user half completes and stays; the project half refuses and rolls back only itself |
 
 A rejected configuration location therefore leaves the agent installed and working. Fix the location as below, then run `agentic-hil init` alone; `agent-install` need not run again for this user, on this project or any other.
