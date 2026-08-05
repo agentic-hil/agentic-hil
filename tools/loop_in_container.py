@@ -102,7 +102,9 @@ LOGIN_FILES = {
 # A fresh home has none of them, and the first containerised round proved what
 # that costs: the agent knew nothing of this operator's rules and signed its
 # commit with an attribution trailer they forbid. The repository's own AGENTS.md
-# and CLAUDE.md arrive with the mount; these two do not.
+# and CLAUDE.md arrive with the mount; these two do not. Only the file itself
+# travels: a file it includes is another path in a profile directory this
+# deliberately does not mount, and the CLI reports the include as missing.
 INSTRUCTION_FILES = {
     "claude-instructions": Path(".claude") / "CLAUDE.md",
     "codex-instructions": Path(".codex") / "AGENTS.md",
