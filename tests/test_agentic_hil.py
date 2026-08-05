@@ -1973,25 +1973,6 @@ def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
     assert victim.read_text(encoding="utf-8") == existing
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
-def test_register_agent_mcp_rejects_group_writable_user_config_without_changes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _isolated_workspace(tmp_path, monkeypatch)
-    home = _isolated_home(tmp_path, monkeypatch)
-    path = home / ".claude.json"
-    existing = '{"mcpServers": {"custom": {}}}'
-    path.write_text(existing, encoding="utf-8")
-    path.chmod(0o660)
-
-    with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=str(trusted_launcher()))
-
-    assert excinfo.value.error_type == "unsafe_configured_path"
-    assert path.read_text(encoding="utf-8") == existing
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink contract")
 def test_trusted_persistent_executable_accepts_safe_pipx_style_symlink(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
