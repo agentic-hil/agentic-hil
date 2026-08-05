@@ -143,26 +143,23 @@ adopt-hardware` — and not a serial to transcribe.
 one this server parsed. Nothing is reloaded while the server runs, so the backend
 that result names, the devices it knows and the permissions it enforces are all
 from the version loaded at startup. The `config_status` block names the file and
-says which of four states it is in, and the four do not share one remedy. Only
-the first of them is a restart on its own:
+says which of three states it is in:
 
-- `changed` — loaded_digest and current_digest differ and the file that is there
-  now loads. Ask for a restart; it loads the file that exists now.
-- `invalid` — the file has changed and will not load: not valid YAML, not
-  accepted by the schema, or refused by one of the document checks the startup
-  loader runs. backend_error names which. A restart here does not swap the
-  policy, it removes it — the server stops and the new one fails to start. The
-  repair comes first and the restart only after it, so never ask for the restart
-  on its own.
+- `changed` — loaded_digest and current_digest differ. That is the whole of the
+  claim: the file on disk is not the one this server loaded. It says nothing
+  about what the file now contains and does not promise a restart will succeed.
+  Ask for the restart. If the server does not come back, the startup refusal
+  names what is wrong with the file — report that and have it repaired.
+  `agentic-hil doctor` produces the same refusal without stopping anything.
 - `missing` — the file is gone and current_digest is `null`, so there is
   nothing to restart onto. It has to be put back first. `project_config_describe`
   still answers in this state, out of the loaded policy: permissions_in_force
   is what is still being enforced and `document_source: loaded_policy` says it
   came from memory rather than from a file.
-- `unreadable` — it is there and will not open: an ACL, a path component that is
-  no longer a directory, bytes that are no longer UTF-8. current_digest is
-  `null` and backend_error names what the read failed on. It has to be made
-  readable and valid before a restart can load it.
+- `unreadable` — it is there and will not open: a permission on the file or a
+  directory above it, a path component that is no longer a directory, bytes that
+  are no longer UTF-8. current_digest is `null` and backend_error names what the
+  read failed on. It has to be made readable before it can be compared at all.
 
 `unknown` is not one of these and never sets `config_stale`: no comparison was
 made, so nothing is claimed either way and reload_required is `false`. Report

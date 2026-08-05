@@ -75,13 +75,13 @@ Optional Windows PowerShell override:
 $env:AGENTIC_HIL_CONFIG = "$env:APPDATA\agentic-hil\projects\<project-id>\config.yaml"
 ```
 
-`%APPDATA%` and `%LOCALAPPDATA%` are standard Windows working folders, and the path trust check accepts them on a profile where an installed packaged application holds an app-capability ACE on `%USERPROFILE%\AppData`. Whether they pass on *this* machine depends on how it is joined: what lets them through is an ACE for a SID the local authority cannot map, and on a domain member or an Entra-joined host the same ACE is a foreign account. A refusal states the verdict for the machine in front of you. What is refused with `unsafe_configured_path` is a path a nameable account other than you, `SYSTEM` or `Administrators` can write, delete or re-permission; the refusal names the holder. Where that happens, the override is the supported answer rather than a workaround, pointed at a location that passes:
+`%APPDATA%` and `%LOCALAPPDATA%` are the discovered defaults, and nothing about their ACLs is inspected: the ownership walk that once did was removed in 0.8.0, because it could only defend against a different account on the same machine and never against your own processes. What is still refused with `unsafe_configured_path` is a path that is not the object it names — a symlinked component, a file where a directory belongs. To bind a project to another location — a redirected profile directory, a roaming share — the override is the supported answer rather than a workaround:
 
 ```powershell
 $env:AGENTIC_HIL_CONFIG = "$env:USERPROFILE\.agentic-hil\projects\<project-id>\config.yaml"
 ```
 
-Set `state_root` in that file to a directory under the same root. Never relax an ACL to make the check pass, and never redirect `%APPDATA%` or `%LOCALAPPDATA%` to silence a refusal — `windows_path_trust` in the configuration is the visible override. Full rules: `agentic-hil://reference/platform-paths`.
+Set `state_root` in that file to a directory under the same root. Set `AGENTIC_HIL_CONFIG` in the host's user-level or managed environment, never in a repository-controlled file. Where each file lives: `agentic-hil://reference/platform-paths`.
 
 ## Canonical Tool Names
 

@@ -6,15 +6,6 @@ from typing import Any, Literal
 
 JsonObject = dict[str, Any]
 
-# Modes for the `windows_path_trust` configuration key. The default is
-# `standard`; `strict` restores the pre-0.8.0 rule for an operator who wants it
-# back; `permissive` is the explicit, visible override for an environment whose
-# ACLs do not describe its trust boundary at all. Defined in this leaf module
-# because the mode is a field of AgenticHILConfig below and config.py, which owns
-# the policy the modes select, imports from here.
-WINDOWS_PATH_TRUST_MODES = ("standard", "strict", "permissive")
-WINDOWS_PATH_TRUST_DEFAULT = "standard"
-
 
 # --- how a device identity folds case ------------------------------------
 #
@@ -280,13 +271,6 @@ class AgenticHILConfig:
     # make.
     config_digest: str = ""
     loaded_at: str = ""
-    # The Windows path trust mode this file named, bound to the policy it came
-    # from rather than kept in a process global. It reaches this configuration's
-    # own state_root and the directories derived from it, so every such check
-    # takes it from here — a second configuration parsed in this process (a
-    # `project_config_set` candidate, a `doctor` run against another workspace)
-    # then cannot change the rule the loaded one is being served under.
-    windows_path_trust: str = WINDOWS_PATH_TRUST_DEFAULT
 
     @property
     def read_free(self) -> bool:

@@ -35,7 +35,6 @@ from agentic_hil.cli import doctor
 from agentic_hil.config import ConfigError, config_digest, load_authoritative_config
 from agentic_hil.configstate import (
     STATE_CHANGED,
-    STATE_INVALID,
     STATE_MISSING,
     STATE_UNCHANGED,
     STATE_UNKNOWN,
@@ -141,7 +140,7 @@ def test_debugger_info_names_the_backend_it_answers_with_and_the_file_it_came_fr
     assert after["config_status"]["loaded_digest"] != after["config_status"]["current_digest"]
     assert after["config_status"]["reload_required"] is True
     # Prominent, in the field a caller reads first, not only in a nested block.
-    assert "changed since this server loaded it" in after["summary"]
+    assert "is not the one this server loaded" in after["summary"]
     assert after["config_status"]["error_type"] == CONFIG_STALE_ERROR
     assert any("restart" in step for step in after["config_status"]["remediation"])
 
@@ -190,7 +189,7 @@ def test_doctor_names_a_file_that_moved_while_it_was_checking(tmp_path: Path, mo
 
     assert checked["config_status"]["state"] == STATE_CHANGED
     assert checked["config_stale"] is True
-    assert "changed since this server loaded it" in checked["summary"]
+    assert "is not the one this server loaded" in checked["summary"]
 
 
 def test_a_changed_configuration_reaches_every_answer_not_only_the_two_that_name_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -626,15 +625,15 @@ def test_the_errors_resource_serves_what_a_stale_answer_carries(tmp_path: Path, 
     assert scoped["remediation"] != unscoped["remediation"]
 
 
-def test_every_agent_facing_copy_names_the_state_a_restart_would_not_fix() -> None:
-    """A safety state is worth nothing if the guidance beside it says "restart".
+def test_every_agent_facing_copy_names_the_states_this_module_has() -> None:
+    """The guidance beside a state has to describe the state the code produces.
 
-    `invalid` exists so that an agent does not send an operator to shut down the
-    only working server for a file that will not come up. It is in `config_stale`,
-    and the server instructions told an agent to ask for a restart on *every*
-    stale result — which turned the new state into an instruction to do the exact
-    thing it was added to prevent. Every shipped copy has to say it, because an
-    agent reads whichever one its host installed."""
+    An agent reads whichever copy its host installed, so a state named in one and
+    absent from another is an agent acting on a rule this server does not follow.
+    `invalid` is the case in point: it was a sixth state asserting that a restart
+    onto the file would fail, it was removed with the candidate validation that
+    was the only thing that could establish it (hardci-hq#95), and a copy still
+    naming it would send an operator looking for a state no answer can carry."""
     from agentic_hil.mcp import SERVER_INSTRUCTIONS
 
     root = Path(__file__).resolve().parents[1]
@@ -646,174 +645,74 @@ def test_every_agent_facing_copy_names_the_state_a_restart_would_not_fix() -> No
         "README.md": (root / "README.md").read_text(encoding="utf-8"),
     }
     for name, text in copies.items():
-        assert STATE_INVALID in text, f"{name} does not name the invalid state"
-        assert "repair" in text.lower(), f"{name} does not say the file is repaired first"
-    # And the states table in the README covers all six, so a reader counting
+        for state in (STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE):
+            assert f"`{state}`" in text, f"{name} does not name the {state} state"
+        assert "`invalid`" not in text, f"{name} still names a state this server cannot produce"
+    # And the states table in the README covers all five, so a reader counting
     # rows against the code finds the same set.
-    for state in (STATE_UNCHANGED, STATE_CHANGED, STATE_INVALID, STATE_MISSING, STATE_UNREADABLE, STATE_UNKNOWN):
+    for state in (STATE_UNCHANGED, STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE, STATE_UNKNOWN):
         assert f"| `{state}` |" in copies["README.md"]
 
 
 # ---------------------------------------------------------------------------
-# What a "changed" file has to be before a restart is the answer to it.
-
-
-def test_a_changed_file_that_will_not_parse_is_not_called_restartable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`changed` says "restart the server to serve the file that exists now".
-
-    On a document that does not parse, that instruction is false in the worst
-    direction: the restart fails, and the operator has swapped a server enforcing
-    an older policy for no server at all. Checking only UTF-8 before hashing
-    classified exactly that file as a restartable change."""
-    workspace, path = bench(tmp_path, monkeypatch)
-    config = load_authoritative_config(workspace)
-
-    path.write_text(path.read_text(encoding="utf-8") + "\n  broken: [unclosed\n", encoding="utf-8")
-
-    status = config_status(config)
-
-    assert status["state"] == STATE_INVALID
-    assert status["error_type"] == "config_invalid"
-    assert status["reload_required"] is True
-    assert status["current_digest"] and status["current_digest"] != status["loaded_digest"]
-    assert status["backend_error"]
-    assert any("repair" in step.lower() for step in status["remediation"])
-    assert any("restart" in step.lower() for step in status["do_not"])
-    # The claim the state makes, checked against what a restart would really do.
-    with pytest.raises(ConfigError):
-        load_authoritative_config(workspace)
-
-
-def test_a_changed_file_that_breaks_the_schema_is_not_called_restartable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Parseable YAML is not the same as a loadable configuration.
-
-    A document the shipped schema refuses fails the same restart for the same
-    reason, so it gets the same state rather than the one whose remedy is to
-    restart onto it."""
-    workspace, path = bench(tmp_path, monkeypatch)
-    config = load_authoritative_config(workspace)
-
-    rewrite(path, lambda document: document.__setitem__("debuggers", {"dut": {"type": "not-a-backend"}}))
-
-    status = config_status(config)
-
-    assert status["state"] == STATE_INVALID
-    assert status["error_type"] == "config_invalid"
-    assert status["backend_error"]
-    with pytest.raises(ConfigError):
-        load_authoritative_config(workspace)
+# What `changed` claims, and what it deliberately does not.
 
 
 @pytest.mark.parametrize(
     ("what", "edit"),
     [
-        # The schema types workspace_root as a string and says nothing about
-        # absoluteness; the loader refuses a relative one outright.
+        # Not YAML at all.
+        ("a document that will not parse", lambda document: document.__setitem__("broken", "[unclosed")),
+        # Parseable, and refused by the shipped schema.
+        ("a document the schema refuses", lambda document: document.__setitem__("debuggers", {"dut": {"type": "not-a-backend"}})),
+        # Schema-valid, refused by a document rule no per-field schema expresses.
         ("a relative workspace_root", lambda document: document.__setitem__("workspace_root", "relative/path")),
-        # state_root inside the workspace: two absolute strings the schema is
-        # happy with, and a pair the loader will not have.
-        ("an overlapping state_root", lambda document: document.__setitem__("state_root", str(Path(document["workspace_root"]) / "state"))),
-        # Cross-entry identity, which no per-field schema can express.
-        (
-            "two debuggers on one probe",
-            lambda document: document.__setitem__(
-                "debuggers",
-                {name: {**entry, "probe_id": "SAMESERIAL01"} for name, entry in [("dut", document["debuggers"]["dut"]), ("spare", document["debuggers"]["dut"])]},
-            ),
-        ),
-    ],
-)
-def test_a_schema_valid_file_the_loader_refuses_is_not_called_restartable(what: str, edit: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The schema is not the loader, and `changed` promises a restart works.
-
-    The status check used to stop after the YAML parse and the shipped schema, so
-    every document the loader refuses for a reason the schema cannot express was
-    classified `changed` — whose remediation is "restart the server to pick this
-    up". Following that shuts down a server that is enforcing a policy and does
-    not bring one back. Each case here is accepted by the schema and refused by
-    `load_authoritative_config`, which is the check the assertion at the end makes
-    directly rather than assuming."""
-    workspace, path = bench(tmp_path, monkeypatch)
-    config = load_authoritative_config(workspace)
-
-    rewrite(path, edit)
-
-    status = config_status(config)
-
-    assert status["state"] == STATE_INVALID, what
-    assert status["error_type"] == "config_invalid"
-    assert status["backend_error"]
-    assert any("repair" in step.lower() for step in status["remediation"])
-    # The claim the state makes, checked against what a restart would really do.
-    with pytest.raises(ConfigError):
-        load_authoritative_config(workspace)
-
-
-@pytest.mark.parametrize(
-    ("what", "edit"),
-    [
-        # `pin_configured_paths`. Every one of these is a plain string the schema
-        # types as a string, and each is refused at config.py's workspace
-        # containment check on every startup there will ever be.
+        # Schema-valid, document-valid, refused when the loader pins paths.
         ("a reports directory outside the workspace", lambda document: document.__setitem__("reports", {"directory": "../outside"})),
-        ("a logs directory outside the workspace", lambda document: document.__setitem__("logs", {"directory": "../outside"})),
-        (
-            "an upload directory outside the workspace",
-            lambda document: document.__setitem__("artifacts", {"upload_directory": "../outside", "allowed_roots": ["build"]}),
-        ),
-        (
-            "an allowed root outside the workspace",
-            lambda document: document.__setitem__("artifacts", {"upload_directory": "uploads", "allowed_roots": ["../outside"]}),
-        ),
-        # The workspace binding. An absolute, existing, non-overlapping directory
-        # that is simply not the one this server was started in.
-        ("a workspace_root bound somewhere else", lambda document: document.__setitem__("workspace_root", str(Path(document["workspace_root"]).parent))),
-        # `pin_configured_executables`. Required because the entry's grants are
-        # on, so the missing binary is a startup failure rather than a disabled
-        # board.
-        (
-            "a debugger executable that is not installed",
-            lambda document: document["debuggers"]["dut"].update({"executable": str(Path(document["workspace_root"]).parent / "no-such-programmer.exe")}),
-        ),
     ],
 )
-def test_a_document_valid_file_the_loader_still_refuses_is_not_called_restartable(what: str, edit: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The document rules are not the loader either.
+def test_a_changed_file_that_will_not_load_is_still_only_a_changed_file(what: str, edit: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One observation, and no forecast attached to it.
 
-    Running `validate_config_document` closed the schema gap and left a second
-    one behind it: the loader also pins every configured output path inside the
-    workspace, checks the workspace it is bound to, and resolves every configured
-    executable. `reports.directory: ../outside` is the plainest case — schema-
-    valid, document-valid, and refused at every startup — and it was being
-    reported as `changed`, whose remediation is "restart the server to pick this
-    up".
-
-    Each case asserts the state *and* then performs the restart the state is a
-    claim about, so the two cannot drift."""
+    `changed` used to mean "a restart loads what is on disk now", and holding
+    that needed a candidate validation congruent with startup — two code paths
+    that must agree, where every difference is a defect, and four were found in
+    four review rounds. The claim is now the digest comparison and nothing else:
+    the file differs from the one this server loaded. Each document here is one
+    the loader really does refuse, asserted at the end, and each is `changed` all
+    the same. The operator restarts, and startup says why if it will not come up.
+    """
     workspace, path = bench(tmp_path, monkeypatch, device_grants={"allow_flash": True})
     config = load_authoritative_config(workspace)
 
-    rewrite(path, edit)
+    if what == "a document that will not parse":
+        path.write_text(path.read_text(encoding="utf-8") + "\n  broken: [unclosed\n", encoding="utf-8")
+    else:
+        rewrite(path, edit)
 
     status = config_status(config)
 
-    assert status["state"] == STATE_INVALID, what
-    assert status["error_type"] == "config_invalid"
-    assert status["backend_error"], what
-    assert any("repair" in step.lower() for step in status["remediation"])
-    # The claim the state makes, checked against what a restart would really do.
+    assert status["state"] == STATE_CHANGED, what
+    assert status["error_type"] == CONFIG_STALE_ERROR, what
+    assert status["reload_required"] is True
+    assert status["current_digest"] and status["current_digest"] != status["loaded_digest"]
+    # Nothing in the answer asserts the restart succeeds, and the remediation
+    # says where the reason comes from when it does not.
+    assert "will load" not in status["summary"]
+    assert any("does not come up" in step for step in status["remediation"])
+    # The document really is one the loader refuses, so this is the case the
+    # removed state existed for and not a document that happens to load.
     with pytest.raises(ConfigError):
         load_authoritative_config(workspace)
 
 
-def test_judging_a_candidate_document_puts_nothing_on_the_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The document being judged is not in force, so nothing about it may land.
+def test_reading_the_status_of_a_changed_file_puts_nothing_on_the_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A status check runs per call, against a file the operator is still editing.
 
-    Startup creates `state_root` before walking its ACLs. A status check runs per
-    call, against a file the operator may still be editing and may roll back, so
-    borrowing that step would scatter directories for configurations nobody
-    chose. What is already there is walked; what is not is left unjudged rather
-    than created to be judged."""
+    Startup creates `state_root`. Nothing here may, because the document naming
+    it is not in force and may be rolled back a second later — one `state_root`
+    typo, repeated on every tool call, would otherwise scatter directories for
+    configurations nobody chose."""
     workspace, path = bench(tmp_path, monkeypatch)
     config = load_authoritative_config(workspace)
     unwritten = Path(os.environ["APPDATA"]) / "config-staleness" / "never-created-state"
@@ -826,11 +725,8 @@ def test_judging_a_candidate_document_puts_nothing_on_the_machine(tmp_path: Path
     assert not unwritten.exists()
 
 
-def test_a_changed_file_that_still_loads_is_still_a_restartable_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The check above must not turn every edit into a repair job.
-
-    An ordinary operator edit — the one the whole module exists for — is still
-    `changed`, and still says a restart is what picks it up."""
+def test_a_changed_file_that_still_loads_is_reported_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary operator edit, which is what the whole module exists for."""
     workspace, path = bench(tmp_path, monkeypatch)
     config = load_authoritative_config(workspace)
 
@@ -841,6 +737,9 @@ def test_a_changed_file_that_still_loads_is_still_a_restartable_change(tmp_path:
     assert status["state"] == STATE_CHANGED
     assert status["error_type"] == CONFIG_STALE_ERROR
     assert status["reload_required"] is True
+    # And it does load, so the one state covers both — which is the point: the
+    # answer never had to tell them apart to be useful.
+    assert load_authoritative_config(workspace).debugger.type == "pyocd"
 
 
 def test_an_unreachable_path_is_unreadable_rather_than_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -940,7 +839,7 @@ def test_a_configuration_that_will_not_parse_still_gets_the_block_it_promises(tm
 
     assert malformed["ok"] is False
     assert malformed["error_type"] == "config_invalid"
-    assert malformed["config_status"]["state"] == STATE_INVALID
+    assert malformed["config_status"]["state"] == STATE_CHANGED
     # And the half nothing else can report once the document is unusable.
     assert malformed["permissions_in_force"][CONFIG_DESCRIPTION_RIGHT] is True
     assert malformed["writable_keys"] == []
@@ -964,5 +863,5 @@ def test_a_write_to_a_configuration_that_will_not_parse_is_refused_in_words(tmp_
 
     assert refused["ok"] is False
     assert refused["error_type"] == "config_invalid"
-    assert refused["config_status"]["state"] == STATE_INVALID
+    assert refused["config_status"]["state"] == STATE_CHANGED
     assert "line" in refused, "the parser's own position, so the file can be repaired"

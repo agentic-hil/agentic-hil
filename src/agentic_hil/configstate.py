@@ -23,21 +23,24 @@ because the grants this server runs under were taken as a whole and a document
 that appeared underneath it may not widen them; the one narrowing that does track
 the file is ``configwrite.granted_rights``, which takes the narrower of the two
 sides and can therefore only ever take a right away.
+
+Nothing here says what a restart would do either. That claim used to be made —
+`changed` meant "a restart loads what is on disk now" — and holding it needed a
+candidate validation that matched startup exactly: two code paths that have to
+stay congruent, where every difference between them is a defect, and four were
+found in four review rounds. The claim was cut back to the observation that
+carries no such obligation (hardci-hq#95). The operator restarts; if the document
+does not load, startup says why, with the message it already produces.
 """
 
 from __future__ import annotations
 
 import errno
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from agentic_hil.config import (
     CONFIG_DIGEST_ALGORITHM,
     ConfigError,
-    UniqueKeyLoader,
-    candidate_startup_error,
     config_digest,
     safe_read_bytes,
     utc_now,
@@ -47,20 +50,17 @@ from agentic_hil.types import AgenticHILConfig, JsonObject
 
 # The file on disk hashes to what this server parsed. Nothing to report.
 STATE_UNCHANGED = "unchanged"
-# It hashes to something else. The server is still enforcing what it loaded.
+# It hashes to something else. That is the whole of the claim: the file differs
+# from the one this server loaded. Whether it would load is not asked, because
+# answering it needs a second validation kept congruent with startup by hand.
 STATE_CHANGED = "changed"
-# It is gone. Neither "unchanged" nor an ordinary "changed": there is no
-# document to restart onto, and the policy in force now exists only in memory.
+# It is gone. Kept apart from `changed` because the file has to be put back
+# before there is anything to read at all, and the policy in force now exists
+# only in this process.
 STATE_MISSING = "missing"
-# It is there and could not be read — an ACL, a device error, bytes that are no
-# longer UTF-8. Unknown, and unknown is not the same as unchanged.
+# It is there and could not be read — a permission, a device error, bytes that
+# are no longer UTF-8. Unknown, and unknown is not the same as unchanged.
 STATE_UNREADABLE = "unreadable"
-# It is there, it is readable, it is not what was loaded — and it will not load.
-# Kept apart from `changed` because `changed` carries "restart the server to pick
-# this up", and that instruction is false here: the restart fails and the
-# operator is left with a server that will not come back rather than one serving
-# an older policy. The repair comes first, and the message has to say so.
-STATE_INVALID = "invalid"
 # This configuration did not come from a file this process read, so there is
 # nothing to compare against and no claim to make either way.
 STATE_UNKNOWN = "unknown"
@@ -68,11 +68,9 @@ STATE_UNKNOWN = "unknown"
 # The states in which the loaded policy and the file have definitely come apart.
 # STATE_UNKNOWN is not one of them: it says the comparison could not be made, and
 # calling that "stale" would put a claim on a result that nothing established.
-STALE_STATES = frozenset({STATE_CHANGED, STATE_INVALID, STATE_MISSING, STATE_UNREADABLE})
+STALE_STATES = frozenset({STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE})
 
 RUNNING_SERVER_SCOPE = "running_server"
-
-CONFIG_INVALID_ERROR = "config_invalid"
 
 
 def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | None]:
@@ -88,39 +86,6 @@ def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | No
         return safe_read_bytes(Path(path)), None
     except (ConfigError, OSError, ValueError) as error:
         return None, error
-
-
-def _load_blocking_error(raw: bytes, config: AgenticHILConfig) -> Exception | None:
-    """Why a restart onto these bytes would not produce a running server.
-
-    The YAML parse plus ``config.candidate_startup_error`` — the startup loader's
-    own checks, called rather than approximated. It used to stop after the shipped
-    schema, and the schema is not the loader; then it stopped after
-    ``validate_config_document``, and the document rules are not the loader
-    either. Both left a file that will not load classified `changed`, whose
-    remediation is "restart the server to pick this up" — advice that shuts down a
-    working server and cannot bring it back. ``reports.directory: ../outside`` is
-    the plainest case: schema-valid, document-valid, and refused by
-    ``pin_configured_paths`` at every startup there will ever be.
-
-    So the whole of the loader runs here now, minus its one side effect: startup
-    creates ``state_root`` before walking its ACLs, and a question about a document
-    that is not in force may not put a directory on the machine. That part of the
-    chain which already exists is walked; the part that does not is left unjudged
-    rather than guessed at. What survives is the only remaining way a `changed`
-    verdict can be optimistic, and it is bounded to one thing that startup
-    creates for itself.
-
-    Run only when the digest already differs, so an unchanged file still costs one
-    read and one hash.
-    """
-    try:
-        loaded: Any = yaml.load(raw.decode("utf-8"), Loader=UniqueKeyLoader)
-    except (yaml.YAMLError, UnicodeDecodeError) as error:
-        return error
-    # `loaded or {}` exactly as load_config does it, so an empty file gets the
-    # same refusal here as it would at startup rather than a different one.
-    return candidate_startup_error(loaded or {}, str(config.config_path), config)
 
 
 def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | None, Exception | None] | None = None) -> JsonObject:
@@ -173,9 +138,9 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
         return _unreadable(base, failure or FileNotFoundError(path))
     # Decoded, deliberately not to produce the digest: the digest is over the
     # exact bytes, because that is what was hashed at load time. The decode is
-    # the same one `load_config` performs, so a file that is no longer UTF-8 is a
-    # file no restart can load — which makes it unreadable rather than a
-    # `changed` document with a restart remedy that cannot work.
+    # the same one `load_config` performs, and bytes that are not text are a file
+    # that cannot be compared at all rather than one that differs — the same
+    # class of answer as a file that will not open.
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -190,31 +155,6 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
             "reload_required": False,
             "summary": "The authoritative configuration on disk is byte-for-byte the one this server loaded.",
         }
-    # Only now, on a file that has actually moved: whether a restart onto it
-    # would produce a running server at all. Saying "restart to load this" about
-    # a document that will not load is worse than saying nothing — it sends an
-    # operator to shut down a server that is enforcing a policy and cannot come
-    # back with one.
-    blocking = _load_blocking_error(raw, config)
-    if blocking is not None:
-        return {
-            **base,
-            "state": STATE_INVALID,
-            "current_digest": current,
-            "reload_required": True,
-            "error_type": CONFIG_INVALID_ERROR,
-            "backend_error": str(blocking),
-            "summary": (
-                "The authoritative configuration has changed since this server loaded it and the file that is there "
-                "now does not load: it is not valid YAML, it does not satisfy the configuration schema, or it fails one "
-                "of the checks the startup loader runs — a document rule, the workspace it is bound to, an output path "
-                "that leaves the workspace, a configured executable that is not installed, the state_root trust rules. "
-                "`backend_error` says which. This server keeps "
-                "enforcing the version it loaded at startup, and a restart would not replace it — it would fail. "
-                "Repair the file first, then restart."
-            ),
-            **remediation_fields(CONFIG_INVALID_ERROR, RUNNING_SERVER_SCOPE),
-        }
     return {
         **base,
         "state": STATE_CHANGED,
@@ -222,10 +162,10 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
         "reload_required": True,
         "error_type": CONFIG_STALE_ERROR,
         "summary": (
-            "The authoritative configuration has changed since this server loaded it. Every answer from this server, "
+            "The authoritative configuration on disk is not the one this server loaded. Every answer from this server, "
             "including which debugger backend it names and which permissions it enforces, still comes from the version "
-            "loaded at startup; it is not reloaded while the server runs. Restart the MCP server to serve the file "
-            "that exists now."
+            "loaded at startup; it is not reloaded while the server runs. Restart the MCP server to bind it to the file "
+            "that is there now; if that document does not load, the restart says so with the reason."
         ),
         **remediation_fields(CONFIG_STALE_ERROR),
     }
@@ -304,10 +244,8 @@ def with_config_status(result: JsonObject, status: JsonObject, *, prominent: boo
 
 
 __all__ = [
-    "CONFIG_INVALID_ERROR",
     "STALE_STATES",
     "STATE_CHANGED",
-    "STATE_INVALID",
     "STATE_MISSING",
     "STATE_UNCHANGED",
     "STATE_UNKNOWN",

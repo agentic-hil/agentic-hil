@@ -1,32 +1,23 @@
 """A refusal has to name what is wrong, not only that something is.
 
-Two findings drive these tests, and both are about a caller who was told "no"
-and could not act on it.
+The finding behind these tests: a pyOCD target type that only a CMSIS pack
+provides failed at flash time with no mention of packs, and an agent hunting for
+the value escalated into pyOCD's own sources and hand-downloaded a vendor
+``.pdsc`` twice (hardci-hq #66).
 
-* A Windows path refusal named an opaque ``S-1-15-3-...`` principal, so nobody
-  could tell who held the right or whether to care (hardci-hq #64).
-* A pyOCD target type that only a CMSIS pack provides failed at flash time with
-  no mention of packs, and an agent hunting for the value escalated into pyOCD's
-  own sources and hand-downloaded a vendor ``.pdsc`` twice (hardci-hq #66).
-
-The tests that matter most here are the negative ones: an unresolvable SID must
-still produce a refusal rather than an exception, and a host that cannot answer
-the target-support question must report "undetermined" rather than "broken".
-A diagnostic that lies is worse than one that abstains.
+The tests that matter most here are the negative ones: a host that cannot answer
+the target-support question must report "undetermined" rather than "broken". A
+diagnostic that lies is worse than one that abstains.
 """
 
 from __future__ import annotations
 
-import ast
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
 from conftest import FAKE_PYOCD, FAKE_PYOCD_UNKNOWN_TARGET, write_authoritative_config, write_config
 
-from agentic_hil import windows_principals
 from agentic_hil.backends.pyocd import (
     PyOCDBackend,
     normalise_target_type,
@@ -34,19 +25,8 @@ from agentic_hil.backends.pyocd import (
     parse_pyocd_targets,
 )
 from agentic_hil.cli import doctor
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.windows_principals import (
-    describe_principal,
-    package_sid_for_capability,
-    principal_class,
-    principal_label,
-    untrusted_principal_details,
-)
-
-CAPABILITY_SID = "S-1-15-3-3557520199-3666692283-3112367039-3524159787-2791857073-3163583606-3692855932"
-PACKAGE_SID = "S-1-15-2-3557520199-3666692283-3112367039-3524159787-2791857073-3163583606-3692855932"
-PACKAGE_FULL_NAME = "Example_1.2.3.0_x64__pzs8sxrjxfjjc"
 
 # Verbatim from pyOCD 0.45.1 stderr, recorded in a real Nucleo-F446RE session.
 # It is here as a literal on purpose: the shipped classifier matched none of it,
@@ -57,286 +37,6 @@ PYOCD_TARGET_NOT_RECOGNIZED = (
     "available target types. See <https://pyocd.io/docs/target_support.html> for how to install "
     "additional target support. [__main__]"
 )
-
-
-@pytest.fixture
-def resolvable_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A registry that answers, without needing this machine to have the package."""
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "_account_name", lambda sid: None)
-    monkeypatch.setattr(windows_principals, "_appcontainer_mapping", lambda sid: {"Moniker": "example_pzs8sxrjxfjjc", "DisplayName": "Example"})
-    monkeypatch.setattr(windows_principals, "_package_full_name", lambda sid: PACKAGE_FULL_NAME)
-
-
-def test_capability_sid_maps_onto_the_package_sid_that_shares_its_sub_authorities() -> None:
-    assert package_sid_for_capability(CAPABILITY_SID) == PACKAGE_SID
-    assert package_sid_for_capability("S-1-5-32-544") is None
-
-
-def test_a_resolvable_capability_sid_reports_the_package_that_holds_the_right(resolvable_package: None) -> None:
-    described = describe_principal(CAPABILITY_SID)
-
-    assert described["sid"] == CAPABILITY_SID
-    assert described["kind"] == "app_capability"
-    assert described["package_sid"] == PACKAGE_SID
-    assert described["package"] == PACKAGE_FULL_NAME
-    assert described["package_family"] == "example_pzs8sxrjxfjjc"
-    assert described["display_name"] == "Example"
-    assert principal_label(described) == f"package {PACKAGE_FULL_NAME} (Example)"
-
-
-def test_the_refusal_names_the_package_and_offers_the_choice_without_touching_acls(resolvable_package: None) -> None:
-    details = untrusted_principal_details([CAPABILITY_SID])
-
-    assert details["untrusted_principals"] == [describe_principal(CAPABILITY_SID)]
-    summary = details["untrusted_principals_summary"]
-    assert PACKAGE_FULL_NAME in summary
-    assert "permitted location" in summary
-    assert "the application that holds it" in summary
-    assert "Do not edit the ACL" in summary
-
-
-def test_an_unresolvable_capability_sid_still_reports_the_sid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A SID nobody can name is still reported, and the refusal is unchanged."""
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "_account_name", lambda sid: None)
-    monkeypatch.setattr(windows_principals, "_appcontainer_mapping", lambda sid: {})
-    monkeypatch.setattr(windows_principals, "_package_full_name", lambda sid: None)
-
-    described = describe_principal(CAPABILITY_SID)
-
-    assert described["sid"] == CAPABILITY_SID
-    assert "package" not in described
-    assert "display_name" not in described
-    assert principal_label(described) == CAPABILITY_SID
-    assert CAPABILITY_SID in untrusted_principal_details([CAPABILITY_SID])["untrusted_principals_summary"]
-
-
-def test_a_principal_is_classified_by_what_it_is_not_by_where_it_appears(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The class decides the refusal, so it is the thing worth pinning.
-
-    Structure answers for a package identity without any lookup. Everything else
-    turns on what the local security authority said — which is the difference
-    between "somebody can exercise this right" and "this SID belongs to nothing
-    that can log on here".
-    """
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(
-        windows_principals,
-        "lookup_account",
-        lambda sid: ("account", "BUILTIN\\Everyone") if sid == "S-1-1-0" else ("unresolved", None),
-    )
-
-    assert principal_class(CAPABILITY_SID) == "app_package"
-    assert principal_class(PACKAGE_SID) == "app_package"
-    assert principal_class("S-1-1-0") == "account"
-    assert principal_class("S-1-5-21-923859167-1023467973-1024582151-2273314122") == "unresolved"
-    # An ACE whose SID would not even stringify. Nothing was established about
-    # who holds that right, so it is ignorance and not an absent account.
-    assert principal_class("") == "lookup_failed"
-
-
-def test_a_broken_lookup_is_not_the_same_as_an_absent_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    """"There is no such account" and "I could not ask" are different verdicts.
-
-    `unresolved` is tolerated under the default trust mode, because a stock
-    Windows profile really does carry orphan SIDs on %LOCALAPPDATA%. So a lookup
-    that merely failed must not land there: it would make a live foreign account
-    pass the gate on any day the authority was unreachable, and would let a
-    broken lookup be the way through the check rather than an obstacle to it.
-    """
-
-    def explode(sid: str):
-        raise OSError("lookup unavailable")
-
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "lookup_account", explode)
-
-    assert principal_class("S-1-5-21-1-2-3-1001") == "lookup_failed"
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows account lookup")
-def test_an_orphan_sid_is_told_apart_from_an_unaskable_one_against_the_real_authority() -> None:
-    """The distinction is only worth anything if the real API makes it.
-
-    Against this machine's own security authority: a SID that resolves is an
-    account, and a well-formed SID nothing maps to comes back `unresolved`
-    rather than `lookup_failed` — that is `ERROR_NONE_MAPPED` being read as the
-    answer it is. A SID that is not a SID at all cannot be asked about.
-    """
-    assert windows_principals.lookup_account("S-1-1-0")[0] == "account"
-    assert windows_principals.lookup_account("S-1-5-21-923859167-1023467973-1024582151-2273314122") == ("unresolved", None)
-    assert windows_principals.lookup_account("not-a-sid") == ("lookup_failed", None)
-
-
-def test_a_described_principal_carries_the_class_that_decided_the_verdict(resolvable_package: None) -> None:
-    assert describe_principal(CAPABILITY_SID)["principal_class"] == "app_package"
-
-
-def test_a_lookup_that_raises_never_becomes_the_reported_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Naming the holder is a courtesy; refusing the path is the duty.
-
-    A registry the process may not read must not turn `unsafe_configured_path`
-    into an unhandled exception from the code that was trying to be helpful.
-    """
-
-    def explode(sid: str):
-        raise OSError("registry unavailable")
-
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: True)
-    monkeypatch.setattr(windows_principals, "_account_name", explode)
-    monkeypatch.setattr(windows_principals, "_appcontainer_mapping", explode)
-    monkeypatch.setattr(windows_principals, "_package_full_name", explode)
-
-    assert describe_principal(CAPABILITY_SID) == {"sid": CAPABILITY_SID}
-    assert untrusted_principal_details([CAPABILITY_SID])["untrusted_principals"] == [{"sid": CAPABILITY_SID}]
-
-
-def test_nothing_is_reported_when_no_principal_could_be_named() -> None:
-    """A refusal with no readable SID stays a refusal and grows no empty fields."""
-    assert untrusted_principal_details([]) == {}
-    assert untrusted_principal_details([""]) == {}
-
-
-def test_posix_never_reaches_the_windows_only_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
-    def forbidden(sid: str):
-        raise AssertionError("Windows-only registry lookup reached off Windows")
-
-    monkeypatch.setattr(windows_principals, "_on_windows", lambda: False)
-    monkeypatch.setattr(windows_principals, "_account_name", forbidden)
-    monkeypatch.setattr(windows_principals, "_appcontainer_mapping", forbidden)
-    monkeypatch.setattr(windows_principals, "_package_full_name", forbidden)
-
-    assert describe_principal(CAPABILITY_SID) == {"sid": CAPABILITY_SID}
-    assert untrusted_principal_details([CAPABILITY_SID])["untrusted_principals"] == [{"sid": CAPABILITY_SID}]
-
-
-def test_no_module_imports_winreg_at_import_time() -> None:
-    """`import agentic_hil` must not pull in a Windows-only module.
-
-    Asserted structurally rather than by watching sys.modules, because a POSIX
-    run cannot import winreg at all and a Windows run has it loaded already, so
-    neither platform would notice the mistake at runtime.
-    """
-    def imports_winreg(node: ast.AST) -> bool:
-        if isinstance(node, ast.Import):
-            return any(alias.name.split(".")[0] == "winreg" for alias in node.names)
-        if isinstance(node, ast.ImportFrom):
-            return (node.module or "").split(".")[0] == "winreg"
-        return False
-
-    package = Path(windows_principals.__file__).parent
-    offenders: list[str] = []
-    found_any = False
-    for source in sorted(package.rglob("*.py")):
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        deferred = {
-            id(node)
-            for function in ast.walk(tree)
-            if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef)
-            for node in ast.walk(function)
-        }
-        for node in ast.walk(tree):
-            if not imports_winreg(node):
-                continue
-            found_any = True
-            if id(node) not in deferred:
-                offenders.append(f"{source.name}:{node.lineno}")
-
-    assert found_any, "no winreg import found at all: this guard would pass vacuously"
-    assert offenders == [], f"winreg imported at module level in: {', '.join(offenders)}"
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows ACL and SID semantics")
-def test_a_real_windows_refusal_names_the_principal_holding_the_right(tmp_path: Path) -> None:
-    """End to end against the real ACL walker, with a SID Windows can name.
-
-    Everyone (S-1-1-0) stands in for the capability SID: it is a principal the
-    check rejects and the local security authority can name, so this exercises
-    the SID stringification and the account lookup without depending on which
-    packages happen to be installed on the runner.
-    """
-    path = write_config(tmp_path)
-    config = load_config(str(path))
-    root = Path(config.state_root)
-    grant = subprocess.run(["icacls", str(root), "/grant", "*S-1-1-0:(OI)(CI)M"], capture_output=True, text=True, check=False)
-    if grant.returncode != 0:
-        pytest.skip(f"could not set temporary test ACL: {grant.stderr}")
-    try:
-        with pytest.raises(ConfigError) as refused:
-            load_config(str(path))
-        details = refused.value.to_dict()
-        assert details["error_type"] == "unsafe_configured_path"
-        assert [entry["sid"] for entry in details["untrusted_principals"]] == ["S-1-1-0"]
-        assert "S-1-1-0" in details["untrusted_principals_summary"]
-    finally:
-        subprocess.run(["icacls", str(root), "/remove:g", "*S-1-1-0"], capture_output=True, check=False)
-
-
-@pytest.mark.skipif(os.name != "nt", reason="the path trust check is Windows-only")
-def test_doctor_names_what_the_path_trust_check_saw_and_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """hardci-hq#91: an environment the check cannot fully vouch for is named.
-
-    Refusing an unreadable ACL locked out every sandbox, service account and CI
-    runner. Accepting it silently would leave a degraded host indistinguishable
-    from a healthy one, which is the other half of the same mistake.
-    """
-    workspace = tmp_path / "workspace"
-    write_authoritative_config(workspace, monkeypatch)
-    monkeypatch.chdir(workspace)
-    monkeypatch.setattr(
-        "agentic_hil.cli.inspect_windows_path_trust",
-        lambda path: [{"finding": "acl_unreadable", "scope": "object", "path": str(path), "winerror": 5}],
-    )
-
-    report = doctor()
-
-    trust = report["path_trust"]
-    assert trust["mode"] == "standard"
-    assert trust["ok"] is False
-    assert {entry["field"] for entry in trust["findings"]} == {"user_config", "state_root"}
-    assert "could not be read" in trust["summary"]
-    assert "strict" in trust["summary"]
-
-
-@pytest.mark.skipif(os.name != "nt", reason="the path trust check is Windows-only")
-def test_doctor_says_so_plainly_when_nothing_was_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    write_authoritative_config(workspace, monkeypatch)
-    monkeypatch.chdir(workspace)
-    monkeypatch.setattr("agentic_hil.cli.inspect_windows_path_trust", lambda path: [])
-
-    trust = doctor()["path_trust"]
-
-    assert trust["ok"] is True
-    assert trust["findings"] == []
-    assert "passes" in trust["summary"]
-
-
-@pytest.mark.skipif(os.name != "nt", reason="the package registry is a Windows construct")
-def test_a_capability_sid_registered_on_this_machine_resolves_to_its_package() -> None:
-    """The real registry route, against whatever package this host has.
-
-    Skipped rather than faked when the host registers no packaged application,
-    so a machine that cannot answer the question does not fail the suite for it.
-    """
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, windows_principals._CAP_AUTHZ_APPLICATIONS) as root:
-            package_name = winreg.EnumKey(root, 0)
-            with winreg.OpenKey(root, package_name) as package_key:
-                package_sid, _ = winreg.QueryValueEx(package_key, "PackageSid")
-    except OSError:
-        pytest.skip("this host registers no packaged application capability SIDs")
-    if not isinstance(package_sid, str) or not package_sid.startswith(windows_principals.PACKAGE_SID_PREFIX):
-        pytest.skip(f"the first registered package carries no package SID to invert: {package_sid!r}")
-
-    capability_sid = windows_principals.CAPABILITY_SID_PREFIX + package_sid[len(windows_principals.PACKAGE_SID_PREFIX) :]
-    described = describe_principal(capability_sid)
-
-    assert described["package_sid"] == package_sid
-    assert described["package"] == package_name
 
 
 def test_pyocd_target_type_names_are_compared_the_way_pyocd_normalises_them() -> None:

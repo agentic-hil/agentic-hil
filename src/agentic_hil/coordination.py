@@ -20,10 +20,10 @@ from agentic_hil.bench import (
 from agentic_hil.config import (
     ConfigError,
     atomic_write_text,
+    derived_state_directory,
     safe_append_text,
     safe_read_bytes,
     safe_read_text,
-    trusted_state_directory,
 )
 from agentic_hil.devices import (
     CanDevice,
@@ -228,11 +228,11 @@ class HardwareCoordinator:
         """Create coordination state only once hardware coordination is used.
 
         Answering ``initialize`` or ``tools/list`` must not require a writable
-        state root, so the trusted directory chain is built on first use.
+        state root, so the directory chain is built on first use.
         """
         directory = self._state_directories.get(parts)
         if directory is None:
-            directory = trusted_state_directory(self.config.state_root, *parts, trust=self.config.windows_path_trust)
+            directory = derived_state_directory(self.config.state_root, *parts)
             self._state_directories[parts] = directory
         return directory
 

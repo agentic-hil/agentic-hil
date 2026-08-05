@@ -37,13 +37,10 @@ from agentic_hil.knowledge import (
     TARGET_SUPPORT_URI,
     catalogue_entry,
     remediation_fields,
-    safe_state_root_suggestion,
     safe_user_root,
 )
 from agentic_hil.mcp import MCP_RESOURCE_NOT_FOUND, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import JsonObject
-from agentic_hil.windows_principals import JOIN_STATE_DOMAIN, JOIN_STATE_WORKGROUP
 
 
 @pytest.fixture
@@ -186,70 +183,44 @@ def test_the_questions_that_sent_agents_into_the_installed_package_are_answered(
     assert "pyocd pack install" in targets
 
 
-def test_a_rejected_path_names_a_permitted_location_and_refuses_the_acl_shortcut() -> None:
+def test_a_refused_path_names_the_component_and_a_location_that_works() -> None:
     """#64: the refusal named the field and the path and no way forward.
 
-    Relaxing the ACL is the obvious next move and the wrong one, so the refusal
-    has to rule it out where the reader is already looking.
+    The refusal itself has changed — an ACL no longer decides anything, and what
+    remains is a path that is not the object it claims to be — but the property
+    that made #64 a defect has not: a caller told "no" has to be told what to do
+    next, in the place they are already reading.
     """
     refusal = ConfigError(
         "unsafe_configured_path",
-        "User configuration directory has a replaceable Windows ancestor directory.",
-        {"field": "user_config", "path": str(Path.home() / "AppData" / "Roaming")},
+        "Configured path contains a symlink or non-directory component.",
+        {"field": "user_config", "path": str(Path.home() / "projects" / "config.yaml"), "component": str(Path.home() / "projects")},
     ).to_dict()
 
+    assert any("`component`" in step for step in refusal["remediation"])
     assert any(safe_user_root() in step for step in refusal["remediation"])
-    assert any("AGENTIC_HIL_CONFIG" in step for step in refusal["remediation"])
-    assert refusal["do_not"]
-    assert any("ACL" in step for step in refusal["do_not"])
+    # And it no longer sends anyone to an ACL, because there is no ACL rule left
+    # to satisfy or to break by relaxing it.
+    said = " ".join(refusal["remediation"])
+    assert "windows_path_trust" not in said
+    assert "untrusted_principals" not in said
 
 
-def test_a_rejected_state_root_proposes_a_state_root_that_passes() -> None:
-    refusal = ConfigError(
-        "unsafe_configured_path",
-        "state_root has a replaceable Windows ancestor directory.",
-        {"field": "state_root", "path": str(Path.home() / "AppData" / "Local")},
-    ).to_dict()
+def test_the_removed_trust_check_leaves_no_advice_behind_it(tmp_path: Path) -> None:
+    """A catalogue entry outliving its mechanism is worse than none at all.
 
-    assert any(safe_state_root_suggestion() in step for step in refusal["remediation"])
-    # init and setup derive the default from %LOCALAPPDATA%, which is the
-    # rejected location itself, so "set state_root" alone is not a way out.
-    assert any("agentic-hil init" in step for step in refusal["remediation"])
-    assert any("ACL" in step for step in refusal["do_not"])
-
-
-@pytest.mark.parametrize("field", ["state_root", "user_config", None])
-def test_a_rejected_path_does_not_send_a_domain_user_back_to_a_location_that_refuses(field: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The advice was written from one machine's measurement and read as a rule.
-
-    "%USERPROFILE%, %APPDATA% and %LOCALAPPDATA% all pass from 0.8.0 on" holds in
-    a workgroup, and holds because the ACEs on those folders are SIDs the local
-    authority answers ERROR_NONE_MAPPED about with nothing else asked. On a domain
-    member or an Entra-joined machine the identical ACEs are `unresolved_foreign`
-    and refuse under `standard` — so a remedy string attached to the refusal was
-    telling exactly the operator who had just been refused to move there, or to
-    retry there, and the second failure reads as the tool being broken.
+    `unsafe_configured_path:user_config`, `:state_root` and `:device_lock_root`
+    existed only to explain an ACL or mode refusal and to offer
+    `windows_path_trust: permissive` as the override. Nothing raises those
+    refusals any more, so an entry still offering that key would send an operator
+    to write a line the loader now refuses by name.
     """
-    monkeypatch.setattr("agentic_hil.knowledge.machine_join_state", lambda: JOIN_STATE_DOMAIN)
-    # Pin the predicate, not `os.name`: patching the shared module makes `pathlib`
-    # select WindowsPath, which cannot be instantiated on POSIX, so this test died
-    # on both POSIX runners before it reached the remediation it is about.
-    monkeypatch.setattr("agentic_hil.knowledge.running_on_windows", lambda: True)
-    details: JsonObject = {"path": "C:\\Users\\example\\AppData\\Local"}
-    if field is not None:
-        details["field"] = field
+    from agentic_hil.knowledge import ERROR_CATALOGUE as catalogue
 
-    refusal = ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", details).to_dict()
-    said = " ".join([*refusal["remediation"], refusal.get("meaning", "")])
-
-    assert "joined to a domain" in said
-    assert "%LOCALAPPDATA%" not in said or "do not apply" in said
-    assert "unresolved_foreign" in said
-    assert safe_user_root() in said
-
-    monkeypatch.setattr("agentic_hil.knowledge.machine_join_state", lambda: JOIN_STATE_WORKGROUP)
-    workgroup = " ".join(ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", details).to_dict()["remediation"])
-    assert "in a workgroup" in workgroup, "and the machine the verdicts were measured on still gets them"
+    assert [key for key in catalogue if key.startswith("unsafe_configured_path:")] == []
+    served = json.dumps([entry.as_json() for entry in catalogue.values()])
+    for gone in ("windows_path_trust", "untrusted_principals", "principal_class", "app_package"):
+        assert gone not in served, f"the catalogue still explains {gone}"
 
 
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:

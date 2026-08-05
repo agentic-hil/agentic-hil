@@ -43,8 +43,8 @@ from agentic_hil.config import (
     _windows_hold_directory_chain,
     _windows_open_regular_file,
     atomic_write_text,
+    safe_directory,
     safe_read_text,
-    secure_user_directory,
 )
 from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.types import JsonObject
@@ -180,18 +180,13 @@ def physical_resources(resources: object) -> list[str]:
 def device_lock_root() -> Path:
     """Where every process on this machine looks for a device lock.
 
-    ``~/.agentic-hil/device-locks``: the home directory is the one location whose
-    ancestors pass the trust check on a stock profile on both platforms — on
-    Windows ``%APPDATA%`` and ``%LOCALAPPDATA%`` inherit AppData's app-capability
-    ACE (``S-1-15-3-*``) and are rejected — and it is reachable by every process
-    of this user without agreeing on a configuration first.
+    ``~/.agentic-hil/device-locks``: fixed, with no configuration key and no
+    environment override, because an override is how two sessions stop seeing
+    each other. The home directory is chosen because every process of this user
+    reaches it without having to agree on a configuration first.
     """
     home = Path(os.path.expanduser("~"))
-    return secure_user_directory(
-        home / BENCH_ROOT_NAME / DEVICE_LOCK_DIRECTORY_NAME,
-        field="device_lock_root",
-        label="Machine-wide device lock directory",
-    )
+    return safe_directory(home / BENCH_ROOT_NAME / DEVICE_LOCK_DIRECTORY_NAME)
 
 
 def resource_digest(resource: str) -> str:
