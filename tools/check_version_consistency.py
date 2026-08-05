@@ -21,7 +21,12 @@ release with `--release-tag`, the one comparison that genuinely needs a tag.
 check, and `--list` prints it, so `docs/release-strategy.md` can point here
 instead of repeating an enumeration that drifts. `uncovered_files` closes the
 other half — any file carrying the release version that no entry accounts for
-is an error, so a new home for the version cannot appear unnoticed.
+is an error, so a new home for the version cannot appear unnoticed. That sweep
+skips covered files, so a mention shape an entry's extractor cannot see is a
+mention nothing checks: the `agentic-hil@vX.Y.Z` git-tag pin in
+TROUBLESHOOTING.md drifted by hand through four releases that way
+(hardci-hq#86). Tag pins are now an entry of their own, and `unclaimed_pins`
+refuses a covered file whose project-tied `@v` pins its entries do not state.
 
 tomllib is deliberately absent: it is stdlib only from 3.11 and this project
 still supports 3.10, so importing it would make the gate itself the thing that
@@ -48,6 +53,14 @@ TOML_STRING = re.compile(r"""^(?P<key>[A-Za-z0-9_-]+)\s*=\s*["'](?P<value>[^"']*
 SKILL_METADATA_VERSION = re.compile(r"""^\s*agentic_hil_version:\s*["']([^"']+)["']\s*$""", re.MULTILINE)
 CHANGELOG_RELEASE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
 EXPECTED_VERSION_FIELD = re.compile(r"""["']expected_version["']\s*:\s*["']([^"']+)["']""")
+# An `@vX.Y.Z` pin: a git tag in an install URL, an action pin, a tag in a
+# release link. The reference the `@` pins — the token before it — decides
+# whose version the pin states: only a reference that names this project
+# (`agentic-hil` is the PyPI name, both halves of the repository path, and the
+# organisation any action of ours lives under) states this project's version.
+# `actions/checkout@v4` and every other third-party pin carries somebody
+# else's version and must stay invisible to this gate.
+TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
 
 # The sweep walks the working tree, so it meets whatever else lives there.
 SKIPPED_DIRECTORIES = frozenset(
@@ -174,6 +187,19 @@ def _requirement_pins(root: Path, relative: str) -> tuple[str, ...]:
     return tuple(re.findall(r"agentic-hil(?:>=|==)(\d+\.\d+\.\d+)", text))
 
 
+def _tag_pins(root: Path, relative: str) -> tuple[str, ...]:
+    """Every `@vX.Y.Z` pin in a document whose reference names this project.
+
+    A different mention shape from a requirement pin: `>=` and `==` state a
+    version, a tag pin states a git reference that happens to be one. The
+    first release after this gate shipped proved the difference matters —
+    `_requirement_pins` counted five occurrences in TROUBLESHOOTING.md and the
+    sixth, `agentic-hil@v0.7.0` in a git URL, was invisible (hardci-hq#86).
+    """
+    text = _read(root, relative)
+    return tuple(match.group(2) for match in TAG_PIN.finditer(text) if "agentic-hil" in match.group(1))
+
+
 def _changelog_release(root: Path) -> str:
     match = CHANGELOG_RELEASE.search(_read(root, "CHANGELOG.md"))
     if match is None:
@@ -237,6 +263,13 @@ def locations(root: Path) -> list[Location]:
             "TROUBLESHOOTING.md",
             "every agentic-hil>= install pin the fix instructions hand a reader",
             _requirement_pins(root, "TROUBLESHOOTING.md"),
+        ),
+        # A second entry for the same file, because it is a different claim: a
+        # git-tag pin, not a version requirement (hardci-hq#86).
+        Location(
+            "TROUBLESHOOTING.md",
+            "the agentic-hil@vX.Y.Z git-tag pin: the documented install route while PyPI is unreachable",
+            _tag_pins(root, "TROUBLESHOOTING.md"),
         ),
         Location(
             "evals/install/matrix.example.json",
@@ -324,6 +357,38 @@ def uncovered_files(root: Path, version: str | None = None) -> list[str]:
                 f"add it to locations() in tools/check_version_consistency.py, "
                 f"or to UNTRACKED_MENTIONS with the reason it must not track the release"
             )
+    return found
+
+
+def unclaimed_pins(root: Path) -> list[str]:
+    """Project-tied `@vX.Y.Z` pins in covered files that no entry states.
+
+    `uncovered_files` deliberately skips a covered file, so a mention shape the
+    file's extractors cannot see is checked by nothing — the gap hardci-hq#86
+    found, where a file counted as covered while a pin in it drifted by hand
+    through four releases. This is the closing half: every pin of this shape in
+    a covered file must carry a version the file's own entries state, which
+    `version_problems` then compares against the release. A pin equal to a
+    stated version passes here and is caught there the moment it goes stale.
+
+    Two gaps stay open, named rather than closed. A file in UNTRACKED_MENTIONS
+    is excused wholesale by its declared reason. And an uncovered file is the
+    sweep's job, which recognises the current release string — so a pin born
+    already stale in a brand-new file is seen only by
+    tools/check_shipped_references.py, and only as a full repository URL in a
+    shipped document.
+    """
+    claimed: dict[str, set[str]] = {}
+    for location in locations(root):
+        claimed.setdefault(location.path, set()).update(location.versions)
+    found = []
+    for relative in sorted(claimed):
+        for pinned in _tag_pins(root, relative):
+            if pinned not in claimed[relative]:
+                found.append(
+                    f"{relative} pins this project at @v{pinned}, but no entry in locations() claims that pin: "
+                    f"extend the file's entry in tools/check_version_consistency.py so the pin is checked"
+                )
     return found
 
 
@@ -424,6 +489,7 @@ def problems(root: Path, release_tag: str | None = None) -> list[str]:
     return [
         *version_problems(root, release_tag),
         *uncovered_files(root),
+        *unclaimed_pins(root),
         *contract_problems(root),
     ]
 
@@ -433,7 +499,10 @@ def render_list(root: Path) -> str:
     version = package_version(root)
     carried = locations(root)
     occurrences = sum(len(location.versions) for location in carried)
-    lines = [f"Release version {version} is carried in {len(carried)} files, {occurrences} occurrences:", ""]
+    # Distinct paths, not entries: a file may hold several claims — TROUBLESHOOTING.md
+    # carries requirement pins and a git-tag pin as two entries.
+    files = len({location.path for location in carried})
+    lines = [f"Release version {version} is carried in {files} files, {occurrences} occurrences:", ""]
     for location in carried:
         count = len(location.versions)
         suffix = "" if count == 1 else f"  [{count} occurrences]"
