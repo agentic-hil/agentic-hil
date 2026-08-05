@@ -79,17 +79,6 @@
       "minLength": 1,
       "description": "Absolute operator-controlled directory shared by every frontend for persistent locks, leases, quarantine incidents, and canonical reports. It must be outside workspace_root."
     },
-    "windows_path_trust": {
-      "type": "string",
-      "enum": [
-        "standard",
-        "strict",
-        "permissive"
-      ],
-      "default": "standard",
-      "description": "How far the Windows ACL check on state_root and the directories derived from it may go. standard refuses a path that a nameable account other than the operator, SYSTEM or Administrators can write, delete or re-permission, and reports without refusing the two findings the machine positively established: an application-package identity, and an S-1-5-21-<a>-<b>-<c>-<rid> account SID the local security authority answered about by saying nothing here maps to it, on a machine in a workgroup and joined to no Entra tenant so that its own SAM was the only thing asked. It still refuses what it could not establish — a principal lookup that failed for any other reason, an ACL that could not be read at all, and the same nothing-maps-to-it answer wherever it settles nothing: on a domain member or an Entra-joined machine, where an authority may simply not have answered, and on any machine for a SID whose form has no account name to be missing, such as a logon session SID S-1-5-5-* or an Entra principal S-1-12-1-*. A check that accepts ignorance is a check that opens whenever the lookup behind it breaks. strict additionally refuses the two reported findings, which is the rule from before 0.8.0. permissive refuses nothing the ACLs say and reports everything; it is the visible override for an environment whose ACLs do not describe its trust boundary. Ignored off Windows. It governs this configuration's own state_root and the directories derived from it and nothing else: the user configuration directory is read before any configuration exists, and the MCP server executable and the machine-wide device-lock directory are shared beyond this project, so all three are always checked under standard.",
-      "$comment": "The check defends the policy file and state against principals outside the operator's identity. It cannot defend against code running as the operator, which owns these objects and can rewrite them regardless of any ACL."
-    },
     "permissions": {
       "type": "object",
       "description": "Project-scoped permissions: what may be done to this configuration itself. Deny-by-default like every other write permission in this file, and like those only ever widened by a human editing this file. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the granting of allow_flash.",

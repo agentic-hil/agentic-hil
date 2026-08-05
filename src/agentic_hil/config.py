@@ -28,8 +28,6 @@ from agentic_hil.knowledge import remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
-    WINDOWS_PATH_TRUST_DEFAULT,
-    WINDOWS_PATH_TRUST_MODES,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
@@ -47,17 +45,6 @@ from agentic_hil.types import (
     ValidationConfig,
     fold_device_path,
     fold_hardware_id,
-)
-from agentic_hil.windows_principals import (
-    PRINCIPAL_CLASS_ACCOUNT,
-    PRINCIPAL_CLASS_APP_PACKAGE,
-    PRINCIPAL_CLASS_ENTRA,
-    PRINCIPAL_CLASS_LOGON_SESSION,
-    PRINCIPAL_CLASS_LOOKUP_FAILED,
-    PRINCIPAL_CLASS_UNRESOLVED,
-    PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
-    principal_class,
-    untrusted_principal_details,
 )
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
@@ -163,13 +150,11 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
 class ValidatedDocument:
     """Everything a configuration document decides about itself.
 
-    What ``load_config`` establishes before it looks at the machine, and
-    therefore exactly what a second reader — ``configstate.config_status`` — can
-    check without walking ACLs or stat-ing a workspace. Returned rather than
-    re-derived so the two cannot answer differently about one file."""
+    What ``load_config`` establishes before it looks at the machine: the checks
+    that are a pure function of the document, kept together so the loader reads
+    in one place and a reader of this class can see what a file alone decides."""
 
     config_version: int
-    windows_path_trust: str
     workspace_root: str
     target: TargetConfig
     debuggers: dict[str, DebuggerConfig]
@@ -180,27 +165,25 @@ class ValidatedDocument:
 def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     """Every load-blocking check that is a pure function of the document.
 
-    The startup loader's first half, factored out so that "would a restart onto
-    these bytes come up?" is answered by running the same rules rather than by a
-    subset of them. A schema-valid file can still be a file no server can load —
-    ``workspace_root: relative``, two debuggers resolving to one probe, a
-    ``resource_id`` spelled in two cases — and classifying those as `changed`
-    tells an operator to restart into a failure.
+    The startup loader's first half. A schema-valid file can still be a file no
+    server can load — ``workspace_root: relative``, two debuggers resolving to
+    one probe, a ``resource_id`` spelled in two cases — and each of those is
+    decidable from the text with no question put to the machine.
 
     Excluded, deliberately: everything that asks the machine rather than the
-    document. Whether ``workspace_root`` exists, the ``state_root`` ACL walk, the
-    executables on disk. Those depend on the host, are expensive on Windows, and
-    a status check runs per call.
+    document. Whether ``workspace_root`` exists, whether ``state_root`` can be
+    created, the executables on disk. Those depend on the host and belong to
+    ``load_config``.
     """
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": config_path})
     reject_bridge_args(raw, config_path)
     reject_removed_sections(raw, config_path)
+    reject_removed_keys(raw, config_path)
     reject_empty_allowed_roots(raw, config_path)
     config_version = configured_version(raw, config_path)
     reject_read_permissions(raw, config_path, config_version)
     validate_config_schema(raw, config_path)
-    trust = validated_windows_path_trust(raw.get("windows_path_trust"), config_path)
 
     workspace_value = str(raw["workspace_root"])
     workspace_requested = Path(workspace_value).expanduser()
@@ -211,8 +194,8 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
             {"path": config_path, "field": "workspace_root", "value": workspace_value},
         )
     workspace = workspace_requested.resolve()
-    # Lexical only: whether the directory is there, who owns it and what its ACLs
-    # say is the machine's answer and belongs to load_config.
+    # Lexical only: whether the directory is there and can be created is the
+    # machine's answer and belongs to load_config.
     validated_state_root_paths(str(raw["state_root"]), workspace, config_path)
 
     target = target_config(mapping(raw.get("target"), "target"))
@@ -226,7 +209,6 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     validate_debuggers(debuggers)
     return ValidatedDocument(
         config_version=config_version,
-        windows_path_trust=trust,
         workspace_root=str(workspace),
         target=target,
         debuggers=debuggers,
@@ -303,19 +285,16 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
             "Configured workspace_root does not match the requested work directory.",
             {"workspace_root": str(workspace), "expected_workspace": str(Path(work_dir).resolve())},
         )
-    state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path, document.windows_path_trust)
+    state_root = validated_state_root(str(raw["state_root"]), workspace, resolved_config_path)
     return assembled_config(raw, document, resolved_config_path, state_root, config_digest(loaded_bytes))
 
 
 def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path: str, state_root: Path, digest: str) -> AgenticHILConfig:
     """The document and its already-validated roots as one ``AgenticHILConfig``.
 
-    Split out of ``load_config`` so that "would a restart onto these bytes come
-    up?" can be answered by running the *rest* of startup — the path pinning, the
-    executable resolution, the post-pinning probe rules — against the same object
-    those steps see at startup, instead of against an approximation of it.
-    Assembles and validates nothing on its own; every check is either behind it in
-    the document validation or ahead of it in the pinning.
+    Split out of ``load_config`` so the assembly of the object is one step with a
+    name. Assembles and validates nothing on its own; every check is either
+    behind it in the document validation or ahead of it in the pinning.
     """
     debug_raw = mapping(raw.get("debug"), "debug")
     artifacts_raw = mapping(raw.get("artifacts"), "artifacts")
@@ -358,7 +337,6 @@ def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path
         permissions=project_permissions(permissions_raw),
         config_digest=digest,
         loaded_at=utc_now(),
-        windows_path_trust=document.windows_path_trust,
     )
 
 
@@ -425,89 +403,6 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
             {"path": str(resolved), "expected_path": str(project_config_path(workspace)), "workspace_root": config.workspace_root},
         )
     return validate_pinned_probe_ownership(pin_configured_paths(pin_configured_executables(config)))
-
-
-def candidate_startup_error(raw: Any, config_path: str, running: AgenticHILConfig) -> ConfigError | None:
-    """Why a restart onto this document would not produce a running server.
-
-    ``load_authoritative_config`` without the loading: every check it makes that a
-    document can fail, run in its order, against the object ``assembled_config``
-    builds — so this answers with startup's own code rather than with a subset of
-    it that has to be kept in step by hand.
-
-    That subset is what this replaces. ``validate_config_document`` alone accepts
-    ``reports.directory: ../outside``, a ``workspace_root`` pointing somewhere
-    else, a debugger whose executable is not installed; each of those is refused
-    by ``pin_configured_paths``, by the workspace binding, or by
-    ``pin_configured_executables``, and each was being reported as `changed` —
-    whose remediation is "restart the server to pick this up". Restarting on that
-    advice shuts down a server that is enforcing a policy and does not bring it
-    back.
-
-    Side-effect-free, and that is a requirement rather than a property: the
-    document being judged is not in force, so nothing about it may reach the
-    machine. The one startup step that writes — ``safe_directory`` creating
-    ``state_root`` before the trust walk — is therefore replaced by
-    ``validate_state_root_trust(only_existing=True)``, which judges the part of
-    that chain that is already there and stays silent about the part that is not.
-
-    ``running`` supplies what startup takes from its environment: the workspace it
-    was started in, which a candidate must still be bound to. Its digest is
-    borrowed only so the assembled object is complete; nothing reads it.
-
-    Cost: one stat per configured output path, one ``which`` per unresolved
-    executable, and on Windows an ACL walk of the state_root chain. Paid only on
-    a file whose digest already differs — that is, only while the server is
-    already reporting itself stale, which is exactly when the answer decides what
-    an operator does next.
-    """
-    try:
-        _validate_candidate(raw, config_path, running)
-    except ConfigError as error:
-        return error
-    except (OSError, ValueError) as error:
-        # Not a refusal any of these checks wrote, but this runs inside every tool
-        # result: a path that will not resolve, a stat that fails on an ancestor,
-        # must not turn a status field into an unhandled exception on the answer it
-        # was attached to. It is also not a pass — whatever stopped the check here
-        # would meet the same startup, so it goes back as a reason the restart
-        # would not come up rather than as silence.
-        return error
-    return None
-
-
-def _validate_candidate(raw: Any, config_path: str, running: AgenticHILConfig) -> None:
-    document = validate_config_document(raw, config_path)
-    workspace = Path(document.workspace_root)
-    if not workspace.is_dir():
-        raise ConfigError(
-            "config_invalid",
-            "workspace_root must be an existing directory.",
-            {"path": config_path, "field": "workspace_root", "value": str(raw["workspace_root"])},
-        )
-    candidate_path = Path(config_path)
-    if is_path_within_frozen(candidate_path, workspace) or is_path_within(candidate_path, workspace):
-        raise ConfigError(
-            "config_invalid",
-            "The authoritative config must be stored outside the workspace.",
-            {"path": config_path, "workspace_root": str(workspace)},
-        )
-    if workspace != Path(running.workspace_root):
-        raise ConfigError(
-            "config_invalid",
-            "The authoritative config is bound to a different workspace.",
-            {"path": config_path, "workspace_root": str(workspace), "expected_workspace": running.workspace_root},
-        )
-    if not os.environ.get(CONFIG_ENV) and candidate_path.resolve() != project_config_path(workspace):
-        raise ConfigError(
-            "config_invalid",
-            "The automatically discovered config is not canonical for this workspace.",
-            {"path": config_path, "expected_path": str(project_config_path(workspace)), "workspace_root": str(workspace)},
-        )
-    state_root = validated_state_root_paths(str(raw["state_root"]), workspace, config_path)
-    validate_state_root_trust(state_root, trust=document.windows_path_trust, only_existing=True)
-    candidate = assembled_config(raw, document, config_path, state_root, running.config_digest)
-    validate_pinned_probe_ownership(pin_configured_paths(pin_configured_executables(candidate)))
 
 
 def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -658,22 +553,23 @@ def user_state_root() -> Path:
 
 
 def ensure_safe_state_root() -> list[str]:
-    """Create and validate the default state directory without changing existing
-    permissions. Unsafe ownership or replaceable ancestors fail closed. This
-    validator itself never chmods; ``setup`` performs any user-owned tightening
-    explicitly beforehand via tighten_owned_writable_ancestors()."""
-    # field="state_root": this is the state directory, not the config directory,
-    # and the field decides which remediation the refusal carries. Reported as
-    # user_config it proposed moving config.yaml, which fixes nothing here.
-    secure_user_directory(user_state_root(), field="state_root", label="Default state root")
+    """Create the default state directory, or fail here rather than later.
+
+    ``init`` runs this before it writes anything, so a state root that cannot be
+    created — a component that is a file, a symlinked chain, a device that is not
+    there — is reported while nothing has been changed, instead of at the first
+    lease of the first run. It changes no permissions on anything that already
+    exists, and returns the list of changes it made for the caller to report:
+    always empty, kept as a list because the caller publishes the field."""
+    user_state_root()
     return []
 
 
 def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
     """Remove group/other write from the *current user's own* directories (and a
     final regular file such as a launcher) along ``target``'s chain, so the
-    fail-closed trust validators accept a umask-002 / private-group home without
-    the operator hand-fixing permissions.
+    fail-closed executable trust check accepts a umask-002 / private-group home
+    without the operator hand-fixing permissions.
 
     Only components owned by the current user are ever changed; the walk stops at
     the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
@@ -713,15 +609,15 @@ def project_state_directory(config: AgenticHILConfig) -> Path:
         ]
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-    return trusted_state_directory(config.state_root, "projects", digest, trust=config.windows_path_trust)
+    return derived_state_directory(config.state_root, "projects", digest)
 
 
 def validated_state_root_paths(value: str, workspace: Path, config_path: str) -> Path:
     """What the two configured roots say about each other, from the text alone.
 
     Split from ``validated_state_root`` so ``validate_config_document`` can run it
-    without creating a directory or walking an ACL — the answer is the same on
-    every host, which is what makes it safe to run from a per-call status check."""
+    without creating a directory — the answer is the same on every host, which is
+    what makes it safe to run from a document-only check."""
     requested = Path(value).expanduser()
     if not requested.is_absolute():
         raise ConfigError("config_invalid", "state_root must be an absolute path.", {"path": config_path, "field": "state_root", "value": value})
@@ -731,569 +627,27 @@ def validated_state_root_paths(value: str, workspace: Path, config_path: str) ->
     return lexical
 
 
-def validated_state_root(value: str, workspace: Path, config_path: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
+def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
+    """The configured state_root, created and openable.
+
+    Reachability and writability, which is function rather than trust: a server
+    that cannot create this directory fails later, at the first lease or report,
+    somewhere with much less context than here. Who else on the machine could
+    write it is not asked — the operator's own processes always can, so an answer
+    to that question never bound anything (hardci-hq#95)."""
     lexical = validated_state_root_paths(value, workspace, config_path)
-    root = safe_directory(lexical)
-    validate_state_root_trust(root, trust=trust)
-    return root
+    return safe_directory(lexical)
 
 
-def validate_state_root_trust(root: Path, *, trust: str = WINDOWS_PATH_TRUST_DEFAULT, only_existing: bool = False) -> None:
-    """The trust rules for a state_root that is already on disk.
+def derived_state_directory(state_root: str | Path, *parts: str) -> Path:
+    """Create/reopen a directory derived from the already-validated state_root.
 
-    Split from ``validated_state_root`` so that a caller which may not *create*
-    anything can still run the same rules. ``validated_state_root`` calls
-    ``safe_directory`` first and therefore always passes a chain that exists;
-    ``only_existing`` is for the candidate check, which is answering a question
-    about a document that is not in force and must not put a directory on the
-    machine for it.
-
-    Under ``only_existing`` a component that is not there yet is not judged — not
-    guessed at, and not held against the path. Everything that *is* there is
-    judged by exactly the rule startup would apply to it, so this can only ever
-    find a subset of what startup finds. What it cannot see is the ACL a
-    not-yet-created directory will end up with, which on Windows is inherited from
-    the parent that was just checked and on POSIX is this process's own umask.
-
-    This configuration's own state_root is the one path its `windows_path_trust`
-    key is entitled to speak for, which is why ``trust`` is passed and never
-    looked up.
-    """
-    if os.name == "nt":
-        validate_windows_state_root(root, trust=trust, only_existing=only_existing)
-        return
-    for index, candidate in enumerate((root, *root.parents)):
-        try:
-            opened = os.stat(candidate, follow_symlinks=False)
-        except OSError:
-            if only_existing:
-                continue
-            raise
-        mode = stat.S_IMODE(opened.st_mode)
-        # The final state_root must never be group/world writable. The sticky
-        # bit only excuses ANCESTORS (e.g. /tmp 01777), where the sticky bit
-        # still stops other users from replacing existing entries; it does
-        # not stop them from pre-creating our derived subdirectories inside a
-        # world-writable final root.
-        unsafe_write = bool(mode & 0o022) and (index == 0 or not bool(mode & stat.S_ISVTX))
-        if (index == 0 and opened.st_uid != os.geteuid()) or unsafe_write:
-            raise ConfigError("unsafe_configured_path", "state_root must be owned by the current user, must not be writable by other users, and must have no replaceable ancestor directories.", {"field": "state_root", "path": str(candidate)})
-
-
-def trusted_state_directory(state_root: str | Path, *parts: str, trust: str = WINDOWS_PATH_TRUST_DEFAULT) -> Path:
-    """Create/reopen a directory derived from the already-validated state_root,
-    verifying every derived component is owned by the current user, is a real
-    directory, and is not writable by other users. This closes the gap where a
-    foreign local user pre-creates coordination/locks/records/projects before
-    the first trusted start.
-
-    ``trust`` is the mode of the configuration whose ``state_root`` this is
-    derived from — ``AgenticHILConfig.windows_path_trust`` and nothing else. It is
-    passed rather than looked up so that a directory is judged by the policy in
-    force for the project it belongs to, never by whichever document some other
-    call happened to parse last. The default is `standard`, so a caller that
-    forgets gets the stricter rule."""
+    Every component is opened without following a link, so a symlinked component
+    is refused rather than traversed; that is the same rule ``safe_directory``
+    applies to any configured directory and it is about what the path *is*, not
+    about who else holds rights on it."""
     base = absolute_without_symlinks(Path(state_root))
-    target = base.joinpath(*parts)
-    if not parts:
-        return safe_directory(target)
-    if os.name == "nt":
-        handles = _windows_hold_directory_chain(target, create=True)
-        _close_windows_handles(handles)
-        # Derived from the state_root the same configuration named, so it is
-        # covered by that configuration's mode and by nothing wider.
-        validate_windows_state_root(target, trust=trust)
-        return target
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = _open_directory_fd(base, create=True)
-    try:
-        euid = os.geteuid()
-        for part in parts:
-            with suppress(FileExistsError):
-                os.mkdir(part, mode=0o700, dir_fd=descriptor)
-            try:
-                next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            except OSError as error:
-                _raise_unsafe_path_error(error, target)
-                raise
-            os.close(descriptor)
-            descriptor = next_descriptor
-            opened = os.fstat(descriptor)
-            if not stat.S_ISDIR(opened.st_mode):
-                raise ConfigError("unsafe_configured_path", "Derived state directory component is not a directory.", {"field": "state_root", "path": str(target)})
-            if opened.st_uid != euid or bool(stat.S_IMODE(opened.st_mode) & 0o022):
-                raise ConfigError("unsafe_configured_path", "Derived state directory must be owned by the current user and not writable by other users.", {"field": "state_root", "path": str(target)})
-        return target
-    finally:
-        os.close(descriptor)
-
-
-# The security decision of hardci-hq#91, in one table. A finding refuses under a
-# mode when it is listed there and is reported otherwise.
-#
-# The line `standard` draws is between evidence and ignorance, not between
-# comfortable and inconvenient. It tolerates exactly two findings, and both are
-# things the machine positively established:
-#
-# * ``app_package_principal`` — an AppContainer identity, recognised from the
-#   SID's own structure with no lookup at all. It holds a subset of rights the
-#   operator's unpackaged processes already have in full.
-# * ``unresolved_principal`` — the local security authority was asked and
-#   answered ``ERROR_NONE_MAPPED`` *on a machine where that is the whole answer*
-#   *about a SID of the one form that answer can be conclusive for*: this host is
-#   in a workgroup and joined to no Entra tenant, so its own SAM is the only
-#   account database the call consults and it is always reachable, and the SID is
-#   ``S-1-5-21-<a>-<b>-<c>-<rid>``, an account somewhere. Nothing on this machine
-#   maps to it and no token built here can carry it. A stock Windows 11
-#   ``%LOCALAPPDATA%`` really does carry such an ACE — measured on 26200, an
-#   ``(OI)(CI)(M)`` grant to an ``S-1-5-21-…`` SID left by the installation image
-#   — which is why refusing it is not an option short of refusing the documented
-#   default state_root.
-#
-# Everything the check could *not* establish refuses: an ACL it could not read, a
-# SID whose lookup failed for any reason other than that answer, and — this is
-# ``unresolved_foreign_principal`` — ``ERROR_NONE_MAPPED`` where it settles
-# nothing. That is a domain member, where the same call also asks the domain and
-# every trust behind it and returns that code when it gets no answer; it is also,
-# on any machine, a SID whose form has no account name to be missing in the first
-# place. A live account, or one reachable only through SID history, then arrives
-# looking exactly like the benign orphan above, and Windows authorizes on the raw
-# SIDs in a token either way.
-#
-# Two of those nameless forms are named rather than lumped in, because the
-# refusal is worth nothing if an operator cannot tell what it is looking at:
-# ``logon_session_principal`` (``S-1-5-5-*``, one live logon session, carried in
-# that session's tokens) and ``entra_principal`` (``S-1-12-1-*``, a principal of a
-# directory this machine did not ask). Both refuse under `standard` for the same
-# reason the general case does.
-#
-# Those are ignorance, and a gate that lets ignorance through is a gate that opens
-# whenever the lookup behind it breaks. Keeping the classes apart is
-# ``windows_principals.lookup_account``'s job, and this table is why it has one.
-# Accepting unknown evidence is what `permissive` is for, and it says so in the
-# file where a later reader can see it.
-_WINDOWS_PATH_TRUST_REFUSALS: dict[str, frozenset[str]] = {
-    "standard": frozenset(
-        {
-            "untrusted_owner",
-            "null_dacl",
-            "foreign_principal",
-            "logon_session_principal",
-            "entra_principal",
-            "unresolved_foreign_principal",
-            "principal_lookup_failed",
-            "acl_unreadable",
-        }
-    ),
-    "strict": frozenset(
-        {
-            "untrusted_owner",
-            "null_dacl",
-            "foreign_principal",
-            "app_package_principal",
-            "logon_session_principal",
-            "entra_principal",
-            "unresolved_principal",
-            "unresolved_foreign_principal",
-            "principal_lookup_failed",
-            "acl_unreadable",
-        }
-    ),
-    "permissive": frozenset(),
-}
-
-# The mode is a property of one loaded configuration, not of this process. It
-# used to be a module global set on every ``load_config``, and that made it
-# reachable from a document nothing is being served under: `project_config_set`
-# validates its candidate by loading it in-process, so an operator's stale edit
-# from `standard` to `permissive` took effect for every later derived-path check
-# — before the restart that is supposed to be what puts a new policy in force,
-# and even when the candidate was rolled back afterwards. It is now parsed here,
-# carried on ``AgenticHILConfig.windows_path_trust``, and passed explicitly to
-# each check.
-#
-# What it governs is *not* every path this process checks. It is a key in one
-# project's configuration, and it may only ever weaken that project's own
-# `state_root` and the directories derived from it. The user configuration, the
-# MCP server executable and the machine-wide device-lock directory are checked
-# under `standard` whatever it says: the first is read before any configuration
-# exists (so there is nothing to read the key from), and the last is shared by
-# every project on the machine — a `permissive` project must not be able to open
-# the mutex state that protects another project's boards. Callers say which they
-# are by passing `trust=` explicitly; the parameter defaults to `standard`, so a
-# path whose caller forgot is checked under the stricter rule rather than the
-# looser one.
-def validated_windows_path_trust(value: object, config_path: str = "") -> str:
-    """The mode this document names. Pure: it changes nothing outside its return."""
-    if value is None:
-        return WINDOWS_PATH_TRUST_DEFAULT
-    if not isinstance(value, str) or value not in WINDOWS_PATH_TRUST_MODES:
-        raise ConfigError(
-            "config_invalid",
-            f"windows_path_trust must be one of {', '.join(WINDOWS_PATH_TRUST_MODES)}.",
-            {"path": config_path, "field": "windows_path_trust", "value": value},
-        )
-    return value
-
-
-# The refusal texts, unchanged from before 0.8.0: what changed is which findings
-# reach them, not what an operator who does hit one reads.
-_WINDOWS_TRUST_SUMMARIES = {
-    ("acl_unreadable", "object"): "Windows ownership and ACL could not be inspected.",
-    ("acl_unreadable", "ancestor"): "ancestor ACL could not be inspected.",
-    ("untrusted_owner", "object"): "must have a trusted Windows owner.",
-    ("principal_lookup_failed", "object"): "grants write access to a Windows principal this machine could not look up.",
-    ("principal_lookup_failed", "ancestor"): "has an ancestor granting write access to a Windows principal this machine could not look up.",
-    (
-        "unresolved_foreign_principal",
-        "object",
-    ): "grants write access to a Windows SID no account here maps to, where that answer settles nothing: this machine has a domain or Entra authority that may not have answered, or the SID is not of a form that has an account name to be missing. The holder may be live.",
-    (
-        "unresolved_foreign_principal",
-        "ancestor",
-    ): "has an ancestor granting write access to a Windows SID no account here maps to, where that answer settles nothing: this machine has a domain or Entra authority that may not have answered, or the SID is not of a form that has an account name to be missing. The holder may be live.",
-    (
-        "logon_session_principal",
-        "object",
-    ): "grants write access to a Windows logon session SID (S-1-5-5-*). That names one live logon session and is carried in its access tokens, so the right is being held now.",
-    (
-        "logon_session_principal",
-        "ancestor",
-    ): "has an ancestor granting write access to a Windows logon session SID (S-1-5-5-*). That names one live logon session and is carried in its access tokens, so the right is being held now.",
-    (
-        "entra_principal",
-        "object",
-    ): "grants write access to an Entra ID principal (S-1-12-1-*) this machine could not name. The directory that could name it was not asked, so the holder may be live.",
-    (
-        "entra_principal",
-        "ancestor",
-    ): "has an ancestor granting write access to an Entra ID principal (S-1-12-1-*) this machine could not name. The directory that could name it was not asked, so the holder may be live.",
-}
-
-
-def _windows_trust_summary(label: str, finding: JsonObject) -> str:
-    key = (str(finding["finding"]), str(finding["scope"]))
-    if key in _WINDOWS_TRUST_SUMMARIES:
-        return f"{label} {_WINDOWS_TRUST_SUMMARIES[key]}"
-    if finding["scope"] == "ancestor":
-        return f"{label} has a replaceable Windows ancestor directory."
-    return f"{label} must not grant write access to other Windows principals."
-
-
-def _trust_finding(name: str, scope: str, path: Path, **extra: object) -> JsonObject:
-    return {"finding": name, "scope": scope, "path": str(path), **extra}
-
-
-def validate_windows_state_root(
-    root: Path,
-    *,
-    field: str = "state_root",
-    label: str = "state_root",
-    trust: str = WINDOWS_PATH_TRUST_DEFAULT,
-    only_existing: bool = False,
-) -> list[JsonObject]:
-    """Refuse a Windows path whose ACLs put it outside the operator's control.
-
-    What is defended: the authoritative configuration is the permission policy
-    for hardware, and state_root holds leases, quarantines and canonical reports.
-    A *nameable account other than the operator* that can write, delete or
-    re-permission either of them could forge that policy or those records, and
-    that is what this refuses.
-
-    What is not defended, and never was: code running as the operator. The
-    operator owns these objects and holds FullControl on them, so every ordinary
-    process of that user can rewrite them regardless of any ACL. No check here
-    can move that boundary, and pretending otherwise is what made the standard
-    per-user folders unusable — an app-capability ACE on ``AppData`` grants a
-    *sandboxed subset* of rights the same user's unpackaged processes already
-    have in full.
-
-    ``trust`` is the policy this particular path is checked under, and it is the
-    caller's to state rather than this function's to look up. A configuration's
-    `windows_path_trust` reaches its own `state_root` and what is derived from
-    it; nothing else in this process is that configuration's to weaken. The
-    default is `standard`, so the failure mode of forgetting is a check that is
-    too strict rather than one that is too loose.
-
-    Returns every finding, including the ones that did not refuse, so `doctor`
-    can name a degraded environment instead of the tool going quiet about it.
-
-    ``only_existing`` drops findings about a component that is not on disk. Every
-    caller that creates the chain first leaves it False and is unaffected — the
-    findings all concern paths that exist. It is for the caller that may not
-    create anything, where "the ACL could not be read" is the reader saying the
-    directory is not there yet rather than a verdict about it.
-    """
-    findings = inspect_windows_path_trust(root)
-    if only_existing:
-        findings = [finding for finding in findings if Path(str(finding["path"])).exists()]
-    mode = trust if trust in _WINDOWS_PATH_TRUST_REFUSALS else WINDOWS_PATH_TRUST_DEFAULT
-    refusing = _WINDOWS_PATH_TRUST_REFUSALS[mode]
-    for finding in findings:
-        if finding["finding"] not in refusing:
-            continue
-        details: JsonObject = {
-            "field": field,
-            "path": finding["path"],
-            "finding": finding["finding"],
-            "path_trust": mode,
-            **untrusted_principal_details([sid for sid in finding.get("sids", []) if sid]),
-        }
-        for key in ("winerror", "backend_error"):
-            if key in finding:
-                details[key] = finding[key]
-        raise ConfigError("unsafe_configured_path", _windows_trust_summary(label, finding), details)
-    return findings
-
-
-def inspect_windows_path_trust(root: Path) -> list[JsonObject]:
-    """Everything this path's ACLs say about who other than the operator can
-    replace it. Refuses nothing; ``validate_windows_state_root`` decides.
-
-    One walk for the refusal and for the report, so what `doctor` says and what a
-    refusal says cannot drift apart.
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    findings: list[JsonObject] = []
-    owner_sid = ctypes.c_void_p()
-    dacl = ctypes.c_void_p()
-    security_descriptor = ctypes.c_void_p()
-    token = wintypes.HANDLE()
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    get_security = advapi32.GetNamedSecurityInfoW
-    get_security.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
-    get_security.restype = wintypes.DWORD
-    result = get_security(str(root), 1, 0x00000005, ctypes.byref(owner_sid), None, ctypes.byref(dacl), None, ctypes.byref(security_descriptor))
-    if result:
-        # Not a verdict. "The ACL could not be read" is ignorance, and a sandbox,
-        # a service account or a CI runner reaches it without anything being
-        # wrong with the path.
-        return [_trust_finding("acl_unreadable", "object", root, winerror=result)]
-
-    open_token = advapi32.OpenProcessToken
-    open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
-    open_token.restype = wintypes.BOOL
-    get_current_process = kernel32.GetCurrentProcess
-    get_current_process.argtypes = []
-    get_current_process.restype = wintypes.HANDLE
-    get_token_information = advapi32.GetTokenInformation
-    get_token_information.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
-    get_token_information.restype = wintypes.BOOL
-    equal_sid = advapi32.EqualSid
-    equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    equal_sid.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-    local_free = kernel32.LocalFree
-    local_free.argtypes = [wintypes.HLOCAL]
-    local_free.restype = wintypes.HLOCAL
-    try:
-        if not open_token(get_current_process(), 0x0008, ctypes.byref(token)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        required = wintypes.DWORD()
-        get_token_information(token, 1, None, 0, ctypes.byref(required))
-        token_info = ctypes.create_string_buffer(required.value)
-        if not get_token_information(token, 1, token_info, required, ctypes.byref(required)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        current_sid = ctypes.c_void_p.from_buffer(token_info).value
-        # Administrator tokens create directories owned by BUILTIN\Administrators
-        # or SYSTEM; both are trusted principals, so accept them as owners.
-        create_well_known_sid = advapi32.CreateWellKnownSid
-        create_well_known_sid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
-        create_well_known_sid.restype = wintypes.BOOL
-        trusted_owner = bool(equal_sid(owner_sid, current_sid))
-        for sid_type in (22, 26):
-            if trusted_owner:
-                break
-            size = wintypes.DWORD(68)
-            candidate = ctypes.create_string_buffer(size.value)
-            if not create_well_known_sid(sid_type, None, candidate, ctypes.byref(size)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            trusted_owner = bool(equal_sid(owner_sid, candidate))
-        if not trusted_owner:
-            findings.append(_trust_finding("untrusted_owner", "object", root, sids=[windows_sid_to_string(advapi32, owner_sid) or ""]))
-        # A NULL DACL grants everyone everything. Nothing to walk, and nothing
-        # ambiguous about it either: it is a grant to Everyone in all but name.
-        if not dacl.value:
-            findings.append(_trust_finding("null_dacl", "object", root))
-        else:
-            findings.extend(_windows_principal_findings(advapi32, dacl, current_sid, 0x500D0116, "object", root))
-        for ancestor in root.parents:
-            ancestor_dacl = ctypes.c_void_p()
-            ancestor_descriptor = ctypes.c_void_p()
-            result = get_security(str(ancestor), 1, 0x00000004, None, None, ctypes.byref(ancestor_dacl), None, ctypes.byref(ancestor_descriptor))
-            if result:
-                findings.append(_trust_finding("acl_unreadable", "ancestor", ancestor, winerror=result))
-                continue
-            try:
-                if not ancestor_dacl.value:
-                    findings.append(_trust_finding("null_dacl", "ancestor", ancestor))
-                else:
-                    # Name the holder, not only the path. An opaque S-1-15-3-...
-                    # leaves the operator unable to decide between the permitted
-                    # location and revoking the grant, and that decision is theirs.
-                    findings.extend(_windows_principal_findings(advapi32, ancestor_dacl, current_sid, 0x100D0040, "ancestor", ancestor, include_inherit_only=False))
-            finally:
-                if ancestor_descriptor:
-                    local_free(ancestor_descriptor)
-    except OSError as error:
-        findings.append(_trust_finding("acl_unreadable", "object", root, backend_error=str(error)))
-    finally:
-        if token:
-            close_handle(token)
-        if security_descriptor:
-            local_free(security_descriptor)
-    return findings
-
-
-def _windows_principal_findings(
-    advapi32: object,
-    dacl: object,
-    current_sid: object,
-    access_mask: int,
-    scope: str,
-    path: Path,
-    *,
-    include_inherit_only: bool = True,
-) -> list[JsonObject]:
-    """One finding per class of principal that holds ``access_mask`` here.
-
-    Grouped by class rather than by SID, because the class is what decides the
-    refusal and the SIDs are what the refusal can say about it.
-    """
-    name_by_class = {
-        PRINCIPAL_CLASS_ACCOUNT: "foreign_principal",
-        PRINCIPAL_CLASS_LOGON_SESSION: "logon_session_principal",
-        PRINCIPAL_CLASS_ENTRA: "entra_principal",
-        PRINCIPAL_CLASS_LOOKUP_FAILED: "principal_lookup_failed",
-        PRINCIPAL_CLASS_UNRESOLVED_FOREIGN: "unresolved_foreign_principal",
-        PRINCIPAL_CLASS_APP_PACKAGE: "app_package_principal",
-        PRINCIPAL_CLASS_UNRESOLVED: "unresolved_principal",
-    }
-    grouped: dict[str, list[str]] = {}
-    for sid in windows_acl_principals_holding(advapi32, dacl, current_sid, access_mask, include_inherit_only=include_inherit_only):
-        # A SID that could not even be stringified cannot be classified either.
-        # That is ignorance about a live right, not a resolved absence, so it
-        # lands in `lookup_failed` and refuses rather than in the tolerated class.
-        holder = principal_class(sid) if sid else PRINCIPAL_CLASS_LOOKUP_FAILED
-        grouped.setdefault(holder, [])
-        if sid and sid not in grouped[holder]:
-            grouped[holder].append(sid)
-    # Deterministic and worst-first: the classes that refuse under `standard` come
-    # before the ones that are reported, so a refusal names the account, or the
-    # lookup that did not answer, before it names a package nobody has to act on.
-    order = (
-        PRINCIPAL_CLASS_ACCOUNT,
-        # A live logon session and an Entra principal are the two nameless forms
-        # this machine can say something positive about, so they are named before
-        # the general "that answer settles nothing" class.
-        PRINCIPAL_CLASS_LOGON_SESSION,
-        PRINCIPAL_CLASS_ENTRA,
-        PRINCIPAL_CLASS_LOOKUP_FAILED,
-        PRINCIPAL_CLASS_UNRESOLVED_FOREIGN,
-        PRINCIPAL_CLASS_APP_PACKAGE,
-        PRINCIPAL_CLASS_UNRESOLVED,
-    )
-    return [_trust_finding(name_by_class[holder], scope, path, principal_class=holder, sids=grouped[holder]) for holder in order if holder in grouped]
-
-
-def windows_acl_principals_holding(advapi32: object, dacl: object, current_sid: object, access_mask: int, *, include_inherit_only: bool = True) -> list[str]:
-    """Every principal other than the operator, SYSTEM, Administrators and
-    CREATOR OWNER that this ACL grants ``access_mask`` to.
-
-    One entry per ACE that hits, in ACL order, deduplicated. A SID that cannot be
-    stringified is reported as an empty string rather than dropped: the right
-    exists whether or not anyone can put a name to it, and the caller decides
-    what an unnameable holder means.
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    class AclSizeInformation(ctypes.Structure):
-        _fields_ = [("ace_count", wintypes.DWORD), ("bytes_in_use", wintypes.DWORD), ("bytes_free", wintypes.DWORD)]
-
-    class AceHeader(ctypes.Structure):
-        _fields_ = [("ace_type", ctypes.c_ubyte), ("ace_flags", ctypes.c_ubyte), ("ace_size", wintypes.WORD)]
-
-    get_acl_information = advapi32.GetAclInformation
-    get_acl_information.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
-    get_acl_information.restype = wintypes.BOOL
-    create_well_known_sid = advapi32.CreateWellKnownSid
-    create_well_known_sid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
-    create_well_known_sid.restype = wintypes.BOOL
-    get_ace = advapi32.GetAce
-    get_ace.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
-    get_ace.restype = wintypes.BOOL
-    equal_sid = advapi32.EqualSid
-    equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    equal_sid.restype = wintypes.BOOL
-    info = AclSizeInformation()
-    if not get_acl_information(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
-        raise ctypes.WinError(ctypes.get_last_error())
-    trusted_sids: list[ctypes.Array] = []
-    for sid_type in (3, 22, 26, 71):
-        size = wintypes.DWORD(68)
-        sid = ctypes.create_string_buffer(size.value)
-        if not create_well_known_sid(sid_type, None, sid, ctypes.byref(size)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        trusted_sids.append(sid)
-    holders: list[str] = []
-    for index in range(info.ace_count):
-        ace = ctypes.c_void_p()
-        if not get_ace(dacl, index, ctypes.byref(ace)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        address = int(ace.value)
-        header = AceHeader.from_address(address)
-        if header.ace_type not in {0, 5, 9, 11}:
-            continue
-        if header.ace_flags & 0x08 and not include_inherit_only:
-            continue
-        mask = ctypes.c_uint32.from_address(address + 4).value
-        if not mask & access_mask:
-            continue
-        sid_offset = 8
-        if header.ace_type in {5, 11}:
-            flags = ctypes.c_uint32.from_address(address + 8).value
-            sid_offset = 12 + (16 if flags & 1 else 0) + (16 if flags & 2 else 0)
-        sid = ctypes.c_void_p(address + sid_offset)
-        if equal_sid(sid, current_sid) or any(equal_sid(sid, trusted_sid) for trusted_sid in trusted_sids):
-            continue
-        readable = windows_sid_to_string(advapi32, sid) or ""
-        if readable not in holders:
-            holders.append(readable)
-    return holders
-
-
-def windows_sid_to_string(advapi32: object, sid: object) -> str | None:
-    """``S-1-...`` for a SID pointer, or None when it cannot be converted."""
-    import ctypes
-    from ctypes import wintypes
-
-    try:
-        convert = advapi32.ConvertSidToStringSidW
-        convert.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
-        convert.restype = wintypes.BOOL
-        local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
-        local_free.argtypes = [wintypes.HLOCAL]
-        local_free.restype = wintypes.HLOCAL
-        buffer = wintypes.LPWSTR()
-        if not convert(sid, ctypes.byref(buffer)):
-            return None
-        try:
-            return buffer.value or None
-        finally:
-            # cast reinterprets the pointer, it does not copy: LocalFree gets the
-            # address ConvertSidToStringSidW allocated, not a ctypes-owned copy of
-            # the string, which is what passing the LPWSTR itself risks.
-            if buffer:
-                local_free(ctypes.cast(buffer, ctypes.c_void_p))
-    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
-        return None
+    return safe_directory(base.joinpath(*parts))
 
 
 def pin_configured_paths(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -1516,73 +870,21 @@ def safe_directory(directory: str | Path) -> Path:
     return path
 
 
-def secure_user_directory(directory: str | Path, *, field: str = "user_config", label: str = "User configuration directory") -> Path:
-    """Create and pin a user-controlled directory, rejecting replaceable
-    ancestors and unsafe ownership/modes instead of repairing them in place.
-
-    ``field`` names the configuration setting the refusal is about. It selects
-    the remediation attached to the result, so a caller told which directory
-    failed is also told where that particular directory may live instead.
-
-    Everything reached through here — the user configuration and its lock, the
-    machine-wide device-lock directory, the default state root chosen before any
-    file exists — is checked under `standard` on Windows and is deliberately out
-    of reach of any configuration's `windows_path_trust`. A key inside one
-    project's file may relax that project's own state_root; it may not relax the
-    directory every project on this machine coordinates through.
-    """
-    path = absolute_without_symlinks(Path(directory))
-    if os.name == "nt":
-        handles = _windows_hold_directory_chain(path, create=True)
-        try:
-            validate_windows_state_root(path, field=field, label=label)
-        finally:
-            _close_windows_handles(handles)
-        return path
-
-    descriptors = _hold_posix_directory_chain(path, create=True)
-    try:
-        euid = os.geteuid()
-        for index, descriptor in enumerate(descriptors):
-            opened = os.fstat(descriptor)
-            mode = stat.S_IMODE(opened.st_mode)
-            final = index == len(descriptors) - 1
-            unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
-            if (final and opened.st_uid != euid) or unsafe_write:
-                raise ConfigError(
-                    "unsafe_configured_path",
-                    f"{label} must be owned by the current user and must have no replaceable components.",
-                    {"field": field, "path": str(path)},
-                )
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-    return path
-
-
 def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
-    """Read a trusted user file as bytes, or return None when it is absent.
+    """Read a user file as bytes, or return None when it is absent.
 
-    The directory chain, file type, link count, owner, and write permissions are
-    validated while the opened file descriptor/handle pins the object.
+    The directory chain, the file type and the link count are validated while the
+    opened descriptor/handle pins the object, so the bytes returned are the bytes
+    of the object that was named and not of one substituted mid-read.
 
     Bytes rather than text, because a caller that needs both a digest of a file
     and the document inside it must take one snapshot and answer out of it; the
     digest is over the exact bytes and a second read can straddle an edit.
     """
     path = absolute_without_symlinks(Path(file_path))
-    secure_user_directory(path.parent)
+    safe_directory(path.parent)
     try:
         with safe_open_binary(path) as handle:
-            opened = os.fstat(handle.fileno())
-            if os.name == "nt":
-                validate_windows_state_root(path, field="user_config", label="User configuration file")
-            elif opened.st_uid != os.geteuid() or bool(stat.S_IMODE(opened.st_mode) & 0o022):
-                raise ConfigError(
-                    "unsafe_configured_path",
-                    "User configuration files must be owned by the current user and not writable by other users.",
-                    {"field": "user_config", "path": str(path)},
-                )
             return handle.read()
     except FileNotFoundError:
         return None
@@ -1597,11 +899,11 @@ def secure_optional_read_text(file_path: str | Path, *, encoding: str = "utf-8")
 
 
 def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Atomically replace one trusted user file with owner-only content."""
+    """Atomically replace one user file with owner-only content."""
     path = absolute_without_symlinks(Path(file_path))
-    secure_user_directory(path.parent)
-    # Refuse unsafe existing aliases/ACLs before atomic replacement. Merely
-    # replacing a hardlink would hide that a caller selected the wrong object.
+    safe_directory(path.parent)
+    # Refuse an existing alias before atomic replacement. Merely replacing a
+    # hardlink would hide that a caller selected the wrong object.
     secure_optional_read_text(path, encoding=encoding)
     atomic_write_text(path, text, encoding=encoding)
     written = secure_optional_read_text(path, encoding=encoding)
@@ -1610,9 +912,9 @@ def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str 
 
 
 def secure_remove_file(file_path: str | Path) -> None:
-    """Remove a trusted single-link file, primarily for transaction rollback."""
+    """Remove a single-link regular file, primarily for transaction rollback."""
     path = absolute_without_symlinks(Path(file_path))
-    secure_user_directory(path.parent)
+    safe_directory(path.parent)
     if secure_optional_read_text(path) is None:
         return
     if os.name == "nt":
@@ -1626,8 +928,8 @@ def secure_remove_file(file_path: str | Path) -> None:
     parent_descriptor = _open_directory_fd(path.parent)
     try:
         opened = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_uid != os.geteuid():
-            raise ConfigError("unsafe_configured_path", "Rollback target must be an owned single-link regular file.", {"field": "user_config", "path": str(path)})
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ConfigError("unsafe_configured_path", "Rollback target must be a single-link regular file.", {"field": "user_config", "path": str(path)})
         os.unlink(path.name, dir_fd=parent_descriptor)
         os.fsync(parent_descriptor)
     finally:
@@ -1648,19 +950,16 @@ def user_file_lock_path(file_path: str | Path) -> Path:
 def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
     """Cross-process sidecar lock for a trusted user-file transaction."""
     path = absolute_without_symlinks(Path(file_path))
-    secure_user_directory(path.parent)
+    safe_directory(path.parent)
     lock_path = user_file_lock_path(path)
     secure_optional_read_text(lock_path)
     with safe_file_lock(lock_path):
         # Validate the object created/opened by safe_file_lock before trusting the
-        # lock. A secure parent prevents another identity from swapping it later.
-        # Windows opens this sidecar without read sharing, so reopening it here
-        # fails even though the lock itself is valid. ``safe_file_lock`` already
-        # validates the opened file handle; retain that handle and only validate
-        # the path/ACL chain while it is held.
-        if os.name == "nt":
-            validate_windows_state_root(lock_path, field="user_config", label="User config lock")
-        else:
+        # lock: it must still be the single-link regular file that was opened.
+        # Windows opens this sidecar without read sharing, so reopening it there
+        # fails even though the lock itself is valid — and ``safe_file_lock`` has
+        # already validated the handle it holds, so nothing is left to re-check.
+        if os.name != "nt":
             secure_optional_read_text(lock_path)
         yield
 
@@ -1862,7 +1161,7 @@ def provisionable_state_root(workspace: Path) -> Path:
             )
             continue
         try:
-            return secure_user_directory(candidate, field="state_root", label="Default state root")
+            return safe_directory(candidate)
         except ConfigError as error:
             failure = error
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})
@@ -1950,7 +1249,7 @@ def write_generated_config(target_path: Path, workspace: Path, text: str) -> Non
 
     Validation runs on a temporary file in the target directory first, so a
     document that would not load never replaces one that does."""
-    secure_user_directory(target_path.parent)
+    safe_directory(target_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
     temporary_path = Path(temporary_name)
     try:
@@ -2002,10 +1301,15 @@ def trusted_persistent_executable(
     reject_forbidden(path)
 
     if os.name == "nt":
+        # The chain is held open while the file is: that blocks a rename or a
+        # delete of any component for the duration, which is what stops the
+        # command that gets written into an agent's configuration from being a
+        # different object than the one that was checked. Who else the ACLs let
+        # write it is no longer asked — see hardci-hq#95.
         handles = _windows_hold_directory_chain(path.parent)
         try:
             with safe_open_binary(path):
-                validate_windows_state_root(path, field="mcp_command", label="MCP server executable")
+                pass
         finally:
             _close_windows_handles(handles)
         return str(path)
@@ -3005,6 +2309,41 @@ def configured_version(raw: JsonObject, config_path: str) -> int:
             {"path": config_path, "field": "version", "value": value, "supported_versions": [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION]},
         )
     return value
+
+
+# Top-level keys this release removed, and what a file that still carries one
+# has to be told. Same argument as ``reject_removed_sections``: the schema would
+# only say the key is unknown, and a key that used to select a security policy is
+# the last thing to leave a reader guessing about.
+REMOVED_KEYS: dict[str, tuple[str, JsonObject]] = {
+    "windows_path_trust": (
+        "windows_path_trust was removed together with the Windows ACL and POSIX mode path trust check it selected. "
+        "No path is judged by who else on the machine could write it any more, so the key selects nothing.",
+        {
+            "removed": "The ancestor walk and the principal classification, on both platforms. A multi-user guarantee "
+            "was never a requirement of this project, and the check could never hold one: the operator owns these "
+            "objects and holds FullControl on them, so every ordinary process of that user could always rewrite them.",
+            "instead": "Detection rather than prevention. `config_status` in every tool result reports whether the "
+            "configuration on disk is still the one this server loaded, by SHA-256 of the exact bytes, and the audit "
+            "trail records the digest an action ran under.",
+            "unchanged": "state_root is still created and opened before it is used, symlinked path components are "
+            "still refused, and the file-level deny rules `agentic-hil setup` writes into an agent's configuration are "
+            "untouched.",
+            "action": "Delete the key. Nothing replaces it.",
+        },
+    ),
+}
+
+
+def reject_removed_keys(raw: JsonObject, config_path: str) -> None:
+    """Refuse a top-level key this release removed, by name.
+
+    Ignoring it silently would leave an operator believing a policy is still
+    being selected by a line that nothing reads. 0.8.0 is unreleased, so no file
+    in the field carries this — which is exactly why the removal is free now."""
+    for key, (summary, migration) in REMOVED_KEYS.items():
+        if key in raw:
+            raise ConfigError("config_invalid", summary, {"path": config_path, "field": key, "migration": migration})
 
 
 def reject_empty_allowed_roots(raw: JsonObject, config_path: str) -> None:
