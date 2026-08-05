@@ -619,6 +619,339 @@ def catalogue_entry(key: str) -> JsonObject | None:
     return entry
 
 
+# ---------------------------------------------------------------------------
+# What a quarantine reason asks the operator to verify.
+#
+# `agentic-hil recover --confirm-safe-state` is a signature: the operator attests
+# that the physical bench is in a safe state. A signature over a claim the signer
+# cannot judge is worthless, so every reason that can hold a bench carries the
+# four facts the signer needs: what was being attempted when confirmation was
+# lost, what is still confirmed, what nobody on this host can know any more, and
+# what to check on the physical board before signing. These travel with every
+# quarantined tool result and with `hardware_lease_status`; this catalogue is the
+# one place the texts live.
+
+
+@dataclass(frozen=True)
+class QuarantineReasonGuide:
+    """The four facts an operator needs before signing off one quarantine reason.
+
+    ``attempted`` is the action whose outcome was lost, ``confirmed`` what is
+    still known to hold, ``unknown`` the exact gap that makes a machine answer
+    impossible — the justification for needing a human at all — and
+    ``physical_check`` what that human verifies on the bench before running
+    `agentic-hil recover --confirm-safe-state`.
+    """
+
+    attempted: str
+    confirmed: str
+    unknown: str
+    physical_check: str
+
+    def as_json(self, reason: str) -> JsonObject:
+        return {
+            "reason": reason,
+            "attempted": self.attempted,
+            "confirmed": self.confirmed,
+            "unknown": self.unknown,
+            "physical_check": self.physical_check,
+        }
+
+
+_AUDIT_CONFIRMED = (
+    "Everything up to the last committed audit record happened as that record says; the failure is in persisting "
+    "evidence, not a report of damage."
+)
+_AUDIT_UNKNOWN = (
+    "Whether the actions since the last committed record reached the device, and in what order — the evidence channel "
+    "itself is what broke, so no later record can answer this."
+)
+_AUDIT_PHYSICAL_CHECK = (
+    "Fix the audit destination first (free disk space, permissions on the reports and logs directories under "
+    "state_root), read the last committed report with `agentic-hil` `get_last_report`, confirm the board matches what "
+    "it describes — firmware, running/halted, wiring — and only then sign."
+)
+
+
+def _audit_guide(attempted: str) -> QuarantineReasonGuide:
+    return QuarantineReasonGuide(attempted=attempted, confirmed=_AUDIT_CONFIRMED, unknown=_AUDIT_UNKNOWN, physical_check=_AUDIT_PHYSICAL_CHECK)
+
+
+_DEBUG_SESSION_PHYSICAL_CHECK = (
+    "Check that no leftover debug server (OpenOCD/GDB) process is holding the probe, power-cycle or reset the target "
+    "into a defined state by its own controls, confirm the expected firmware banner or LED pattern, then sign."
+)
+_EXCEPTION_UNKNOWN = (
+    "Where the operation stopped: what had already been sent to the device and what had not. An exception carries no "
+    "abort point, so the device may hold a partial effect."
+)
+
+
+def _discovery_exception_guide(tool: str) -> QuarantineReasonGuide:
+    return QuarantineReasonGuide(
+        attempted=f"`{tool}` was reading the attached probe (enumeration plus a HOTPLUG connect) when it was interrupted by an exception.",
+        confirmed="The read intended no stimulus: discovery connects without resetting and writes nothing to the target.",
+        unknown="Whether a toolchain process is still running and holding the probe, and whether the connect completed or aborted mid-handshake.",
+        physical_check="Check for leftover debugger processes holding the probe, unplug/replug the probe if its LED shows a stuck connection, confirm the target still runs its firmware, then sign.",
+    )
+
+
+def _discovery_audit_guide(tool: str) -> QuarantineReasonGuide:
+    return _audit_guide(f"`{tool}` read the attached probe and then could not write the audit record of that read.")
+
+
+def _terminal_audit_guide(tool: str) -> QuarantineReasonGuide:
+    return QuarantineReasonGuide(
+        attempted=f"`{tool}` read the attached probe, released its leases cleanly, and then could not commit the record saying so.",
+        confirmed="The probe read completed and every lock was handed back; the hardware itself finished in the state the read left it.",
+        unknown="Nothing about the board — what is missing is the durable record; until it exists, later readers cannot distinguish this from a read that ended badly.",
+        physical_check="Restore the audit destination (disk space, permissions under state_root); no board inspection is required beyond confirming the probe is idle, then sign.",
+    )
+
+
+QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
+    # -- Coordination lifecycle -------------------------------------------------
+    "owner_process_exited_without_release": QuarantineReasonGuide(
+        attempted="A previous Agentic HIL process held this project's hardware and exited without confirming its cleanup.",
+        confirmed="The dead owner can no longer touch the device; its machine-wide device lock died with it.",
+        unknown="What its last action was and whether it completed: the process ended without recording a confirmed safe state, so the board may hold a partial flash, an open session's halt, or stale stimulus.",
+        physical_check="Confirm no orphaned debugger/serial/CAN process is running, power-cycle or reset the target by its own controls, verify the expected firmware runs, then sign.",
+    ),
+    "owner_closed_with_active_lease": QuarantineReasonGuide(
+        attempted="This Agentic HIL service shut down while a hardware lease was still active.",
+        confirmed="The shutdown itself released the machine-wide device lock; no Agentic HIL process is driving the device any more.",
+        unknown="The state the interrupted call left the device in: the lease never reported a confirmed safe state.",
+        physical_check="Verify the device is idle (no unexpected output on its console, expected firmware running), reset it by its own controls if in doubt, then sign.",
+    ),
+    "safe_state_unconfirmed": QuarantineReasonGuide(
+        attempted="A hardware lease was released without its holder confirming the device reached a safe state.",
+        confirmed="The release itself was recorded; the device is no longer being driven.",
+        unknown="Whether the device is in the state the last operation intended — the holder explicitly declined to confirm it.",
+        physical_check="Inspect the board for the state the last report describes (firmware, run/halt, outputs), drive it to a known state by its own controls, then sign.",
+    ),
+    "process_reap_unconfirmed": QuarantineReasonGuide(
+        attempted="A hardware lease was released, but the toolchain processes it had started could not all be confirmed terminated.",
+        confirmed="The lease's own records were committed; the device lock is back.",
+        unknown="Whether a leftover child process (debug server, bridge) is still attached to the device and able to act on it.",
+        physical_check="List running processes for leftover debugger/bridge children and end them, confirm the probe and port are free, then sign.",
+    ),
+    "audit_broken": _audit_guide("A hardware lease was released while its audit trail was broken."),
+    # Literal keys, not imports from agentic_hil.coordination: this catalogue is
+    # a leaf module, and the reason strings are the stable contract persisted in
+    # incident records.
+    "lease_release_unconfirmed": QuarantineReasonGuide(
+        attempted="A clean release could not persist its own record or hand back a lock; the hardware action itself had already completed.",
+        confirmed="The device saw nothing after the completed action; this is a host-side persistence fault.",
+        unknown="Whether the on-disk coordination state matches memory; retrying the release settles it without touching the board.",
+        physical_check="Usually none: this reason is machine-recoverable, and the next hardware call retries the release itself. If it persists, fix the state_root filesystem, then sign.",
+    ),
+    # -- Machine recovery and dispatch guards ----------------------------------
+    "machine_recovery_failed": QuarantineReasonGuide(
+        attempted="The service was verifying a recoverable incident (process reap plus probe re-read, possibly a reset into halt) and the verification itself raised.",
+        confirmed="The original incident is unchanged; recovery never attested a safe state.",
+        unknown="Whether the recovery's own reset or probe read reached the target before failing.",
+        physical_check="Treat the board as holding the original incident: reset it by its own controls, confirm the expected firmware state, then sign.",
+    ),
+    "machine_recovery_audit_broken": _audit_guide("Machine recovery verified a safe state but could not persist the attestation record, so the quarantine stands."),
+    "unknown_hardware_exception": QuarantineReasonGuide(
+        attempted="A hardware tool call raised an exception the service could not classify.",
+        confirmed="The exception was contained and reported; no further calls have touched the device since.",
+        unknown=_EXCEPTION_UNKNOWN,
+        physical_check="Read the failure report for the tool that raised, put the device into a known state by its own controls, confirm it responds normally, then sign.",
+    ),
+    "hardware_exception_audit_broken": _audit_guide("A hardware tool call failed and the failure report itself could not be persisted."),
+    "lease_release_report_audit_broken": _audit_guide("A one-shot debugger call released its lease and the final report of that release could not be persisted."),
+    # -- Debugger one-shots and sessions ---------------------------------------
+    "debugger_readonly_result_unconfirmed": QuarantineReasonGuide(
+        attempted="A read-only probe call (probe discovery or probe_target) returned a result that claims an unknown or partial side effect.",
+        confirmed="These calls send no stimulus by construction; the target keeps the state the last effectful call left.",
+        unknown="Why a read reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
+        physical_check="Normally none — the next hardware call re-reads the probe and clears this itself. If the probe stays unreachable, reseat it, then sign.",
+    ),
+    "debugger_result_unconfirmed": QuarantineReasonGuide(
+        attempted="flash_firmware or reset_target reported an outcome the host could not confirm.",
+        confirmed="The command was issued through the configured toolchain and its output was captured in the log the report names.",
+        unknown="Whether the flash or reset reached the target and completed: the firmware on the board and its run state may be either the old or the new one.",
+        physical_check="Check which firmware the board runs (version banner, behavior), reflash or reset by its own controls if needed, then sign. Under `recovery.auto_recover: reset_halt` the service settles this itself with a verified reset into halt.",
+    ),
+    "debugger_call_exception": QuarantineReasonGuide(
+        attempted="A debugger call raised an exception instead of returning a result.",
+        confirmed="The lease was captured before anything ran; no later call has driven the probe.",
+        unknown="Whether the toolchain child process was reaped and what it sent before the exception — a returned result would have proven the child was terminated, an exception proves nothing.",
+        physical_check="Check for leftover debugger processes holding the probe, confirm the target's firmware state, then sign.",
+    ),
+    "debug_session_start_unconfirmed": QuarantineReasonGuide(
+        attempted="debug_start_session started a debug server against the target and could not confirm the session's state.",
+        confirmed="What the phase fields of the failure report say: `load_phase` records how far startup provably got.",
+        unknown="Whether the server halted, reset, or partially loaded firmware onto the target before failing.",
+        physical_check=_DEBUG_SESSION_PHYSICAL_CHECK,
+    ),
+    "debug_session_result_unconfirmed": QuarantineReasonGuide(
+        attempted="A debug session command (symbol read, dump) reported an outcome the host could not confirm.",
+        confirmed="The session was attached under a lease and every prior command is in the session log.",
+        unknown="Whether the failed command changed target state before failing.",
+        physical_check=_DEBUG_SESSION_PHYSICAL_CHECK,
+    ),
+    "debug_breakpoint_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="Setting or clearing breakpoints could not be confirmed against the backend.",
+        confirmed="The session log records every breakpoint command issued.",
+        unknown="Whether hardware breakpoints remain armed on the target — firmware run under a leftover breakpoint stops where nobody expects.",
+        physical_check="A successful debug_clear_breakpoints reconciled against the backend clears this without an operator; otherwise power-cycle the target so the debug unit forgets its breakpoints, then sign.",
+    ),
+    "debug_target_state_unconfirmed": QuarantineReasonGuide(
+        attempted="debug_continue or debug_halt lost confirmation of whether the target is running or halted.",
+        confirmed="The session is still owned; the command sequence up to the failure is in the session log.",
+        unknown="Whether the target is currently running or halted.",
+        physical_check="A successful debug_halt clears this without an operator; otherwise observe the board (heartbeat LED, console output) to see whether firmware runs, reset it by its own controls, then sign.",
+    ),
+    "debug_session_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="debug_stop_session could not confirm the debug server and GDB were torn down.",
+        confirmed="The stop was requested and recorded; no new session can start over the remains.",
+        unknown="Whether a server process still holds the probe and whether the target was left halted.",
+        physical_check=_DEBUG_SESSION_PHYSICAL_CHECK,
+    ),
+    "debug_audit_broken": _audit_guide("A debug session status read surfaced a broken audit latch: session evidence can no longer be persisted."),
+    "debug_coordination_report_audit_broken": _audit_guide("A debugger call completed but its lease-status report could not be persisted."),
+    "debug_backend_cleanup_exception": QuarantineReasonGuide(
+        attempted="Service shutdown raised while closing the debug backend.",
+        confirmed="The shutdown error and any cleanup errors were reported to the caller that closed the service.",
+        unknown="Whether the debug server was torn down and the target released.",
+        physical_check=_DEBUG_SESSION_PHYSICAL_CHECK,
+    ),
+    "debug_shutdown_reporting_failed": QuarantineReasonGuide(
+        attempted="Service shutdown stopped the debug session but could not report or release it cleanly.",
+        confirmed="The backend close itself succeeded; the failure is in the closing report or release.",
+        unknown="Whether the recorded state matches the session's real end state.",
+        physical_check=_DEBUG_SESSION_PHYSICAL_CHECK,
+    ),
+    # -- COM ports --------------------------------------------------------------
+    "com_open_interrupted": QuarantineReasonGuide(
+        attempted="com_session_start was interrupted (for example by Ctrl-C) while opening the serial port.",
+        confirmed="No stimulus was written: the session never reached a writable state.",
+        unknown="Whether the OS handle was left open and whether the modem lines (DTR/RTS) were left asserted — on a board that wires DTR to reset, that holds the target in reset.",
+        physical_check="Confirm no process holds the port, that the target is not held in reset (its firmware runs), then sign.",
+    ),
+    "com_open_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="com_session_start failed and could not confirm the partially opened port was closed again.",
+        confirmed="No stimulus was written; the failure happened during open or its rollback.",
+        unknown="Whether the port handle is still open and holding modem lines.",
+        physical_check="Confirm the port is free (no process holds it) and the target is not held in reset, then sign.",
+    ),
+    "com_write_effect_unconfirmed": QuarantineReasonGuide(
+        attempted="com_write raised while writing stimulus to the port.",
+        confirmed="Everything before this write is in the COM log; reads are unaffected.",
+        unknown="How many of the requested bytes reached the wire — the target may have received a truncated command.",
+        physical_check="Check the device console/behavior for a partially applied command, bring the device to a known state by its own controls, then sign.",
+    ),
+    "com_buffer_clear_unconfirmed": QuarantineReasonGuide(
+        attempted="Clearing the port's receive buffer failed after the OS-level clear had started.",
+        confirmed="No stimulus was written; only received bytes were being discarded.",
+        unknown="Whether the OS buffer was fully cleared, so a later read may mix old and new bytes.",
+        physical_check="Usually none: this reason is machine-recoverable by a re-read. If it persists, close whatever else holds the port, then sign.",
+    ),
+    "com_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="Stopping a COM session could not confirm the port was closed and the reader stopped.",
+        confirmed="The session is out of service; no further writes are possible through it.",
+        unknown="Whether the OS handle and reader thread are really gone, and with them the port's modem-line state.",
+        physical_check="Confirm the port is free and the target is not held in reset, then sign.",
+    ),
+    "com_effect_unconfirmed": QuarantineReasonGuide(
+        attempted="A COM call reported a side effect it could not confirm.",
+        confirmed="Everything before it is in the COM log.",
+        unknown="Whether the unconfirmed stimulus reached the target.",
+        physical_check="Check the device behavior against the last confirmed log entries, bring it to a known state, then sign.",
+    ),
+    "com_reader_audit_broken": _audit_guide("The background COM reader received bytes it could not append to the audit log."),
+    "com_write_audit_broken": _audit_guide("A COM write happened (or failed) and its audit entry could not be written."),
+    "com_audit_broken": _audit_guide("Stopping a COM session could not write its closing audit entry."),
+    "com_report_audit_broken": _audit_guide("A COM call completed but its report could not be persisted."),
+    # -- CAN buses --------------------------------------------------------------
+    "can_open_interrupted": QuarantineReasonGuide(
+        attempted="can_session_start was interrupted while opening the adapter.",
+        confirmed="No frame was sent: the session never reached a writable state.",
+        unknown="Whether the adapter channel was left initialized and participating on the bus.",
+        physical_check="Confirm no process holds the adapter and the bus shows normal traffic (no error flood), then sign.",
+    ),
+    "can_open_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="can_session_start failed and could not confirm the partially opened adapter was shut down.",
+        confirmed="No frame was sent by this session.",
+        unknown="Whether the adapter channel is still initialized — a channel brought up at the wrong bitrate disturbs the bus just by listening.",
+        physical_check="Confirm the adapter is free and the bus shows normal traffic at the expected bitrate, then sign.",
+    ),
+    "can_session_setup_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="CAN session setup failed after the adapter opened, and closing the adapter failed too.",
+        confirmed="No frame was sent by this session.",
+        unknown="Whether the adapter is still open on the bus.",
+        physical_check="Confirm the adapter is free and bus traffic is normal, then sign.",
+    ),
+    "can_send_effect_unconfirmed": QuarantineReasonGuide(
+        attempted="can_send raised while transmitting a frame.",
+        confirmed="Every earlier frame is in the CAN log.",
+        unknown="Whether the frame reached the bus — receivers may have acted on it.",
+        physical_check="Check the devices on the bus for the effect of the possibly-sent frame, bring them to a known state, then sign.",
+    ),
+    "can_read_effect_unconfirmed": QuarantineReasonGuide(
+        attempted="can_read raised while receiving.",
+        confirmed="Reading transmits nothing; the bus was not stimulated by this call.",
+        unknown="Whether the adapter or its bridge process is still in a defined state.",
+        physical_check="Confirm the adapter answers again (or replug it) and the bridge process is gone, then sign.",
+    ),
+    "can_adapter_cleanup_unconfirmed": QuarantineReasonGuide(
+        attempted="Stopping a CAN session could not confirm the adapter was shut down.",
+        confirmed="The session is out of service; no further frames can be sent through it.",
+        unknown="Whether the adapter still participates on the bus.",
+        physical_check="Confirm the adapter is free and bus traffic is normal, then sign.",
+    ),
+    "can_effect_unconfirmed": QuarantineReasonGuide(
+        attempted="A CAN call reported a side effect it could not confirm.",
+        confirmed="Everything before it is in the CAN log.",
+        unknown="Whether the unconfirmed frame reached the bus.",
+        physical_check="Check the devices on the bus against the last confirmed log entries, then sign.",
+    ),
+    "can_queue_clear_audit_broken": _audit_guide("Clearing the CAN receive queue could not be audited."),
+    "can_audit_broken": _audit_guide("Stopping a CAN session could not write its closing audit entry."),
+    "can_report_audit_broken": _audit_guide("A CAN call completed but its report could not be persisted."),
+    # -- Configuration adoption / generation (both callers of the shared read) --
+    "config_adopt_discovery_exception": _discovery_exception_guide("project_config_adopt_hardware"),
+    "config_create_discovery_exception": _discovery_exception_guide("project_config_create"),
+    "config_adopt_discovery_audit_broken": _discovery_audit_guide("project_config_adopt_hardware"),
+    "config_create_discovery_audit_broken": _discovery_audit_guide("project_config_create"),
+    "config_adopt_terminal_audit_broken": _terminal_audit_guide("project_config_adopt_hardware"),
+    "config_create_terminal_audit_broken": _terminal_audit_guide("project_config_create"),
+}
+
+_UNKNOWN_REASON_GUIDE = QuarantineReasonGuide(
+    attempted="A hardware operation recorded a quarantine reason this build has no catalogue entry for (it may come from a different Agentic HIL version).",
+    confirmed="Only what the incident's own records say; read `hardware_lease_status` and `get_last_report`.",
+    unknown="What the recording version meant by this reason; treat the device state as unknown.",
+    physical_check="Read the failure report the incident references, verify the device against it on the bench, then sign.",
+)
+
+
+def quarantine_reason_details(reasons: list[str]) -> list[JsonObject]:
+    """The signer's view of each reason, in the order the reasons occurred.
+
+    Unknown reasons get the explicit fallback rather than nothing: an incident
+    persisted by another version still has to be resolvable at this one's CLI.
+    """
+    return [QUARANTINE_REASON_GUIDES.get(reason, _UNKNOWN_REASON_GUIDE).as_json(reason) for reason in reasons]
+
+
+def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
+    """Attach the per-reason signer guidance to a quarantined result.
+
+    Applied at reporting time, never persisted: records and audit reports keep
+    only the reason strings, so catalogue text can improve between versions
+    without stale copies surviving in state files."""
+    if result.get("quarantined") is not True and result.get("cleanup_required") is not True:
+        return result
+    listed = result.get("cleanup_reasons")
+    reasons = [reason for reason in listed if isinstance(reason, str) and reason] if isinstance(listed, list) else []
+    if not reasons or "quarantine_guidance" in result:
+        return result
+    return {**result, "quarantine_guidance": quarantine_reason_details(reasons)}
+
+
 # Exactly what each backend reads out of a `debuggers.<name>` entry. "required"
 # means the backend cannot work without it; "discovered" means it is found
 # automatically when unset; "ignored" means the backend never reads it, so
@@ -1455,10 +1788,32 @@ hardware_state     != unknown
 
 `agentic_hil.report.overall_success()` is exactly this predicate. Do not re-derive it from `ok` alone.
 
+## What quarantines, and what merely refuses
+
+Quarantine answers one question — "is the physical state of the hardware unknown?" — never the weaker "did something go wrong?". A failure that can prove it never reached the hardware refuses with a named error and `retry_safe: true`, leaves no quarantine record, and keeps the bench in service; the board is exactly as the last call that did reach it left it.
+
+| Failure | Outcome |
+|---|---|
+| toolchain executable not found (OpenOCD, pyOCD, STM32CubeProgrammer CLI, the debug server, GDB) | refusal — no process ever existed |
+| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, with the init-stage marker absent | refusal — the adapter was never opened |
+| pyOCD found no probe / could not open it, or refused the configured `target_type` | refusal — no connect sequence began |
+| ST-Link probe absent (`no ST-LINK detected`) | refusal — the transport never existed |
+| `probe_target` / `debugger_probes_list` returned any plain failure | refusal — the call is read-only by construction and its returned result proves the toolchain child was reaped |
+| COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
+| CAN adapter never initialized (python-can `CanInitializationError`) | refusal — the adapter never joined the bus |
+| a direct CAN read failed | refusal — `recv()` transmits nothing |
+| anything whose abort point cannot be proven — an unconfirmed flash or reset, an exception mid-call, an unconfirmed cleanup, an owner that died holding a lease, a broken audit trail | quarantine; that is the feature |
+
+Between the two sits the self-resolving class: a reason the next hardware call can settle itself under `recovery.auto_recover` (a read-only re-read, or a verified reset-into-halt) is cleared by the machine, without an operator.
+
+## What a justified quarantine tells the signer
+
+`recover --confirm-safe-state` is a signature, so every quarantined result and `hardware_lease_status` carry `quarantine_guidance`: one entry per `cleanup_reason` with `attempted` (what was being done when confirmation was lost), `confirmed` (what still holds), `unknown` (the exact gap that makes a machine answer impossible), and `physical_check` (what to verify on the physical board before signing). An incident recorded by another version gets an explicit fallback entry rather than silence.
+
 ## When a call is refused with `resource_quarantined`
 
 1. Stop every effect. Do not retry around it, and never delete state under `state_root`.
-2. Read `hardware_lease_status` (CLI: `agentic-hil lease-status`). It reports `cleanup_reasons`, `auto_recoverable`, `auto_recover_policy`, and the current `quarantine_id`.
+2. Read `hardware_lease_status` (CLI: `agentic-hil lease-status`). It reports `cleanup_reasons`, `quarantine_guidance`, `auto_recoverable`, `auto_recover_policy`, and the current `quarantine_id`.
 3. Branch on `auto_recoverable`.
 
 | Field | Value | Do |
@@ -1469,7 +1824,7 @@ hardware_state     != unknown
 
 ## Operator path
 
-The operator physically confirms the bench, then:
+The operator performs the `physical_check` each `quarantine_guidance` entry names, confirms the bench matches, then:
 
 ```bash
 agentic-hil lease-status

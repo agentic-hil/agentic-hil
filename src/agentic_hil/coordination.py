@@ -34,6 +34,7 @@ from agentic_hil.devices import (
     UartDevice,
     lock_keys,
 )
+from agentic_hil.knowledge import attach_quarantine_guidance
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -429,7 +430,7 @@ class HardwareCoordinator:
                     self.blocked = True
                     self.project_lock.release()
                     self.project_lock = None
-                    raise CoordinationError(self._quarantined_result(normalized, "Previous owner exited without confirmed cleanup."))
+                    raise CoordinationError(self._quarantined_result(normalized, "Previous owner exited without confirmed cleanup.", ["owner_process_exited_without_release"]))
             locks: list[_LifetimeLock] = []
             bench_taken: list[str] = []
             try:
@@ -448,7 +449,7 @@ class HardwareCoordinator:
                             held.release()
                         locks.clear()
                         self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
-                        raise CoordinationError(self._quarantined_result(normalized, "Physical resource requires explicit safe-state recovery."))
+                        raise CoordinationError(self._quarantined_result(normalized, "Physical resource requires explicit safe-state recovery.", ["owner_process_exited_without_release"]))
                 # The project's own lock only keeps this configuration honest. A
                 # device is shared with every other configuration on the machine,
                 # so exclusivity is taken here too — inside a run this borrows the
@@ -705,7 +706,7 @@ class HardwareCoordinator:
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
             blocked = self.blocked or blocked_state
             reasons = _record_cleanup_reasons(record)
-            return {
+            result: JsonObject = {
                 "ok": True,
                 "tool": "hardware_lease_status",
                 "project_resource": self.project_key,
@@ -725,6 +726,14 @@ class HardwareCoordinator:
                 "record": _public_record(record),
                 "leases": [lease.status() for lease in self.leases.values()],
             }
+            if blocked:
+                # The signature `recover --confirm-safe-state` asks for is only
+                # as good as what the signer was told: name what was attempted,
+                # what is confirmed, what remains unknown, and what to check on
+                # the physical board, per reason. Attached at reporting time so
+                # the record itself carries reasons, never versioned prose.
+                result = attach_quarantine_guidance({**result, "cleanup_required": True})
+            return result
 
     def _project_probe_lock(self) -> _LifetimeLock:
         return _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
@@ -981,7 +990,9 @@ class HardwareCoordinator:
     def _write_record(self, resource: str, record: JsonObject) -> None:
         atomic_write_text(self._record_path(resource), json.dumps(record, indent=2) + "\n")
 
-    def _quarantined_result(self, resources: list[str], summary: str) -> JsonObject:
+    def _quarantined_result(self, resources: list[str], summary: str, reasons: list[str] | None = None) -> JsonObject:
+        if reasons is None:
+            reasons = sorted({reason for lease in self.leases.values() for reason in lease.cleanup_reasons()})
         return {
             "ok": False,
             "error_type": "resource_quarantined",
@@ -989,6 +1000,10 @@ class HardwareCoordinator:
             "resources": resources,
             "cleanup_required": True,
             "quarantined": True,
+            # The reason is what keys the signer guidance and the operator's
+            # decision between retrying and walking to the bench, so an
+            # acquire-time refusal names it too, not only lease-status.
+            "cleanup_reasons": reasons,
             "retry_safe": False,
             "quarantine_id": self.quarantine_id,
         }

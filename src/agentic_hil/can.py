@@ -481,7 +481,11 @@ class PythonCanAdapterSession:
                 frames.append({"id": message.arbitration_id, "id_hex": f"0x{message.arbitration_id:x}", "extended": bool(message.is_extended_id), "rtr": bool(message.is_remote_frame), "data_hex": bytes(message.data).hex(), "dlc": int(message.dlc)})
             return {"ok": True, "backend": self.adapter_name, "frames": frames}
         except Exception as error:
-            return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error)}
+            # recv() transmits nothing: a failed direct-adapter read proves no
+            # frame was sent by this call, so it refuses instead of reporting
+            # an unknown bus effect (hardci-hq#97). The process-bridge adapter
+            # stays markerless — a broken bridge process is an unknown.
+            return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
     def close(self) -> JsonObject:
         shutdown = getattr(self.bus, "shutdown", None)
@@ -506,26 +510,67 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         import can
     except ImportError:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False}
-    try:
-        interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
-        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
-        shutdown = getattr(bus, "shutdown", None)
-        provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
-        try:
-            session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
-        except BaseException as primary_error:
-            try:
-                if callable(shutdown):
-                    shutdown()
-            except BaseException as cleanup_error:
-                # Keep the raw bus registered for a retried service.close().
-                raise RuntimeError(f"CAN session construction failed and raw bus cleanup remains unconfirmed: {cleanup_error}") from primary_error
-            discharge_provisional_handle(provisional)
-            raise
-        discharge_provisional_handle(provisional)
-        return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
-    except Exception as error:
+
+    def open_failure(error: BaseException) -> JsonObject:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
+
+    interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
+    # python-can's own contract for the two supported direct interfaces: a
+    # CanInitializationError out of Bus() means the channel could not be
+    # brought up — PCANBasic.Initialize refused, or the SocketCAN socket could
+    # not be created/bound — so the adapter never joined the bus and no frame
+    # was possible. Read defensively off the module because tests (and old
+    # python-can) may not provide the class.
+    initialization_errors = tuple(kind for kind in (getattr(can, "CanInitializationError", None),) if isinstance(kind, type))
+    try:
+        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+    except Exception as error:
+        failure = open_failure(error)
+        if initialization_errors and isinstance(error, initialization_errors):
+            # Provably never on the bus: refuse, do not quarantine
+            # (hardci-hq#97). Any other exception class keeps the markerless
+            # result — a partially initialized channel participates on the bus
+            # (it ACKs and can emit error frames at a wrong bitrate), and
+            # nothing here can disprove one was left behind.
+            failure.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+        return failure
+    shutdown = getattr(bus, "shutdown", None)
+    try:
+        provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
+    except BaseException as register_error:
+        try:
+            if callable(shutdown):
+                shutdown()
+        except BaseException as cleanup_error:
+            if not isinstance(register_error, Exception):
+                register_error.args = (*register_error.args, f"Cleanup error: {cleanup_error}")
+                raise
+            return {**open_failure(register_error), "cleanup_error": str(cleanup_error)}
+        if not isinstance(register_error, Exception):
+            raise
+        return {**open_failure(register_error), "cleanup_confirmed": True}
+    try:
+        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+    except BaseException as primary_error:
+        try:
+            if callable(shutdown):
+                shutdown()
+        except BaseException as cleanup_error:
+            # Keep the raw bus registered for a retried service.close(); the
+            # markerless result is what quarantines the lease over the
+            # unconfirmed adapter.
+            if not isinstance(primary_error, Exception):
+                primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+                raise
+            return {**open_failure(primary_error), "cleanup_error": str(cleanup_error)}
+        discharge_provisional_handle(provisional)
+        if not isinstance(primary_error, Exception):
+            raise
+        # The adapter was confirmed shut down, so the bus ends where a normal
+        # open/shutdown cycle ends it.
+        return {**open_failure(primary_error), "cleanup_confirmed": True}
+    discharge_provisional_handle(provisional)
+    return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
 
 
 class ProcessCanAdapterSession(ProcessBridgeSession):

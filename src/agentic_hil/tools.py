@@ -55,7 +55,7 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, resolve_devices
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import attach_quarantine_guidance, remediation_fields
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
@@ -330,6 +330,13 @@ class AgenticHILToolService:
             # `ConfigError` out of the describe path is caught before its own
             # result is built. Deciding here means an early refusal from one of
             # those two carries the same statement as a success.
+            #
+            # A quarantining result additionally carries, per reason, what was
+            # attempted, what is confirmed, what remains unknown, and what the
+            # operator checks on the physical board before signing
+            # `--confirm-safe-state`. One catalogue (knowledge.py), one attach
+            # point, so every tool's quarantine reads the same way.
+            result = attach_quarantine_guidance(result)
             if "config_status" in result:
                 return result
             return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
@@ -707,6 +714,23 @@ class AgenticHILToolService:
             return result
         if one_shot:
             requires_quarantine = self._result_requires_quarantine(result)
+            if requires_quarantine and name in {"debugger_probes_list", "probe_target"} and self._readonly_failure_is_settled(result):
+                # A failed read is a failed call, not an unconfirmed board.
+                # These two tools drive no stimulus by construction — machine
+                # recovery attests safe state through the same read — and a
+                # returned result proves the toolchain child was already
+                # reaped, so nothing is left that could still act on the
+                # target. Quarantining here is what turned an unplugged probe
+                # into a physical `recover --confirm-safe-state` stop; the
+                # board is exactly as the last effectful call left it. Only a
+                # result that itself claims an unknown effect, unconfirmed
+                # cleanup, or a broken audit trail still needs containment.
+                requires_quarantine = False
+                result = {**result, "hardware_state": "unchanged"}
+                # An explicit retry_safe from the backend (e.g. an ambiguity a
+                # retry cannot resolve) survives; only the absent field becomes
+                # the reclassification's own answer.
+                result.setdefault("retry_safe", True)
             if requires_quarantine:
                 unconfirmed = DEBUGGER_READONLY_RESULT_REASON if name in {"debugger_probes_list", "probe_target"} else "debugger_result_unconfirmed"
                 lease.quarantine(unconfirmed, audit_broken=result.get("audit_ok") is False)
@@ -783,6 +807,22 @@ class AgenticHILToolService:
                 lease.quarantine("debug_coordination_report_audit_broken", audit_broken=True)
                 final = write_report(self.config, {**final, **lease.status()})
         return {**final, **lease.status()}
+
+    def _readonly_failure_is_settled(self, result: JsonObject) -> bool:
+        """Whether a read-only one-shot's failure result leaves nothing unknown.
+
+        The claim being checked is narrow: the call was a read, the result came
+        back (so the spawned toolchain process was reaped before it returned),
+        and the result itself asserts no unconfirmed effect and no broken audit
+        trail. Exceptions never reach this — a raise proves nothing about the
+        child process and keeps quarantining as ``debugger_call_exception``."""
+        return (
+            result.get("audit_ok") is not False
+            and result.get("cleanup_required") is not True
+            and result.get("quarantined") is not True
+            and result.get("side_effect_status") not in {"unknown", "partial"}
+            and result.get("side_effect_committed") is not True
+        )
 
     def _result_requires_quarantine(self, result: JsonObject) -> bool:
         if result.get("audit_ok") is False or result.get("cleanup_required") is True:

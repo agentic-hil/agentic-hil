@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    NOT_CONTACTED,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -40,6 +41,12 @@ PYOCD_NOT_FOUND: JsonObject = {
         "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)",
         "pyocd is not in PATH",
     ],
+    # No executable means no process, so this call is not an unconfirmed outcome
+    # on the bench: nothing was ever started that could have touched it.
+    "target_contacted": False,
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "retry_safe": True,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -109,7 +116,12 @@ class PyOCDBackend:
     def _enumerate_probes(self, tool: str) -> JsonObject:
         """List connected probes. Split out of list_probes because selector
         canonicalization needs it before flashing or resetting, which a config
-        may grant without granting probe discovery."""
+        may grant without granting probe discovery.
+
+        `pyocd json --probes --no-config` enumerates USB probes and never
+        connects to a target, so every failure of it — including the timeout,
+        whose child spawn_command reaped before returning — is a failed call
+        with the bench untouched, and carries the markers that say so."""
         resolved = self._resolve_executable()
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
@@ -118,12 +130,12 @@ class PyOCDBackend:
         if completed.not_found:
             return {"tool": tool, **PYOCD_NOT_FOUND}
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out.", **NOT_CONTACTED}
         if completed.returncode != 0:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "pyOCD probe discovery command failed."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "pyOCD probe discovery command failed.", **NOT_CONTACTED}
         parsed = parse_pyocd_probes(completed.stdout)
         if not parsed["ok"]:
-            return {"tool": tool, "backend": self.backend_name, **parsed}
+            return {"tool": tool, "backend": self.backend_name, **parsed, **NOT_CONTACTED}
         probes = parsed["probes"]
         return {
             "ok": True,
@@ -455,8 +467,11 @@ class PyOCDBackend:
             **remediation_fields("adapter_not_found", self.backend_name),
             "configured_probe_id": configured,
             "candidate_probe_ids": candidates,
+            "target_contacted": False,
             "side_effect_committed": False,
             "side_effect_status": "not_started",
+            # Deliberately not retry_safe: retrying with the same configuration
+            # cannot resolve the ambiguity, only a config or bench change can.
             "retry_safe": False,
         }
 
@@ -475,6 +490,15 @@ class PyOCDBackend:
             # The refusal carries the command that fixes it, with the configured
             # value already substituted, so nobody has to reconstruct it.
             result["install_commands"] = pack_install_commands(target_type)
+        if backend_error_type in {"probe_not_found", "target_type_invalid"}:
+            # Both name the phase before pyOCD begins a connect sequence: the
+            # probe is the only channel to the target, and pyOCD reporting that
+            # it found no probe or could not open one is the report that the
+            # channel never existed; an unresolvable target type is refused
+            # while the session is being built, before anything is driven. A
+            # failed call over a channel that never opened must refuse, not
+            # quarantine (hardci-hq#97).
+            result.update(NOT_CONTACTED)
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:

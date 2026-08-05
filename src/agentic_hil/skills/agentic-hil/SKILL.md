@@ -57,6 +57,23 @@ there: finish through the gate. `get_last_report` and `classify_last_error` say
 what the attempt recorded and why it failed, and `debugger_info` or
 `probe_target` say whether the hardware would have been reachable at all.
 
+A failed call and quarantined hardware are two different refusals, and the
+result says which one you have. A failure that proves it never reached the
+board — a toolchain that is not installed, an unplugged probe or adapter, a
+port that would not open, any plain failure of the read-only probe tools —
+carries `retry_safe: true` and no `quarantined: true`: the bench stays in
+service, so report the named cause, fix it or ask for it to be fixed, and
+retry. `quarantined: true` means the physical state is genuinely unknown. Stop
+effects there and retry the hardware call once: an incident the bench's
+recovery policy can verify clears itself on that retry. A refusal carrying
+`auto_recovery_attempted: true` means that already ran and did not confirm the
+safe state — do not retry again. Relay the result's `quarantine_guidance`
+entries to the operator instead — per reason: what was attempted, what is
+confirmed, what remains unknown, and the `physical_check` to perform on the
+board — and ask them to run `agentic-hil recover --confirm-safe-state
+--quarantine-id <id>` after that check. Never clear the server's own state
+files yourself.
+
 Report those findings together with the refusal, name the permission that is
 denied, and ask the user before changing it. Never work around it with a raw
 command, with the configuration file, or with the CLI.

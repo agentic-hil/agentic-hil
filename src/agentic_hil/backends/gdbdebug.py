@@ -152,7 +152,11 @@ class GdbDebugSessions:
                 **process_group_kwargs(),
             )
         except OSError as error:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error)})
+            # The spawn itself raised: no server process ever existed, so
+            # nothing was started that could have touched the target. Marked as
+            # such so the failed call refuses instead of quarantining a board
+            # it provably never reached (hardci-hq#97).
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
         session.load_phase = "server_spawned"
@@ -541,12 +545,14 @@ class GdbDebugSessions:
                 found = which(configured)
                 if found is not None:
                     return {"ok": True, "executable": found}
-            return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"]}
+            # Resolved before the debug server is spawned, so a missing GDB is
+            # a call that never started anything: refuse, do not quarantine.
+            return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         for candidate in GDB_AUTODETECT_CANDIDATES:
             found = which(candidate)
             if found is not None:
                 return {"ok": True, "executable": found}
-        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"]}
+        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
         commands = ["-gdb-set pagination off", "-gdb-set confirm off", f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from agentic_hil.backends.common import (
+    NOT_CONTACTED,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -35,6 +36,9 @@ STLINK_NOT_FOUND: JsonObject = {
     "backend_error_type": "stm32_programmer_cli_not_found",
     "summary": "STM32CubeProgrammer CLI executable could not be found.",
     "likely_causes": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"],
+    # No executable means no process, so this call is not an unconfirmed outcome
+    # on the bench: nothing was ever started that could have touched it.
+    **NOT_CONTACTED,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -88,12 +92,16 @@ class STLinkBackend:
         resolved = self._resolve_executable()
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
+        # `-l st-link-only` enumerates connected probes and never connects to a
+        # target, so every failure of it — including the timeout, whose child
+        # spawn_command reaped before returning — leaves the bench untouched
+        # and carries the markers that say so.
         command = [*invocation(str(resolved["executable_path"])), "-q", "-l", "st-link-only"]
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         if completed.not_found:
             return {"tool": tool, **STLINK_NOT_FOUND}
         if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out.", **NOT_CONTACTED}
         output = f"{completed.stdout}{completed.stderr}"
         probe_ids = stlink_probe_ids(output)
         if completed.returncode == 0 and (probe_ids or stlink_empty_result(output)):
@@ -111,6 +119,7 @@ class STLinkBackend:
             "backend": self.backend_name,
             "error_type": "probe_discovery_failed",
             "summary": "STM32CubeProgrammer did not return a recognized non-intrusive probe listing.",
+            **NOT_CONTACTED,
         }
 
     def probe_target(self) -> JsonObject:
@@ -270,6 +279,13 @@ class STLinkBackend:
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
         if operation_result is not None:
             result["operation_result"] = operation_result
+        if backend_error_type == "probe_not_found":
+            # The ST-Link probe is the only transport STM32CubeProgrammer has
+            # to the target, and "no ST-LINK detected" is its report that the
+            # transport never existed for this run. A failed call over a
+            # channel that never opened must refuse, not quarantine
+            # (hardci-hq#97).
+            result.update(NOT_CONTACTED)
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
