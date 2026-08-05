@@ -14,6 +14,26 @@ pytest
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
+### Working on Windows
+
+Part of this suite only runs on POSIX, and that part is where the platform bugs
+are. Three changes in two days were verified green on Windows and failed on all
+four POSIX runners: a test that assumed a debugger was installed, two that wrote
+`"nt"` into the shared `os` module and killed pytest itself, and one that
+asserted a refusal its own branch had removed. None was visible locally.
+
+If Docker is available, run the Linux job before opening a pull request:
+
+```bash
+python tools/ci_linux.py
+```
+
+It clones the committed tree into a container and runs the suite there — about
+ninety seconds, and the count matches the Linux CI job exactly. Uncommitted work
+is not covered, so commit first.
+
+If you cannot run it, say in the pull request which tests you did not run.
+
 ## Pull Requests
 
 - Keep changes focused and describe the user-facing behavior they affect.
