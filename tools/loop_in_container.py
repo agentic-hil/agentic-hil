@@ -46,7 +46,12 @@ Usage:
     python tools/loop_in_container.py --rebuild --task "..."
 
 Every option this wrapper does not consume is handed to `agent_review_loop.py`
-unchanged.
+unchanged, except the four that decide what the container isolates -- `--repo`,
+`--codex-sandbox`, `--review-checkout` and `--review-checkout-dir`. Those are
+set here and refused rather than forwarded: a second `--codex-sandbox` is how
+the value that was measured stops being the value that runs, and a reviewer
+checkout pointed back at the repository mount is the Windows failure this
+wrapper exists to bury.
 """
 
 from __future__ import annotations
@@ -54,12 +59,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 # evals/ is a source tree rather than an installed package, so a script run as
@@ -89,6 +95,25 @@ MOUNTED_FILES = "/run/loop-agent-files"
 
 EXIT_NO_DOCKER = 2
 EXIT_REFUSED = 3
+# A run whose home volume outlived it is not a successful run, whatever the loop
+# inside it returned: that volume is the one place a copy of a login can be.
+EXIT_CLEANUP_FAILED = 4
+
+# Inner options that decide what the container isolates rather than how the loop
+# is run. The wrapper sets all four and refuses to forward any of them: a second
+# --codex-sandbox would take the value argparse saw last, and a
+# --review-checkout-dir or --review-checkout none puts the reviewer's test runs
+# back onto the repository mount, which is the Windows failure this exists to
+# bury. tools/loopimage/entrypoint.py repeats the refusal on the far side.
+CONTAINER_OWNED_OPTIONS = ("--repo", "--codex-sandbox", "--review-checkout", "--review-checkout-dir")
+# Inner options naming where the run's paperwork lands. They are forwarded, and
+# they are checked: a directory outside the mount dies with the container, and
+# then nothing this wrapper printed about it was ever true.
+PAPERWORK_OPTIONS = ("--review-dir", "--log-dir")
+DEFAULT_PAPERWORK = {
+    "--review-dir": f"{MOUNTED_REPOSITORY}/.agentic-loop/reviews",
+    "--log-dir": f"{MOUNTED_REPOSITORY}/.agentic-loop/logs",
+}
 
 # One file per mount, addressed by kind, exactly as the evaluation does it. The
 # profile directories these live in are never mounted: they hold every project
@@ -116,9 +141,10 @@ HEALTH_CHECKED = ("claude-auth", "codex-auth")
 # an empty variable that looks like a configured credential.
 CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
 
-# The loop announces both directories on startup; they are the run's paperwork
-# and they land in the mount, so they can be named on this side afterwards.
-ANNOUNCED_DIRECTORY = re.compile(r"^(reviews|logs)\s+:\s+(/repo/\S+)\s*$")
+# The loop announces both directories on startup; they are the run's paperwork.
+# The path is taken whole rather than up to the first space, because a directory
+# an operator named may contain one and half a path is worse than none.
+ANNOUNCED_DIRECTORY = re.compile(r"^(reviews|logs)\s+:\s+(\S.*?)\s*$")
 
 
 class Refused(RuntimeError):
@@ -126,17 +152,148 @@ class Refused(RuntimeError):
 
 
 def repository_root(start: Path) -> Path:
-    """The work tree this file belongs to, so the tool works from any cwd."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=start,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    """The exact top level of the work tree that will be mounted read-write.
+
+    Not "somewhere inside a repository": the mount is the one writable thing the
+    container gets, so what it covers has to be established rather than assumed
+    from an argument. `git rev-parse --show-toplevel` is what decides it.
+    """
+    result = run_capture(["git", "-C", str(start), "rev-parse", "--show-toplevel"], 30)
     if result.returncode != 0:
-        return REPOSITORY_ROOT
-    return Path(result.stdout.strip())
+        raise Refused(
+            f"{start} is not inside a git work tree, and this loop's product is commits: "
+            f"{result.stderr.strip() or result.stdout.strip() or 'git could not answer'}"
+        )
+    return Path(result.stdout.strip()).resolve()
+
+
+def contains(parent: Path, child: Path) -> bool:
+    """Whether `child` is `parent` or lies under it, on either platform's rules."""
+    parent_key = Path(os.path.normcase(str(parent)))
+    child_key = Path(os.path.normcase(str(child)))
+    return child_key == parent_key or parent_key in child_key.parents
+
+
+def check_repository(repository: Path, files: list[tuple[str, Path]]) -> None:
+    """Refuse a mount that would carry this machine's profile into the container.
+
+    The repository is the single read-write mount, so everything under it is
+    writable from inside. A work tree rooted at the home directory -- a dotfiles
+    repository is the ordinary way to have one -- would hand the container the
+    stored logins themselves, writable, beside the read-only copies it is given
+    on purpose. The evaluation keeps credentials outside the workspace for the
+    same reason.
+
+    Docker's --mount value is comma separated and has no escape for a comma, so
+    a path holding one is refused by name here instead of turning into an opaque
+    syntax error later. `evals/install/runner.py` refuses it in the same words.
+    """
+    home = Path.home().resolve()
+    if contains(repository, home):
+        raise Refused(
+            f"{repository} contains this machine's profile ({home}), and it would be mounted read-write. "
+            "The stored logins live in there; the container gets copies of the individual files instead. "
+            "Point --repo at the project you want the loop to commit to."
+        )
+    for kind, path in files:
+        if contains(repository, path):
+            raise Refused(
+                f"the {kind} file at {path} is inside {repository}, which is mounted read-write. "
+                "A login the container can rewrite in place is not a login it was handed a copy of."
+            )
+    for label, path in (("the repository", repository), *((f"the {kind} file", path) for kind, path in files)):
+        if "," in str(path):
+            raise Refused(
+                f"{label} path contains a comma: {path}. Docker's --mount value is comma separated and "
+                "cannot carry one, and it refuses the run with a syntax error that names nothing."
+            )
+
+
+def inside_the_mount(option: str, value: str) -> str:
+    """Where a forwarded directory lands inside the container, refusing an escape.
+
+    The loop resolves a relative path against --repo, which is the mount, so a
+    plain name is fine. An absolute path or one that climbs out lands on the
+    container's own filesystem, where it is deleted with the container -- and
+    this wrapper would then print a host path that nothing ever wrote.
+    """
+    if "\\" in value:
+        raise Refused(
+            f"{option} {value!r} is read inside a Linux container, where a backslash is part of the name "
+            "rather than a separator. Use forward slashes."
+        )
+    landing = posixpath.normpath(posixpath.join(MOUNTED_REPOSITORY, value))
+    if landing != MOUNTED_REPOSITORY and not landing.startswith(f"{MOUNTED_REPOSITORY}/"):
+        raise Refused(
+            f"{option} {value!r} lands at {landing} inside the container, outside the mounted repository, "
+            "so it would be deleted with the container. Name a directory inside the repository."
+        )
+    return landing
+
+
+def expansions(name: str, options: tuple[str, ...]) -> list[str]:
+    """Which of `options` a forwarded name can reach.
+
+    The inner loop's parser accepts any unambiguous prefix of an option, so a
+    rule that reads `--codex-sandbox` and lets `--codex-sand` past reads
+    nothing at all: both arrive at the same destination.
+    """
+    if not name.startswith("--"):
+        return []
+    return [option for option in options if option.startswith(name)]
+
+
+def owned_options(forwarded: list[str]) -> list[str]:
+    """The forwarded options that decide what the container isolates."""
+    return sorted(
+        {
+            name
+            for argument in forwarded
+            if expansions(name := argument.split("=", 1)[0], CONTAINER_OWNED_OPTIONS)
+        }
+    )
+
+
+def forwarded_paperwork(forwarded: list[str]) -> dict[str, str]:
+    """Check what the caller forwards, and answer where the paperwork will land.
+
+    Isolation is not a default here, so the options that decide it are refused
+    rather than overridden: forwarding a second one is how `danger-full-access`
+    stops being the value that was measured, and how the reviewer's checkout
+    walks back onto the repository mount.
+    """
+    named = owned_options(forwarded)
+    if named:
+        raise Refused(
+            f"{', '.join(named)} decide what the container isolates, so this wrapper sets them and does not "
+            "forward them. The reviewer's checkout stays on the container's own filesystem, and codex runs "
+            "with no sandbox of its own because the container is the boundary."
+        )
+    landing = dict(DEFAULT_PAPERWORK)
+    for index, argument in enumerate(forwarded):
+        name, separator, attached = argument.partition("=")
+        reached = expansions(name, PAPERWORK_OPTIONS)
+        if len(reached) != 1:
+            # No match, or an abbreviation the inner parser will reject as
+            # ambiguous; either way there is nothing here to place.
+            continue
+        if separator:
+            landing[reached[0]] = inside_the_mount(name, attached)
+        elif index + 1 < len(forwarded):
+            landing[reached[0]] = inside_the_mount(name, forwarded[index + 1])
+    return landing
+
+
+def on_this_side(inside: str, repository: Path) -> str:
+    """A path the container printed, named where this machine can open it."""
+    landing = posixpath.normpath(inside)
+    if landing == MOUNTED_REPOSITORY:
+        return str(repository)
+    if landing.startswith(f"{MOUNTED_REPOSITORY}/"):
+        return str(repository / PurePosixPath(landing[len(MOUNTED_REPOSITORY) + 1 :]))
+    # Not in the mount, so there is no path here to name: saying one anyway is
+    # how an operator goes looking for a directory that never existed.
+    return f"{inside} (inside the container only; it went with it)"
 
 
 def docker_source(path: Path) -> str:
@@ -221,23 +378,35 @@ def refresh_stale_login(kind: str, detail: str) -> None:
             "copy rejected. Start Claude Code once on this machine, then rerun."
         )
     print(f"{kind}: {detail}; starting Claude Code here once so the refreshed token stays on this machine", flush=True)
-    completed = subprocess.run(
-        [executable, "-p", "--output-format", "text", "reply with: ok"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [executable, "-p", "--output-format", "text", "reply with: ok"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        # A CLI that hangs here has not refreshed anything, and a traceback out
+        # of the pre-flight says that far less clearly than the reason does.
+        raise Refused(
+            f"the {kind} refresh attempt did not finish within {error.timeout:.0f}s, so the login was not "
+            f"refreshed ({detail}). Start Claude Code once on this machine, then rerun."
+        ) from error
+    except OSError as error:
+        raise Refused(
+            f"the {kind} refresh attempt could not start {executable}: {error}. The login was not refreshed "
+            f"({detail}). Start Claude Code once on this machine, then rerun."
+        ) from error
     if completed.returncode != 0:
         raise Refused(f"the {kind} refresh attempt failed: {completed.stderr.strip() or completed.stdout.strip()}")
 
 
 def mounted_files() -> list[tuple[str, Path]]:
-    """The individual files the container gets, refusing before any model spend.
+    """The individual files the container gets, named before anything is checked.
 
-    A login that cannot be used fails every round the same way, so it is decided
-    here. The instruction files are optional: an operator who keeps none simply
-    has none, and that is not a reason to refuse.
+    The instruction files are optional: an operator who keeps none simply has
+    none, and that is not a reason to refuse.
     """
     resolved: list[tuple[str, Path]] = []
     for kind, relative in LOGIN_FILES.items():
@@ -246,7 +415,23 @@ def mounted_files() -> list[tuple[str, Path]]:
             raise Refused(f"{kind}: no stored login at {path}. Sign in with the CLI on this machine first.")
         resolved.append((kind, path.resolve()))
 
-    for kind, path in resolved:
+    for kind, relative in INSTRUCTION_FILES.items():
+        path = Path.home() / relative
+        if path.is_file():
+            resolved.append((kind, path.resolve()))
+        else:
+            print(f"{kind}: none at {path}; the container gets the repository's instructions only", flush=True)
+    return resolved
+
+
+def check_logins(files: list[tuple[str, Path]]) -> None:
+    """Decide the stored logins here, before any model is spent on a round.
+
+    A login that cannot be used fails every round the same way, and refreshing
+    one inside the container can rotate the token and leave this machine holding
+    the value the provider has already replaced.
+    """
+    for kind, path in files:
         if kind not in HEALTH_CHECKED:
             continue
         state, detail = credential_health(kind, path)
@@ -261,14 +446,6 @@ def mounted_files() -> list[tuple[str, Path]]:
                     "Sign in again, then rerun."
                 )
         print(f"{kind}: {state} ({detail})", flush=True)
-
-    for kind, relative in INSTRUCTION_FILES.items():
-        path = Path.home() / relative
-        if path.is_file():
-            resolved.append((kind, path.resolve()))
-        else:
-            print(f"{kind}: none at {path}; the container gets the repository's instructions only", flush=True)
-    return resolved
 
 
 def container_command(
@@ -362,8 +539,7 @@ def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], s
         print(line.rstrip(), flush=True)
         match = ANNOUNCED_DIRECTORY.match(line)
         if match is not None:
-            inside = match.group(2)
-            announced[match.group(1)] = str(repository / Path(inside[len(MOUNTED_REPOSITORY) + 1 :]))
+            announced[match.group(1)] = on_this_side(match.group(2), repository)
         if failure is None:
             failure = authentication_failure(line)
     return process.wait(), announced, failure
@@ -383,7 +559,12 @@ def main(argv: list[str] | None = None) -> int:
         allow_abbrev=False,
     )
     parser.add_argument("--docker", default="docker", help="Docker CLI to use.")
-    parser.add_argument("--repo", type=Path, default=None, help="Repository to mount and work in.")
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help="Repository to mount and work in; its git top level is what gets mounted, read-write.",
+    )
     parser.add_argument("--image", default=None, help="Container image, overriding the one built from tools/loopimage.")
     parser.add_argument("--rebuild", action="store_true", help="Build the image even when it is already present.")
     options, forwarded = parser.parse_known_args(argv)
@@ -401,11 +582,16 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_DOCKER
 
     docker = shutil.which(options.docker) or options.docker
-    repository = (options.repo or repository_root(Path(__file__).resolve().parent)).resolve()
     image = options.image or f"{IMAGE_NAME}:{recipe_digest()}"
 
     try:
+        # Cheapest refusals first: none of these costs a model call, and the
+        # health check below can spend a small session refreshing a login.
+        paperwork = forwarded_paperwork(forwarded)
+        repository = repository_root(options.repo or Path(__file__).resolve().parent)
         files = mounted_files()
+        check_repository(repository, files)
+        check_logins(files)
         identity = git_identity(repository)
         if options.rebuild or not image_present(docker, image):
             build_image(docker, image)
@@ -440,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
 
     announced: dict[str, str] = {}
     failure: str | None = None
+    remaining: list[str] = []
     try:
         exit_code, announced, failure = stream(command, repository)
     except KeyboardInterrupt:
@@ -450,9 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 remove(docker, name)
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                # Worth naming: the home volume is the one place a copy of a
-                # login could outlive the run.
-                print(f"warning: could not remove the {kind} {name}: {error}", file=sys.stderr)
+                remaining.append(f"{kind} {name}: {type(error).__name__}: {error}")
 
     if failure is not None and exit_code != 0:
         print(
@@ -460,9 +645,21 @@ def main(argv: list[str] | None = None) -> int:
             "The stored login needs to be renewed on this machine; the container cannot fix it.",
             file=sys.stderr,
         )
-    print(f"\nreviews    : {announced.get('reviews', repository / '.agentic-loop' / 'reviews')}")
-    print(f"logs       : {announced.get('logs', repository / '.agentic-loop' / 'logs')}")
+    print(f"\nreviews    : {announced.get('reviews', on_this_side(paperwork['--review-dir'], repository))}")
+    print(f"logs       : {announced.get('logs', on_this_side(paperwork['--log-dir'], repository))}")
     print(f"commits    : in {repository}; nothing was pushed and no pull request was opened.")
+    if remaining:
+        # The home volume is the one place a copy of a login can outlive the run,
+        # and a CLI that rewrites its login file in place turns the tmpfs symlink
+        # the entrypoint made into a regular file in that volume. A run that
+        # leaves it behind is not a run that succeeded, whatever the loop
+        # returned, so this is never folded into the loop's own exit code.
+        print(
+            "\nerror: this run left Docker resources behind, and the home volume is where the logins were "
+            "copied to:\n  " + "\n  ".join(remaining) + f"\nRemove them by hand. The loop itself exited {exit_code}.",
+            file=sys.stderr,
+        )
+        return EXIT_CLEANUP_FAILED
     return exit_code
 
 

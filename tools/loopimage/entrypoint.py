@@ -14,6 +14,12 @@ in this repository for handing a stored login to an agent CLI:
 Unlike the evaluation, nothing is exported back to the host: the wrapper deletes
 the home volume unconditionally, because the only product of a loop run is the
 commits it made in the repository mount.
+
+The virtualenv it builds installs a *snapshot* of the project rather than the
+mount, so the one environment both agents share maps ``agentic_hil`` to neither
+working tree. Each agent's tree comes first on its own ``PYTHONPATH`` instead:
+the implementer's is the mount it is editing, the reviewer's is the checkout of
+the commit it is reviewing.
 """
 
 from __future__ import annotations
@@ -34,6 +40,9 @@ TEMPORARY_FILES = Path("/tmp/loop-agent-files")
 # exists.
 SCRATCH = Path("/tmp")
 REVIEW_CHECKOUT = SCRATCH / "agentic-loop-review"
+# The committed tree, cloned here so that installing it writes its build
+# leavings here rather than into the operator's checkout.
+PROJECT_SNAPSHOT = SCRATCH / "loop-project"
 VENV = HOME / ".venv"
 
 # Same kind names as the evaluation where the file is the same file. The others
@@ -47,6 +56,16 @@ MOUNTED_PATHS = {
     "codex-auth": HOME / ".codex" / "auth.json",
     "codex-instructions": HOME / ".codex" / "AGENTS.md",
 }
+
+# The extras the suite needs; the project's own requirements come with them.
+EXTRAS = ("dev", "can")
+
+# Inner options that decide what this container isolates rather than how the
+# loop is run. tools/loop_in_container.py refuses them on the host, before any
+# model is spent; this is the second half of the same rule, so a value that
+# reached the loop another way cannot move the reviewer's checkout back onto the
+# repository mount or hand codex a sandbox that was never measured here.
+CONTAINER_OWNED_OPTIONS = ("--repo", "--codex-sandbox", "--review-checkout", "--review-checkout-dir")
 
 
 def place_mounted_files(kinds: list[str]) -> None:
@@ -106,28 +125,74 @@ def prepare_repository() -> None:
         subprocess.run(["git", "config", "--global", "--add", "safe.directory", str(path)], check=True, timeout=60)
 
 
-def install_project() -> None:
-    """Install the mounted project the way a developer on Linux would.
+def snapshot_command() -> list[str]:
+    return ["git", "clone", "--quiet", "--no-hardlinks", str(REPO), str(PROJECT_SNAPSHOT)]
 
-    An editable install has setuptools write ``src/agentic_hil.egg-info`` into
-    the mount. It is gitignored, so the loop's clean-tree check does not see it,
-    and it is metadata for the source directory rather than for any environment,
-    so a host virtualenv beside it keeps working.
+
+def install_command() -> list[str]:
+    return [str(VENV / "bin" / "pip"), "install", "--quiet", f"{PROJECT_SNAPSHOT}[{','.join(EXTRAS)}]"]
+
+
+def install_project() -> None:
+    """Install a snapshot of the project, and import from neither copy of it.
+
+    Two things have to be true at once. The suite reads the real distribution
+    metadata in one place -- which extras are installed -- so the project must
+    be installed and not only its requirements: without it,
+    `test_installed_extras_names_only_the_extras_whose_requirements_are_present`
+    fails in every round for a reason no agent put there.
+
+    And no install may map ``agentic_hil`` to a working tree, because there are
+    two of them. An editable install of ``/repo`` resolves the import to the
+    implementer's tree, so the reviewer -- running from a checkout pinned to the
+    commit under review -- would have tested the implementer's code, across the
+    bind mount and possibly mid-edit. It would also have setuptools write
+    ``src/agentic_hil.egg-info`` into the mount, where nothing disposable
+    belongs.
+
+    So the install is a plain one, from a clone of the committed tree on the
+    container's own filesystem: metadata and console script exist, the build
+    writes its own leavings next to the clone, and the copy in site-packages is
+    only ever the fallback -- each agent's tree comes first on PYTHONPATH, the
+    implementer's mount for one and the reviewer's checkout for the other.
     """
+    subprocess.run(snapshot_command(), check=True, timeout=600)
     subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True, timeout=300)
-    subprocess.run(
-        [str(VENV / "bin" / "pip"), "install", "--quiet", "--editable", f"{REPO}[dev,can]"],
-        check=True,
-        timeout=1800,
-    )
+    subprocess.run(install_command(), check=True, timeout=1800)
 
 
 def loop_command(forwarded: list[str]) -> list[str]:
+    arguments = [argument for argument in forwarded if argument != "--"]
+    # A prefix, not an equality: the loop's parser expands any unambiguous
+    # abbreviation, so refusing `--codex-sandbox` while `--codex-sand` reaches
+    # the same destination refuses nothing.
+    owned = sorted(
+        {
+            name
+            for argument in arguments
+            if (name := argument.split("=", 1)[0]).startswith("--")
+            for option in CONTAINER_OWNED_OPTIONS
+            if option.startswith(name)
+        }
+    )
+    if owned:
+        raise SystemExit(
+            f"these options decide what this container isolates and cannot be forwarded into it: {', '.join(owned)}"
+        )
     return [
         str(VENV / "bin" / "python"),
         str(REPO / "tools" / "agent_review_loop.py"),
+        *arguments,
+        # Last, and after everything forwarded, because argparse takes the final
+        # occurrence: an isolation option cannot be weakened by putting another
+        # copy of it in front of these.
         "--repo",
         str(REPO),
+        # Named rather than left to the default, so the value that survives an
+        # abbreviation forwarded from outside is this one. 'none' would review
+        # in the implementer's tree, which is the repository mount.
+        "--review-checkout",
+        "clone",
         # The container is the isolation boundary, so Codex needs no second one
         # inside it. Its own sandbox is what could not run this suite on the
         # host at all, and the blast radius of turning it off here is a
@@ -138,8 +203,6 @@ def loop_command(forwarded: list[str]) -> list[str]:
         # and never reaches the repository mount.
         "--review-checkout-dir",
         str(REVIEW_CHECKOUT),
-        # Forwarded last so a caller can override any default chosen here.
-        *[argument for argument in forwarded if argument != "--"],
     ]
 
 
@@ -165,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     # tmpfs. The reviewer's checkout is placed there explicitly below for the
     # same reason.
     environment.update({key: str(SCRATCH) for key in ("TMPDIR", "TMP", "TEMP")})
+    # The implementer edits this tree, so this is the tree its tests must
+    # import. The reviewer's own checkout replaces this in the environment
+    # agent_review_loop.reviewer_env builds for it.
+    environment["PYTHONPATH"] = str(REPO / "src")
 
     command = loop_command(list(args.loop_args))
     print(f"loop: {' '.join(command)}", flush=True)

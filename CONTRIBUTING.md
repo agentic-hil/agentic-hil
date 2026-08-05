@@ -50,8 +50,14 @@ repository read-write — the commits are the product and they land here — han
 the two CLIs their stored logins as individual read-only files, keeps every
 temporary directory on the container's own filesystem, and deletes the
 container's home afterwards. Every option it does not consume goes to
-`agent_review_loop.py` unchanged. Nothing is pushed and no pull request is
-opened.
+`agent_review_loop.py` unchanged, except the four that decide what the container
+isolates — `--repo`, `--codex-sandbox`, `--review-checkout` and
+`--review-checkout-dir`. Those it sets itself and refuses to forward, because
+forwarding one is how the isolation stops being the isolation that was measured.
+It also refuses a repository that would carry your profile into the read-write
+mount, and it exits non-zero when the container's home outlives the run, since
+that home is the one place a copy of a login can be. Nothing is pushed and no
+pull request is opened.
 
 ## Pull Requests
 

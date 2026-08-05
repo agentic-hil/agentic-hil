@@ -90,6 +90,13 @@ NO_TASK = (
 # both 'main' and 'master' has been seen to make first-match pick the wrong one.
 MAIN_BRANCH_CANDIDATES = ("origin/HEAD", "origin/main", "origin/master", "main", "master")
 
+# git clone --local hardlinks the object store, and the only failure that a
+# second attempt without hardlinks can fix is the link itself failing. Anything
+# else -- a destination git refused, a repository it could not read -- must be
+# reported rather than retried, because the retry deletes what it is about to
+# clone into.
+HARDLINK_REFUSED = re.compile(r"cross-device|failed to create link", re.IGNORECASE)
+
 
 @dataclass
 class Verdict:
@@ -253,17 +260,31 @@ def create_review_checkout(mode: str, repo: Path, destination: Path) -> Path | N
         return None
     destination.parent.mkdir(parents=True, exist_ok=True)
     if mode == "clone":
+        # The retry below deletes the destination, so nothing this call did not
+        # create may be sitting there. --review-checkout-dir is a caller's
+        # value: pointed at the repository itself -- and under
+        # tools/loop_in_container.py that is a read-write mount of the
+        # operator's own checkout -- a clone git safely refuses would otherwise
+        # be followed by a delete that does not refuse anything.
+        if destination.exists():
+            raise AgentError(
+                f"the reviewer's checkout directory already exists: {destination}. "
+                "Name one that does not, or remove it first."
+            )
         # --local hardlinks the object store when both sides share a filesystem,
         # so this stays cheap; a separate object store also means the reviewer
         # cannot damage the implementer's repository.
         try:
             git(repo, "clone", "--local", "--no-checkout", str(repo), str(destination))
-        except AgentError:
+        except AgentError as error:
             # A hardlink cannot cross a filesystem boundary, and under
             # tools/loop_in_container.py the repository is a bind mount while
             # this checkout is on the container's own filesystem. git reports
             # "Invalid cross-device link" and stops rather than falling back, so
             # the fallback is here: copy the objects instead of linking them.
+            # Every other failure is the caller's to see.
+            if not HARDLINK_REFUSED.search(str(error)):
+                raise
             shutil.rmtree(destination, ignore_errors=True)
             git(repo, "clone", "--local", "--no-hardlinks", "--no-checkout", str(repo), str(destination))
     elif mode == "worktree":
@@ -725,6 +746,16 @@ def reviewer_env(checkout: Path | None, dry_run: bool) -> dict[str, str] | None:
     scratch.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update({key: str(scratch) for key in ("TMP", "TEMP", "TMPDIR")})
+    source = checkout / "src"
+    if source.is_dir():
+        # A review is of one commit, so the reviewer's tests have to import that
+        # commit's code. Without this they import whatever an installed copy
+        # resolves to, which is the implementer's working tree -- possibly
+        # dirty, possibly mid-edit, and under tools/loop_in_container.py on the
+        # far side of a bind mount. PYTHONPATH comes ahead of everything
+        # site-packages adds, so it decides this rather than argues with it.
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = os.pathsep.join([str(source), *([existing] if existing else [])])
     return env
 
 
