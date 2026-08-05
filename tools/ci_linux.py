@@ -42,6 +42,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# CI runs 3.10 through 3.13; this runs one of them. 3.12 is the newest version
+# every dependency ships wheels for, so the image builds without a compiler and
+# the run stays fast. Override with --python to reproduce a version-specific
+# failure.
 DEFAULT_PYTHON = "3.12"
 EXIT_NO_DOCKER = 2
 
@@ -50,6 +54,9 @@ EXIT_NO_DOCKER = 2
 # inside a container is a waste of an afternoon.
 IMAGE = "python:{version}"
 
+# The mount is owned by the host user, not the container's root, so git treats
+# /src as unsafe and refuses to read it; `safe.directory` waives that check for
+# the one path we clone from.
 SCRIPT = """
 set -e
 git config --global --add safe.directory /src
@@ -113,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     # container one too so this runs what CI runs.
     command = ["docker", "run", "--rm", "--init", "-v", f"{docker_mount_source(root)}:/src:ro", image, "bash", "-c", script]
     print(f"{image}: the committed tree at {root}", flush=True)
+    # `check=False` so we forward pytest's exit status instead of raising: a
+    # failing suite must leave this process with pytest's code, not a traceback.
     return subprocess.run(command, check=False).returncode
 
 
