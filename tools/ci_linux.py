@@ -111,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
 
     command = ["docker", "run", "--rm", "-v", f"{docker_mount_source(root)}:/src:ro", image, "bash", "-c", script]
     print(f"{image}: the committed tree at {root}", flush=True)
+    # `check=False` so we forward pytest's exit status instead of raising: a
+    # failing suite must leave this process with pytest's code, not a traceback.
     return subprocess.run(command, check=False).returncode
 
 
