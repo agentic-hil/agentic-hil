@@ -36,6 +36,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
+    NOT_STARTED,
     PROJECT_CONFIG_DESCRIBE,
     PROJECT_CONFIG_SET,
     permission_surface,
@@ -1369,13 +1370,45 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend="mcp")
         try:
-            return _discover_under_lease(current, owned)
+            discovery, refusal = _discover_under_lease(current, owned)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
-            # starting clean.
-            owned.close()
+            # starting clean. A close that cannot give a lock back marks the
+            # coordinator `cleanup_required` and raises; this owner exists only
+            # for the length of the read, so that has to become an answer rather
+            # than an exception out of an MCP call.
+            cleanup_error = _closed_cleanly(owned)
+        if refusal is None and cleanup_error is not None:
+            return {}, _lock_cleanup_refusal(cleanup_error)
+        return discovery, refusal
     return _discover_under_lease(current, coordinator)
+
+
+def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
+    try:
+        coordinator.close()
+    except Exception as error:  # noqa: BLE001 - reported, never swallowed
+        return error
+    return None
+
+
+def _lock_cleanup_refusal(error: Exception) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_CREATE,
+        "error_type": "resource_quarantined",
+        "summary": (
+            "The attached probe was read and the coordination locks taken for that read could not all be given back, so "
+            "nothing was written to the configuration."
+        ),
+        "backend_error": str(error),
+        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        "cleanup_required": True,
+        "quarantined": True,
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
 
 
 def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator) -> tuple[JsonObject, JsonObject | None]:
