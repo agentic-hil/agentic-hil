@@ -6,7 +6,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-05
+
 The entries below add surface — configuration keys, MCP tools, a resource, a changed generated default — so this is a minor under decision 0019, not a patch.
+
+Three of them change what the tool refuses, and all three came from one working day of using it: the path trust check refused the standard Windows user folders and is gone, a generated configuration granted nothing and now grants everything, and quarantine fired where the failure could prove it never reached the board. What replaced the first is detection rather than prevention; what replaced the other two is a narrower rule that holds.
 
 ### Added
 

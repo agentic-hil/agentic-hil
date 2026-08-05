@@ -112,6 +112,21 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes (hardci-hq#97). History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",
+    # One release changed what the tool refuses, so several documents and the
+    # code itself state *from which release* a rule applies: the standard Windows
+    # folders stopped being refused, a generated configuration started granting
+    # everything, quarantine stopped firing where the failure proves it never
+    # reached the board. A reader on 0.7.1 needs that sentence to know it does
+    # not describe their installation. These name a release in prose and pin
+    # nothing anything installs against; freezing them here keeps that history
+    # readable instead of rewriting it at every bump.
+    "README.md": "prose reference to the release a behaviour changed in",
+    "SECURITY.md": "prose reference to the release a behaviour changed in",
+    "docs/mcp-hosts.md": "prose reference to the release a behaviour changed in",
+    "src/agentic_hil/config.py": "prose reference to the release a behaviour changed in",
+    "src/agentic_hil/knowledge.py": "prose reference to the release a behaviour changed in",
+    "src/agentic_hil/schemas/config.schema.json": "prose reference to the release a key was removed in",
+    "tests/test_hardening.py": "prose reference to the release a behaviour changed in",
 }
 
 
