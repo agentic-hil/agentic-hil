@@ -17,6 +17,7 @@ Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Python 3.10 or newer as the suppor
 - Install: `python -m pip install -e '.[dev,can]'`
 - Lint: `ruff check src tests evals tools`
 - Test: `pytest`
+- Test the POSIX half from Windows: `python tools/ci_linux.py` — needs Docker, runs the committed tree in a Linux container, and matches the Linux CI job. On Windows the POSIX-only tests never run, and that is where the platform bugs have been. If you cannot run it, say in the pull request which tests you did not run.
 - Package check: `python -m build` and `twine check dist/*`
 
 Do not bypass Agentic HIL MCP tools with raw debugger commands, direct serial-device access, or direct CAN-adapter access when a Agentic HIL tool is available.
