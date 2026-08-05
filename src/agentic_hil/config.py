@@ -678,14 +678,29 @@ def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) 
     return str(lexical)
 
 
-def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, required: bool) -> DebuggerConfig:
-    candidates = {
-        "openocd": ["openocd"],
-        "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
-        "pyocd": ["pyocd"],
-    }[debugger.type]
+def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, access_enabled: bool) -> DebuggerConfig:
+    # The starter entry names no toolchain, and pinning does not go and find it
+    # one. Autodetection here was what let `agentic-hil init` leave behind an
+    # entry that grants everything (hardci-hq#96), resolves `openocd` off `PATH`
+    # on the way in, and then drives a board with the two relative script names
+    # of the skeleton — exempt from the absolute-and-outside-the-workspace rule
+    # and skipped by `doctor`, because both keyed on it being the starter entry.
+    # An entry nobody has configured stays inert instead; naming an executable is
+    # what turns it into a bench, and from that moment the normal rules apply to
+    # it whole.
+    starter = debugger_is_starter_entry(debugger)
+    required = access_enabled and not starter
+    candidates = (
+        []
+        if starter
+        else {
+            "openocd": ["openocd"],
+            "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
+            "pyocd": ["pyocd"],
+        }[debugger.type]
+    )
     configured = debugger.executable
-    if configured is None and debugger.type == "stlink":
+    if configured is None and not starter and debugger.type == "stlink":
         from agentic_hil.backends.common import find_stm32_programmer_cli
 
         configured = find_stm32_programmer_cli()
@@ -724,10 +739,11 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     }
     # Every named debugger MUST be pinned and validated: a named entry could
     # otherwise point a backend at an unvalidated executable. Whether failing to
-    # resolve one is fatal is `debugger_drives_hardware`: an entry that grants
-    # nothing, and the starter entry `init` writes before a board is attached,
-    # do not force an operator to install a toolchain they may never drive.
-    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_drives_hardware(named)) for name, named in config.debuggers.items()}
+    # resolve one is fatal is decided inside `pin_one_debugger`, from the two
+    # facts it can see: an entry that grants nothing, and the starter entry
+    # `init` writes before anybody has said what it drives, do not force an
+    # operator to install a toolchain they may never use.
+    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named)) for name, named in config.debuggers.items()}
     return replace(
         config,
         debuggers=debuggers,
@@ -2203,45 +2219,59 @@ def _skeleton_debugger() -> JsonObject:
     return entry
 
 
+def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
+    """Whether this is the shipped skeleton entry, in every field that could drive.
+
+    Asked before pinning and about one thing only: whether anybody has yet said
+    what this entry drives. Type and both script names as the skeleton writes
+    them, and no toolchain named. It decides that pinning does *not* go looking
+    for a toolchain on `PATH` for this entry — see `pin_one_debugger` — which is
+    what makes "still the starter entry" and "drives nothing" the same statement
+    instead of two that drift apart on any host with OpenOCD installed.
+
+    `probe_id` and `resource_id` are deliberately not part of it. Identity drives
+    no board on its own, and `project_config_adopt_hardware` fills a serial into
+    exactly this entry while refusing to fill its executable — the discovery
+    backend is STM32CubeProgrammer and this entry is OpenOCD — so counting a
+    serial as "configured" would make `init`, plug the board in, adopt end in a
+    file that no longer loads, on the one flow hardci-hq#96 exists to make work.
+    """
+    skeleton = _skeleton_debugger()
+    return (
+        debugger.executable is None
+        and debugger.type == skeleton.get("type")
+        and debugger.interface_cfg == skeleton.get("interface_cfg")
+        and debugger.target_cfg == skeleton.get("target_cfg")
+    )
+
+
 def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
-    """Whether this entry is still the starter one and drives nothing as written.
+    """Whether this entry has no toolchain behind it and so drives nothing.
+
+    One rule, asked of the pinned entry: no executable named, or the marker
+    pinning substituted because nothing resolved. That marker is what makes the
+    answer survive pinning, which replaces an unresolved executable with a path
+    under the configuration directory that deliberately does not exist.
 
     It has to be asked because hardci-hq#96 made every permission true by
     default. Two rules key on "this bench is meant to drive hardware": config
-    load insists such an entry's toolchain resolves, and `doctor` probes it. A
+    load insists such an entry's toolchain resolves and, for OpenOCD, that its
+    scripts are absolute files outside the workspace, and `doctor` probes it. A
     granted permission used to be a deliberate human edit and so a good signal
-    for both. Now it is what a generation writes, so without this a starter file
-    would demand an installed toolchain and an attached board the moment `init`
-    produced it — and `init` would leave behind a configuration that does not
-    load, on the one path this issue exists to make work.
+    for both; now it is what a generation writes, so the starter file would
+    otherwise demand an installed toolchain the moment `init` produced it.
 
-    What is compared is what the shipped skeleton writes, and only values that
-    survive pinning, so the answer is the same before and after config load
-    rewrites a configured entry's paths:
-
-    * An **OpenOCD** entry still holding both skeleton script names. They are
-      relative, and the rule for a driving OpenOCD entry is that they are
-      absolute and outside the workspace — so an entry that kept them cannot
-      drive anything however its permissions read, whether or not
-      `project_config_adopt_hardware` has since filled in its probe serial.
-
-      Deliberately not narrowed by probe id or executable. Adoption fills a
-      serial into exactly this entry without touching its scripts, and requiring
-      the scripts from that point on would make the one flow this issue exists
-      to make work — `init`, plug the board in, adopt — end in a configuration
-      that no longer loads. What keeps the relative names harmless is not this
-      predicate: OpenOCD is spawned with its working directory pinned to the
-      directory of the executable itself (`spawn_command` in
-      `backends/openocd.py`), so `interface/stlink.cfg` resolves inside the
-      toolchain's own script tree and the workspace cannot shadow it.
-    * Any other entry with no toolchain behind it: none named, or the one pinning
-      substituted because nothing resolved. That marker is what makes the answer
-      survive pinning, which replaces an unresolved executable with a path under
-      the configuration directory that deliberately does not exist.
+    The predicate used to answer "still holds both skeleton script names"
+    instead, and that was wrong in the one direction that matters: an entry with
+    a real OpenOCD executable behind it and those two relative names in it was
+    exempted from script validation and skipped by `doctor` while
+    `backends/openocd.py` passed exactly those names to a real program. Pinning
+    OpenOCD's working directory to its own executable's directory keeps the
+    workspace out of the search, but `OPENOCD_SCRIPTS` and the per-user script
+    directories are still in it, so what ran was neither inert nor validated.
+    An entry that can drive is now an entry that is checked, and an entry that is
+    exempt is one nothing can drive.
     """
-    skeleton = _skeleton_debugger()
-    if debugger.type == skeleton.get("type"):
-        return debugger.interface_cfg == skeleton.get("interface_cfg") and debugger.target_cfg == skeleton.get("target_cfg")
     return debugger.executable is None or executable_is_disabled(debugger.executable)
 
 

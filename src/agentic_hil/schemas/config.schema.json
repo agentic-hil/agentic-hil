@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
   "title": "Agentic HIL configuration",
-  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written. A generated configuration sets every one of them true so the bench is workable without hand-edited YAML; what an agent may do to this file afterwards is take permissions away and never grant one, so the file can only ever narrow until a person runs agentic-hil init --force.",
+  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written. A generated configuration sets every one of them true so the bench is workable without hand-edited YAML. What an agent may write into a permission through project_config_set is false and nothing else, so that call can only ever narrow this file; regenerating it is a separate door with a separate grant (allow_config_write, or agentic-hil init --force at a person's shell) and it writes permissions again from the skeleton and the file it replaces.",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -81,13 +81,13 @@
     },
     "permissions": {
       "type": "object",
-      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. No call on the MCP surface writes true into any permission in this file, so each of these can go from true to false and none of them back, and only a person running agentic-hil init --force reopens one. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
+      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. project_config_set writes false into a permission and no other value, so through that call each of these can go from true to false and none of them back. The one MCP call that writes permissions any other way is project_config_create, which regenerates the whole file from hardware discovery under allow_config_write: it carries the permissions of the configuration it replaces onto the entries that are already there, grants everything to an entry it discovers for the first time, and generates a fully open file when there is none. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
       "additionalProperties": false,
       "properties": {
         "allow_config_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may regenerate this whole configuration from hardware discovery through project_config_create. True in a generated configuration. It is not a route back to an open file: a regeneration carries every permission already on disk over unchanged and supplies only the discovered hardware facts, so a bench that was narrowed comes back narrowed. Set it false to stop the agent refreshing probe ids and COM devices from hardware at all."
+          "description": "Whether an agent may regenerate this whole configuration from hardware discovery through project_config_create. True in a generated configuration. A regeneration is not the narrowing path and does not obey its ratchet: it carries the permissions of the configuration this server loaded onto the entries that are already in the file, and everything else in the file it writes is granted — an entry the discovery finds for the first time, and every entry at all if the configuration has been deleted since. Set it false to stop the agent regenerating this file from hardware, and with it refreshing probe ids and COM devices, at all."
         },
         "allow_config_description_write": {
           "type": "boolean",
@@ -97,7 +97,7 @@
         "allow_config_permissions_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change the permissions: blocks field-wise through project_config_set, including this key and allow_config_description_write. Only false may be written: a change that would turn any permission on is refused as permission_widening_denied, whatever key it named. So this hands over the taking-away, not the granting — with it an agent can narrow this bench on your request, and setting it false itself is the last permission change it can make, after which agentic-hil init --force is the only way to reopen the file."
+          "description": "Whether an agent may change the permissions: blocks field-wise through project_config_set, including this key and allow_config_description_write. Only false may be written: a change that would turn any permission on is refused as permission_widening_denied, whatever key it named. So this hands over the taking-away, not the granting — with it an agent can narrow this bench on your request, and setting it false itself is the last permission change it can make through project_config_set, after which a regeneration (agentic-hil init --force, or project_config_create while allow_config_write is still true) is what writes permissions into this file again."
         }
       },
       "default": {}

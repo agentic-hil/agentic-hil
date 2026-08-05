@@ -312,12 +312,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     CONFIG_WIDENING_ERROR: ErrorRemedy(
         meaning=(
-            "A field-wise configuration change would have turned a permission on. Nothing on this surface does that: a "
-            "generated configuration starts with every permission granted, and the one direction left is narrowing, so "
-            "an agent writes `false` into a permission and never `true`. `widened_keys` lists the paths that would have "
-            "opened, read out of the document before and after the change rather than out of the request. Nothing was "
-            "written, including the parts of the same call that were narrowings — a change is applied whole or not at "
-            "all."
+            "A field-wise configuration change tried to write something other than a narrowing into a permission. A "
+            "generated configuration starts with every permission granted, and the one direction `project_config_set` "
+            "leaves is narrowing, so an agent writes `false` into a permission and never `true`. Two cases share this "
+            "error because for a caller they are one fact — nothing here turns a permission on. Either the request "
+            "carried a permission value that was not `false`, and `widened_keys` names those keys as the request spelled "
+            "them, including a `true` sent to a permission that is already `true` and would have moved nothing; or the "
+            "resulting document would have granted more than the current one, and `widened_keys` names the paths that "
+            "would have opened, read out of the document before and after rather than out of the request. Nothing was "
+            "written in either case, including the parts of the same call that were narrowings — a change is applied "
+            "whole or not at all."
         ),
         remediation=(
             "If the intent was to narrow the bench, re-send the call with `false` values only; a call that mixes the "
@@ -620,12 +624,12 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     "openocd": {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant."},
-        "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
+        "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
-        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Resolved against OpenOCD's own search path."},
-        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`. Must match the MCU family."},
+        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Once this entry names a toolchain it must be an absolute path to an existing file outside the workspace: the relative default is what OpenOCD's own search path would resolve, and what that resolves to is not this configuration's to promise."},
+        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, absolute and outside the workspace like interface_cfg. Must match the MCU family."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
     "stlink": {
@@ -1230,25 +1234,35 @@ These calls are the only door. The file itself is protected by deny rules `agent
 | `project_config_describe` | answers, for **this** configuration in **this** state, which keys you may change right now, which you may not, and which grant would open a locked one. Needs no permission; reading is free. |
 | `project_config_set` | sets named keys, field-wise, after checking each value against the schema. |
 | `project_config_adopt_hardware` | reads the attached probe and fills in the identity keys that are still unset, through `project_config_set`. Supplies no value of its own. |
-| `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. Contributes no permission value: the permissions on disk are carried over unchanged, so it is not a way to undo a narrowing. |
+| `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. It authors no permission value of its own, but it is a generation and not a narrowing: see below. |
 
-### Permissions move one way
+### Permissions move one way — through `project_config_set`
 
 A configuration is **generated with every permission true** — flashing, reset, raw debugger commands, mass erase, COM and CAN writes, and all three `permissions.allow_config_*` grants. The bench is workable from the moment the file exists, and nobody has to open an editor to make it so.
 
-What holds instead of a closed start is the direction:
+What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 
 ```text
-Generation         every permission true
-You may            write false into a permission
-You may not        write true into one — ever, not even one you set to false yourself
-Last move          permissions.{CONFIG_PERMISSIONS_RIGHT}: false
-After that         only a person, with `{CONFIG_REOPEN_COMMAND}`
+Generation                  every permission true
+Through project_config_set  write false into a permission
+                            never true — not even into one you set to false yourself
+Last move there             permissions.{CONFIG_PERMISSIONS_RIGHT}: false
+After that                  no permission changes through project_config_set at all
 ```
 
 A change that would turn any permission on is refused as `{CONFIG_WIDENING_ERROR}`, and the check reads the permissions present in the document before and after the write rather than the keys the request named — so there is no spelling of it that gets through. Report the refusal and stop; granting is the operator's.
 
-Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the file: after it, no permission here can be changed again by anything on this surface. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the command a person reopens it with. Do not make that call in passing.
+Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the command a person reopens it with. Do not make that call in passing.
+
+### What the ratchet does not cover
+
+Regeneration is a separate door, and it is honest to say so rather than to promise more than holds:
+
+* `{CONFIG_REOPEN_COMMAND}` at a person's shell rewrites this file from attached hardware with every permission granted. That is the reopen path and it is the operator's.
+* `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives with everything granted; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back grants everything. Its result names what it wrote.
+* Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
+
+So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well — that closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it.
 
 ### The two rights
 
@@ -1287,11 +1301,12 @@ The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, 
 |---|---|
 | writing the file with your own file tools | `setup` writes host deny rules against exactly that. One door, audited, locked by a grant inside the file. |
 | sending a whole document, or a whole `debuggers.dut` subtree | the agent does not author this file. `value` accepts a string, number, boolean or null and nothing else, so no subtree — and no `permissions:` block inside one — can arrive as a value. |
-| turning any permission on, with any grant | refused as `{CONFIG_WIDENING_ERROR}`. The permissions actually present in the document are compared before and after the change, so it holds whatever the key was called and whichever grant the caller holds. `{CONFIG_REOPEN_COMMAND}`, run by a person, is the only way one comes back. |
+| turning any permission on through `project_config_set`, with any grant | refused as `{CONFIG_WIDENING_ERROR}`, both for a value other than `false` and for a document that would end up granting more than it did. The permissions actually present in the document are compared before and after the change, so it holds whatever the key was called and whichever grant the caller holds. Regenerating the file is the other door and a different grant — see "What the ratchet does not cover". |
 | reaching a permission with only the description grant | refused twice over: the key does not resolve to the description grant, and the same before/after comparison catches a permission that moved without `{CONFIG_PERMISSIONS_RIGHT}`. |
 | changing anything while a run is open | a run holds devices under the policy this file states. Changing the policy underneath it is refused; close the run with `bench_run_stop` first. |
 | deleting a key, an entry, or the file | nothing on this surface removes configuration. Regenerating one costs an operator their settings. |
-| `version`, `workspace_root`, `state_root`, `artifacts`, `debug`, `validation`, `recovery` | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
+| `version`, `workspace_root`, `state_root`, `validation`, `recovery`, and every key of `artifacts` and `debug` except the two grants below | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
+| widening `artifacts.allow_upload` or `debug.allow_all_symbols` | those two are the exception to the row above: a generation grants them like every other permission, so `{CONFIG_PERMISSIONS_RIGHT}` reaches them and `false` is the only value that may be written into either. Their list and path neighbours — `artifacts.allowed_roots`, `debug.allowed_symbols`, `upload_directory` — stay operator-only, so narrowing here is the scalar grant and nothing else. |
 
 A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.
 

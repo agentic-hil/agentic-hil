@@ -14,6 +14,7 @@ from agentic_hil.bootstrap import (
     select_probe_id,
 )
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, init_config
+from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_config
 from agentic_hil.types import fold_hardware_id
 
 
@@ -341,7 +342,7 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert "the project profile set to false" in result["summary"]
     assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
     assert any("allow_mass_erase" in step for step in result["next_steps"])
-    assert not any(step.startswith("Every permission in this file is true, so") for step in result["next_steps"])
+    assert not any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
 
 
 def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,4 +362,12 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
     assert result["permissions"]["allow_config_permissions_write"] is True
     assert result["permissions"]["debug"]["allow_all_symbols"] is True
     assert result["permissions"]["artifacts"]["allow_upload"] is True
-    assert any(step.startswith("Every permission in this file is true, so") for step in result["next_steps"])
+    assert any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
+    # The permissions are open and the entry still drives nothing. The starter
+    # entry names no toolchain and pinning does not find it one, so the steps say
+    # that rather than promising a bench that works as written.
+    assert any("names no toolchain yet" in step for step in result["next_steps"])
+    written = load_config(str(Path(result["path"])), str(workspace))
+    entry = written.debuggers["dut"]
+    assert debugger_is_placeholder(entry)
+    assert not debugger_drives_hardware(entry)

@@ -525,7 +525,15 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
     # two boards attached would enumerate, pick the one probe that answers, and
     # produce a plan about a board this entry is not for.
     requested_probe = _optional_string(arguments.get("probe_id")) or configured_probe_id(debugger_entry)
-    discovery, refusal = _discover_exclusively(existing, coordinator, debugger_id=debugger_name, probe_id=requested_probe)
+    configured_resource = configured_probe_resource(existing, debugger_name)
+    discovery, refusal = discover_under_hardware_lease(
+        existing,
+        coordinator,
+        tool=PROJECT_CONFIG_ADOPT,
+        reason_prefix="adopt",
+        resources=[] if configured_resource is None else [configured_resource],
+        probe_id=requested_probe,
+    )
     if refusal is not None:
         return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root}
     if not overall_success(discovery):
@@ -679,8 +687,8 @@ def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path
     }
 
 
-def _configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> str | None:
-    """The machine-wide lock of the entry being filled in, when it names a board.
+def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> str | None:
+    """The machine-wide lock of a configured entry, when it names a board.
 
     ``resource_id`` and ``probe_id`` name a physical unit and produce the same
     key a run holding that board holds. The remaining fallbacks name a toolchain
@@ -694,48 +702,58 @@ def _configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> 
     return device.lock_key if device.identity_source in {"resource_id", "probe_id"} else None
 
 
-def _discover_exclusively(
+def discover_under_hardware_lease(
     existing: AgenticHILConfig,
     coordinator: HardwareCoordinator | None,
     *,
-    debugger_id: str,
-    probe_id: str | None,
+    tool: str,
+    reason_prefix: str,
+    resources: list[str],
+    probe_id: str | None = None,
 ) -> tuple[JsonObject, JsonObject | None]:
     """Read the attached probe holding what a probe read holds.
 
-    Three things, and none of them is this path's invention — they are what
+    Four things, and none of them is this path's invention — they are what
     `debugger_probes_list` already does for the same two commands:
 
     * the audit trail is proven writable *before* the board is touched, so a
       bench that cannot record what happened does not have it happen;
-    * the host-wide enumeration pseudo-resource and the physical probe are
+    * the host-wide enumeration pseudo-resource, the entries this call is about
+      (``resources``) and the physical probe the enumeration selects are all
       locked, so a second MCP server, a second `agentic-hil adopt-hardware`, or a
       run in another project is told `device_busy` instead of finding a HOTPLUG
-      connect underneath it;
-    * a raised exception leaves the locks taken and the lease quarantined,
-      because what was said to that board is then unknown.
+      connect underneath it. A configured entry has to be in that list in its own
+      right: it is the canonical alias a run holds the board through, and a read
+      that locked only the enumerated serial would connect to a board another
+      owner is holding under its `resource_id`;
+    * the read is written to the audit trail before anything is done with it, and
+      a failure to write it quarantines;
+    * a raised exception, a release that does not come back clean, or a terminal
+      record that cannot be committed all leave the locks taken and the leases
+      quarantined, because what was said to that board is then unknown.
 
-    Returns the discovery result and, when the read never got that far, the
-    refusal that is the whole answer.
+    ``tool`` names the caller in every result and record, and ``reason_prefix``
+    names it in a quarantine reason — the two callers are `project_config_adopt_hardware`
+    and `project_config_create`, and an incident has to say which one left it.
+
+    Returns the discovery result and, when the read never got that far or did not
+    end cleanly, the refusal that is the whole answer.
     """
     if coordinator is None:  # pragma: no cover - every caller supplies or is given one
-        raise ConfigError("config_invalid", "Reading attached hardware requires a hardware coordinator.", {"debugger_id": debugger_id})
+        raise ConfigError("config_invalid", "Reading attached hardware requires a hardware coordinator.", {"tool": tool})
     try:
         ensure_audit_ready(existing)
     except (ConfigError, OSError) as error:
-        return {}, {**audit_unavailable(PROJECT_CONFIG_ADOPT, error), **NOT_STARTED, "retry_safe": False}
+        return {}, {**audit_unavailable(tool, error), **NOT_STARTED, "retry_safe": False}
     if coordinator.blocked:
-        return {}, _quarantined_refusal(coordinator)
+        return {}, _quarantined_refusal(coordinator, tool)
 
     held: list[HardwareLease] = []
-    resources = [DEBUGGER_DISCOVERY_RESOURCE]
-    configured = _configured_probe_resource(existing, debugger_id)
-    if configured is not None:
-        resources.append(configured)
+    requested = [DEBUGGER_DISCOVERY_RESOURCE, *dict.fromkeys(resources)]
     try:
-        held.append(coordinator.acquire(*resources))
+        held.append(coordinator.acquire(*requested))
     except CoordinationError as error:
-        return {}, _coordination_refusal(error, resources)
+        return {}, _coordination_refusal(error, requested, tool)
 
     def before_connect(selected: str) -> JsonObject | None:
         # Which probe the enumeration actually chose is known only here, and the
@@ -746,7 +764,7 @@ def _discover_exclusively(
         try:
             held.append(coordinator.acquire(resource))
         except CoordinationError as error:
-            return _coordination_refusal(error, [resource])
+            return _coordination_refusal(error, [resource], tool)
         return None
 
     try:
@@ -755,17 +773,17 @@ def _discover_exclusively(
         # Fail closed. What reached the board is unknown, so the locks stay taken
         # and an operator — or `agentic-hil recover` — owns the incident.
         for lease in held:
-            lease.quarantine("adopt_discovery_exception", error)
+            lease.quarantine(f"{reason_prefix}_discovery_exception", error)
         raise
 
-    record = write_report(existing, {**discovery, "tool": PROJECT_CONFIG_ADOPT, **_combined_status(held)})
+    record = write_report(existing, {**discovery, "tool": tool, **_combined_status(held)})
     if record.get("audit_ok") is False:
         for lease in held:
-            lease.quarantine("adopt_discovery_audit_broken", audit_broken=True)
+            lease.quarantine(f"{reason_prefix}_discovery_audit_broken", audit_broken=True)
         return {}, {
             **record,
             "ok": False,
-            "tool": PROJECT_CONFIG_ADOPT,
+            "tool": tool,
             "error_type": "audit_failed_after_action",
             "summary": "The attached probe was read and the audit record of that read could not be written, so the probe is quarantined and nothing was written to the configuration.",
             **_combined_status(held),
@@ -783,7 +801,7 @@ def _discover_exclusively(
             released = lease.release() and released
     status = _combined_status(held)
     if not released or status["cleanup_required"] or status["quarantined"]:
-        return {}, _refuse_after_failed_release(existing, record, discovery, status)
+        return {}, _refuse_after_failed_release(existing, record, discovery, status, tool)
     # The clean path re-commits too, so the persisted record carries the state the
     # leases actually ended in (`released`) rather than the `active` they were
     # written under. A no-op when the two already agree.
@@ -792,7 +810,7 @@ def _discover_exclusively(
         return {}, {
             **committed,
             "ok": False,
-            "tool": PROJECT_CONFIG_ADOPT,
+            "tool": tool,
             "error_type": "audit_failed_after_action",
             "summary": (
                 "The attached probe was read, the lease on it was released, and the record could not be updated to say "
@@ -805,7 +823,7 @@ def _discover_exclusively(
     return discovery, None
 
 
-def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject) -> JsonObject:
+def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
     """Refuse, and make the audit trail say so.
 
     The read is written as an `ok: true`, `lease_state: active` report before the
@@ -827,13 +845,13 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     whose incident cannot be recorded is in a worse state than one whose incident
     can.
     """
-    refusal = _release_refusal(discovery, status)
+    refusal = _release_refusal(discovery, status, tool)
     committed = write_report(existing, {**record, **refusal, **status})
     if committed.get("audit_ok") is False:
         return {
             **committed,
             "ok": False,
-            "tool": PROJECT_CONFIG_ADOPT,
+            "tool": tool,
             "error_type": "audit_failed_after_action",
             "summary": (
                 "The attached probe was read, the lease on it could not be released cleanly, and the record of that "
@@ -848,7 +866,7 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     return {**committed, **refusal, "report_path": committed.get("report_path"), "audit_ok": committed.get("audit_ok")}
 
 
-def _release_refusal(discovery: JsonObject, status: JsonObject) -> JsonObject:
+def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
     """The probe was read and this process could not give it back.
 
     Nothing is written after this. The read itself succeeded, so its result is
@@ -859,7 +877,7 @@ def _release_refusal(discovery: JsonObject, status: JsonObject) -> JsonObject:
     """
     return {
         "ok": False,
-        "tool": PROJECT_CONFIG_ADOPT,
+        "tool": tool,
         "error_type": "resource_quarantined",
         "summary": (
             "The attached probe was read and the lease on it could not be released cleanly, so the board is "
@@ -925,10 +943,10 @@ def _combined_status(held: list[HardwareLease]) -> JsonObject:
     }
 
 
-def _quarantined_refusal(coordinator: HardwareCoordinator) -> JsonObject:
+def _quarantined_refusal(coordinator: HardwareCoordinator, tool: str) -> JsonObject:
     return {
         "ok": False,
-        "tool": PROJECT_CONFIG_ADOPT,
+        "tool": tool,
         "error_type": "resource_quarantined",
         "summary": "Hardware on this bench has unresolved cleanup or audit state, and reading a probe is a hardware action, so nothing was read and nothing was written.",
         "cleanup_required": True,
@@ -941,10 +959,10 @@ def _quarantined_refusal(coordinator: HardwareCoordinator) -> JsonObject:
     }
 
 
-def _coordination_refusal(error: CoordinationError, resources: list[str]) -> JsonObject:
+def _coordination_refusal(error: CoordinationError, resources: list[str], tool: str) -> JsonObject:
     result = dict(error.result)
     return {
-        "tool": PROJECT_CONFIG_ADOPT,
+        "tool": tool,
         **result,
         "requested_resources": sorted(resources),
         "next_step": str(
@@ -1012,6 +1030,8 @@ __all__ = [
     "DEFAULT_COM_PORT_ID",
     "PROJECT_CONFIG_ADOPT",
     "configured_probe_id",
+    "configured_probe_resource",
+    "discover_under_hardware_lease",
     "is_unset",
     "plan_adoption",
     "project_config_adopt_hardware",

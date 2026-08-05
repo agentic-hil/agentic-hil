@@ -42,10 +42,12 @@ from agentic_hil.knowledge import (
     CONFIG_PERMISSIONS_RIGHT,
     CONFIG_SHAPE_URI,
     CONFIG_WRITE_RIGHT,
+    ErrorRemedy,
     ResolvedConfigKey,
     config_key_catalogue,
     config_key_schema,
     config_rule_fields,
+    lookup_remedy,
     read_resource,
     remediation_fields,
     resolve_config_key,
@@ -842,6 +844,42 @@ def test_the_reference_says_how_to_change_a_configuration_and_what_cannot_be_don
     assert "| `debuggers.<name>.permissions.allow_flash` | `allow_config_permissions_write` | boolean |" in document
 
 
+def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
+    """The security claim in the live resource is the one that is true.
+
+    An agent reads this before it decides what it may do, and it said the file
+    could only ever narrow — while `project_config_create` on the same surface
+    can regenerate it open. The owner's clarification on hardci-hq#96 keeps
+    regeneration outside the ratchet deliberately, so the resource has to say
+    which call the direction belongs to and what the other one does."""
+    document = (read_resource(CONFIG_SHAPE_URI) or {})["text"]
+
+    assert "### Permissions move one way — through `project_config_set`" in document
+    assert "### What the ratchet does not cover" in document
+    assert "the MCP permission-write path can only narrow" in document
+    # Regeneration, described as it behaves rather than as the ratchet.
+    assert "arrives with everything granted" in document
+    assert "grants everything" in document
+    assert "`permissions.allow_config_write` to false" in document
+
+
+def test_the_reference_names_the_two_grants_outside_a_permissions_block() -> None:
+    """`artifacts` and `debug` are operator-only apart from their two grants.
+
+    A generation grants `artifacts.allow_upload` and `debug.allow_all_symbols`
+    like every other permission, so they are in the key model and an agent can
+    narrow them. The resource listed both whole sections as unsettable, which
+    left one document answering the same question two opposite ways."""
+    document = (read_resource(CONFIG_SHAPE_URI) or {})["text"]
+
+    assert "| `artifacts.allow_upload` | `allow_config_permissions_write` | boolean |" in document
+    assert "| `debug.allow_all_symbols` | `allow_config_permissions_write` | boolean |" in document
+    assert "widening `artifacts.allow_upload` or `debug.allow_all_symbols`" in document
+    # And their list and path neighbours stay the operator's.
+    assert "`artifacts.allowed_roots`, `debug.allowed_symbols`, `upload_directory`" in document
+    assert "except the two grants below | not settable over MCP at all" in document
+
+
 def test_the_reference_is_advertised_and_readable_over_mcp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace, _ = bench(tmp_path, monkeypatch)
     tools = service(workspace)
@@ -996,6 +1034,15 @@ def test_a_permission_already_true_cannot_be_sent_true_again(tmp_path: Path, mon
     assert coerced["error_type"] in ("permission_widening_denied", "invalid_argument")
     assert path.read_bytes() == before
     assert document_of(path)["provenance"] == PROVENANCE
+    # The machine-readable half of the same refusal has to describe the same
+    # thing. This result's `widened_keys` came out of the request and nothing in
+    # the document would have moved, so a catalogue entry that spoke only of a
+    # before/after delta made one refusal say two incompatible things.
+    meaning = (lookup_remedy("permission_widening_denied") or ErrorRemedy("", ())).meaning
+    assert "carried a permission value that was not `false`" in meaning
+    assert "as the request spelled them" in meaning
+    assert "would have moved nothing" in meaning
+    assert refused["remediation"] == remediation_fields("permission_widening_denied")["remediation"]
 
 
 def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1111,3 +1158,55 @@ def test_the_frozen_notice_names_the_section_grants_too(tmp_path: Path, monkeypa
     # And the notice claims only what it closes: this call, not the whole file.
     assert "project_config_set" in froze["permissions_frozen"]["summary"]
     assert "agentic-hil init --force" in " ".join(froze["permissions_frozen"]["next_steps"])
+
+
+def test_describe_scopes_the_direction_to_the_call_that_has_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guidance an agent reads before writing says which call it is about.
+
+    `project_config_describe` told callers that closing the permissions grant was
+    the last permission change this server could make "at all", which is not
+    true of a server that still holds `allow_config_write`: regenerating writes
+    permissions again. Both branches name the call now."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    tools = service(workspace)
+    try:
+        open_steps = " ".join(tools.call(PROJECT_CONFIG_DESCRIBE)["next_steps"])
+    finally:
+        tools.close()
+
+    assert "narrowed and never widened through `project_config_set`" in open_steps
+    assert "the last permission change this call can make" in open_steps
+    assert "project_config_create" in open_steps
+
+    closed = document_of(path)
+    closed["permissions"][CONFIG_PERMISSIONS_RIGHT] = False
+    path.write_text(yaml.safe_dump(closed, sort_keys=False), encoding="utf-8")
+    tools = service(workspace)
+    try:
+        closed_steps = " ".join(tools.call(PROJECT_CONFIG_DESCRIBE)["next_steps"])
+    finally:
+        tools.close()
+
+    assert "fixed for this call" in closed_steps
+    assert "through `project_config_set` in either direction" in closed_steps
+
+
+def test_the_schema_says_what_each_door_does_to_a_permission() -> None:
+    """The shipped schema is a contract a host may show verbatim.
+
+    It promised that no call on the MCP surface writes `true` into a permission,
+    which `project_config_create` does on any entry a regeneration meets for the
+    first time. Scoped to the call that holds the direction, with the other door
+    described as it behaves."""
+    schema = config_schema()
+    top = schema["description"]
+    project = schema["properties"]["permissions"]["description"]
+    write_grant = schema["properties"]["permissions"]["properties"]["allow_config_write"]["description"]
+    permissions_grant = schema["properties"]["permissions"]["properties"]["allow_config_permissions_write"]["description"]
+
+    assert "through project_config_set is false and nothing else" in top
+    assert "regenerating it is a separate door" in top
+    assert "project_config_set writes false into a permission and no other value" in project
+    assert "grants everything to an entry it discovers for the first time" in project
+    assert "is not the narrowing path and does not obey its ratchet" in write_grant
+    assert "the last permission change it can make through project_config_set" in permissions_grant

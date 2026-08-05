@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 
 from agentic_hil.artifacts import ArtifactManager
@@ -30,9 +31,13 @@ from agentic_hil.config import (
     _close_windows_handles,
     _windows_hold_directory_chain,
     config_schema_text,
+    debugger_drives_hardware,
+    debugger_is_placeholder,
     derived_state_directory,
+    executable_is_disabled,
     load_authoritative_config,
     load_config,
+    project_config_path,
     project_state_directory,
 )
 from agentic_hil.contracts import validate_tool_arguments
@@ -1331,6 +1336,72 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
 
     assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_scripts_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both skeleton script names plus a real executable is a driving entry.
+
+    The placeholder exemption used to key on exactly this shape — an OpenOCD
+    entry still holding `interface/stlink.cfg` and `target/stm32f4x.cfg` — and so
+    let an entry with a real program behind it and every permission granted skip
+    script validation and `doctor` alike, while `backends/openocd.py` passed
+    those two relative names to that program. What the entry can drive is what
+    decides now, and this one can."""
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_flash": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    assert "interface/stlink.cfg" in config_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry nobody configured stays inert, on a host that has OpenOCD.
+
+    This is the other half of the rule above. Autodetection used to resolve
+    `openocd` off PATH for the starter entry too, so on such a host `agentic-hil
+    init` left behind an entry that granted everything (hardci-hq#96), had a real
+    program behind it, and drove a board with the skeleton's two relative script
+    names — exempt from validation and skipped by `doctor`, because both keyed on
+    it being the starter entry. It names no toolchain and nothing finds it one."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=None,
+        permissions={"allow_flash": True, "allow_reset": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    # The shipped skeleton names no executable; the conftest writer always does.
+    config_file = project_config_path(workspace)
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["executable"] = None
+    document["debuggers"]["dut"]["probe_id"] = None
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+
+    config = load_authoritative_config(workspace)
+
+    entry = config.debuggers["dut"]
+    assert debugger_is_placeholder(entry), "an entry nobody configured must not acquire a toolchain at load"
+    assert not debugger_drives_hardware(entry)
+    assert entry.executable is not None and executable_is_disabled(entry.executable)
+    # And the relative script names it still carries reach no program: the entry
+    # is inert, which is the only reason it may keep them.
+    assert entry.interface_cfg == "interface/stlink.cfg"
 
 
 def test_artifact_root_symlink_cannot_pivot_after_startup(tmp_path: Path) -> None:

@@ -1236,14 +1236,17 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
         )
     if not rights[CONFIG_PERMISSIONS_RIGHT]:
         steps.append(
-            f"The permissions in this file are fixed: {_right_key(CONFIG_PERMISSIONS_RIGHT)} is false, so none of them "
-            f"can be changed from here in either direction. A person reopens the file with `{CONFIG_REOPEN_COMMAND}`."
+            f"The permissions in this file are fixed for this call: {_right_key(CONFIG_PERMISSIONS_RIGHT)} is false, so "
+            f"none of them can be changed through `{PROJECT_CONFIG_SET}` in either direction. A person reopens the file "
+            f"with `{CONFIG_REOPEN_COMMAND}`."
         )
     else:
         steps.append(
-            "Permissions here can be narrowed and never widened: a change may write `false` into one and never `true`, "
-            f"whichever key it names. Closing {_right_key(CONFIG_PERMISSIONS_RIGHT)} is the last permission change this "
-            f"server can make at all, after which only `{CONFIG_REOPEN_COMMAND}` reopens the file."
+            f"Permissions here can be narrowed and never widened through `{PROJECT_CONFIG_SET}`: a change may write "
+            "`false` into one and never `true`, whichever key it names. Closing "
+            f"{_right_key(CONFIG_PERMISSIONS_RIGHT)} is the last permission change this call can make, after which "
+            f"`{CONFIG_REOPEN_COMMAND}` — or a regeneration through `project_config_create`, while "
+            "`permissions.allow_config_write` is still true — is what writes permissions into this file again."
         )
     steps.append(f"{CONFIG_SHAPE_URI} describes what a configuration looks like and what deliberately cannot be changed over MCP.")
     return steps
