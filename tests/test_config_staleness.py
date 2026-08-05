@@ -274,12 +274,12 @@ def test_the_two_prominent_answers_carry_the_block_when_they_refuse(tmp_path: Pa
 def test_an_edit_after_this_session_created_the_configuration_is_still_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The provisioning sequence, run to its end.
 
-    Start with no configuration, generate the deny-by-default one, let the
-    operator open a permission in it, call `project_config_create` again. The
-    second call is refused by the file — correctly, the server is gated by the
-    policy it loaded — and that refusal used to be handed back around the bound
-    service, so it carried nothing at all. It is the one moment in this sequence
-    where the loaded document and the file have provably come apart."""
+    Start with no configuration, generate one, let the operator take a
+    permission back out of it, then ask this server something. The answer has to
+    say that the file it is enforcing is no longer the file on disk: this is the
+    one moment in this sequence where the loaded document and the file have
+    provably come apart, and the narrowing the operator made is precisely what
+    the server will not pick up until it is restarted."""
     workspace = (tmp_path / "workspace").resolve()
     workspace.mkdir(parents=True)
     monkeypatch.chdir(workspace)
@@ -307,21 +307,31 @@ def test_an_edit_after_this_session_created_the_configuration_is_still_reported(
         assert created["ok"] is True, created
         path = Path(created["path"])
 
-        # A person opens what this project needs. Nothing reloads.
-        rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_flash": True}))
+        # A person narrows what this project should not have, and takes the
+        # regeneration grant with it. Nothing reloads.
+        rewrite(
+            path,
+            lambda document: (
+                document["debuggers"]["dut"]["permissions"].update({"allow_mass_erase": False}),
+                document["permissions"].update({"allow_config_write": False}),
+            ),
+        )
 
-        refused = provisioner.call(PROJECT_CONFIG_CREATE)
+        described = provisioner.call(PROJECT_CONFIG_DESCRIBE)
         elsewhere = provisioner.call("com_ports_list")
     finally:
         provisioner.close()
 
-    assert refused["error_type"] == "permission_denied"
-    assert refused["config_stale"] is True
-    assert refused["config_status"]["state"] == STATE_CHANGED
-    assert refused["config_status"]["path"] == str(path)
+    assert described["config_stale"] is True
+    assert described["config_status"]["state"] == STATE_CHANGED
+    assert described["config_status"]["path"] == str(path)
+    # The narrowing is in force on disk and not yet in this server, and the
+    # answer carries both halves rather than one of them.
+    assert described["permissions_in_force"]["allow_config_write"] is True
+    assert [entry for entry in described["writable_keys"] if entry["key"] == "permissions.allow_config_write"][0]["current_value"] is False
     # And the same statement from the same check on an ordinary answer, so the
     # two cannot say different things about one file.
-    assert elsewhere["config_status"]["current_digest"] == refused["config_status"]["current_digest"]
+    assert elsewhere["config_status"]["current_digest"] == described["config_status"]["current_digest"]
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,7 @@ One command instead of `agent-install`, `init` and `doctor` separately. It retur
 |---|---|---|
 | Scope | user: per user, per machine — every process of that OS user on this host, and no other OS user | one workspace |
 | Frequency | once per user and agent | once per project |
-| Writes | the agent's skill, the user-level MCP registration | the deny-by-default authoritative config; with `--agent claude-code`, that agent's refusal of its own write tools on the config and state root. For opencode nothing is written and the step reports that, see SECURITY.md; Codex needs nothing |
+| Writes | the agent's skill, the user-level MCP registration | the authoritative config, with every permission granted; with `--agent claude-code`, that agent's refusal of its own write tools on the config and state root. For opencode nothing is written and the step reports that, see SECURITY.md; Codex needs nothing |
 | Also | checks that a persistent trusted executable exists to register | runs `doctor` |
 | Cwd | anywhere; needs and creates no workspace and no config | the firmware project root |
 

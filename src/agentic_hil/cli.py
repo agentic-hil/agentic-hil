@@ -30,7 +30,7 @@ from agentic_hil.config import (
     authoritative_config_target,
     bind_debugger,
     config_schema_text,
-    debugger_access_enabled,
+    debugger_drives_hardware,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
@@ -49,7 +49,7 @@ from agentic_hil.config import (
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
-from agentic_hil.knowledge import RUNNING_SERVER_COMPARISON, remediation_fields
+from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="project half: write this workspace's deny-by-default authoritative config and verify it with doctor")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted, and verify it with doctor")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
@@ -1005,7 +1005,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     available_com_ports = list_available_com_ports()
     return {
         "ok": True,
-        "summary": "Attached hardware was discovered and configured." if discovery is not None and overall_success(discovery) else "Deny-by-default Agentic HIL project configuration written.",
+        "summary": (
+            "Attached hardware was discovered and configured, with every permission granted."
+            if discovery is not None and overall_success(discovery)
+            else "Agentic HIL project configuration written, with every permission granted."
+        ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
         "available_com_ports": available_com_ports,
@@ -1176,7 +1180,14 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Reading needs nothing granted: probing, serial reads and CAN reads work as written. Grant only what writes or changes state under debuggers.<name>.permissions; those flags stay deny-by-default.",
+        "Every permission in this file is true, so the bench is workable as written: probing, flashing, resetting, raw "
+        "debugger commands, mass erase, and serial and CAN writes. Read the permissions blocks and decide which of them "
+        "this bench should not have — allow_mass_erase in particular cannot be undone once it has run.",
+        "You can also just tell the agent: it may write false into any permission here and can never write true into "
+        f"one, so nothing it does widens this file. `{CONFIG_REOPEN_COMMAND}` regenerates it with everything open again.",
+        "Flashing needs one of those decisions before it works: validated flashing and unrestricted debugger access are "
+        "mutually exclusive policies, so while allow_raw_debugger_commands or allow_mass_erase is true on a probe, "
+        "flash_firmware on that probe is refused. Set whichever of the two this bench does not need to false.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
     if available_com_ports.get("ok"):
@@ -1720,8 +1731,10 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # anything about what this bench is meant to drive; a config that granted
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
-    # and it is the same set config load already insisted on resolving.
-    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    # and `debugger_drives_hardware` is literally the set config load insisted on
+    # resolving — which since hardci-hq#96 also excludes the starter entry `init`
+    # writes with every permission granted and no board attached yet.
+    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(entry)}
     checks = {name: result for name, (result, _) in probed.items()}
     target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]

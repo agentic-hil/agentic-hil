@@ -102,7 +102,7 @@ DEFAULT_COM_PORT_ID = "dut_uart"
 
 @cache
 def _skeleton() -> JsonObject:
-    """The shipped deny-by-default skeleton, parsed once.
+    """The shipped generation skeleton, parsed once.
 
     The placeholders are read out of it rather than listed here. A second list of
     "values that mean nothing was found" would be a list that drifts from the

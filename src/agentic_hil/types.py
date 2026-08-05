@@ -69,10 +69,16 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class DebuggerPermissions:
-    """What one configured debug probe may do beyond reading it. Every flag is
-    deny-by-default and belongs to exactly one probe, so enabling flash on a
-    bring-up board cannot grant it on a second board that shares the project
-    config.
+    """What one configured debug probe may do beyond reading it. Every flag
+    belongs to exactly one probe, so taking flash away from a bring-up board
+    leaves a second board that shares the project config untouched.
+
+    The defaults here are ``False`` and stay that way, which is not the same
+    question as what a *generated* file says. A generation writes every flag
+    true (hardci-hq#96); these defaults decide what an existing file means where
+    it says nothing, and turning them over would have widened every configuration
+    already on disk at the moment of an update — the one thing a permission
+    change may not do.
 
     ``allow_probe`` exists only for version 1 files. From version 2 on there is
     no read permission: exclusivity replaced it, and a version 2 config that
@@ -98,26 +104,35 @@ class IoPermissions:
 class ProjectPermissions:
     """What may be done to this project's configuration itself.
 
-    Every flag belongs to the write class of decision 0018 and is
-    deny-by-default like the rest of it: reading the configuration needs no
-    grant, writing it does. A configuration an agent generated carries all three
-    false, so the same agent cannot widen anything it wrote, and only a human
-    editing the file can open one.
+    Every flag belongs to the write class of decision 0018: reading the
+    configuration needs no grant, writing it does. A generated configuration
+    carries all three true (hardci-hq#96), so an agent can describe the bench and
+    narrow it on the operator's request without anyone opening YAML. The
+    dataclass defaults stay ``False`` for the same reason the per-device ones do:
+    they say what a file that names nothing means, and widening that would widen
+    every configuration already on disk.
+
+    What holds instead of a closed start is the direction. No call writes ``true``
+    into a permission, so each of these can go from true to false and none of them
+    back, and ``allow_config_permissions_write: false`` is the last permission
+    change an agent can make at all. ``agentic-hil init --force`` is what reopens
+    the file, and it is a person's command.
 
     Three grants rather than one, because one would be a master key. Somebody who
     opens the file so an agent can enter a probe serial must not thereby have
-    handed over ``allow_flash`` and ``allow_mass_erase``:
+    handed over the permissions block:
 
     ``allow_config_write``
         regenerate the whole file from hardware discovery
         (``project_config_create``). Contributes no permission value of its own —
-        the grants already on disk are carried over unchanged.
+        the permissions already on disk are carried over unchanged, so it is not
+        a way back to the open skeleton.
     ``allow_config_description_write``
         set named description keys field-wise (``project_config_set``): what the
         bench *is*. Never reaches a ``permissions:`` block.
     ``allow_config_permissions_write``
-        set the ``permissions:`` blocks field-wise: what the bench may be told to
-        do. This is the grant that hands over the granting."""
+        take permissions away field-wise, this key included. It hands over the
+        taking-away and not the granting: only ``false`` may be written."""
 
     allow_config_write: bool = False
     allow_config_description_write: bool = False

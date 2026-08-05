@@ -202,7 +202,10 @@ def test_discovery_applies_project_requirements() -> None:
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     profile = {
         "target": {"name": "demo", "controller": "stm32f446ret6"},
-        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_reset": True, "allow_raw_debugger_commands": True}}},
+        # Every flag is granted by default now, so what a profile can still say
+        # is "not this one". allow_mass_erase below is the narrowing; the
+        # version 1 read grants beside it are the request that is dropped.
+        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_mass_erase": False}}},
         "com_ports": {"uart": {"baudrate": 115200, "permissions": {"allow_read": True, "allow_write": False}}},
     }
     discovery = {
@@ -221,10 +224,13 @@ def test_discovery_applies_project_requirements() -> None:
     # this writes is version 2, where reading needs none and the keys are
     # refused by name, so the request is satisfied by dropping it.
     assert configured["version"] == 2
+    # Granted unless the profile said otherwise: a flag it does not name follows
+    # the generated default, and one it names is honoured — which can now only
+    # narrow, because the default it would have to beat is already true.
     assert configured["debuggers"]["dut"]["permissions"] == {
         "allow_flash": True,
         "allow_reset": True,
-        "allow_raw_debugger_commands": False,
+        "allow_raw_debugger_commands": True,
         "allow_mass_erase": False,
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"

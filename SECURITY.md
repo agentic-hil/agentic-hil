@@ -33,6 +33,22 @@ Mutable canonical report and hardware-lease state is stored under the pinned `st
 
 This boundary assumes the agent cannot modify the authoritative config, parent-process environment, host MCP registration, installed executables, or Agentic HIL process itself. If the agent has arbitrary shell access as the same OS identity, run Agentic HIL as a separate service account or isolated process and restrict the IPC boundary; an external YAML config cannot sandbox an already equivalent host principal.
 
+## What a generated configuration grants, and which direction it can move
+
+A configuration produced by `agentic-hil init` or `project_config_create` grants **every** permission it declares: flashing, reset, raw debugger commands, mass erase, serial and CAN writes, artifact upload, unrestricted symbol access, and all three project-scoped `permissions.allow_config_*` grants. That is the owner's decision (hardci-hq#96), taken after the destructive ones were named: the person who runs these benches owns them, and the previous closed default cost a working day of hand-edited YAML while protecting against nothing an agent with a shell was actually stopped by. Review the file `setup` prints and take back what your bench should not have — `allow_mass_erase` first, on any bench where a board you did not program can end up in the socket, because a mass erase cannot be undone.
+
+The property that carries the weight is no longer what a generation withholds. It is the direction:
+
+- An agent may set any permission in the file to `false`, through `project_config_set`, gated by `permissions.allow_config_permissions_write` and recorded in `provenance`.
+- An agent may **never** set one to `true`. Not one it never touched, and not one it set to `false` itself. Any write that would turn a permission on is refused as `permission_widening_denied`. The check compares the permissions present in the document before and after the change rather than the keys the request named, so it does not depend on a path parser being right, and no actor waives it.
+- An entry an agent creates under `debuggers`, `com_ports` or `can_buses` arrives with every permission `false`, written by the server. Adding a device is a write, and a write never grants.
+- `project_config_create` carries the permissions on disk over unchanged, so regenerating is not a route back to the open skeleton. Only a workspace with no configuration at all gets that.
+- Setting `permissions.allow_config_permissions_write: false` is terminal: after it nothing on the MCP surface can move a permission in that file again. The call that does it reports what stands frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens the file.
+
+So an agent can only ever reduce its own authority. Widening is a person's, at the command line, and `agentic-hil init --force` is the command — it regenerates the configuration from attached hardware with every permission granted again. Treat a report that a permission is missing as a request for that command, not as something to work around.
+
+The file-level deny rules `setup` writes into an agent host are a different mechanism and are unaffected by any of this.
+
 `setup --agent claude-code` writes one deny rule per protected tree into that host's user settings, which is a lock on the front door and not a wall — a shell writes those files regardless. **For opencode, Agentic HIL writes no such rule, deliberately.** That host puts the decision in the operator's hands at the moment of the prompt: answering one permission prompt with "always" adds a session rule that allows every subsequent edit, and it outranks anything the configuration says. A rule written by setup would therefore be a lock a single click removes, and presenting it as protection would say something about this bench that is not true. Whether opencode's file tools may reach the authoritative config and `state_root` is set by the operator in `~/.config/opencode/opencode.json`, under `permission.edit`; `setup` reports that it wrote nothing, and removes the ineffective patterns earlier releases left there. Codex needs no rule: it sandboxes model-generated shell commands and leaves MCP servers outside that sandbox.
 
 Treat that as an expectation, not an edge case. Agentic HIL gates the tools it

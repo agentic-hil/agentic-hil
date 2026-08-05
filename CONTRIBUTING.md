@@ -69,7 +69,7 @@ Use the bug report issue template when possible. Include enough information for 
 Agentic HIL is designed to let agents perform hardware actions through configured, narrow tools. Contributions should preserve these principles:
 
 - Agentic HIL discovers one operator-controlled config outside the repository; `AGENTIC_HIL_CONFIG` may provide an absolute-path override, and mandatory `workspace_root` binds either file to the exact project.
-- Raw debugger commands and mass erase behavior must remain disabled unless explicitly authorized by a reviewed design.
+- A generated configuration grants every permission, including raw debugger commands and mass erase; that is the owner's decision in hardci-hq#96 and the reason the tool is usable without hand-edited YAML. What must be preserved is the direction, not the closed start: **nothing on the MCP surface may turn a permission on.** A change that would is refused as `permission_widening_denied`, and the refusal is enforced by comparing the permissions present in the document before and after the write rather than the keys the request named. A contribution that adds a path by which a permission can become `true` — a new tool, a new key model, an actor exemption, an entry created pre-granted — breaks the only invariant left and needs a reviewed design.
 - Hardware reports and structured errors should stay machine-readable so agents can reason about failures safely.
 
 ## Releases

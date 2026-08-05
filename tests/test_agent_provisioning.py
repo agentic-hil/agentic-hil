@@ -1,15 +1,21 @@
 """One-time agent provisioning of a project configuration.
 
-The invariant every test here circles: an agent can enable itself up to
-observation, never up to modification. Reading needs no permission under
-decision 0018, so the configuration an agent generates for itself must reach
-exactly that far — every write permission false, including the one that would
-let it write the file again.
+The invariant every test here circles, since hardci-hq#96 turned the generated
+default over: **an agent can only ever reduce its own authority.** A generation
+grants everything — the file it writes is workable from the first call, mass
+erase included — and the direction is what is defended: `project_config_set`
+writes `false` into a permission and never `true`.
 
-The ratchet is the configuration. There is no second state store, and the tests
-below say why that is enough: the agent cannot choose what it generates, so a
-delete-and-regenerate cycle yields the same restrictive file. What that costs is
-a human's customised permissions, which is a downgrade, not an escalation.
+The statement kept from the version of these tests that pinned the opposite is
+that *a generation decides the permission state completely rather than half*. It
+was worth asserting when the answer was "nothing" and it is worth asserting now
+that the answer is "everything", which is why they were turned around instead of
+deleted.
+
+The ratchet is still the configuration, and there is still no second state store.
+A delete-and-regenerate cycle yields the same file the CLI would have written, so
+what it costs is every narrowing somebody asked for and what it yields is nothing
+that was not already reachable.
 """
 
 from __future__ import annotations
@@ -79,6 +85,19 @@ def granted(document: object, prefix: str = "") -> set[str]:
     return set()
 
 
+def declared(document: object, prefix: str = "") -> set[str]:
+    """Every `allow_*` flag in a document, by dotted path, whatever its value."""
+    if isinstance(document, dict):
+        found: set[str] = set()
+        for key, value in document.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key).startswith("allow_"):
+                found.add(path)
+            found |= declared(value, path)
+        return found
+    return set()
+
+
 def written_document(result: dict) -> dict:
     document = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -116,7 +135,15 @@ def test_agent_generates_the_configuration_it_could_not_find(tmp_path: Path, mon
         service.close()
 
 
-def test_generated_configuration_grants_nothing_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generated_configuration_grants_everything_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turned-around form of the test that pinned the closed default.
+
+    The statement is the same one: a generation decides the permission state
+    completely rather than half, so nothing in the file is left to a template's
+    memory or to whatever filled it in. Only the answer changed, and with it the
+    day of hand-edited YAML that used to stand between `init` and a working
+    bench.
+    """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
@@ -125,29 +152,32 @@ def test_generated_configuration_grants_nothing_at_all(tmp_path: Path, monkeypat
         document = written_document(result)
 
         assert document["permissions"] == {
-            "allow_config_write": False,
-            "allow_config_description_write": False,
-            "allow_config_permissions_write": False,
+            "allow_config_write": True,
+            "allow_config_description_write": True,
+            "allow_config_permissions_write": True,
         }
         assert document["debuggers"]["dut"]["permissions"] == {
-            "allow_flash": False,
-            "allow_reset": False,
-            "allow_raw_debugger_commands": False,
-            "allow_mass_erase": False,
+            "allow_flash": True,
+            "allow_reset": True,
+            "allow_raw_debugger_commands": True,
+            "allow_mass_erase": True,
         }
-        assert document["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
-        assert document["artifacts"]["allow_upload"] is False
-        assert document["debug"]["allow_all_symbols"] is False
-        # Nothing anywhere in the file is granted, whatever it is called.
-        assert granted(document) == set()
+        assert document["com_ports"]["dut_uart"]["permissions"] == {"allow_write": True}
+        assert document["artifacts"]["allow_upload"] is True
+        assert document["debug"]["allow_all_symbols"] is True
+        # Everything the file declares is granted, whatever it is called. The
+        # complete decision, stated as one assertion rather than as the list
+        # above, which is the half that survives a key being added.
+        assert granted(document) == declared(document)
+        assert granted(document), "a generated configuration that declares no permission proves nothing"
 
-        # And the file it wrote is what refuses the next write.
+        # And the file it wrote is one this server may write again: the ratchet
+        # is no longer "generate once", it is "narrow only".
         again = service.call(PROJECT_CONFIG_CREATE)
 
-        assert again["error_type"] == "permission_denied"
-        assert again["permission"] == "allow_config_write"
-        assert again["reason"] == "config_write_denied"
-        assert written_document(result) == document
+        assert again["ok"] is True, again
+        assert again["created"] is False
+        assert granted(written_document(again)) == granted(document)
     finally:
         service.close()
 
@@ -156,9 +186,11 @@ def test_generated_configuration_ignores_permissions_the_workspace_asks_for(tmp_
     """A profile in the repository must not decide what the board may be told to do.
 
     `agentic-hil init` fills a configuration from this file on purpose: a person
-    ran it. Over MCP the same file is repository-controlled data, and honouring
-    its permission block would turn "generate once" into complete
-    self-authorization — write the profile, then ask for the configuration.
+    ran it. Over MCP the same file is repository-controlled data, and the
+    generation ignores its permission block either way — which is now a check in
+    the narrowing direction as well: a profile asking for `allow_mass_erase:
+    false` does not reach a bench over MCP any more than one asking for `true`
+    did. Repository content decides no permission here, in either direction.
     """
     workspace = bench(tmp_path, monkeypatch)
     (workspace / "agentic-hil.config.example.yaml").write_text(
@@ -168,13 +200,13 @@ def test_generated_configuration_ignores_permissions_the_workspace_asks_for(tmp_
         "debuggers:\n"
         "  dut:\n"
         "    permissions:\n"
-        "      allow_flash: true\n"
+        "      allow_flash: false\n"
         "      allow_reset: true\n"
-        "      allow_mass_erase: true\n"
+        "      allow_mass_erase: false\n"
         "com_ports:\n"
         "  uart:\n"
         "    permissions:\n"
-        "      allow_write: true\n",
+        "      allow_write: false\n",
         encoding="utf-8",
     )
     attached_hardware(monkeypatch)
@@ -182,7 +214,8 @@ def test_generated_configuration_ignores_permissions_the_workspace_asks_for(tmp_
     try:
         result = service.call(PROJECT_CONFIG_CREATE)
 
-        assert granted(written_document(result)) == set()
+        document = written_document(result)
+        assert granted(document) == declared(document)
     finally:
         service.close()
 
@@ -201,9 +234,13 @@ def test_generated_configuration_says_an_agent_wrote_it(tmp_path: Path, monkeypa
         assert document["provenance"]["created_at"].endswith("Z")
         # A reader opening the file sees it before any setting.
         assert text.startswith("# Generated by Agentic HIL for an AI agent")
-        # Provenance is a note to a reader, never policy: what gates the next
+        # And it says which way the file can move from here, because the header
+        # is the one part of a generated file a person reads before the settings.
+        assert "cannot write true into any of them" in text
+        assert "agentic-hil init --force" in text
+        # Provenance is a note to a reader, never policy: what decides the next
         # write is the permission beside it, not what the file says wrote it.
-        assert load_authoritative_config(workspace).permissions.allow_config_write is False
+        assert load_authoritative_config(workspace).permissions.allow_config_write is True
     finally:
         service.close()
 
@@ -212,10 +249,10 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     """The trade the config-resident ratchet makes, stated as a test.
 
     A configuration removed out of band puts the workspace back in the state it
-    started from, and an agent may generate one again. That is a downgrade, not
-    an escalation: the agent cannot choose what it generates, so what comes back
-    is byte for byte the same deny-by-default skeleton, minus whatever a human
-    had opened in the file that was deleted. The cycle yields no capability.
+    started from, and an agent may generate one again. What comes back is byte
+    for byte the same skeleton, because the agent still cannot choose what it
+    generates — so the cycle costs whatever a person had *narrowed* and yields
+    the file `agentic-hil init` writes, which they could have run themselves.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -227,10 +264,10 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     config_file = Path(created["path"])
     original = written_document(created)
 
-    # A person opens what their project needs, then the file is lost.
-    opened = deepcopy(original)
-    opened["debuggers"]["dut"]["permissions"]["allow_flash"] = True
-    config_file.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+    # A person narrows what their project should not have, then the file is lost.
+    narrowed = deepcopy(original)
+    narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+    config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
     config_file.unlink()
 
     second = UnprovisionedToolService(workspace)
@@ -243,14 +280,15 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     assert again["ok"] is True, again
     assert again["created"] is True
     regenerated = written_document(again)
-    # No capability was gained: the second file grants exactly as little as the
-    # first, and the flash permission the person had set is simply gone.
-    assert granted(regenerated) == set()
-    assert regenerated["debuggers"]["dut"]["permissions"]["allow_flash"] is False
+    # The second file is the first file: the same fixed skeleton, and the mass
+    # erase the person had taken away is simply back. That is what the cycle
+    # costs, and it is why the file is not where the direction is enforced.
+    assert granted(regenerated) == declared(regenerated)
+    assert regenerated["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
     assert regenerated["permissions"] == {
-        "allow_config_write": False,
-        "allow_config_description_write": False,
-        "allow_config_permissions_write": False,
+        "allow_config_write": True,
+        "allow_config_description_write": True,
+        "allow_config_permissions_write": True,
     }
     assert {key: value for key, value in regenerated.items() if key != "provenance"} == {
         key: value for key, value in original.items() if key != "provenance"
@@ -260,8 +298,10 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
 def test_a_running_server_may_not_replace_the_configuration_it_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A server that holds a policy is gated by it, file present or not.
 
-    Otherwise deleting the file underneath a running server would be a way to
-    turn its own refusal into a fresh, writable start.
+    The permission that decides it is now granted by default, so what this pins
+    is the other half: the server keeps enforcing the policy it loaded rather
+    than treating a vanished file as an unconfigured workspace, and the write it
+    then makes is the ordinary regeneration rather than a fresh start.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -270,13 +310,53 @@ def test_a_running_server_may_not_replace_the_configuration_it_lost(tmp_path: Pa
         created = service.call(PROJECT_CONFIG_CREATE)
         Path(created["path"]).unlink()
 
-        refused = service.call(PROJECT_CONFIG_CREATE)
+        rewritten = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
 
-    assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == "allow_config_write"
-    assert not Path(created["path"]).exists(), "a refused call must not write anything"
+    assert rewritten["ok"] is True, rewritten
+    # Not "created": this server holds a policy, so it regenerated under it and
+    # carried that policy's permissions over rather than starting over.
+    assert rewritten["created"] is False
+
+
+def test_a_running_server_that_lost_a_narrowed_configuration_may_not_widen_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting the file is not a way past a narrowing this server is bound to.
+
+    This is the case the old refusal covered and the one that still matters: a
+    server whose configuration was narrowed and whose file then vanished must
+    not be able to regenerate its way back to the open skeleton. It cannot,
+    because a regeneration carries over the permissions of the policy in force —
+    and the policy in force is the one this server loaded.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    first = UnprovisionedToolService(workspace)
+    try:
+        created = first.call(PROJECT_CONFIG_CREATE)
+        narrowed = written_document(created)
+        narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+        narrowed["artifacts"]["allow_upload"] = False
+        Path(created["path"]).write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
+    finally:
+        first.close()
+
+    bound = UnprovisionedToolService(workspace)
+    try:
+        assert bound.config is not None
+        assert bound.config.debugger is not None
+        assert bound.config.debugger.permissions.allow_mass_erase is False
+        Path(created["path"]).unlink()
+
+        rewritten = bound.call(PROJECT_CONFIG_CREATE)
+    finally:
+        bound.close()
+
+    assert rewritten["ok"] is True, rewritten
+    assert rewritten["created"] is False
+    document = written_document(rewritten)
+    assert document["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+    assert document["artifacts"]["allow_upload"] is False
 
 
 def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
@@ -313,7 +393,14 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
     assert all(adopt["properties"][name]["type"] == "string" for name in ("com_port_id", "debugger_id", "probe_id"))
 
 
-def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_regeneration_carries_over_what_a_person_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hardware refresh refreshes hardware, not what the bench may be told to do.
+
+    The direction that matters here is the one a regeneration could break: a
+    person took two permissions away, and a call made to pick up a new probe
+    serial must not hand them back. The generation grants everything only where
+    there is no configuration to read.
+    """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
@@ -323,10 +410,10 @@ def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeyp
         service.close()
 
     config_file = Path(created["path"])
-    opened = written_document(created)
-    opened["permissions"]["allow_config_write"] = True
-    opened["debuggers"]["dut"]["permissions"]["allow_flash"] = True
-    config_file.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+    narrowed = written_document(created)
+    narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+    narrowed["com_ports"]["dut_uart"]["permissions"]["allow_write"] = False
+    config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
 
     attached_hardware(monkeypatch, probe_id="STLINK999", target={"controller": "STM32F411RE"}, com_port={"device": "COM7"})
     reopened = UnprovisionedToolService(workspace)
@@ -343,8 +430,8 @@ def test_a_person_flipping_the_flag_lets_the_agent_write(tmp_path: Path, monkeyp
     # The hardware facts are refreshed …
     assert document["debuggers"]["dut"]["probe_id"] == "STLINK999"
     assert document["com_ports"]["dut_uart"]["device"] == "COM7"
-    # … and every permission is the one the person set. The agent contributes no
-    # permission value on this path either.
+    # … and every permission is the one the person left behind. The agent
+    # contributes no permission value on this path either, in either direction.
     assert document["permissions"]["allow_config_write"] is True
     assert document["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert document["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
@@ -428,12 +515,16 @@ def test_regeneration_keeps_the_artifact_extensions_the_person_set(tmp_path: Pat
     assert document["artifacts"]["max_upload_size_mb"] == 64
 
 
-def test_a_configured_server_refuses_to_write_its_own_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_configured_server_refuses_to_write_a_configuration_that_took_the_grant_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The ordinary server carries the same refusal.
 
     A project that was set up by a person is the common case, and the tool is
     advertised there too — it has to answer with the permission it is denied by,
-    not by being absent from the list.
+    not by being absent from the list. What reaches the refusal now is a
+    configuration whose `allow_config_write` was taken away, which is a narrowing
+    an agent can make itself and never take back.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -442,6 +533,10 @@ def test_a_configured_server_refuses_to_write_its_own_configuration(tmp_path: Pa
         created = provisioner.call(PROJECT_CONFIG_CREATE)
     finally:
         provisioner.close()
+
+    narrowed = written_document(created)
+    narrowed["permissions"]["allow_config_write"] = False
+    Path(created["path"]).write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
 
     service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
     try:
@@ -584,15 +679,18 @@ def test_provisioning_is_reachable_over_mcp(tmp_path: Path, monkeypatch: pytest.
 
         assert result["isError"] is False
         assert result["structuredContent"]["created"] is True
-        assert result["structuredContent"]["permissions"]["allow_config_write"] is False
+        # The permission summary a host sees is the granted one, so the answer a
+        # caller reads over the wire is the answer the file gives.
+        assert result["structuredContent"]["permissions"]["allow_config_write"] is True
+        assert result["structuredContent"]["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is True
 
-        denied = handle_mcp_message(
+        again = handle_mcp_message(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": PROJECT_CONFIG_CREATE, "arguments": {}}},
             service,
         )
-        assert isinstance(denied, dict)
-        assert denied["result"]["isError"] is True
-        assert denied["result"]["structuredContent"]["error_type"] == "permission_denied"
+        assert isinstance(again, dict)
+        assert again["result"]["isError"] is False
+        assert again["result"]["structuredContent"]["created"] is False
     finally:
         service.close()
 
@@ -602,3 +700,187 @@ def test_default_state_root_is_still_preferred_when_it_passes(tmp_path: Path, mo
     workspace = bench(tmp_path, monkeypatch)
 
     assert provisionable_state_root(workspace) == user_state_root()
+
+
+# ---------------------------------------------------------------------------
+# The two proofs hardci-hq#96 asks for.
+
+
+def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """From nothing to hardware, counted in round trips between human and agent.
+
+    The whole of hardci-hq#96, as a sequence. Under the closed default this run
+    stopped at the second call with `permission_denied` on `allow_flash`, and the
+    way on was a person finding the key in a YAML file outside the repository and
+    setting it by hand — the day of work that produced this change. Here nobody
+    opens an editor at any point.
+
+    Flashing takes one extra call, and the direction of it is the point. Validated
+    flashing and unrestricted debugger access are mutually exclusive policies
+    (docs/security-design.md), and a generated configuration grants both sides of
+    that exclusion — so `flash_firmware` is refused until somebody decides which
+    of the two this bench keeps. That decision is a *narrowing*, which is the one
+    thing an agent may write, so it happens on the operator's word in the same
+    session. Nothing about it is a widening and nothing about it needs an editor.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    # Intel HEX rather than a raw binary: ST-Link needs `flash_address` for a
+    # .bin, which is a backend's requirement rather than anything this is about.
+    artifact = workspace / "build" / "app.hex"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(":00000001FF\n", encoding="ascii")
+
+    service = UnprovisionedToolService(workspace)
+    try:
+        # 1. The wall a new project hits, and the way out it names.
+        blocked = service.call("probe_target")
+        assert blocked["error_type"] == "config_file_not_found"
+        assert PROJECT_CONFIG_CREATE in blocked["next_step"]
+
+        # 2. One call, no arguments, no editor, and the bench is described and
+        #    granted. The result says both, including the exclusion below.
+        created = service.call(PROJECT_CONFIG_CREATE)
+        assert created["ok"] is True, created
+        assert created["permissions"]["debuggers"]["dut"]["allow_flash"] is True
+        assert any("mutually exclusive" in step for step in created["next_steps"]), created["next_steps"]
+
+        # 3. Flashing is past `allow_flash` on the first try — the refusal names
+        #    the exclusion and the key that resolves it, not a missing grant.
+        refused = service.call("flash_firmware", {"image_path": "build/app.hex"})
+        assert refused["error_type"] == "permission_denied"
+        assert "mutually exclusive" in refused["summary"]
+        assert "allow_raw_debugger_commands" in refused["summary"]
+
+        # 4. The operator says which of the two this bench keeps. The agent
+        #    writes it — a narrowing, through the ordinary write door.
+        narrowed = service.call(
+            PROJECT_CONFIG_SET,
+            {
+                "changes": [
+                    {"key": "debuggers.dut.permissions.allow_raw_debugger_commands", "value": False},
+                    {"key": "debuggers.dut.permissions.allow_mass_erase", "value": False},
+                ]
+            },
+        )
+        assert narrowed["ok"] is True, narrowed
+
+        flashed = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+        try:
+            result = flashed.call("flash_firmware", {"image_path": "build/app.hex"})
+        finally:
+            flashed.close()
+    finally:
+        service.close()
+
+    # Past every gate a permission decides, and stopped at the fake toolchain:
+    # no `permission_denied` and no schema refusal on the way, so the only thing
+    # left between an empty directory and a real board is the board.
+    assert result["error_type"] not in ("permission_denied", "invalid_argument"), result
+    assert result["artifact"]["path"].endswith("app.hex"), result
+    # And the file it all came out of was never touched by hand: an agent wrote
+    # it in one call with every permission granted, and an agent narrowed it on
+    # request. Two documents' worth of change, no editor in either.
+    document = written_document(created)
+    assert document["provenance"]["created_by"] == "agent"
+    assert document["provenance"]["last_modified_by"] == "agent"
+    assert declared(document) - granted(document) == {
+        "debuggers.dut.permissions.allow_raw_debugger_commands",
+        "debuggers.dut.permissions.allow_mass_erase",
+    }
+
+
+def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: everything an agent closes stays closed.
+
+    Four attempts, and the fourth is the one that matters — a permission this
+    same agent took away a moment earlier is exactly as unreachable as one it
+    never touched. After the terminal move nothing on this surface can move a
+    permission at all, and the call that made it said so.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+        assert created["ok"] is True, created
+        path = Path(created["path"])
+
+        # The operator asks for the bench to be narrowed, in prose. The agent
+        # writes it, with a provenance record and no YAML editing.
+        narrowed = service.call(
+            PROJECT_CONFIG_SET,
+            {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]},
+        )
+        assert narrowed["ok"] is True, narrowed
+        assert narrowed["permissions_changed"] == ["debuggers.dut.permissions.allow_mass_erase"]
+        assert "permissions_frozen" not in narrowed
+        assert written_document(created)["provenance"]["last_modified_by"] == "agent"
+
+        # 1. It cannot put back what it just took away.
+        reopened = service.call(
+            PROJECT_CONFIG_SET,
+            {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": True}]},
+        )
+        assert reopened["error_type"] == "permission_widening_denied"
+        assert reopened["widened_keys"] == ["debuggers.dut.permissions.allow_mass_erase"]
+        assert reopened["reopened_by"] == "agentic-hil init --force"
+        assert reopened["side_effect_committed"] is False
+        assert written_document(created)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+
+        # 2. Nor can it slip one through beside a narrowing: a change is applied
+        #    whole or not at all, so the narrowing is refused with the widening.
+        mixed = service.call(
+            PROJECT_CONFIG_SET,
+            {
+                "changes": [
+                    {"key": "com_ports.dut_uart.permissions.allow_write", "value": False},
+                    {"key": "debuggers.dut.permissions.allow_mass_erase", "value": True},
+                ]
+            },
+        )
+        assert mixed["error_type"] == "permission_widening_denied"
+        assert written_document(created)["com_ports"]["dut_uart"]["permissions"]["allow_write"] is True
+
+        # 3. The terminal move, and it announces itself in its own result.
+        froze = service.call(
+            PROJECT_CONFIG_SET,
+            {"changes": [{"key": "permissions.allow_config_permissions_write", "value": False}]},
+        )
+        assert froze["ok"] is True, froze
+        frozen = froze["permissions_frozen"]
+        assert frozen["closed_key"] == "permissions.allow_config_permissions_write"
+        assert frozen["irreversible_by_agent"] is True
+        assert frozen["reopened_by"] == "agentic-hil init --force"
+        # What stands frozen, read out of the file rather than out of the
+        # request: the one already taken away and the ones left granted.
+        assert frozen["frozen_permissions"]["debuggers.dut.permissions.allow_mass_erase"] is False
+        assert frozen["frozen_permissions"]["debuggers.dut.permissions.allow_flash"] is True
+        assert frozen["frozen_permissions"]["permissions.allow_config_permissions_write"] is False
+        # And it is in the result of *that* call, not only in a reference.
+        assert "agentic-hil init --force" in froze["summary"] + " ".join(froze["next_steps"])
+        assert froze["next_steps"][0].startswith("Report this before anything else")
+
+        # 4. After it, no permission moves in either direction. A new server on
+        #    the same file, so the loaded policy is the narrowed one.
+        service.close()
+        after = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+        try:
+            for value in (True, False):
+                refused = after.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": value}]})
+                assert refused["error_type"] == "permission_denied", (value, refused)
+                assert refused["permission"] == "allow_config_permissions_write"
+        finally:
+            after.close()
+    finally:
+        service.close()
+
+    document = written_document(created)
+    assert document["debuggers"]["dut"]["permissions"] == {
+        "allow_flash": True,
+        "allow_reset": True,
+        "allow_raw_debugger_commands": True,
+        "allow_mass_erase": False,
+    }
+    assert document["permissions"]["allow_config_permissions_write"] is False
+    assert path.exists()

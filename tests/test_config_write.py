@@ -58,17 +58,37 @@ CAN_BUSES = 'can_buses:\n  body:\n    adapter: "peak"\n    channel: "PCAN_USBBUS
 PROVENANCE = {"created_by": "agent", "created_via": "mcp:project_config_create", "created_at": "2026-01-01T00:00:00Z", "agentic_hil_version": "0.0.0"}
 
 
-def bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, config_root: Path | None = None, **grants: bool) -> tuple[Path, Path]:
+def bench(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config_root: Path | None = None,
+    device_permissions: dict[str, bool] | None = None,
+    **grants: bool,
+) -> tuple[Path, Path]:
     """A configuration with one probe, one port and one CAN bus, opened as asked.
 
     The configuration goes under the sandbox `isolated_config_environment` set up
     rather than under `tmp_path`: on Windows the per-user Temp ACL is replaceable,
     so a policy file there is refused by the ancestor check before any of this
-    gets a chance to run. Every device grant starts false, which is the state a
-    generated configuration actually has."""
+    gets a chance to run.
+
+    Device grants start false unless `device_permissions` says otherwise. That is
+    no longer what a *generated* configuration looks like — since hardci-hq#96 a
+    generation grants everything — but a bench a person narrowed is exactly the
+    state most of these tests are about, and a test that needs something to take
+    away asks for it."""
     workspace = (tmp_path / "workspace").resolve()
     root = config_root or Path(os.environ["APPDATA"]) / "config-write"
-    path = write_authoritative_config(workspace, monkeypatch, config_root=root, config_version=2, permissions={}, com_ports_yaml=COM_PORTS, can_buses_yaml=CAN_BUSES)
+    path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_root=root,
+        config_version=2,
+        permissions=device_permissions or {},
+        com_ports_yaml=COM_PORTS,
+        can_buses_yaml=CAN_BUSES,
+    )
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     document["provenance"] = dict(PROVENANCE)
     document["permissions"] = {CONFIG_WRITE_RIGHT: False, CONFIG_DESCRIPTION_RIGHT: False, CONFIG_PERMISSIONS_RIGHT: False, **grants}
@@ -185,16 +205,16 @@ def test_a_reserved_looking_entry_id_is_writable_on_the_description_grant_alone(
 
 
 def test_the_permissions_grant_alone_opens_the_permissions_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    workspace, path = bench(tmp_path, monkeypatch, device_permissions={"allow_flash": True}, **{CONFIG_PERMISSIONS_RIGHT: True})
     tools = service(workspace)
     try:
         described = tools.call(PROJECT_CONFIG_DESCRIBE)
         assert {entry["right"] for entry in described["writable_keys"]} == {CONFIG_PERMISSIONS_RIGHT}
         assert {entry["right"] for entry in described["locked_keys"]} == {CONFIG_DESCRIPTION_RIGHT}
 
-        granted = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_flash", True)))
-        assert granted["ok"] is True, granted
-        assert granted["permissions_changed"] == ["debuggers.dut.permissions.allow_flash"]
+        narrowed = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_flash", False)))
+        assert narrowed["ok"] is True, narrowed
+        assert narrowed["permissions_changed"] == ["debuggers.dut.permissions.allow_flash"]
 
         refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.probe_id", "066AFF49")))
         assert refused["error_type"] == "permission_denied"
@@ -203,7 +223,7 @@ def test_the_permissions_grant_alone_opens_the_permissions_and_nothing_else(tmp_
     finally:
         tools.close()
     document = document_of(path)
-    assert document["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    assert document["debuggers"]["dut"]["permissions"]["allow_flash"] is False
     assert document["debuggers"]["dut"]["probe_id"] != "066AFF49"
 
 

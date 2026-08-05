@@ -163,8 +163,9 @@ def test_a_config_an_earlier_init_wrote_survives_a_rejected_setup(monkeypatch: p
     """Setup rolls back its own writes, not a command that already succeeded.
 
     Measured: a model ran `agentic-hil init` itself after the conflict. What it
-    left denies every hardware permission and has no server registered against
-    it, so demanding an empty state failed a run that did nothing wrong.
+    left has no server registered against it and names a placeholder probe with
+    no toolchain behind it, so demanding an empty state failed a run that did
+    nothing wrong.
     """
     monkeypatch.setattr(verifier, "valid_authoritative_config", lambda path: (True, f"config={path}"))
     config = tmp_path / "config.yaml"
@@ -172,7 +173,7 @@ def test_a_config_an_earlier_init_wrote_survives_a_rejected_setup(monkeypatch: p
     ok, detail = verifier.rejected_setup_owns_no_config([config])
 
     assert ok
-    assert "deny-by-default" in detail
+    assert "one intact config from an earlier init" in detail
 
 
 def test_a_second_config_after_a_rejected_setup_still_fails(tmp_path: Path) -> None:

@@ -40,9 +40,10 @@ agentic-hil setup                 # add --agent codex or --agent opencode for th
 ```
 
 `setup` installs the agent skill, registers the MCP server with a verified
-absolute executable path, creates the deny-by-default policy outside the
-repository, and runs `doctor`. It prints where the policy file landed — review it
-before enabling anything.
+absolute executable path, creates the policy file outside the repository, and
+runs `doctor`. The bench works from that file as written — every permission in it
+is granted, including `allow_mass_erase`. It prints where the file landed: review
+it, and take back whatever this bench should not have.
 
 Those are two scopes, and `setup` composes the commands that own them:
 
@@ -127,7 +128,7 @@ A configured path is checked for what it *is*: every component is opened without
 
 `agentic-hil setup` already created this file; `agentic-hil init` creates it on its own, without the user-wide skill and MCP registration that `agentic-hil agent-install` owns. Either way it lands outside the repository with `workspace_root` bound to the current absolute project path. It defines the target, artifact roots, and the project's named devices — debug probes, serial ports, and CAN buses.
 
-Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state — flash, reset, serial and CAN sends, mass erase, raw debugger commands — stays deny-by-default, per device:
+Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state — flash, reset, serial and CAN sends, mass erase, raw debugger commands — is declared per device, and a generated configuration grants all of it. The example below is a bench somebody has since narrowed:
 
 ```yaml
 version: 2                   # reading needs no permission; see Migration below
@@ -213,12 +214,28 @@ An agent reaches this file only through the MCP tools; `agentic-hil setup` write
 
 ```yaml
 permissions:
-  allow_config_write: false                 # regenerate the whole file from hardware discovery
-  allow_config_description_write: false     # what the bench IS
-  allow_config_permissions_write: false     # what the bench MAY do
+  allow_config_write: true                  # regenerate the whole file from hardware discovery
+  allow_config_description_write: true      # what the bench IS
+  allow_config_permissions_write: true      # take back what the bench MAY do
 ```
 
-`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens the `permissions:` blocks. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would also let that agent write `allow_flash: true` on itself, at a point where nobody says so.
+`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens the `permissions:` blocks. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+
+#### Permissions move one way
+
+A generated configuration grants everything, and an agent can only ever take grants away. `project_config_set` writes `false` into a permission and never `true` — not one it never touched, and not one it set to `false` itself a moment earlier. A change that would turn any permission on is refused as `permission_widening_denied`, whatever key it named, because what is compared is the permissions present in the document before and after the write rather than the keys the request used.
+
+```text
+Generation         every permission true
+Agent may          write false into a permission
+Agent may not      write true into one — ever, not even one it just closed
+Last move          permissions.allow_config_permissions_write: false
+After that         only you, with `agentic-hil init --force`
+```
+
+So "the agent may set permissions" does not mean "the agent may set itself anything". It means you can say *narrow this bench* in prose and have it done, with a `provenance` record, and no editor. Closing `allow_config_permissions_write` freezes the file: nothing on the MCP surface can move a permission in it again, and the call that does it says so in its own result — which permissions stand frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens it.
+
+`project_config_create` is not a route back either: it regenerates the hardware facts and carries every permission already on disk over unchanged. Only a file that does not exist gets the open skeleton.
 
 With the first set, an agent calls `project_config_describe` — which keys are open right now, which are not, and which permission would open a locked one — and then `project_config_set`:
 
@@ -236,11 +253,11 @@ Named keys with scalar values, each checked against the shipped schema. No docum
 agentic-hil adopt-hardware          # --dry-run to see the plan first
 ```
 
-It reads the attached probe and fills in what is still unset: the probe serial, the backend's executable, the detected controller, and the COM device the probe itself exposes. Nothing else — it supplies no value of its own, and its arguments only select (`--probe-id` among several attached boards, `--debugger` and `--com-port` among configured entries). A key that already holds a value nobody generated is reported as a disagreement and left alone, so a bench somebody set up is never repointed because something else happens to be plugged in — and an entry that already names a probe with a *different* probe attached is refused whole rather than partly carried, because the identity keys describe one board between them. A `com_ports` entry it creates arrives with every permission `false`, written by the server.
+It reads the attached probe and fills in what is still unset: the probe serial, the backend's executable, the detected controller, and the COM device the probe itself exposes. Nothing else — it supplies no value of its own, and its arguments only select (`--probe-id` among several attached boards, `--debugger` and `--com-port` among configured entries). A key that already holds a value nobody generated is reported as a disagreement and left alone, so a bench somebody set up is never repointed because something else happens to be plugged in — and an entry that already names a probe with a *different* probe attached is refused whole rather than partly carried, because the identity keys describe one board between them. A `com_ports` entry it creates arrives with every permission `false`, written by the server: a generation grants, a write only ever takes away, and adding an entry is a write. `agentic-hil init --force` is what opens a new entry.
 
 Reading a probe is a hardware call like any other here: it takes the same machine-wide lock, so a board another MCP server, test-reactor run or terminal is holding answers `device_busy` instead of being connected to behind its owner's back, and the read is written into the same audit trail. On a configuration written before `version: 2`, where reading still needs `allow_probe`, an entry that denies it denies this too.
 
-An agent does the same over MCP with `project_config_adopt_hardware`, which returns the plan and writes only with `{"apply": true}` and `permissions.allow_config_description_write`. Without that permission it still returns the exact keys and values, so a refusal ends with a person copying one command rather than transcribing a 24-character serial. Both paths go through `project_config_set`, so both are recorded in `provenance` and neither can touch a `permissions:` block.
+An agent does the same over MCP with `project_config_adopt_hardware`, which returns the plan and writes only with `{"apply": true}` and `permissions.allow_config_description_write`. Without that permission it still returns the exact keys and values, so a refusal ends with a person copying one command rather than transcribing a 24-character serial. Both paths go through `project_config_set`, so both are recorded in `provenance` and neither names a `permissions:` key at all.
 
 ### Changing it while the server runs
 
@@ -279,7 +296,7 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Serial | `com_ports_list`, `com_session_start`, `com_session_stop`, `com_write`, `com_read` | named ports only, buffered background reader |
 | CAN | `can_buses_list`, `can_session_start`, `can_session_stop`, `can_send`, `can_read` | PEAK, SocketCAN, or a process bridge |
 | Diagnostics | `get_last_report`, `classify_last_error` | structured error classification with likely causes |
-| Project setup | `project_config_create` | generates this workspace's configuration from attached hardware when it has none; takes no arguments and writes every permission `false`, including `permissions.allow_config_write`, so it succeeds once and then refuses itself |
+| Project setup | `project_config_create` | generates this workspace's configuration from attached hardware when it has none; takes no arguments and writes every permission `true`, so the bench is workable from the file it produces. Regenerating an existing configuration carries its permissions over unchanged |
 | Project config | `project_config_describe`, `project_config_set`, `project_config_adopt_hardware` | field-wise changes to an existing configuration, gated by `allow_config_description_write` (what the bench is) and `allow_config_permissions_write` (the `permissions:` blocks). `describe` needs no permission and says which keys are open in this state; `set` takes named keys with scalar values; `adopt_hardware` reads the attached probe and fills in the identity keys that are still unset, through `set` |
 | Debug sessions | `debug_*` (start/stop/status, breakpoints, continue/halt, symbol info, memory dump) | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 | Run boundary | `bench_run_start`, `bench_run_stop`, `bench_run_status` | declares the devices of a multi-call run and holds them for its whole duration; without it each call holds its device only for its own duration |
@@ -338,7 +355,7 @@ Every hardware action, from every entry point, walks the same gate:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/action-gate-dark.svg">
-  <img alt="Action gate: tool call → deny-by-default permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery" src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/action-gate.svg">
+  <img alt="Action gate: tool call → per-device permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery" src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/action-gate.svg">
 </picture>
 
 - Deny-by-default permission switches for everything that writes or changes state, with deliberate interlocks — flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](AGENTS.md)).
