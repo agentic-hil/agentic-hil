@@ -1133,6 +1133,49 @@ def test_the_section_grants_a_generation_writes_can_be_narrowed(tmp_path: Path, 
     assert document_of(path)["debug"]["allowed_symbols"] == opened["debug"]["allowed_symbols"]
 
 
+def test_a_denied_section_grant_is_explained_as_the_permission_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal a caller is handed has to describe the request it refused.
+
+    Both keys are gated by `allow_config_permissions_write`, and the catalogue
+    entry a caller reads said the change had "reached a `permissions:` block".
+    Neither of these sits in one. An agent denied on `artifacts.allow_upload` was
+    handed a machine-readable explanation of a request it had not made, and the
+    right conclusion — this is a permission and an operator decides it — was left
+    for it to guess."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    opened = document_of(path)
+    opened["debug"]["allow_all_symbols"] = True
+    opened["artifacts"]["allow_upload"] = True
+    path.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+
+    tools = service(workspace)
+    try:
+        for key in ("artifacts.allow_upload", "debug.allow_all_symbols"):
+            refused = tools.call(PROJECT_CONFIG_SET, changes((key, False)))
+            assert refused["error_type"] == "permission_denied", refused
+            assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+            assert refused["denied_keys"] == [key]
+            # And the advice it carries is the catalogue's, for this exact grant.
+            assert refused["remediation"] == remediation_fields("permission_denied", CONFIG_PERMISSIONS_RIGHT)["remediation"]
+        # Both at once, and nothing is written for either.
+        both = tools.call(PROJECT_CONFIG_SET, changes(("artifacts.allow_upload", False), ("debug.allow_all_symbols", False)))
+        assert both["error_type"] == "permission_denied"
+        assert both["denied_keys"] == ["artifacts.allow_upload", "debug.allow_all_symbols"]
+    finally:
+        tools.close()
+
+    # The catalogue entry those refusals are derived from has to describe the
+    # request that was actually made. Neither key sits in a `permissions:` block.
+    meaning = (lookup_remedy("permission_denied", CONFIG_PERMISSIONS_RIGHT) or ErrorRemedy("", ())).meaning
+    assert "artifacts.allow_upload" in meaning
+    assert "debug.allow_all_symbols" in meaning
+    assert "not only the ones inside a `permissions:` block" in meaning
+
+    written = document_of(path)
+    assert written["artifacts"]["allow_upload"] is True
+    assert written["debug"]["allow_all_symbols"] is True
+
+
 def test_the_frozen_notice_names_the_section_grants_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`frozen_permissions` is the whole list or it is misleading.
 

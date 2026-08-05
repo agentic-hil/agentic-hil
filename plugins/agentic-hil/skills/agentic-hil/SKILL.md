@@ -101,11 +101,13 @@ first hardware action. Report where the file is, that an agent generated it, and
 what it granted — name `allow_mass_erase`, because a mass erase cannot be taken
 back — then ask the operator which permissions this bench should not have.
 Never edit the file with your own tools, and never delete or move one to get a
-different one. Regenerating carries the permissions on disk over for the entries
-already in it, but a configuration deleted first comes back as the open skeleton
-with every narrowing the operator asked for gone, and anything a regeneration
-discovers for the first time arrives open. Regenerating is the operator's call,
-not yours.
+different one. Regenerating carries over the permissions of the configuration
+this server loaded at startup for the entries already in it — not the file as it
+stands now, so a permission you narrowed with `project_config_set` in this
+session comes back granted — while a configuration deleted first comes back as
+the open skeleton with every narrowing the operator asked for gone, and anything
+a regeneration discovers for the first time arrives open. Regenerating is the
+operator's call, not yours.
 
 Changing an existing configuration goes through MCP too, never through your own
 file tools, and two separate permissions gate it. `project_config_describe`
@@ -115,8 +117,10 @@ reading needs no grant. `project_config_set` then sets named keys with scalar
 values checked against the shipped schema:
 `permissions.allow_config_description_write` opens what the bench *is* —
 `target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device`, CAN bus
-settings — and `permissions.allow_config_permissions_write` opens the
-`permissions:` blocks. The split is deliberate. The first is the one an operator
+settings — and `permissions.allow_config_permissions_write` opens every
+permission key: each `permissions:` block, plus the two grants that sit directly
+on a section, `artifacts.allow_upload` and `debug.allow_all_symbols`. The split
+is deliberate. The first is the one an operator
 can leave open, because it does not reach what the bench may do; a refusal names
 the permission that is missing and is the answer to the request. A write is
 refused while a run or a session holds hardware, the changed file is validated

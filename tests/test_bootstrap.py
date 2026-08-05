@@ -370,4 +370,4 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
     written = load_config(str(Path(result["path"])), str(workspace))
     entry = written.debuggers["dut"]
     assert debugger_is_placeholder(entry)
-    assert not debugger_drives_hardware(entry)
+    assert not debugger_drives_hardware(written, entry)

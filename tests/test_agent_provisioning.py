@@ -38,8 +38,15 @@ from agentic_hil.config import (
 from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
+from agentic_hil.knowledge import CONFIG_SHAPE_URI, read_resource
 from agentic_hil.mcp import SERVER_INSTRUCTIONS, handle_mcp_message
-from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
+from agentic_hil.report import read_last_report
+from agentic_hil.tools import (
+    PROJECT_CONFIG_CREATE,
+    AgenticHILToolService,
+    UnprovisionedToolService,
+    project_config_create,
+)
 from agentic_hil.types import fold_hardware_id
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
@@ -1175,6 +1182,115 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
     assert path.read_bytes() == before
 
 
+def test_a_regeneration_whose_terminal_record_fails_quarantines_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last write of the read is the one that had no consequences.
+
+    The read is recorded while the board is held, the leases come back clean, and
+    the record is then re-committed to say `released`. That last write is the one
+    tested here, and it used to be the hole: the leases were already gone, so
+    nothing was left to quarantine, the coordinator was never told, and the
+    refusal returned the pre-failure lease status — `cleanup_required: false`,
+    `quarantined: false`, `lease_state: released` — beside a summary saying the
+    bench needed an operator. Every field a caller branches on said it was fine,
+    and the next hardware call went through.
+    """
+    workspace, path = _regenerable_bench(tmp_path, monkeypatch)
+    before = path.read_bytes()
+    # Only the re-commit. `adopt.write_report` is the initial record and is left
+    # alone; `report.write_report` is what `recommit_report_with_status` calls.
+    monkeypatch.setattr("agentic_hil.report.write_report", lambda config, report: {**report, "audit_ok": False})
+
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = service.call(PROJECT_CONFIG_CREATE)
+        assert refused["ok"] is False
+        assert refused["error_type"] == "audit_failed_after_action"
+        assert refused["cleanup_required"] is True
+        assert refused["quarantined"] is True
+        assert refused["lease_state"] == "quarantined"
+        assert refused["quarantine_id"]
+        assert refused["retry_safe"] is False
+        assert "agentic-hil recover" in refused["next_step"]
+        # And the bench stays shut behind it, which is the whole point of raising
+        # the incident on the coordinator rather than only reporting one.
+        retried = service.call(PROJECT_CONFIG_CREATE)
+        probed = service.call("debugger_probes_list")
+    finally:
+        service.close()
+
+    assert retried["ok"] is False
+    assert retried["error_type"] == "resource_quarantined"
+    assert probed["ok"] is False
+    assert probed["error_type"] == "resource_quarantined"
+    assert path.read_bytes() == before
+
+
+def test_an_unprovisioned_creator_that_finds_a_configuration_still_leases_the_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two unprovisioned servers racing, and the second one loses cleanly.
+
+    Both miss the bind, both call `project_config_create` with no coordinator,
+    and the first writes the file. The second then finds that configuration on
+    the in-lock reread — the reread exists precisely so it does — and used to
+    read the board directly from there: no audit, no lease, straight past the
+    `resource_id` holder the file it had just loaded names, and outside the
+    quarantine path. "No coordinator" is not "no configuration".
+
+    The call made here is the exact one `UnprovisionedToolService` makes, with
+    the configuration already in place: the post-race state, without a thread."""
+    workspace, path = _regenerable_bench(tmp_path, monkeypatch, resource_id="bench-a")
+    before = path.read_bytes()
+    # The direct read is the failure mode. If it is reached at all, say so here
+    # rather than inferring it from the file afterwards.
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: pytest.fail("an unprovisioned creator read the board without a lease"),
+    )
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"physical:{fold_hardware_id('bench-a')}"])
+    try:
+        refused = project_config_create(workspace, None)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "device_busy"
+    assert refused["holder"]["label"] == "other-bench-session"
+    assert refused["side_effect_committed"] is False
+    assert path.read_bytes() == before
+
+
+def test_an_unprovisioned_creator_that_finds_a_configuration_writes_the_audit_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: with nobody holding the board, the read is a leased read.
+
+    A refusal alone would be satisfied by a path that simply gave up. This shows
+    the racing server goes through the same lifecycle every other caller does —
+    the enumeration pseudo-resource, the configured alias and the enumerated
+    probe all locked, and the read written to the audit trail."""
+    workspace, _ = _regenerable_bench(tmp_path, monkeypatch, resource_id="bench-a")
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: pytest.fail("an unprovisioned creator read the board without a lease"),
+    )
+
+    regenerated = project_config_create(workspace, None)
+
+    assert regenerated["ok"] is True, regenerated
+    report = read_last_report(load_authoritative_config(workspace))
+    assert report["tool"] == PROJECT_CONFIG_CREATE
+    assert report["resources"] == [
+        "debugger-discovery:all",
+        f"physical:{fold_hardware_id('bench-a')}",
+        f"probe:{fold_hardware_id('STLINK123')}",
+    ]
+    assert report["lease_state"] == "released"
+    assert report["cleanup_required"] is False
+
+
 # ---------------------------------------------------------------------------
 # What a generation says about itself is read out of what it wrote.
 
@@ -1215,7 +1331,7 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
 
     assert rewritten["ok"] is True, rewritten
     assert rewritten["narrowed_permissions"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_mass_erase"]
-    assert "carried over from the previous file as false" in rewritten["summary"]
+    assert "carried over as false from the configuration this server loaded at startup" in rewritten["summary"]
     assert "every permission was carried over unchanged" not in rewritten["summary"]
     header = config_file.read_text(encoding="utf-8")
     assert "Every permission below is true" not in header
@@ -1251,3 +1367,83 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     # And what the schema says a provenance record means says it too.
     provenance = config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"]
     assert "every permission true" in provenance
+
+
+def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The accepted behaviour, pinned as behaviour rather than left to a promise.
+
+    A server parses its configuration once and does not reload, so the `existing`
+    a regeneration carries permissions from is what it read at startup — not the
+    file as `project_config_set` has since left it. One session that narrows and
+    then regenerates therefore writes the wider loaded value back.
+
+    That is not a bug to close. The owner's clarification puts regeneration
+    outside the ratchet: it is creation, it belongs to the operator, and the rule
+    that holds is that the *MCP write path* can only narrow. What is defended
+    here is that every contract a caller reads says so, because a contract
+    promising that a narrowing survives a regeneration would be describing a
+    boundary that is not there."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+    assert created["ok"] is True, created
+    path = Path(created["path"])
+
+    # One service, one session: narrow, then regenerate, with no restart between.
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        narrowed = service.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]})
+        assert narrowed["ok"] is True, narrowed
+        assert written_document({"path": str(path)})["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+
+        attached_hardware(monkeypatch)
+        regenerated = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert regenerated["ok"] is True, regenerated
+    assert written_document(regenerated)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
+    assert regenerated["narrowed_permissions"] == []
+    # And the result says which state it wrote from, so nobody reads the reopened
+    # grant as a promise that was broken.
+    assert "this server loaded at startup" in regenerated["summary"]
+    assert any("since this server started" in step for step in regenerated["next_steps"])
+
+
+def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"The permissions already on disk" was a promise this path does not keep.
+
+    Each of these is served to a caller before or during the call, and each said
+    a regeneration carries the permissions on disk over — which a caller can only
+    read as "my narrowing survives this". It does not; the loaded configuration
+    is what is carried. Every one of them has to say the true thing, because a
+    caller that believes the false one regenerates to refresh a probe id and
+    reopens the bench."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
+    schema = config_schema()["properties"]["permissions"]
+    served = {
+        "tool description": description,
+        "config-shape resource": read_resource(CONFIG_SHAPE_URI)["text"],
+        "permissions schema": schema["description"],
+        "allow_config_write schema": schema["properties"]["allow_config_write"]["description"],
+        "provenance schema": config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"],
+        "generated header": Path(created["path"]).read_text(encoding="utf-8"),
+    }
+    for name, text in served.items():
+        assert "loaded" in text, f"{name} must say the carried permissions are the loaded ones"
+        assert "permissions already on disk" not in text, f"{name} still promises the on-disk state"
+        assert "permissions on disk over" not in text, f"{name} still promises the on-disk state"

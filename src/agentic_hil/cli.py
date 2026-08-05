@@ -1028,7 +1028,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             available_com_ports,
             target_path,
             narrowed=sorted(narrowed),
-            drives_hardware=any(debugger_drives_hardware(entry) for entry in written.debuggers.values()),
+            drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
         ),
     }
 
@@ -1775,8 +1775,11 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # and `debugger_drives_hardware` is literally the set config load validated —
     # which since hardci-hq#96 excludes the starter entry `init` writes with
     # every permission granted and no toolchain named, and includes every entry
-    # that has one, whatever its scripts looked like before it did.
-    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(entry)}
+    # that has one, whatever its scripts looked like before it did. It takes the
+    # configuration too, because under version 2 an entry with no mutation grant
+    # at all is still reachable — read-free — and an entry `doctor` skips is an
+    # entry nothing validated.
+    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(config, entry)}
     checks = {name: result for name, (result, _) in probed.items()}
     target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]

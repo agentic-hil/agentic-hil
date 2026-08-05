@@ -291,8 +291,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "permission_denied:allow_config_permissions_write": ErrorRemedy(
         meaning=(
-            "A field-wise configuration change reached a `permissions:` block — what the bench may be told to do — and "
-            "`permissions.allow_config_permissions_write` is false. This is the deliberate half of the split: a "
+            "A field-wise configuration change reached a permission — what the bench may be told to do — and "
+            "`permissions.allow_config_permissions_write` is false. That right gates every permission key in the file, "
+            "not only the ones inside a `permissions:` block: the project block, each entry's own block under "
+            "`debuggers`, `com_ports` and `can_buses`, and the two grants that sit directly on a section, "
+            "`artifacts.allow_upload` and `debug.allow_all_symbols`. This is the deliberate half of the split: a "
             "configuration may be open for describing the bench and closed for granting, and this refusal is that "
             "state working as intended. `denied_keys` lists the refused keys. Nothing was written."
         ),
@@ -761,7 +764,11 @@ def config_schema_document() -> JsonObject:
 # write `allow_flash: false` on a bench somebody else was about to flash.
 #
 #   description  what the bench IS   — target, probe identity, port parameters
-#   permissions  what the bench MAY  — every permissions: block in the file
+#   permissions  what the bench MAY  — every permission key in the file: each
+#                                      permissions: block, and the two grants
+#                                      that sit directly on a section,
+#                                      artifacts.allow_upload and
+#                                      debug.allow_all_symbols
 #
 # Neither right reaches upward. `allow_config_permissions_write` opens the
 # permissions half in one direction only: `configwrite.permission_widening`
@@ -787,12 +794,13 @@ PROJECT_CONFIG_SET_TOOL = "project_config_set"
 CONFIG_RIGHTS: dict[str, str] = {
     CONFIG_DESCRIPTION_RIGHT: (
         "Set the description of the bench field-wise: what hardware is there and how it is reached. "
-        "Never a permissions: block, so it cannot touch what may be done to the hardware."
+        "Never a permission, so it cannot touch what may be done to the hardware."
     ),
     CONFIG_PERMISSIONS_RIGHT: (
-        "Take permissions away, field-wise, including these two keys themselves. Only false may be "
-        "written: `project_config_set` turns no permission on, so this grant reduces authority and "
-        "never adds any. Setting it false is the last permission change that tool can make."
+        "Take permissions away, field-wise: every permissions: block, the two section-level grants "
+        "`artifacts.allow_upload` and `debug.allow_all_symbols`, and these two keys themselves. Only "
+        "false may be written: `project_config_set` turns no permission on, so this grant reduces "
+        "authority and never adds any. Setting it false is the last permission change that tool can make."
     ),
 }
 
@@ -1086,10 +1094,14 @@ target:
 debuggers:
   dut:
     type: "openocd"
-    executable: null            # found on PATH
+    executable: null            # resolved from PATH when this file is loaded
     probe_id: "066AFF495451885087171450"
-    interface_cfg: "interface/stlink.cfg"
-    target_cfg: "target/stm32f4x.cfg"
+    # Absolute, and outside workspace_root. An OpenOCD entry that anything can
+    # reach — and under version 2 reading reaches every entry — is refused with
+    # relative script names: those resolve out of OPENOCD_SCRIPTS and the
+    # per-user script directories, which is not a path this file states.
+    interface_cfg: "C:/tools/openocd/share/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "C:/tools/openocd/share/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
       allow_flash: true
@@ -1260,9 +1272,10 @@ Regeneration is a separate door, and it is honest to say so rather than to promi
 
 * `{CONFIG_REOPEN_COMMAND}` at a person's shell rewrites this file from attached hardware with every permission granted. That is the reopen path and it is the operator's.
 * `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives with everything granted; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back grants everything. Its result names what it wrote.
+* **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file — the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
 * Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
 
-So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well — that closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it.
+So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well — that closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it, taking effect for a running server once it is restarted onto the closed file.
 
 ### The two rights
 

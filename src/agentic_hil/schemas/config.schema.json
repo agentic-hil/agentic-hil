@@ -81,23 +81,23 @@
     },
     "permissions": {
       "type": "object",
-      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. project_config_set writes false into a permission and no other value, so through that call each of these can go from true to false and none of them back. The one MCP call that writes permissions any other way is project_config_create, which regenerates the whole file from hardware discovery under allow_config_write: it carries the permissions of the configuration it replaces onto the entries that are already there, grants everything to an entry it discovers for the first time, and generates a fully open file when there is none. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
+      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. project_config_set writes false into a permission and no other value, so through that call each of these can go from true to false and none of them back. The one MCP call that writes permissions any other way is project_config_create, which regenerates the whole file from hardware discovery under allow_config_write: it carries the permissions of the configuration this server loaded onto the entries that are already there — not the ones on disk, so a narrowing made through project_config_set closes the regeneration path only once the server has been restarted onto it — grants everything to an entry it discovers for the first time, and generates a fully open file when there is none. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
       "additionalProperties": false,
       "properties": {
         "allow_config_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may regenerate this whole configuration from hardware discovery through project_config_create. True in a generated configuration. A regeneration is not the narrowing path and does not obey its ratchet: it carries the permissions of the configuration this server loaded onto the entries that are already in the file, and everything else in the file it writes is granted — an entry the discovery finds for the first time, and every entry at all if the configuration has been deleted since. Set it false to stop the agent regenerating this file from hardware, and with it refreshing probe ids and COM devices, at all."
+          "description": "Whether an agent may regenerate this whole configuration from hardware discovery through project_config_create. True in a generated configuration. A regeneration is not the narrowing path and does not obey its ratchet: it carries the permissions of the configuration this server loaded — the state it holds in memory, which a project_config_set narrowing since startup has not changed — onto the entries that are already in the file, and everything else in the file it writes is granted: an entry the discovery finds for the first time, and every entry at all if the configuration has been deleted since. So in one running server a narrow-then-regenerate puts the loaded grant back. Set it false to stop the agent regenerating this file from hardware, and with it refreshing probe ids and COM devices, at all."
         },
         "allow_config_description_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permissions: block, so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
+          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key — no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols — so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
         },
         "allow_config_permissions_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change the permissions: blocks field-wise through project_config_set, including this key and allow_config_description_write. Only false may be written: a change that would turn any permission on is refused as permission_widening_denied, whatever key it named. So this hands over the taking-away, not the granting — with it an agent can narrow this bench on your request, and setting it false itself is the last permission change it can make through project_config_set, after which a regeneration (agentic-hil init --force, or project_config_create while allow_config_write is still true) is what writes permissions into this file again."
+          "description": "Whether an agent may change permissions field-wise through project_config_set. It gates every permission key in the file: each permissions: block, the two grants that sit directly on a section (artifacts.allow_upload and debug.allow_all_symbols), and this key and allow_config_description_write themselves. Only false may be written: a change that would turn any permission on is refused as permission_widening_denied, whatever key it named. So this hands over the taking-away, not the granting — with it an agent can narrow this bench on your request, and setting it false itself is the last permission change it can make through project_config_set, after which a regeneration (agentic-hil init --force, or project_config_create while allow_config_write is still true) is what writes permissions into this file again."
         }
       },
       "default": {}
@@ -113,7 +113,7 @@
             "agent",
             "human"
           ],
-          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission true; a regeneration carries the permissions already on disk over instead."
+          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission true; a regeneration carries over the permissions of the configuration that server had loaded instead."
         },
         "created_via": {
           "type": "string",

@@ -678,7 +678,7 @@ def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) 
     return str(lexical)
 
 
-def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, access_enabled: bool) -> DebuggerConfig:
+def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> DebuggerConfig:
     # Two rules, and between them "this entry is exempt from validation" and
     # "nothing can drive this entry" are the same set.
     #
@@ -716,7 +716,15 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
         debugger,
         executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates),
     )
-    if access_enabled and not debugger_is_placeholder(pinned) and pinned.type == "openocd":
+    # And whether the scripts are validated is decided by the same predicate
+    # `doctor` uses, so the set that is checked and the set that was validated
+    # stay one set. Not by the mutation grants: under version 2 reading needs no
+    # grant at all, so an entry with allow_probe, allow_flash and allow_reset all
+    # false still runs `probe_target` — a real OpenOCD, started on scripts nothing
+    # had looked at, resolved out of OPENOCD_SCRIPTS and the per-user script
+    # directories. "Nothing can drive this entry" has to mean nothing, reads
+    # included, before validation may be skipped.
+    if debugger_can_reach_hardware(config, pinned) and not debugger_is_placeholder(pinned) and pinned.type == "openocd":
         pinned = replace(
             pinned,
             interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg"),
@@ -752,7 +760,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     # load on any host that has not installed the backend yet. It becomes the
     # placeholder instead: `doctor` says the check was skipped and names why, and
     # the entry drives nothing until it has a toolchain.
-    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named)) for name, named in config.debuggers.items()}
+    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}") for name, named in config.debuggers.items()}
     return replace(
         config,
         debuggers=debuggers,
@@ -1284,18 +1292,28 @@ def grant_every_permission(document: JsonObject) -> JsonObject:
 
 
 def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> list[str]:
-    """Give a regenerated document exactly the grants the existing file has.
+    """Give a regenerated document exactly the grants ``existing`` holds.
 
     Regeneration refreshes what the hardware is, never what it may do. Every
-    permission is copied from the configuration on disk, by name, so a narrowing
-    somebody made survives a call taken to refresh a probe id and no permission
-    the file does not already hold appears; a device the regenerated document
-    does not contain is returned to the caller rather than dropped in silence.
+    permission is copied from ``existing`` by name, so a narrowing survives a call
+    taken to refresh a probe id and no permission that configuration does not hold
+    appears; a device the regenerated document does not contain is returned to the
+    caller rather than dropped in silence.
 
-    This is the reason regeneration is not a way around the one-way rule. An
-    agent that narrowed a permission and then called `project_config_create`
-    would get the narrowed file back, not the open skeleton — the skeleton's
-    grants reach only a workspace that has no configuration at all."""
+    ``existing`` is the configuration its caller is bound to, which on the MCP
+    path is the one that server parsed at startup — not a fresh read of the file.
+    Servers do not reload, by decision, so a `project_config_set` narrowing made
+    since startup is on disk and not in this object, and a regeneration in that
+    same session puts the loaded grant back. That is accepted: regeneration is
+    creation and belongs to the operator (hardci-hq#96), and the ratchet it is not
+    bound by is the MCP *write* path. Restarting the server onto the narrowed file
+    is what makes the narrowing bind here too — and it is the same restart a
+    `config_stale` result already asks for.
+
+    So this is not a promise that regeneration cannot widen. It is that the values
+    written come from a configuration rather than from the caller: nothing an
+    agent sends decides a permission here, and every entry already known keeps
+    what its loaded configuration says."""
     sources: dict[str, dict[str, Any]] = {
         "debuggers": dict(existing.debuggers),
         "com_ports": dict(existing.com_ports),
@@ -2239,14 +2257,20 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
     "drives nothing" two different sets on any host with OpenOCD installed, which
     is the hole this predicate closes.
 
-    Deliberately narrow. An entry an operator has typed — `type: stlink` on the
-    skeleton, the documented first edit of `init`, plug the board in, adopt —
-    resolves its toolchain as it always did; it simply has no relative scripts to
-    be exempt about, because no other backend reads them. `probe_id` and
-    `resource_id` are not part of it either: identity drives no board on its own,
-    and adoption fills a serial into this entry while refusing to fill its
-    executable, the discovery backend being STM32CubeProgrammer and this entry
-    OpenOCD.
+    Untouched has to mean untouched, identity included. The predicate once asked
+    only about the type, the two script names and the absent executable, and
+    called an entry with `probe_id: "066AFF49..."` in it a starter — so a bench
+    somebody had identified, on a host with OpenOCD on PATH, resolved no
+    executable, took the disabled marker instead, and was skipped by `doctor` for
+    looking untouched. An entry that names a board is not the shipped skeleton
+    however its scripts read; it resolves its toolchain normally and its scripts
+    are validated with everything else's, which for OpenOCD means absolute files
+    outside the workspace.
+
+    An entry an operator has typed is outside this in the same way — `type:
+    stlink` on the skeleton, the documented first edit of `init`, plug the board
+    in, adopt — and it simply has no relative scripts to be exempt about, because
+    no other backend reads them.
     """
     skeleton = _skeleton_debugger()
     return (
@@ -2254,6 +2278,13 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
         and debugger.type == skeleton.get("type")
         and debugger.interface_cfg == skeleton.get("interface_cfg")
         and debugger.target_cfg == skeleton.get("target_cfg")
+        # Nothing that names which physical board this is, or what runs on it.
+        # Each of these is a field only a person or an adoption fills in.
+        and debugger.probe_id is None
+        and debugger.resource_id is None
+        and debugger.target_type is None
+        and debugger.target is None
+        and debugger.flash_address is None
     )
 
 
@@ -2287,14 +2318,26 @@ def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
     return debugger.executable is None or executable_is_disabled(debugger.executable)
 
 
-def debugger_drives_hardware(debugger: DebuggerConfig) -> bool:
-    """Whether this entry can reach a board: a toolchain behind it and a grant.
+def debugger_can_reach_hardware(config: AgenticHILConfig, debugger: DebuggerConfig) -> bool:
+    """Whether anything this configuration permits reaches this entry's board.
+
+    The read model belongs in this answer, and leaving it out was the hole:
+    `debugger_access_enabled` names the three mutation grants, but under version 2
+    reading needs no grant at all, so an entry with all three false is still
+    probed. Nothing was validated for it and `doctor` skipped it, while
+    `probe_target` on it started a real debugger. Under version 1 the union is
+    just the three grants again, which is what that model says."""
+    return config.read_free or debugger_access_enabled(debugger)
+
+
+def debugger_drives_hardware(config: AgenticHILConfig, debugger: DebuggerConfig) -> bool:
+    """Whether this entry can reach a board: a toolchain behind it and a way in.
 
     The single answer config load and `doctor` share, so the set `doctor` checks
     stays exactly the set config load validated — for OpenOCD that means its
     scripts had to be absolute files outside the workspace. Asked of the pinned
     entry, because pinning is where an executable is resolved."""
-    return debugger_access_enabled(debugger) and not debugger_is_placeholder(debugger)
+    return debugger_can_reach_hardware(config, debugger) and not debugger_is_placeholder(debugger)
 
 
 def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:

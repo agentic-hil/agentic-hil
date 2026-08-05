@@ -134,7 +134,7 @@ MCP_TOOLS: list[JsonObject] = [
     # machine: a workspace_root argument would let a caller provision a project
     # this server was never pointed at, and a content argument would let it
     # decide its own permissions.
-    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments. Every permission in the generated file is true, including allow_raw_debugger_commands, allow_mass_erase and all three permissions.allow_config_* grants, so the bench is workable from it without anybody editing YAML — report what it granted and ask the operator which of it this bench should not have. Regenerating an existing configuration needs allow_config_write and carries the permissions already on disk over. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments. Every permission in the generated file is true, including allow_raw_debugger_commands, allow_mass_erase and all three permissions.allow_config_* grants, so the bench is workable from it without anybody editing YAML — report what it granted and ask the operator which of it this bench should not have. Regenerating an existing configuration needs allow_config_write and carries over the permissions of the configuration this server loaded at startup, for the entries that are still in it; an entry the regeneration discovers for the first time arrives with everything granted, and a workspace whose configuration is gone gets a fully open file. Because this server does not reload, a narrowing you made with project_config_set in this session is not in what it loaded and a regeneration now puts that permission back — regenerating is the operator's call, not a way to narrow or to re-open. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     # Reading is free, so this takes no arguments either: it answers for the one
     # configuration this server is bound to, in the state it is in.
     {
@@ -157,7 +157,8 @@ MCP_TOOLS: list[JsonObject] = [
         "description": (
             "Change named keys of this project's configuration, field-wise. Two separate permissions gate it: "
             "allow_config_description_write for what the bench is (target, probe id, port device and baudrate, CAN bus "
-            "settings) and allow_config_permissions_write for the permissions: blocks. Values are scalars checked "
+            "settings) and allow_config_permissions_write for every permission key — each permissions: block, and the "
+            "two grants that sit directly on a section, artifacts.allow_upload and debug.allow_all_symbols. Values are scalars checked "
             "against the shipped schema; the changed file is validated before it replaces the working one, and a write "
             "is refused while a run holds hardware. Use this instead of editing the configuration file yourself."
         ),
