@@ -50,6 +50,9 @@ EXIT_NO_DOCKER = 2
 # inside a container is a waste of an afternoon.
 IMAGE = "python:{version}"
 
+# The mount is owned by the host user, not the container's root, so git treats
+# /src as unsafe and refuses to read it; `safe.directory` waives that check for
+# the one path we clone from.
 SCRIPT = """
 set -e
 git config --global --add safe.directory /src
