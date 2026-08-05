@@ -1,0 +1,11 @@
+{
+  "name": "agentic-hil-loop-clis",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned agent CLIs for the containerised Claude/Codex review loop.",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.218",
+    "@openai/codex": "0.145.0"
+  }
+}
