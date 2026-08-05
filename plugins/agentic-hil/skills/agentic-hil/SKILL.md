@@ -143,10 +143,17 @@ adopt-hardware` — and not a serial to transcribe.
 one this server parsed. Nothing is reloaded while the server runs, so the backend
 that result names, the devices it knows and the permissions it enforces are all
 from the version loaded at startup. The `config_status` block names the file and
-says which of three states it is in, and the three do not share one remedy:
+says which of four states it is in, and the four do not share one remedy. Only
+the first of them is a restart on its own:
 
-- `changed` — loaded_digest and current_digest differ. Ask for a restart; it
-  loads the file that exists now.
+- `changed` — loaded_digest and current_digest differ and the file that is there
+  now loads. Ask for a restart; it loads the file that exists now.
+- `invalid` — the file has changed and will not load: not valid YAML, not
+  accepted by the schema, or refused by one of the document checks the startup
+  loader runs. backend_error names which. A restart here does not swap the
+  policy, it removes it — the server stops and the new one fails to start. The
+  repair comes first and the restart only after it, so never ask for the restart
+  on its own.
 - `missing` — the file is gone and current_digest is `null`, so there is
   nothing to restart onto. It has to be put back first. `project_config_describe`
   still answers in this state, out of the loaded policy: permissions_in_force

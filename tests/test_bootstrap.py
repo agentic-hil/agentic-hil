@@ -7,8 +7,14 @@ import yaml
 
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
-from agentic_hil.bootstrap import apply_discovery_to_template, correlate_com_port, discover_attached_hardware
+from agentic_hil.bootstrap import (
+    apply_discovery_to_template,
+    correlate_com_port,
+    discover_attached_hardware,
+    select_probe_id,
+)
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, init_config
+from agentic_hil.types import fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -19,17 +25,29 @@ def test_stlink_target_info_extracts_one_identity() -> None:
     assert stlink_target_info("Device name : STM32F446RE\n") is None
 
 
-def test_correlate_com_port_requires_one_exact_serial_match() -> None:
+def test_correlate_com_port_requires_one_serial_match() -> None:
+    """One hardware identity, the same one `select_probe_id` and the lock use.
+
+    Case folds and nothing else. This used to strip punctuation as well, on the
+    theory that a correlation keys nothing — but the port it picks is written into
+    `com_ports.<name>.device` by adoption, so a probe serial `06:6A-FF30` matching
+    a sole host port whose serial is really `066AFF30` puts a possibly different
+    device into an entry that may already allow writes. A tie guard cannot see a
+    single false match. Not correlating is the safe failure: the caller reports
+    the COM port as unavailable with the host inventory attached."""
     available = {
         "ok": True,
         "ports": [
-            {"device": "COM3", "serial_number": "06:6A-FF30"},
+            {"device": "COM3", "serial_number": "066AFF30"},
             {"device": "COM4", "serial_number": "OTHER"},
         ],
     }
-    assert correlate_com_port("066aff30", available) == {"device": "COM3", "serial_number": "06:6A-FF30"}
-    available["ports"].append({"device": "COM5", "serial_number": "066AFF30"})
-    assert correlate_com_port("066aff30", available) is None
+    assert correlate_com_port("066aff30", available) == {"device": "COM3", "serial_number": "066AFF30"}
+    # A serial the two inventories spell differently is not this probe's port as
+    # far as anything here can prove, so it is not offered as one.
+    assert correlate_com_port("06:6A-FF30", available) is None
+    available["ports"].append({"device": "COM5", "serial_number": "066aff30"})
+    assert correlate_com_port("066AFF30", available) is None
 
 
 def test_bootstrap_discovery_uses_fixed_readonly_stlink_commands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +151,30 @@ def test_a_serial_that_is_not_attached_is_still_refused_naming_the_ones_that_are
     assert result["error_type"] == "adapter_not_found"
     assert result["requested_probe_id"] == "066AFF495451"
     assert [entry["probe_id"] for entry in result["probes"]] == ["0669FF303430"]
+
+
+def test_selection_folds_exactly_what_the_lock_key_folds_and_no_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Selection, locking and comparison have to name one probe.
+
+    Selection used to strip every non-alphanumeric character, while lock keys and
+    the adoption mismatch check only case-fold. A request for `06-69FF303430`
+    therefore selected the attached `0669FF303430`, and the HOTPLUG connect went
+    to a board the rest of the system does not think this call is about — the
+    lock taken is keyed on a different identity, and the mismatch check that
+    would have caught it runs after something was already said to that board.
+    """
+    commands: list[list[str]] = []
+    _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\n", commands=commands)
+
+    result = discover_attached_hardware(probe_id="06-69FF303430")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert len(commands) == 1, "nothing was said to any board"
+    # And the folding that is the lock's own still selects.
+    assert select_probe_id("0669ff303430", ["0669FF303430"]) == "0669FF303430"
+    assert select_probe_id("06-69FF303430", ["0669FF303430"]) is None
+    assert fold_hardware_id("0669ff303430") == fold_hardware_id("0669FF303430")
 
 
 def test_nothing_reaches_the_board_when_before_connect_refuses(monkeypatch: pytest.MonkeyPatch) -> None:

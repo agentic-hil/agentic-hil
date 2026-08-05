@@ -75,7 +75,7 @@ Optional Windows PowerShell override:
 $env:AGENTIC_HIL_CONFIG = "$env:APPDATA\agentic-hil\projects\<project-id>\config.yaml"
 ```
 
-`%APPDATA%` and `%LOCALAPPDATA%` are standard Windows working folders and the path trust check accepts them, including on a profile where an installed packaged application holds an app-capability ACE on `%USERPROFILE%\AppData`. What is refused with `unsafe_configured_path` is a path a nameable account other than you, `SYSTEM` or `Administrators` can write, delete or re-permission; the refusal names the holder. Where that happens, the override is the supported answer rather than a workaround, pointed at a location that passes:
+`%APPDATA%` and `%LOCALAPPDATA%` are standard Windows working folders, and the path trust check accepts them on a profile where an installed packaged application holds an app-capability ACE on `%USERPROFILE%\AppData`. Whether they pass on *this* machine depends on how it is joined: what lets them through is an ACE for a SID the local authority cannot map, and on a domain member or an Entra-joined host the same ACE is a foreign account. A refusal states the verdict for the machine in front of you. What is refused with `unsafe_configured_path` is a path a nameable account other than you, `SYSTEM` or `Administrators` can write, delete or re-permission; the refusal names the holder. Where that happens, the override is the supported answer rather than a workaround, pointed at a location that passes:
 
 ```powershell
 $env:AGENTIC_HIL_CONFIG = "$env:USERPROFILE\.agentic-hil\projects\<project-id>\config.yaml"

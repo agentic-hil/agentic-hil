@@ -40,8 +40,11 @@ the grants, the scalar-only shape, the closed key model, the before/after
 comparison of every permission in the document, the refusal while hardware is
 held, the validate-before-replace and the ``provenance`` record are all the ones
 that were already there. There is no second way to write this file. The plan is
-carried into that write as an expectation per key, so a placeholder somebody else
-filled while the probe was being read refuses the write instead of losing to it.
+carried into that write as an expectation per key *and* as the description of the
+document it was decided against, so a placeholder somebody else filled while the
+probe was being read refuses the write instead of losing to it — and so does a
+change to something the plan depended on but cannot set, such as the entry's
+``type`` or the ``probe_id`` that decided which physical board was read.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ import yaml
 
 from agentic_hil.bootstrap import discover_attached_hardware
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
+from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     ACTOR_AGENT,
     NOT_STARTED,
@@ -75,7 +79,13 @@ from agentic_hil.knowledge import (
     CONFIG_SHAPE_URI,
     remediation_fields,
 )
-from agentic_hil.report import audit_unavailable, ensure_audit_ready, overall_success, write_report
+from agentic_hil.report import (
+    audit_unavailable,
+    ensure_audit_ready,
+    overall_success,
+    recommit_report_with_status,
+    write_report,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject, fold_hardware_id
 
 PROJECT_CONFIG_ADOPT = "project_config_adopt_hardware"
@@ -331,7 +341,65 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
 
     detected = discovery.get("target")
     controller = str(detected.get("controller") or "").lower() if isinstance(detected, dict) else ""
-    if controller:
+    override = debugger.get("target") if isinstance(debugger.get("target"), dict) else None
+    if controller and override is not None:
+        # This entry carries its own `target:` block, and `bind_debugger` gives
+        # that block to everything that runs on this probe. Writing the detected
+        # controller into the top-level `target:` would therefore not reach this
+        # board at all — it would change the fallback the *other* entries use,
+        # which is a different board, from a call that named this one. The closed
+        # key model has no `debuggers.<name>.target.*` key, so there is nowhere
+        # correct to put it.
+        #
+        # That is a fact about where a value could go, not about what the value
+        # is — and the two were being conflated. Every override went to
+        # `unavailable` with "set the discovered value yourself", including one
+        # that already held exactly the discovered controller (nothing to do) and
+        # one that deliberately held something else (an operator's choice this
+        # path does not overrule, and does not quietly recommend overruling
+        # either). Adoption's contract is report-and-preserve, so the *value* is
+        # sorted first and only the genuinely unplaceable case is `unavailable`.
+        configured = str(override.get("controller") or "").lower()
+        if configured == controller:
+            already.append({"key": f"debuggers.{debugger_name}.target.controller", "value": controller})
+        elif is_unset(override.get("controller"), "target", "controller"):
+            unavailable.append(
+                {
+                    "key": f"debuggers.{debugger_name}.target.controller",
+                    "discovered_value": controller,
+                    "reason": (
+                        f"`debuggers.{debugger_name}` has its own `target:` block, which overrides the project target for "
+                        "everything that runs on this probe, and that block does not name a controller. The detected "
+                        "controller belongs in it, and this path cannot write it: `target.controller` at the top level is "
+                        "the target other entries fall back to, so carrying it there would change a different board's "
+                        "configuration from a call about this one."
+                    ),
+                    "next_step": (
+                        f"Set `controller: {controller}` inside `debuggers.{debugger_name}.target` in the configuration "
+                        f"file, or remove that block so `debuggers.{debugger_name}` uses the project target this path can fill in."
+                    ),
+                }
+            )
+        else:
+            kept.append(
+                {
+                    "key": f"debuggers.{debugger_name}.target.controller",
+                    "configured_value": override.get("controller"),
+                    "discovered_value": controller,
+                    "reason": (
+                        f"`debuggers.{debugger_name}` has its own `target:` block naming a controller, and the attached "
+                        "board reports a different one. Somebody set that value, so adoption does not replace it — and "
+                        "does not tell you to replace it either: a deliberate override and a stale one look the same from "
+                        "here, and only the operator knows which this is."
+                    ),
+                    "next_step": (
+                        f"Decide which is right. If the board really is `{controller}`, change "
+                        f"`debuggers.{debugger_name}.target.controller` in the configuration file yourself; if the "
+                        "override is deliberate, nothing needs to happen."
+                    ),
+                }
+            )
+    elif controller:
         _propose(carried, already, kept, key="target.controller", section="target", field="controller", current=_mapping(document, "target").get("controller"), value=controller)
 
     matched_port = discovery.get("com_port")
@@ -419,7 +487,11 @@ def _guarded(workspace: Path, existing: AgenticHILConfig | None, arguments: Json
     try:
         return _adopt(workspace, existing, arguments, coordinator, open_holds=open_holds, actor=actor, via=via)
     except ConfigError as error:
-        return {"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}
+        # Reading the document is the first thing this does, so a file that will
+        # not decode or will not parse arrives here — as a refusal that says so,
+        # carrying the state of the configuration, rather than as an internal
+        # error from underneath the MCP layer.
+        return with_config_status({"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}, config_status(existing))
 
 
 def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonObject, coordinator: HardwareCoordinator | None, *, open_holds: JsonObject | None, actor: str, via: str) -> JsonObject:
@@ -520,6 +592,17 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         # somebody chose" rule would hold only against values chosen before the
         # read started.
         expect={str(item["key"]): item["previous_value"] for item in carried},
+        # And the document those decisions were taken against, whole. The keys
+        # this write names are not the only inputs to the plan: `probe_id` when
+        # it was already set decided which physical probe was read at all, `type`
+        # decided whether the executable could be carried, and which entries
+        # exist decided which entry receives any of it. None of those is a key
+        # this tool can set, so no per-key expectation can cover them — and a
+        # `probe_id` that moves from A to B inside the read window would
+        # otherwise commit A's controller, executable and COM device into an
+        # entry that now names B. That is precisely the mixed-board file this
+        # module refuses to produce, arriving by the back door.
+        expect_document=document,
     )
     if not overall_success(write):
         # The refusal is the answer, and the values stay in it: an agent that may
@@ -688,22 +771,157 @@ def _discover_exclusively(
             **_combined_status(held),
             "retry_safe": False,
         }
+    released = True
     for lease in reversed(held):
         if lease.state == "active":
-            lease.release()
+            # `release` returns False for a durable-record or lock-release
+            # failure and leaves the lease registered, blocking and quarantined.
+            # Discarding that answer reported a clean read of a board this
+            # process is still holding, and let the configuration write go ahead
+            # under it — the one place where "the hardware is fine now" has to be
+            # a checked claim rather than an assumption.
+            released = lease.release() and released
+    status = _combined_status(held)
+    if not released or status["cleanup_required"] or status["quarantined"]:
+        return {}, _refuse_after_failed_release(existing, record, discovery, status)
+    # The clean path re-commits too, so the persisted record carries the state the
+    # leases actually ended in (`released`) rather than the `active` they were
+    # written under. A no-op when the two already agree.
+    committed = recommit_report_with_status(existing, record, status)
+    if committed.get("audit_ok") is False:
+        return {}, {
+            **committed,
+            "ok": False,
+            "tool": PROJECT_CONFIG_ADOPT,
+            "error_type": "audit_failed_after_action",
+            "summary": (
+                "The attached probe was read, the lease on it was released, and the record could not be updated to say "
+                "so. Nothing was written to the configuration, because a write made now would not be described by any "
+                "audit record an operator can read."
+            ),
+            **status,
+            "retry_safe": False,
+        }
     return discovery, None
 
 
+def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject) -> JsonObject:
+    """Refuse, and make the audit trail say so.
+
+    The read is written as an `ok: true`, `lease_state: active` report before the
+    release is attempted, which is right — the read happened. What was wrong was
+    stopping there: the release then failed, this returned `resource_quarantined`,
+    and nothing rewrote the record. `get_last_report` went on describing a clean
+    active discovery and `classify_last_error` had no failure at all, so the two
+    places an operator looks after a refusal both said the bench was fine.
+
+    So the terminal outcome is committed before it is returned. Committed
+    unconditionally, unlike ``recommit_report_with_status``: that helper skips the
+    write when the lease states already agree, and here they can — a release can
+    report failure while leaving the lease's own state alone — and skipping is
+    exactly the hole being closed. `last_failure` is what this is for, and only a
+    written failure report reaches it.
+
+    If that write itself fails it is not swallowed: the result says
+    `audit_failed_after_action` and every lease is quarantined, because a bench
+    whose incident cannot be recorded is in a worse state than one whose incident
+    can.
+    """
+    refusal = _release_refusal(discovery, status)
+    committed = write_report(existing, {**record, **refusal, **status})
+    if committed.get("audit_ok") is False:
+        return {
+            **committed,
+            "ok": False,
+            "tool": PROJECT_CONFIG_ADOPT,
+            "error_type": "audit_failed_after_action",
+            "summary": (
+                "The attached probe was read, the lease on it could not be released cleanly, and the record of that "
+                "outcome could not be written either. The board is quarantined, nothing was written to the "
+                "configuration, and the audit trail does not describe what happened."
+            ),
+            **status,
+            "cleanup_required": True,
+            "quarantined": True,
+            "retry_safe": False,
+        }
+    return {**committed, **refusal, "report_path": committed.get("report_path"), "audit_ok": committed.get("audit_ok")}
+
+
+def _release_refusal(discovery: JsonObject, status: JsonObject) -> JsonObject:
+    """The probe was read and this process could not give it back.
+
+    Nothing is written after this. The read itself succeeded, so its result is
+    carried for the operator to read, but a configuration written now would be
+    written by a process holding quarantined hardware — and the answer would say
+    `ok: true` about a bench that needs `agentic-hil recover` before anything
+    else touches it.
+    """
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_ADOPT,
+        "error_type": "resource_quarantined",
+        "summary": (
+            "The attached probe was read and the lease on it could not be released cleanly, so the board is "
+            "quarantined and nothing was written to the configuration. What was discovered is under "
+            "`hardware_discovery`; the bench has to be resolved before it can be carried into the file."
+        ),
+        "hardware_discovery": discovery,
+        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        # The read is what happened; the release is what did not. Both are said,
+        # and neither is inferred from the other.
+        "side_effect_committed": bool(discovery.get("side_effect_committed", False)),
+        "side_effect_status": str(discovery.get("side_effect_status") or "not_started"),
+        "hardware_state": str(discovery.get("hardware_state") or "unknown"),
+        **remediation_fields("resource_quarantined"),
+        **status,
+        "retry_safe": False,
+    }
+
+
+# Worst first. An aggregate over several leases has to answer for the one in the
+# worst state, because that is the one an operator has to act on; "the other lock
+# came back cleanly" is not a fact anybody can use. `released` is last on purpose:
+# it is the only value in this list that means nothing is held, so it may only be
+# said when every lease says it.
+_LEASE_STATE_PRIORITY = ("quarantined", "cleanup_required", "stale", "releasing", "active", "released")
+
+
 def _combined_status(held: list[HardwareLease]) -> JsonObject:
-    """One lease status for however many locks this read had to take."""
+    """One lease status for however many locks this read had to take.
+
+    The aggregate state is the worst of them, not the first non-`active` one. A
+    read takes two or three locks — the enumeration pseudo-resource and the
+    physical probe — and they are released independently, so "the first one that
+    is not active" was whichever came first in the list: with the enumeration
+    lease released and the probe lease in `cleanup_required`, the result said
+    `lease_state: released` beside `cleanup_required: true`. Callers are told to
+    treat any state other than null/active/released as blocking, and that
+    combination told them the opposite of what was true about the board.
+
+    ``quarantine_id`` travels with it for the same reason: it is what
+    `agentic-hil recover --quarantine-id` needs, and dropping it left the refusal
+    naming an incident the operator could not address. Per-lease statuses are
+    carried too, so a partial release can be read as the partial thing it is."""
     statuses = [lease.status() for lease in held]
+    if not statuses:  # pragma: no cover - a read always holds at least the enumeration lease
+        return {"lease_ids": [], "resources": [], "lease_state": "active", "cleanup_required": False, "quarantined": False, "cleanup_reasons": [], "quarantine_id": None}
+    states = {str(status["lease_state"]) for status in statuses}
+    worst = next((state for state in _LEASE_STATE_PRIORITY if state in states), sorted(states)[0])
     return {
         "lease_ids": [str(status["lease_id"]) for status in statuses],
         "resources": sorted({resource for status in statuses for resource in status["resources"]}),
-        "lease_state": next((str(status["lease_state"]) for status in statuses if status["lease_state"] != "active"), "active"),
+        "lease_state": worst,
         "cleanup_required": any(status["cleanup_required"] for status in statuses),
         "quarantined": any(status["quarantined"] for status in statuses),
         "cleanup_reasons": sorted({reason for status in statuses for reason in status["cleanup_reasons"]}),
+        # The incident an operator has to name to `recover`. The first lease that
+        # has one, in the order they were taken.
+        "quarantine_id": next((status["quarantine_id"] for status in statuses if status.get("quarantine_id")), None),
+        "leases": [
+            {"lease_id": status["lease_id"], "lease_state": status["lease_state"], "resources": list(status["resources"]), "quarantine_id": status["quarantine_id"]}
+            for status in statuses
+        ],
     }
 
 

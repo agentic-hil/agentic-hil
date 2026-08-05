@@ -42,6 +42,8 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.mcp import MCP_RESOURCE_NOT_FOUND, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.types import JsonObject
+from agentic_hil.windows_principals import JOIN_STATE_DOMAIN, JOIN_STATE_WORKGROUP
 
 
 @pytest.fixture
@@ -214,6 +216,40 @@ def test_a_rejected_state_root_proposes_a_state_root_that_passes() -> None:
     # rejected location itself, so "set state_root" alone is not a way out.
     assert any("agentic-hil init" in step for step in refusal["remediation"])
     assert any("ACL" in step for step in refusal["do_not"])
+
+
+@pytest.mark.parametrize("field", ["state_root", "user_config", None])
+def test_a_rejected_path_does_not_send_a_domain_user_back_to_a_location_that_refuses(field: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The advice was written from one machine's measurement and read as a rule.
+
+    "%USERPROFILE%, %APPDATA% and %LOCALAPPDATA% all pass from 0.8.0 on" holds in
+    a workgroup, and holds because the ACEs on those folders are SIDs the local
+    authority answers ERROR_NONE_MAPPED about with nothing else asked. On a domain
+    member or an Entra-joined machine the identical ACEs are `unresolved_foreign`
+    and refuse under `standard` — so a remedy string attached to the refusal was
+    telling exactly the operator who had just been refused to move there, or to
+    retry there, and the second failure reads as the tool being broken.
+    """
+    monkeypatch.setattr("agentic_hil.knowledge.machine_join_state", lambda: JOIN_STATE_DOMAIN)
+    # Pin the predicate, not `os.name`: patching the shared module makes `pathlib`
+    # select WindowsPath, which cannot be instantiated on POSIX, so this test died
+    # on both POSIX runners before it reached the remediation it is about.
+    monkeypatch.setattr("agentic_hil.knowledge.running_on_windows", lambda: True)
+    details: JsonObject = {"path": "C:\\Users\\example\\AppData\\Local"}
+    if field is not None:
+        details["field"] = field
+
+    refusal = ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", details).to_dict()
+    said = " ".join([*refusal["remediation"], refusal.get("meaning", "")])
+
+    assert "joined to a domain" in said
+    assert "%LOCALAPPDATA%" not in said or "do not apply" in said
+    assert "unresolved_foreign" in said
+    assert safe_user_root() in said
+
+    monkeypatch.setattr("agentic_hil.knowledge.machine_join_state", lambda: JOIN_STATE_WORKGROUP)
+    workgroup = " ".join(ConfigError("unsafe_configured_path", "state_root has a replaceable Windows ancestor directory.", details).to_dict()["remediation"])
+    assert "in a workgroup" in workgroup, "and the machine the verdicts were measured on still gets them"
 
 
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:

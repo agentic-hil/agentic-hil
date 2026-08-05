@@ -232,7 +232,7 @@ class HardwareCoordinator:
         """
         directory = self._state_directories.get(parts)
         if directory is None:
-            directory = trusted_state_directory(self.config.state_root, *parts)
+            directory = trusted_state_directory(self.config.state_root, *parts, trust=self.config.windows_path_trust)
             self._state_directories[parts] = directory
         return directory
 

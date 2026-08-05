@@ -49,7 +49,7 @@ from agentic_hil.config import (
     load_authoritative_config,
     permission_summary,
     secure_atomic_write_text,
-    secure_optional_read_text,
+    secure_optional_read_bytes,
     secure_user_file_lock,
     write_generated_config,
 )
@@ -100,25 +100,42 @@ NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status":
 # Reading what is actually in a document.
 
 
-def permission_surface(node: object, prefix: str = "") -> dict[str, Any]:
+def permission_surface(node: object, prefix: str = "", *, entry_ids: bool = False) -> dict[str, Any]:
     """Every value in a document that decides what may be done, by dotted path.
 
-    Deliberately not driven by the key model. This walks whatever the document
-    actually contains and collects two things at any depth: a key named
-    ``allow_*``, and every leaf inside a mapping named ``permissions``. A guard
-    that understood only the paths the key model produces would be blind exactly
-    where something that got around the key model would land.
+    Almost entirely name-driven rather than key-model-driven. This walks whatever
+    the document actually contains and collects two things at any depth: a key
+    named ``allow_*``, and every leaf inside a mapping named ``permissions``. A
+    guard that understood only the paths the key model produces would be blind
+    exactly where something that got around the key model would land.
+
+    The one place it has to know the schema is the level directly under
+    ``debuggers``, ``com_ports`` and ``can_buses``, because that level is not
+    field names at all — it is operator-chosen entry ids, and ``permissions``,
+    ``provenance`` and ``allow_anything`` are all legal ones. Reading them as
+    grant names made every field of such an entry a permission: repointing
+    ``debuggers.permissions`` at another board produced a permission delta and
+    demanded ``allow_config_permissions_write``, while `project_config_describe`
+    went on offering the same key as description-writable. The entry is still
+    walked, so its real ``permissions`` block is still found, one level further
+    down where the schema actually puts it.
+
+    A *scalar* under an id level is still read as a grant. An entry is a mapping
+    in every section here, so a scalar there is not an entry that happens to be
+    called ``allow_flash`` — it is the shape this walk exists to catch, and it
+    keeps catching it.
     """
     found: dict[str, Any] = {}
     if isinstance(node, dict):
         for key, value in node.items():
             path = f"{prefix}.{key}" if prefix else str(key)
-            if str(key).startswith("allow_"):
+            named_entry = entry_ids and isinstance(value, dict)
+            if str(key).startswith("allow_") and not named_entry:
                 found[path] = value
-            elif str(key) == "permissions" and isinstance(value, dict):
+            elif str(key) == "permissions" and isinstance(value, dict) and not named_entry:
                 for flag, granted in value.items():
                     found[f"{path}.{flag}"] = granted
-            found.update(permission_surface(value, path))
+            found.update(permission_surface(value, path, entry_ids=not prefix and str(key) in CONFIG_NAMED_SECTIONS))
     elif isinstance(node, list):
         for index, value in enumerate(node):
             found.update(permission_surface(value, f"{prefix}[{index}]"))
@@ -134,21 +151,61 @@ def permission_delta(before: dict[str, Any], after: dict[str, Any]) -> list[str]
     return sorted(path for path in set(before) | set(after) if before.get(path, False) != after.get(path, False))
 
 
+# Where the schema puts a grant, and nowhere else. `permission_surface` above is
+# name-driven at every depth but one, because its job is to *find* a grant
+# wherever one got in. This is the opposite job — deciding what to *drop* — and a
+# name-driven rule there removes real description. Both stop at the same place
+# and for the same reason: `debuggers`, `com_ports` and `can_buses`
+# (`CONFIG_NAMED_SECTIONS`) are keyed by operator-chosen entry ids, and
+# `permissions`, `provenance` and `allow_anything` are all legal ids. One tuple
+# for both so the finder and the dropper cannot disagree about where an id level
+# is.
+# Grants that sit directly on a fixed section rather than inside a permissions
+# block: `debug.allow_all_symbols`, `artifacts.allow_upload`.
+_SECTION_GRANT_KEYS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
+# Top-level keys that are not part of what the bench *is*: the project grants,
+# and the audit trail the writer maintains itself.
+_TOP_LEVEL_NON_DESCRIPTION = ("permissions", "provenance")
+
+
 def description_view(node: object) -> object:
     """A document with everything that grants anything removed.
 
-    The mirror of ``permission_surface``: what is left is the description, and
-    comparing two of these says whether a change touched the bench's description
-    regardless of which key was named to do it."""
-    if isinstance(node, dict):
-        return {
-            key: description_view(value)
-            for key, value in node.items()
-            if key != "permissions" and not str(key).startswith("allow_") and key != "provenance"
-        }
-    if isinstance(node, list):
-        return [description_view(item) for item in node]
-    return node
+    The mirror of ``permission_surface``, and — unlike it — schema-aware. Two
+    callers depend on what survives: the compare-and-swap against
+    ``expect_document``, and the check for whether a change needs
+    `allow_config_description_write`. Both read a *removal* as "nothing there
+    changed", so removing more than the grants blinds them.
+
+    That is what a name-driven rule did. It dropped every mapping key called
+    `permissions` or `provenance`, and every key starting with `allow_`, at every
+    depth — and those are legal entry ids. A debugger an operator named
+    `permissions` had its whole entry deleted from this view, so its `probe_id`
+    and `type` were outside the CAS *and* outside the description-right check: a
+    concurrent repoint of that entry from board A to board B was invisible, and
+    discovery from A could still be committed onto it.
+
+    So the drops here are the schema's grant locations, spelled out. A grant that
+    turns up anywhere else is still caught — by ``permission_surface``, which
+    finds it, and now by this view too, which keeps it and therefore reports it
+    as a description change. Both rights, rather than neither."""
+    if not isinstance(node, dict):
+        return node
+    view: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _TOP_LEVEL_NON_DESCRIPTION:
+            continue
+        if key in CONFIG_NAMED_SECTIONS and isinstance(value, dict):
+            view[key] = {
+                entry_id: {field: item for field, item in entry.items() if field != "permissions"} if isinstance(entry, dict) else entry
+                for entry_id, entry in value.items()
+            }
+            continue
+        if key in _SECTION_GRANT_KEYS and isinstance(value, dict):
+            view[key] = {field: item for field, item in value.items() if field not in _SECTION_GRANT_KEYS[key]}
+            continue
+        view[key] = value
+    return view
 
 
 def deny_all_permissions(section: str) -> JsonObject:
@@ -184,14 +241,71 @@ def authoritative_write_target(workspace: Path, existing: AgenticHILConfig) -> P
     return target
 
 
-def load_config_document(target_path: Path) -> tuple[str, JsonObject]:
-    text = secure_optional_read_text(target_path)
-    if text is None:
+def config_document_snapshot(target_path: Path) -> tuple[bytes | None, Exception | None]:
+    """One trusted read of the authoritative file: its bytes, or what stopped it.
+
+    ``None, None`` means the file is not there, which is a different answer from
+    every failure and is the one case a caller may have a policy for. Everything
+    else arrives as the original exception so the caller decides what to say
+    about it — and, for the tool documented to report the configuration's state
+    even while refusing, so that one read serves both the state and the document.
+    """
+    try:
+        return secure_optional_read_bytes(target_path), None
+    except (ConfigError, OSError, ValueError) as error:
+        return None, error
+
+
+def config_read_error(error: Exception, target_path: Path) -> ConfigError:
+    """A read failure as a refusal this server knows how to talk about.
+
+    ``secure_optional_read_bytes`` raises what the platform raises. Left alone
+    they leave the MCP layer with an internal error where a structured answer was
+    promised, on exactly the paths an operator hits with a half-written file: a
+    configuration saved as UTF-16 by a Windows editor, a directory that is no
+    longer traversable, a device that went away.
+    """
+    if isinstance(error, ConfigError):
+        return error
+    if isinstance(error, UnicodeDecodeError):
+        return ConfigError(
+            "config_unreadable",
+            "The authoritative configuration is not UTF-8 text, so it cannot be read as a configuration.",
+            {"path": str(target_path), "backend_error": str(error)},
+        )
+    return ConfigError(
+        "config_unreadable",
+        "The authoritative configuration could not be read.",
+        {"path": str(target_path), "backend_error": str(error)},
+    )
+
+
+def parse_config_document(raw: bytes | None, target_path: Path) -> tuple[str, JsonObject]:
+    """The document in a snapshot, or the refusal that says why there is none."""
+    if raw is None:
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"path": str(target_path)})
-    document = yaml.load(text, Loader=UniqueKeyLoader)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise config_read_error(error, target_path) from error
+    try:
+        document = yaml.load(text, Loader=UniqueKeyLoader)
+    except yaml.YAMLError as error:
+        details: JsonObject = {"path": str(target_path), "backend_error": str(error)}
+        mark = getattr(error, "problem_mark", None)
+        if mark is not None:
+            details.update({"line": mark.line + 1, "column": mark.column + 1})
+        raise ConfigError("config_invalid", "The authoritative configuration is not valid YAML.", details) from error
     if not isinstance(document, dict):
         raise ConfigError("config_invalid", "The authoritative configuration is not a mapping.", {"path": str(target_path)})
     return text, document
+
+
+def load_config_document(target_path: Path) -> tuple[str, JsonObject]:
+    raw, failure = config_document_snapshot(target_path)
+    if failure is not None:
+        raise config_read_error(failure, target_path)
+    return parse_config_document(raw, target_path)
 
 
 def _header(text: str) -> str:
@@ -300,6 +414,7 @@ def project_config_set(
     actor: str = ACTOR_AGENT,
     via: str = f"mcp:{PROJECT_CONFIG_SET}",
     expect: dict[str, Any] | None = None,
+    expect_document: JsonObject | None = None,
 ) -> JsonObject:
     """Set named configuration keys, or refuse and change nothing.
 
@@ -312,18 +427,38 @@ def project_config_set(
     part of any tool schema and no caller supplies it: it exists for a caller
     that read the document, spent time deciding, and must not then overwrite what
     somebody else wrote in between. Checked inside the write lock against the
-    document as it is now, so a mismatch refuses the whole call."""
+    document as it is now, so a mismatch refuses the whole call.
+
+    ``expect_document`` is the whole document the caller planned against. Not
+    every input to a plan is a key this tool can set — a debugger's ``type``, the
+    set of entries a document has — so a per-key expectation cannot cover them,
+    and a plan invalidated by one of those is exactly as wrong as one invalidated
+    by a carried key. Compared on its description, so a permissions change or a
+    provenance bump by another writer does not refuse a change it cannot affect."""
     try:
-        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via, expect=expect)
+        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via, expect=expect, expect_document=expect_document)
     except ConfigError as error:
-        return {"tool": PROJECT_CONFIG_SET, **error.to_dict(), **NOT_STARTED}
+        # The state of the configuration belongs on a refusal about the
+        # configuration too: a caller told "this did not load" and not told
+        # whether the file has moved under the server has half the picture.
+        return with_config_status({"tool": PROJECT_CONFIG_SET, **error.to_dict(), **NOT_STARTED}, config_status(existing))
 
 
 def _invalid(field: str, summary: str, **extra: object) -> JsonObject:
     return {"ok": False, "tool": PROJECT_CONFIG_SET, "error_type": "invalid_argument", "field": field, "summary": summary, "reference": CONFIG_SHAPE_URI, **extra, **NOT_STARTED}
 
 
-def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, changes: object, *, open_holds: JsonObject | None, actor: str, via: str, expect: dict[str, Any] | None = None) -> JsonObject:
+def _project_config_set(
+    workspace: Path,
+    existing: AgenticHILConfig | None,
+    changes: object,
+    *,
+    open_holds: JsonObject | None,
+    actor: str,
+    via: str,
+    expect: dict[str, Any] | None = None,
+    expect_document: JsonObject | None = None,
+) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
     if open_holds:
@@ -341,6 +476,8 @@ def _project_config_set(workspace: Path, existing: AgenticHILConfig | None, chan
         stale = _stale_expectations(document, requested, expect)
         if stale:
             return _changed_underneath(target_path, stale)
+        if expect_document is not None and description_view(document) != description_view(expect_document):
+            return _document_changed_underneath(target_path)
         rights = granted_rights(existing, document)
         # An operator at the CLI is the person the description grant belongs to,
         # so it is not consulted for them; the permissions grant is consulted for
@@ -462,6 +599,35 @@ def _changed_underneath(target_path: Path, stale: list[JsonObject]) -> JsonObjec
             "somebody else wrote this file in the meantime and nothing was written here."
         ),
         "stale_keys": stale,
+        "path": str(target_path),
+        "next_step": "Read the configuration again and decide against what it says now; the plan this call carried is out of date.",
+        "reference": CONFIG_SHAPE_URI,
+        **NOT_STARTED,
+        "retry_safe": True,
+    }
+
+
+def _document_changed_underneath(target_path: Path) -> JsonObject:
+    """The plan was made against a description of the bench that has since moved.
+
+    Broader than the per-key check on purpose, and not reducible to it: a plan
+    can be decided by values this tool cannot set — a debugger's ``type``, which
+    entries exist at all — and one of those moving invalidates the plan just as
+    completely as a carried key moving. Compared on the description, so a
+    concurrent permissions change, which no plan here reads, does not refuse a
+    write it has nothing to do with.
+    """
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_SET,
+        "error_type": "config_changed_underneath",
+        "summary": (
+            "The description of the bench in this configuration is no longer the one this change was planned against, "
+            "so somebody else wrote this file in the meantime and nothing was written here. The plan was decided by "
+            "more than the keys it would have set — which entries exist, which backend an entry names — and any of "
+            "those moving makes it a plan for a document that is gone."
+        ),
+        "document_changed": True,
         "path": str(target_path),
         "next_step": "Read the configuration again and decide against what it says now; the plan this call carried is out of date.",
         "reference": CONFIG_SHAPE_URI,
@@ -663,26 +829,37 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to describe.", {"workspace_root": str(workspace)})
     target_path = authoritative_write_target(workspace, existing)
-    # This tool needs no permission, so it is also the answer to "is what this
-    # server enforces still what the file says". It reads the document as it is
-    # now, which is exactly why the divergence has to be stated here: the keys
-    # and values below come from disk while the grants that gate them are the
-    # narrower of disk and what this server loaded.
-    status = config_status(existing)
-    try:
-        _, document = load_config_document(target_path)
-    except ConfigError as error:
-        if error.error_type != "config_file_not_found":
-            raise
+    # One read, and both halves of the answer come out of it. This tool needs no
+    # permission, so it is also the answer to "is what this server enforces still
+    # what the file says" — and a status taken from one read beside a document
+    # taken from another can describe two versions of the file in one response:
+    # `state: unchanged` next to values from a document that is not the unchanged
+    # one, or a status saying the file is there next to `loaded_policy`.
+    #
+    # The divergence that remains is the deliberate one: the keys and values
+    # below come from disk while the grants that gate them are the narrower of
+    # disk and what this server loaded.
+    raw, failure = config_document_snapshot(target_path)
+    status = config_status(existing, snapshot=(raw, failure))
+    document: JsonObject | None = None
+    if failure is not None:
+        return _describe_unreadable(existing, config_read_error(failure, target_path), status)
+    if raw is not None:
         # The file this server loaded is gone, and refusing with
         # `config_file_not_found` would say the wrong thing twice: this workspace
         # is not unconfigured — this server holds a policy and is enforcing it —
         # and that error sends a caller to `project_config_create`, which is
         # refused here and would replace the operator's settings with a
         # deny-by-default skeleton if it were not. Nothing else exposes the
-        # policy still in force, so this answers with it, and says plainly that
-        # it came from memory and cannot be compared against anything.
-        document = None
+        # policy still in force, so an absent file answers with it, and says
+        # plainly that it came from memory and cannot be compared against
+        # anything. A file that is there and will not parse is a different
+        # condition with a different repair, and is refused rather than dressed
+        # up as an answer.
+        try:
+            _, document = parse_config_document(raw, target_path)
+        except ConfigError as error:
+            return _describe_unreadable(existing, error, status)
     # No file is no grant: `granted_rights` takes the narrower of the loaded
     # policy and the document, and an absent document grants nothing.
     rights = granted_rights(existing, document if document is not None else {})
@@ -747,6 +924,47 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
         **NOT_STARTED,
         "cleanup_required": False,
     }
+
+
+def _describe_unreadable(existing: AgenticHILConfig, error: ConfigError, status: JsonObject) -> JsonObject:
+    """A configuration that is there and will not parse, said in this tool's terms.
+
+    `project_config_describe` carries `config_status` whatever the state is —
+    that is what it is for — so a refusal from it must too. And it still reports
+    `permissions_in_force`: the policy this server is enforcing is not affected
+    by the file having been made unreadable, and it is the half a caller cannot
+    get any other way once the document is unusable.
+    """
+    return with_config_status(
+        {
+            "tool": PROJECT_CONFIG_DESCRIBE,
+            **error.to_dict(),
+            "summary": (
+                f"{error.summary} This server is still enforcing the configuration it loaded at startup, reported "
+                "below as `permissions_in_force`; no key can be listed or changed while the file cannot be read."
+            ),
+            "document_source": "loaded_policy",
+            "permissions_in_force": permission_summary(existing),
+            "path": existing.config_path,
+            "workspace_root": existing.workspace_root,
+            "config_version": existing.config_version,
+            "writable_keys": [],
+            "locked_keys": [],
+            "next_steps": [
+                "Report `backend_error`: it is the parser's own message and names what has to be repaired.",
+                "Ask the operator to repair the file at `config_status.path` and confirm it with `agentic-hil doctor`, "
+                "which reads it fresh, before restarting the MCP server.",
+                "Do not call `project_config_create` to replace it: it is refused here, and it would write a "
+                "deny-by-default skeleton over whatever the operator was in the middle of writing.",
+                f"{CONFIG_SHAPE_URI} describes the shape a configuration has to have.",
+            ],
+            "reference": CONFIG_SHAPE_URI,
+            **NOT_STARTED,
+            "cleanup_required": False,
+        },
+        status,
+        prominent=True,
+    )
 
 
 def _concrete_keys(document: JsonObject) -> list[JsonObject]:
