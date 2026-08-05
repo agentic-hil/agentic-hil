@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from conftest import (
     FAKE_OPENOCD,
     FAKE_OPENOCD_NO_TARGET,
@@ -76,7 +77,7 @@ def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | N
     return response["result"]["structuredContent"]
 
 
-def test_init_config_writes_deterministic_deny_by_default_external_config(
+def test_init_config_writes_a_deterministic_external_config_that_grants_everything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -91,12 +92,32 @@ def test_init_config_writes_deterministic_deny_by_default_external_config(
     config_text = config_path.read_text(encoding="utf-8")
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
     # Born on the read-free model: reading has no key to set, so every
-    # permission line a fresh config carries is about writing.
+    # permission line a fresh config carries is about writing — and since
+    # hardci-hq#96 every one of them is granted, so the bench this writes is
+    # workable without anybody opening it.
     assert "version: 2" in config_text
     assert "allow_probe: " not in config_text
-    assert "allow_flash: false" in config_text
-    assert "allow_reset: false" in config_text
-    assert "allow_upload: false" in config_text
+    assert "allow_flash: true" in config_text
+    assert "allow_reset: true" in config_text
+    assert "allow_upload: true" in config_text
+    assert "allow_mass_erase: true" in config_text
+    assert "allow_config_permissions_write: true" in config_text
+    # And nothing in the file it wrote is off, whatever the key is called: a
+    # generation decides the permission state completely rather than half.
+    document = yaml.safe_load(config_text)
+
+    def denied(node: object, prefix: str = "") -> list[str]:
+        if not isinstance(node, dict):
+            return []
+        found: list[str] = []
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key).startswith("allow_") and value is not True:
+                found.append(path)
+            found += denied(value, path)
+        return found
+
+    assert denied(document) == []
     assert initialized_config_path(workspace) == config_path
 
 
@@ -1765,7 +1786,18 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
     # Underscored identifiers in backticks are tool names; these are the import
     # name, the error types the skill names, and the result fields any tool can
     # carry. The list grows with every documented field: hardci-hq#90.
-    not_a_tool = {"agentic_hil", "permission_denied", "config_file_not_found", "device_busy", "hardware_mismatch", "config_status", "config_stale"}
+    not_a_tool = {
+        "agentic_hil",
+        "permission_denied",
+        "permission_widening_denied",
+        "config_file_not_found",
+        "device_busy",
+        "hardware_mismatch",
+        "config_status",
+        "config_stale",
+        "permissions_frozen",
+        "allow_mass_erase",
+    }
 
     referenced = {
         token

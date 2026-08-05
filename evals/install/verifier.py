@@ -48,6 +48,10 @@ SOURCE = Path("/workspace/source")
 OTHER_WORKSPACE = Path("/tmp/agentic-hil-other-project")
 RESPONSE_TIMEOUT_SECONDS = 10.0
 PROBE_DIAGNOSTIC_CHARS = 800
+# The project-scoped permissions this release defines, listed here rather than
+# imported: the verifier checks an installed distribution and must not read its
+# expectations out of the thing it is verifying.
+PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
 VERIFIER_PYTHON = Path("/opt/install-eval-verifier/bin/python")
 TRUSTED_PACKAGE_ROOT = Path("/tmp/install-eval-trusted-package")
 LAUNCHER_PYTHON_ALLOWLIST = (Path("/usr/bin/python3"),)
@@ -570,9 +574,10 @@ def rejected_setup_owns_no_config(configs: list[Path]) -> tuple[bool, str]:
 
     Same reasoning as the skill: setup rolls back to the state it found, so a
     config a standalone `agentic-hil init` wrote stays on purpose. Measured: a
-    model ran init itself after the conflict, and the config it left denies
-    every hardware permission and has no server registered against it, which is
-    inert. What must not survive is more than one, or a broken one.
+    model ran init itself after the conflict, and the config it left has no
+    server registered against it and names a placeholder probe with no
+    toolchain behind it, which is inert whatever its permissions say. What must
+    not survive is more than one, or a broken one.
     """
     if not configs:
         return True, "count=0"
@@ -581,7 +586,7 @@ def rejected_setup_owns_no_config(configs: list[Path]) -> tuple[bool, str]:
     safe, detail = valid_authoritative_config(configs[0])
     if not safe:
         return False, f"a rejected setup left an unsafe config: {detail}"
-    return True, f"one intact deny-by-default config from an earlier init: {detail}"
+    return True, f"one intact config from an earlier init: {detail}"
 
 
 def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
@@ -829,8 +834,16 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
     safe, detail = safe_owned_path(resolved_state_root, HOME)
     if not safe:
         return False, detail
-    if "permissions" in data:
-        return False, "config still uses the removed top-level permissions block"
+    # The project-scoped block, and exactly the three keys it has. It used to be
+    # absent from what `init` writes and its presence was read as the *removed*
+    # flat block of a much older release; since hardci-hq#96 `init` writes it,
+    # granted, so what has to be checked is its shape rather than its absence.
+    project_permissions = data.get("permissions", {})
+    if not isinstance(project_permissions, dict):
+        return False, "top-level permissions is not an object"
+    unexpected = sorted(set(project_permissions) - set(PROJECT_PERMISSION_FLAGS))
+    if unexpected:
+        return False, f"top-level permissions carries keys this release does not define: {unexpected}"
     for section, absent in (("devices", "devices"), ("adapters", "adapters"), ("debugger", "debugger")):
         if section in data:
             return False, f"config still uses the removed {absent} block"
@@ -867,20 +880,26 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
                 return False, f"{section}.{name}.permissions missing: {missing}"
             if read_free and forbidden_flag in permissions:
                 return False, f"{section}.{name}.permissions carries the removed {forbidden_flag}"
-            # Deny-by-default is about what writes: every flag that IS declared
-            # has to be off, whichever model the file uses.
-            enabled = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and value is not False)
-            if enabled:
-                return False, f"{section}.{name}.permissions not deny-by-default: {enabled}"
+            # An install decides the permission state completely rather than
+            # half, and since hardci-hq#96 it decides it open: every flag that
+            # IS declared has to be on, whichever model the file uses. What this
+            # still catches is the thing it always caught — an install that left
+            # some flags to a template's memory and some to chance.
+            withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and value is not True)
+            if withheld:
+                return False, f"{section}.{name}.permissions were not all granted by the install: {withheld}"
     debug = data.get("debug")
-    if not isinstance(debug, dict) or debug.get("allow_all_symbols") is not False or debug.get("allowed_symbols") != []:
-        return False, "debug access is not deny-by-default"
+    if not isinstance(debug, dict) or debug.get("allow_all_symbols") is not True or debug.get("allowed_symbols") != []:
+        return False, "debug access was not granted by the install"
     artifacts = data.get("artifacts")
-    if not isinstance(artifacts, dict) or artifacts.get("allow_upload") is not False:
-        return False, "artifact upload is not deny-by-default"
+    if not isinstance(artifacts, dict) or artifacts.get("allow_upload") is not True:
+        return False, "artifact upload was not granted by the install"
+    ungranted = sorted(flag for flag in PROJECT_PERMISSION_FLAGS if project_permissions.get(flag) is not True)
+    if ungranted:
+        return False, f"top-level permissions were not all granted by the install: {ungranted}"
     # The check is "the agent added no hardware while installing", not "the
-    # template is empty": `init` now writes one deny-by-default starter probe,
-    # so `debuggers` must hold exactly that entry and nothing else.
+    # template is empty": `init` writes one starter probe, so `debuggers` must
+    # hold exactly that entry and nothing else.
     nonempty_resources = [name for name in ("can_buses", "com_ports") if data.get(name, {}) != {}]
     if nonempty_resources:
         return False, f"hardware resources configured during install: {nonempty_resources}"

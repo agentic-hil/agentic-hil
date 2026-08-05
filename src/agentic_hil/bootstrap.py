@@ -8,9 +8,16 @@ import yaml
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
+from agentic_hil.config import GENERATED_WRITE_PERMISSIONS
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
+
+# The probe flags a generated configuration decides, read from the one list that
+# also drives `grant_every_permission` and the carry-over on regeneration. A
+# second list here would be the one that quietly stops deciding a flag somebody
+# added to the schema.
+DEBUGGER_PERMISSION_FLAGS = GENERATED_WRITE_PERMISSIONS["debuggers"]
 
 
 def load_project_profile(workspace: Path) -> JsonObject | None:
@@ -211,12 +218,18 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             # profile written against version 1 may still request it; that
             # request is already satisfied, so it is dropped rather than
             # written into a file that would be refused on load.
-            "permissions": {
-                "allow_flash": bool(requested_permissions.get("allow_flash", False)),
-                "allow_reset": bool(requested_permissions.get("allow_reset", False)),
-                "allow_raw_debugger_commands": False,
-                "allow_mass_erase": False,
-            },
+            #
+            # Every flag defaults to granted, like the skeleton this fills in
+            # (hardci-hq#96). A profile that names one is still honoured, which
+            # can now only narrow: a person who wrote `allow_mass_erase: false`
+            # into their project's example configuration meant it, and a default
+            # that overrode it would be the same silent widening the carried-over
+            # permissions on the regeneration path exist to prevent. Over MCP
+            # this profile decides nothing at all — `project_config_create`
+            # rewrites every permission afterwards — because there it is
+            # repository-controlled data rather than a file a person ran `init`
+            # against.
+            "permissions": {flag: bool(requested_permissions.get(flag, True)) for flag in DEBUGGER_PERMISSION_FLAGS},
         }
     }
 
@@ -236,7 +249,7 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
                 # `allow_read` went the same way as `allow_probe`: reading a
                 # port needs no grant at version 2, and the key is refused there.
                 "permissions": {
-                    "allow_write": bool(requested_io.get("allow_write", False)),
+                    "allow_write": bool(requested_io.get("allow_write", True)),
                 },
             }
         }

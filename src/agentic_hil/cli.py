@@ -30,11 +30,12 @@ from agentic_hil.config import (
     authoritative_config_target,
     bind_debugger,
     config_schema_text,
-    debugger_access_enabled,
+    debugger_drives_hardware,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
     load_config,
+    permission_summary,
     project_config_path,
     safe_directory,
     secure_atomic_write_text,
@@ -47,9 +48,9 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN
+from agentic_hil.configwrite import ACTOR_HUMAN, permission_surface
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
-from agentic_hil.knowledge import RUNNING_SERVER_COMPARISON, remediation_fields
+from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -137,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="project half: write this workspace's deny-by-default authoritative config and verify it with doctor")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted, and verify it with doctor")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
@@ -993,7 +994,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     snapshot = FileSnapshot(target_path, existing)
     try:
         secure_atomic_write_text(target_path, text)
-        load_authoritative_config(workspace)
+        written = load_authoritative_config(workspace)
     except ConfigError as error:
         rollback_errors = _restore_file_snapshots([snapshot])
         result = error.to_dict()
@@ -1003,14 +1004,32 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             result["rollback_errors"] = rollback_errors
         return result
     available_com_ports = list_available_com_ports()
+    # Read off the file that was written rather than asserted. The skeleton path
+    # grants everything, but a project's own `agentic-hil.config.example.yaml`
+    # may set a flag false and that is honoured — an operator who wrote
+    # `allow_mass_erase: false` into their profile meant it. A fixed sentence
+    # here told them the opposite about their own bench.
+    narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
+    granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
     return {
         "ok": True,
-        "summary": "Attached hardware was discovered and configured." if discovery is not None and overall_success(discovery) else "Deny-by-default Agentic HIL project configuration written.",
+        "summary": (
+            f"Attached hardware was discovered and configured, {granted_clause}."
+            if discovery is not None and overall_success(discovery)
+            else f"Agentic HIL project configuration written, {granted_clause}."
+        ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
+        "permissions": permission_summary(written),
+        "narrowed_permissions": sorted(narrowed),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
-        "next_steps": init_next_steps(available_com_ports, target_path),
+        "next_steps": init_next_steps(
+            available_com_ports,
+            target_path,
+            narrowed=sorted(narrowed),
+            drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
+        ),
     }
 
 
@@ -1028,10 +1047,13 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     and the COM device all come from what is attached to this machine. It fills
     only what is unset, so it cannot repoint a bench somebody configured. And it
     names no permission, which the before/after comparison inside the write path
-    enforces from the document rather than from the request. The same shell
-    already has `agentic-hil init --force`, which rewrites the whole file and
-    resets every grant in it to false — strictly more destructive, and of no use
-    to anyone trying to gain something.
+    enforces from the document rather than from the request. Nothing here needs
+    to be argued as the lesser evil either: the same shell already has
+    `agentic-hil init --force`, which since hardci-hq#96 rewrites the whole file
+    with every permission granted. Whoever has that shell has the operator's
+    authority over this configuration outright, and the ratchet was never a
+    promise about them — it holds on the MCP write path, which is where an agent
+    that has only the MCP tools lives.
 
     The grant is what differs, and only the grant. Reading the probe goes through
     the same coordinator every other hardware call on this machine goes through,
@@ -1171,14 +1193,44 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     return written
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
+    granted_step = (
+        "Every permission in this file is true: probing, flashing, resetting, raw debugger commands, mass erase, and "
+        "serial and CAN writes. Read the permissions blocks and decide which of them this bench should not have — "
+        "allow_mass_erase in particular cannot be undone once it has run."
+        if not narrowed
+        else "Every permission in this file is true except the ones your project profile set to false ("
+        + ", ".join(narrowed)
+        + "). Read the permissions blocks and decide which of the rest this bench should not have — allow_mass_erase in "
+        "particular cannot be undone once it has run."
+    )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
-        "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Reading needs nothing granted: probing, serial reads and CAN reads work as written. Grant only what writes or changes state under debuggers.<name>.permissions; those flags stay deny-by-default.",
-        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ]
+    if drives_hardware:
+        next_steps.append("Check interface_cfg and target_cfg on your debuggers entry against your OpenOCD installation.")
+    else:
+        # The permissions are open and the entry still drives nothing, and those
+        # are two different facts. The starter entry names no toolchain, and
+        # nothing resolves one for it: an entry nobody has configured stays inert
+        # rather than picking up whatever `openocd` happens to be on PATH.
+        next_steps.append(
+            "Your debuggers entry names no toolchain yet, so it drives no board however its permissions read. Set "
+            "`executable` to the absolute path of your OpenOCD, STM32CubeProgrammer or pyOCD binary; for OpenOCD also "
+            "set interface_cfg and target_cfg to absolute script paths outside the workspace. `agentic-hil doctor` "
+            "checks the entry from the moment it names one."
+        )
+    next_steps.append(granted_step)
+    next_steps.extend([
+        "You can also just tell the agent: over MCP it may write false into any permission here and can write no other "
+        f"value, so nothing it does through `project_config_set` widens this file. `{CONFIG_REOPEN_COMMAND}` is yours "
+        "and regenerates the file with everything open again.",
+        "Flashing needs one of those decisions before it works: validated flashing and unrestricted debugger access are "
+        "mutually exclusive policies, so while allow_raw_debugger_commands or allow_mass_erase is true on a probe, "
+        "flash_firmware on that probe is refused. Set whichever of the two this bench does not need to false.",
+        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
+    ])
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])
         if ports:
@@ -1720,8 +1772,14 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # anything about what this bench is meant to drive; a config that granted
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
-    # and it is the same set config load already insisted on resolving.
-    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_access_enabled(entry)}
+    # and `debugger_drives_hardware` is literally the set config load validated —
+    # which since hardci-hq#96 excludes the starter entry `init` writes with
+    # every permission granted and no toolchain named, and includes every entry
+    # that has one, whatever its scripts looked like before it did. It takes the
+    # configuration too, because under version 2 an entry with no mutation grant
+    # at all is still reachable — read-free — and an entry `doctor` skips is an
+    # entry nothing validated.
+    probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(config, entry)}
     checks = {name: result for name, (result, _) in probed.items()}
     target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
@@ -1729,7 +1787,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken

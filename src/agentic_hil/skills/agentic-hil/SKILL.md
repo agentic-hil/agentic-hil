@@ -93,14 +93,21 @@ prints its path; ask the operator to review any permission change.
 
 When a project has none, every tool answers `config_file_not_found` and
 `project_config_create` is the way out. It takes no arguments and generates the
-file from the hardware attached to this machine, with every permission `false` —
-including the one that would let it write the file again, so it succeeds once
-and then refuses itself. That refusal lives in the configuration, so what holds
-is what the operator reads there. Report where the file is and that an agent
-generated it, and ask the operator for anything the task needs beyond reading
-the bench. Never edit the file to grant yourself a permission, and never delete
-or move a configuration to get a different one: regenerating only produces the
-same restrictive file and throws the operator's settings away.
+file from the hardware attached to this machine, with every permission `true` —
+flashing, reset, raw debugger commands, mass erase, COM and CAN writes, and all
+three `permissions.allow_config_*` grants. The bench is workable from that file
+as it stands: nobody has to open an editor between an empty project and the
+first hardware action. Report where the file is, that an agent generated it, and
+what it granted — name `allow_mass_erase`, because a mass erase cannot be taken
+back — then ask the operator which permissions this bench should not have.
+Never edit the file with your own tools, and never delete or move one to get a
+different one. Regenerating carries over the permissions of the configuration
+this server loaded at startup for the entries already in it — not the file as it
+stands now, so a permission you narrowed with `project_config_set` in this
+session comes back granted — while a configuration deleted first comes back as
+the open skeleton with every narrowing the operator asked for gone, and anything
+a regeneration discovers for the first time arrives open. Regenerating is the
+operator's call, not yours.
 
 Changing an existing configuration goes through MCP too, never through your own
 file tools, and two separate permissions gate it. `project_config_describe`
@@ -110,9 +117,11 @@ reading needs no grant. `project_config_set` then sets named keys with scalar
 values checked against the shipped schema:
 `permissions.allow_config_description_write` opens what the bench *is* —
 `target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device`, CAN bus
-settings — and `permissions.allow_config_permissions_write` opens the
-`permissions:` blocks. The split is deliberate. The first is the one an operator
-can leave open, because it does not reach your own authority; a refusal names
+settings — and `permissions.allow_config_permissions_write` opens every
+permission key: each `permissions:` block, plus the two grants that sit directly
+on a section, `artifacts.allow_upload` and `debug.allow_all_symbols`. The split
+is deliberate. The first is the one an operator
+can leave open, because it does not reach what the bench may do; a refusal names
 the permission that is missing and is the answer to the request. A write is
 refused while a run or a session holds hardware, the changed file is validated
 before it replaces the working one, and what moved is recorded in `provenance`.
@@ -120,6 +129,26 @@ This server keeps serving the configuration it loaded, so report the result's
 reload_required field and ask the operator to restart it.
 `agentic-hil://reference/config-shape` describes the whole shape, a worked
 example, and what deliberately cannot be done.
+
+**`project_config_set` only ever narrows.** Write `false` into a permission when
+the operator asks you to; you can send no other value for one, not `true` for a
+permission you never touched and not `true` for one you set to `false` a moment
+ago. Such a call is refused as `permission_widening_denied`, whichever key it
+named: the value you sent is checked, and the file's own permissions are
+compared before and after the write as well. A person reopens a configuration
+with `agentic-hil init --force` in the project root — say that and stop.
+
+Setting `permissions.allow_config_permissions_write: false` is the last
+permission change **that call** can make: after it, `project_config_set` cannot
+move any permission in that file again. The result of that call says so itself,
+under `permissions_frozen` — what stands frozen, that you cannot undo it, and the
+command a person reopens it with. Make it when that is what was asked for, never
+in passing.
+
+Regenerating is not covered by that rule and is not a way around it.
+`project_config_create` is creation rather than a permissions write, and
+`agentic-hil init --force` is the operator's own command; both may write open
+permissions. Ask for one, do not engineer one.
 
 A configuration written before the board was plugged in holds placeholders:
 `probe_id: null`, `executable: null`, `controller: "unknown-controller"`. Do not
