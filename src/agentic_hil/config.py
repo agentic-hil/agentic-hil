@@ -641,7 +641,7 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     write it is not asked — the operator's own processes always can, so an answer
     to that question never bound anything (hardci-hq#95)."""
     lexical = validated_state_root_paths(value, workspace, config_path)
-    return safe_directory(lexical)
+    return safe_writable_directory(lexical, field="state_root", config_path=config_path)
 
 
 def derived_state_directory(state_root: str | Path, *parts: str) -> Path:
@@ -728,13 +728,54 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # had looked at, resolved out of OPENOCD_SCRIPTS and the per-user script
     # directories. "Nothing can drive this entry" has to mean nothing, reads
     # included, before validation may be skipped.
-    if debugger_can_reach_hardware(config, pinned) and not debugger_is_placeholder(pinned) and pinned.type == "openocd":
-        pinned = replace(
-            pinned,
-            interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg"),
-            target_cfg=configured_external_file(config, pinned.target_cfg, f"{field_prefix}.target_cfg"),
+    return pinned_debugger_scripts(config, pinned, field_prefix)
+
+
+def pinned_debugger_scripts(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> DebuggerConfig:
+    """This entry's OpenOCD scripts, validated whenever anything can drive it.
+
+    Split out of ``pin_one_debugger`` because the answer depends on the
+    permissions the entry is read under, and those are not fixed for the life of
+    a configuration object: a description reload keeps the file's entries and the
+    permissions parsed at startup, a pairing neither load validated. Whoever
+    changes which permissions apply to an entry has to ask this again, so it has
+    to be callable on its own.
+
+    Idempotent: an already-validated absolute path resolves to itself, so running
+    it a second time over the same entry changes nothing.
+    """
+    if debugger_drives_hardware(config, debugger) and debugger.type == "openocd":
+        return replace(
+            debugger,
+            interface_cfg=configured_external_file(config, debugger.interface_cfg, f"{field_prefix}.interface_cfg"),
+            target_cfg=configured_external_file(config, debugger.target_cfg, f"{field_prefix}.target_cfg"),
         )
-    return pinned
+    return debugger
+
+
+def revalidate_permission_dependent_pinning(config: AgenticHILConfig) -> AgenticHILConfig:
+    """Re-run the validations whose outcome depends on the permissions in force.
+
+    Pinning skips an OpenOCD entry's script check when nothing this configuration
+    permits can drive it, so what was checked at load belongs to the permissions
+    the *loaded document* carried. Composing a configuration out of two documents
+    breaks that: a version 1 file whose grants are all false is exempt from the
+    check when it is loaded, and drivable again the moment wider permissions from
+    another document are put behind it. Running this on the object that is about
+    to be enforced is what keeps "this entry is exempt from validation" and
+    "nothing can drive this entry" one set — the rule ``pin_one_debugger``
+    states and the only one that makes the exemption safe.
+
+    Raises ``ConfigError`` exactly as loading would, so a composition that cannot
+    pass is refused rather than enforced."""
+    debuggers = {name: pinned_debugger_scripts(config, entry, f"debuggers.{name}") for name, entry in config.debuggers.items()}
+    return replace(
+        config,
+        debuggers=debuggers,
+        # The binding must follow the revalidated entry, or the backend would run
+        # on the object whose scripts were never checked.
+        debugger=None if config.debugger_id is None else debuggers.get(config.debugger_id),
+    )
 
 
 def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
@@ -919,6 +960,65 @@ def safe_directory(directory: str | Path) -> Path:
     else:
         handles = _windows_hold_directory_chain(path, create=True)
         _close_windows_handles(handles)
+    return path
+
+
+# The private entry a write check creates and removes. Named so that one left
+# behind by a killed process is recognisable as this and not as project state.
+WRITE_PROBE_PREFIX = ".agentic-hil-write-probe-"
+
+
+def safe_writable_directory(directory: str | Path, *, field: str, config_path: str | None = None) -> Path:
+    """``safe_directory``, plus proof that this process can create inside it.
+
+    ``safe_directory`` opens read-only and lets an existing directory through
+    untouched — ``mkdir`` is suppressed on ``FileExistsError`` on POSIX and
+    skipped entirely on Windows, and the Windows handle asks for list and
+    read-attribute access only. So a directory that already exists and cannot be
+    written loads clean and fails at the first lease, report or log write,
+    somewhere with far less context than here. Reachability was the half that was
+    actually being checked; this is the other half.
+
+    A created-and-removed private entry rather than a mode or ACL inspection,
+    because what the next write needs is the filesystem's own answer: a POSIX
+    mode says nothing about an ACL or a read-only mount, and a Windows ACL that
+    reads as writable can still be denied by a deny ACE or a filter driver. The
+    entry is a directory rather than a file so that ``mkdir``/``rmdir`` prove
+    create *and* delete rights in the one round trip, and it is created through
+    the same no-symlink walk as everything else here.
+    """
+    path = safe_directory(directory)
+    probe = f"{WRITE_PROBE_PREFIX}{os.getpid()}"
+    try:
+        if os.name != "nt":
+            descriptor = _open_directory_fd(path, create=True)
+            try:
+                # A leftover from a killed run holding this pid: removing it
+                # first keeps the mkdir below the decisive call rather than
+                # letting a stale entry answer for this process's rights.
+                with suppress(OSError):
+                    os.rmdir(probe, dir_fd=descriptor)
+                os.mkdir(probe, mode=0o700, dir_fd=descriptor)
+                os.rmdir(probe, dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            # The held chain pins every component against rename for the
+            # duration, so the plain path cannot be redirected under the probe.
+            handles = _windows_hold_directory_chain(path, create=True)
+            try:
+                with suppress(OSError):
+                    (path / probe).rmdir()
+                (path / probe).mkdir()
+                (path / probe).rmdir()
+            finally:
+                _close_windows_handles(handles)
+    except OSError as error:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured directory exists and cannot be written by this process.",
+            {"field": field, "path": str(path), "backend_error": str(error), **({"config_path": config_path} if config_path else {})},
+        ) from error
     return path
 
 
@@ -1199,12 +1299,25 @@ def permission_summary(config: AgenticHILConfig) -> JsonObject:
     this is the only shape in which an operator can be shown what that is.
 
     Complete, including the two section-level grants — a summary that leaves a
-    grant out is one an operator reads as "not granted"."""
+    grant out is one an operator reads as "not granted".
+
+    The version 1 read grants are in it whenever they decide anything.
+    ``GENERATED_*_PERMISSIONS`` name what a *generation* writes, and a generated
+    file is version 2, where there is no read permission at all; a version 1 file
+    still gates probing and COM/CAN reads on ``allow_probe``/``allow_read``, so a
+    summary built from the generation lists alone silently dropped every read
+    grant a legacy bench runs under — including from ``configreload``'s
+    permission comparison, which then reported two documents as agreeing while
+    one of them granted a read the other refused. They are omitted under version
+    2 rather than reported false, because there the key is refused by the schema
+    and `false` beside a free read would be the same lie the other way."""
+    read_grants = () if config.read_free else ("allow_probe",)
+    io_read_grants = () if config.read_free else ("allow_read",)
     return {
         **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
-        "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
-        "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
-        "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
+        "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in (*read_grants, *GENERATED_WRITE_PERMISSIONS["debuggers"])} for name, entry in config.debuggers.items()},
+        "com_ports": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in (*io_read_grants, *GENERATED_WRITE_PERMISSIONS["com_ports"])} for name, entry in config.com_ports.items()},
+        "can_buses": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in (*io_read_grants, *GENERATED_WRITE_PERMISSIONS["can_buses"])} for name, entry in config.can_buses.items()},
         "debug": {"allow_all_symbols": bool(config.debug.allow_all_symbols)},
         "artifacts": {"allow_upload": bool(config.artifacts.allow_upload)},
     }
@@ -1259,7 +1372,11 @@ def provisionable_state_root(workspace: Path) -> Path:
             )
             continue
         try:
-            return safe_directory(candidate)
+            # The same test `validated_state_root` will apply when the generated
+            # file is loaded, writability included. Selecting on the weaker one
+            # is what this function exists to stop: a candidate that opens and
+            # cannot be written would be written down and then refused on load.
+            return safe_writable_directory(candidate, field="state_root")
         except ConfigError as error:
             failure = error
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})

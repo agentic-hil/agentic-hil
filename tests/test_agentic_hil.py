@@ -1809,6 +1809,14 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
         "can_buses",
         "workspace_root",
         "state_root",
+        # `config_status` fields the skill names when it says which document a
+        # stale answer's description came from and which document its
+        # permissions came from.
+        "description_source",
+        "description_reload",
+        "description_reloaded_at",
+        "loaded_digest",
+        "loaded_at",
     }
 
     referenced = {

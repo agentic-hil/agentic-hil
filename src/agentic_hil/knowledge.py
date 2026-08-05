@@ -160,12 +160,15 @@ def _substitutions() -> dict[str, str]:
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
-            "The authoritative configuration on disk is not the one this MCP server parsed, and the server is still "
-            "answering out of the version it loaded at startup. It does not reload while it runs, so the backend it "
-            "names, the devices it knows and the permissions it enforces are the ones from the older file. Nothing "
-            "failed; what an answer says and what the file says have come apart, and the file is the one an operator "
-            "reads. This says the two digests differ and nothing more — not what the file now contains, and not what "
-            "a restart onto it would produce."
+            "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "
+            "names, the devices it knows and the permissions it enforces are the ones from an older document. Which "
+            "document is in `config_status.description_source`: `startup` means all of it came from the version parsed "
+            "at startup, which is the normal case because the server does not reload while it runs; "
+            "`description_reload` means the devices and the backend came from the last explicit "
+            "`project_config_reload_description` (`description_reloaded_at`, and `loaded_digest` is that document's) "
+            "while the permissions still came from startup (`loaded_at`). Nothing failed; what an answer says and what "
+            "the file says have come apart, and the file is the one an operator reads. This says the two digests differ "
+            "and nothing more — not what the file now contains, and not what a restart onto it would produce."
         ),
         remediation=(
             "If what changed is the description of the bench — `target`, a `debuggers`, `com_ports` or `can_buses` "
@@ -293,8 +296,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not edit the configuration with your own file tools. `agentic-hil setup` writes host deny rules "
             "against exactly that, and this refusal is the reason they exist.",
-            "Do not set the grant through `project_config_set` either. It is a permission, so it needs "
-            "`allow_config_permissions_write`, which no configuration hands out to close its own refusal.",
+            "Do not set the grant through `project_config_set` either. It is a permission, and that call writes only "
+            "`false` into a permission — never `true`, whatever `allow_config_permissions_write` says. A generated "
+            "configuration grants that key, so it is very likely open here and still not a way back to this one.",
         ),
     ),
     "permission_denied:allow_config_permissions_write": ErrorRemedy(

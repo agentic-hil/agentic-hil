@@ -188,8 +188,13 @@ keys and values, so the operator gets one command to run — `agentic-hil
 adopt-hardware` — and not a serial to transcribe.
 
 `config_stale: true` on any result says the authoritative file is no longer the
-one this server parsed, so the backend that result names, the devices it knows
-and the permissions it enforces are all from the version loaded at startup. The
+one this server is enforcing, so the backend that result names, the devices it
+knows and the permissions it enforces are from an older document.
+`config_status.description_source` says which one: `startup` for all of it,
+which is the normal case, or `description_reload` when a
+`project_config_reload_description` has since moved the devices and the backend
+onto a newer document (`description_reloaded_at`, and `loaded_digest` is that
+document's) while the permissions stayed the startup ones (`loaded_at`). The
 `config_status` block names the file and says which of three states it is in:
 
 - `changed` — loaded_digest and current_digest differ. That is the whole of the

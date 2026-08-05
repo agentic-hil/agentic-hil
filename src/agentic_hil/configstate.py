@@ -33,6 +33,15 @@ permission half of the same configuration may be older. That is not hidden here:
 two have come apart, in every state, so a `unchanged` answer never means more
 than it should.
 
+It also costs this module a sentence it used to be able to say. "Every answer
+comes from the version loaded at startup" was true while nothing could re-read
+the file at all; after one reload the devices and the backend come from that
+reload and only the permissions still come from startup, so a `changed` answer
+has to name two documents rather than one. ``description_source`` and
+``description_reloaded_at`` say which document ``loaded_digest`` is, because
+``loaded_at`` stays the startup parse and the pair would otherwise read as one
+snapshot.
+
 Nothing here says what a restart would do either. That claim used to be made —
 `changed` meant "a restart loads what is on disk now" — and holding it needed a
 candidate validation that matched startup exactly: two code paths that have to
@@ -81,6 +90,13 @@ STALE_STATES = frozenset({STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE})
 
 RUNNING_SERVER_SCOPE = "running_server"
 
+# Which document the description in force came from, and therefore which
+# document `loaded_digest` names. `loaded_at` is always the startup parse — that
+# is when the permissions were taken and they are never taken again — so without
+# this the two fields sit under one word while naming two different snapshots.
+DESCRIPTION_FROM_STARTUP = "startup"
+DESCRIPTION_FROM_RELOAD = "description_reload"
+
 
 def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | None]:
     """One securely opened read of a configuration, bytes or the failure.
@@ -123,11 +139,19 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
         }
 
     path = Path(config.config_path)
+    reloaded = bool(config.description_reloaded_at)
     base: JsonObject = {
         "path": str(path),
         "digest_algorithm": CONFIG_DIGEST_ALGORITHM,
         "loaded_digest": config.config_digest or None,
         "loaded_at": config.loaded_at or None,
+        # Which document `loaded_digest` names. On a server that has never
+        # reloaded it is the startup one and the two agree; after a description
+        # reload `loaded_digest` is the reloaded document's while `loaded_at` is
+        # still the startup parse, and a reader has to be able to tell which
+        # field belongs to which snapshot rather than take both as one.
+        "description_source": DESCRIPTION_FROM_RELOAD if reloaded else DESCRIPTION_FROM_STARTUP,
+        "description_reloaded_at": config.description_reloaded_at or None,
         "checked_at": utc_now(),
     }
     if not config.config_digest:
@@ -179,15 +203,36 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
         "current_digest": current,
         "reload_required": True,
         "error_type": CONFIG_STALE_ERROR,
-        "summary": (
-            "The authoritative configuration on disk is not the one this server loaded. Every answer from this server, "
-            "including which debugger backend it names and which permissions it enforces, still comes from the version "
-            "loaded at startup; it is not reloaded while the server runs. Restart the MCP server to bind it to the file "
-            "that is there now; if that document does not load, the restart says so with the reason."
-        ),
+        "summary": _changed_summary(reloaded),
         **remediation_fields(CONFIG_STALE_ERROR),
         **divergence,
     }
+
+
+def _changed_summary(reloaded: bool) -> str:
+    """What a changed file means, said against the right two snapshots.
+
+    "Everything comes from startup" was true while nothing could re-read the
+    file. ``agentic_hil.configreload`` broke that in one direction only: after a
+    description reload the devices and the backend come from the document that
+    reload took, and the permissions still come from startup. Saying the old
+    sentence there names the wrong document for half the answer, and it is the
+    half an operator would compare against the file."""
+    tail = (
+        "Restart the MCP server to bind it to the file that is there now; if that document does not load, the restart "
+        "says so with the reason."
+    )
+    if reloaded:
+        return (
+            "The authoritative configuration on disk is not the one this server is enforcing. The devices it knows and "
+            "the debugger backend it names come from the last explicit description reload, the permissions it enforces "
+            f"come from the version loaded at startup, and neither of those is this file. {tail}"
+        )
+    return (
+        "The authoritative configuration on disk is not the one this server loaded. Every answer from this server, "
+        "including which debugger backend it names and which permissions it enforces, still comes from the version "
+        f"loaded at startup; it is not reloaded while the server runs. {tail}"
+    )
 
 
 def _permissions_source(config: AgenticHILConfig) -> JsonObject:
@@ -251,6 +296,15 @@ def _unreadable(base: JsonObject, config: AgenticHILConfig, error: Exception) ->
     """
     missing = _is_missing(error)
     error_type = "config_file_not_found" if missing else "config_unreadable"
+    # Same correction as `_changed_summary`: after a description reload the
+    # description in force is the reloaded document's, so "the version it loaded
+    # at startup" names the wrong document for that half.
+    still_enforcing = (
+        "The server keeps enforcing the description it took at the last explicit reload and the permissions it "
+        "parsed at startup."
+        if config.description_reloaded_at
+        else "The server keeps enforcing the version it loaded at startup."
+    )
     return {
         **base,
         "state": STATE_MISSING if missing else STATE_UNREADABLE,
@@ -263,7 +317,7 @@ def _unreadable(base: JsonObject, config: AgenticHILConfig, error: Exception) ->
             "now exists only in this process, and no restart can restore it until the file is back."
             if missing
             else "The authoritative configuration this server loaded can no longer be read, so whether it still says "
-            "the same cannot be established. The server keeps enforcing the version it loaded at startup."
+            f"the same cannot be established. {still_enforcing}"
         ),
         **remediation_fields(error_type, RUNNING_SERVER_SCOPE),
         # Carried here too: which document the grants came from is a fact about
@@ -302,6 +356,8 @@ def with_config_status(result: JsonObject, status: JsonObject, *, prominent: boo
 
 
 __all__ = [
+    "DESCRIPTION_FROM_RELOAD",
+    "DESCRIPTION_FROM_STARTUP",
     "STALE_STATES",
     "STATE_CHANGED",
     "STATE_MISSING",
