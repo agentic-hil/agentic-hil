@@ -256,7 +256,16 @@ def create_review_checkout(mode: str, repo: Path, destination: Path) -> Path | N
         # --local hardlinks the object store when both sides share a filesystem,
         # so this stays cheap; a separate object store also means the reviewer
         # cannot damage the implementer's repository.
-        git(repo, "clone", "--local", "--no-checkout", str(repo), str(destination))
+        try:
+            git(repo, "clone", "--local", "--no-checkout", str(repo), str(destination))
+        except AgentError:
+            # A hardlink cannot cross a filesystem boundary, and under
+            # tools/loop_in_container.py the repository is a bind mount while
+            # this checkout is on the container's own filesystem. git reports
+            # "Invalid cross-device link" and stops rather than falling back, so
+            # the fallback is here: copy the objects instead of linking them.
+            shutil.rmtree(destination, ignore_errors=True)
+            git(repo, "clone", "--local", "--no-hardlinks", "--no-checkout", str(repo), str(destination))
     elif mode == "worktree":
         git(repo, "worktree", "add", "--detach", str(destination), "HEAD")
     else:
