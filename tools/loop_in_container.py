@@ -474,8 +474,10 @@ def container_command(
         # Taken unchanged, because the numbers say they can be. Measured in this
         # image with the container reporting its own cgroup peak (report_peaks
         # in the entrypoint): the suite alone 287 MiB and 37 processes, a full
-        # implement-and-review round 405 MiB and 71, the heaviest run observed
-        # 807 MiB -- all well inside the evaluation's 2g and 512.
+        # implement-and-review round 405 MiB and 71, and 1019 MiB with 77
+        # processes for the heaviest round measured since the virtualenv started
+        # installing a clone of the project on the tmpfs. Half of 2g, and 77 of
+        # 512: still the evaluation's limits, still with room.
         *docker_security_options(),
         "--mount",
         docker_mount("volume", home_volume, CONTAINER_HOME),
