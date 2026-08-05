@@ -48,6 +48,7 @@ from agentic_hil.contracts import MCP_TOOL_NAMES, validate_tool_arguments
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
+    DEBUGGER_READONLY_TARGET_STATE_REASON,
     RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
     HardwareCoordinator,
@@ -802,18 +803,13 @@ class AgenticHILToolService:
             return result
         if one_shot:
             requires_quarantine = self._result_requires_quarantine(result)
-            if requires_quarantine and name in {"debugger_probes_list", "probe_target"} and self._readonly_failure_is_settled(result):
-                # A failed read the backend finished on its own is a failed call,
-                # not an unconfirmed board. These two tools drive no stimulus by
-                # construction — machine recovery attests safe state through the
-                # same read — and a returned result proves the toolchain child
-                # was already reaped, so nothing is left that could still act on
-                # the target. Quarantining here is what turned an unplugged probe
-                # into a physical `recover --confirm-safe-state` stop; the
-                # board is exactly as the last effectful call left it. Only a
-                # result that claims an unknown effect, unconfirmed cleanup, a
-                # broken audit trail, or a backend killed at the deadline before
-                # it could end its own session still needs containment.
+            read_only = name in {"debugger_probes_list", "probe_target"}
+            if requires_quarantine and read_only and self._readonly_failure_is_settled(result):
+                # A failed read whose backend named an abort point before the
+                # target is a failed call, not an unconfirmed board: the board is
+                # exactly as the last effectful call left it. Quarantining here
+                # is what turned an unplugged probe into a physical
+                # `recover --confirm-safe-state` stop.
                 requires_quarantine = False
                 result = {**result, "hardware_state": "unchanged"}
                 # An explicit retry_safe from the backend (e.g. an ambiguity a
@@ -821,7 +817,15 @@ class AgenticHILToolService:
                 # the reclassification's own answer.
                 result.setdefault("retry_safe", True)
             if requires_quarantine:
-                unconfirmed = DEBUGGER_READONLY_RESULT_REASON if name in {"debugger_probes_list", "probe_target"} else "debugger_result_unconfirmed"
+                if not read_only:
+                    unconfirmed = "debugger_result_unconfirmed"
+                elif result.get("target_contacted") is False:
+                    # The target was never addressed, so its run state is not in
+                    # question and only this host's bookkeeping is: a re-read
+                    # settles it.
+                    unconfirmed = DEBUGGER_READONLY_RESULT_REASON
+                else:
+                    unconfirmed = DEBUGGER_READONLY_TARGET_STATE_REASON
                 lease.quarantine(unconfirmed, audit_broken=result.get("audit_ok") is False)
             written = self._lease_result(result, lease)
             if not requires_quarantine and written.get("audit_ok") is not False and lease.state == "active":
@@ -897,41 +901,32 @@ class AgenticHILToolService:
                 final = write_report(self.config, {**final, **lease.status()})
         return {**final, **lease.status()}
 
-    # The one read-only failure whose backend did not end its own session with
-    # the target. Every other failure here is one the toolchain reported and then
-    # exited from: OpenOCD ran the `shutdown` in its command string, or it
-    # aborted inside `init` and tore its own session down on the way out. A
-    # timeout is the deadline killing it mid-call — `shutdown` never runs — so if
-    # `init` had completed, the core is left halted with nothing to resume it,
-    # and the result cannot say whether it had. Both backends' timeout branches
-    # discard the init-stage marker they do have, so the answer is not recoverable
-    # from the result either; a backend that can prove this particular timeout
-    # touched nothing says so with `target_contacted: false` (pyOCD's and
-    # ST-Link's probe *enumeration* do), and that explicit claim still settles it.
-    READONLY_FAILURES_WITHOUT_A_BACKEND_SHUTDOWN = frozenset({"timeout"})
-
     def _readonly_failure_is_settled(self, result: JsonObject) -> bool:
         """Whether a read-only one-shot's failure result leaves nothing unknown.
 
-        The claim being checked is narrow: the call was a read, the backend ended
-        its own session with the target before reporting, the result came back
-        (so the spawned toolchain process was reaped before it returned), and the
-        result itself asserts no unconfirmed effect and no broken audit trail.
-        Exceptions never reach this — a raise proves nothing about the child
-        process and keeps quarantining as ``debugger_call_exception``.
+        The abort point has to be the backend's claim, never this layer's
+        inference from fields the backend did not write. Only the backend knows
+        where its own run stopped, and each one says so the same way — with
+        ``target_contacted: false`` and ``side_effect_status: not_started``,
+        which it writes exactly where it has the evidence: OpenOCD when a
+        classification that names a failure to reach the target meets an absent
+        init-stage marker, pyOCD and ST-Link when the toolchain's own words say
+        no probe was opened or no target answered.
 
-        Reaping the child proves nothing will act on the board from here on. It
-        does not prove what already happened, and a read on this bench is not
-        passive — an SWD attach halts the core. That gap only matters where the
-        backend was killed instead of allowed to finish, which is why the check
-        is against that one class rather than against contact in general."""
-        killed_mid_call = result.get("error_type") in self.READONLY_FAILURES_WITHOUT_A_BACKEND_SHUTDOWN and result.get("target_contacted") is not False
+        Absence of those fields is not the opposite claim, and it was read as one
+        until this check demanded them. A returned result proves the spawned
+        toolchain child was reaped, so nothing will act on the board from here
+        on; it proves nothing about what already happened, and a read on this
+        bench is not passive — an SWD attach halts the core, and a process killed
+        at its deadline never ran the ``shutdown`` in its own command string.
+        Exceptions never reach this — a raise proves nothing about the child
+        process and keeps quarantining as ``debugger_call_exception``."""
         return (
-            not killed_mid_call
+            result.get("target_contacted") is False
+            and result.get("side_effect_status") == "not_started"
             and result.get("audit_ok") is not False
             and result.get("cleanup_required") is not True
             and result.get("quarantined") is not True
-            and result.get("side_effect_status") not in {"unknown", "partial"}
             and result.get("side_effect_committed") is not True
         )
 

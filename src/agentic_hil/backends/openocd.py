@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    NOT_CONTACTED,
+    READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -36,10 +38,7 @@ OPENOCD_NOT_FOUND: JsonObject = {
     "likely_causes": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
     # No executable means no process, so this call is not an unconfirmed outcome
     # on the bench: nothing was ever started that could have touched it.
-    "target_contacted": False,
-    "side_effect_committed": False,
-    "side_effect_status": "not_started",
-    "retry_safe": True,
+    **NOT_CONTACTED,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -342,10 +341,29 @@ class OpenOCDBackend:
     # opened is the other face of the same boundary. Each of these may be read
     # as "never reached the bench" ONLY together with the absent init-stage
     # marker (see _failure_result) — the classification alone is string
-    # matching, and the marker is what makes it a proof.
+    # matching, and the marker is what makes it a proof. Nothing here covers the
+    # timeout, which is the deadline killing the process before it could say
+    # where it stopped.
     PRE_CONTACT_BACKEND_ERRORS = frozenset(
         {"interface_config_not_found", "target_config_not_found", "config_file_not_found", "adapter_not_found"}
     )
+    # One classification further out, and only for the two tools whose command
+    # string drives nothing: OpenOCD's own report that nothing answered on the
+    # selected transport, which is what the error catalogue's
+    # `target_not_detected:openocd` entry means by it. A target that never
+    # answered was never brought under debug control, and with the init-stage
+    # marker absent `init` is the only thing that could have addressed it at all
+    # — `targets` lists and `shutdown` ends. `flash_firmware` and `reset_target`
+    # are deliberately not here: their command strings drive the target
+    # themselves, so the same words also fit a target that stopped answering
+    # while it was being driven, and the safe reading of an ambiguity is the one
+    # that keeps the bench contained.
+    READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
+
+    def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
+        if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
+            return True
+        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
@@ -362,17 +380,18 @@ class OpenOCDBackend:
             # not an unconfirmed target, so it must not take the bench out of
             # service - the board is exactly as the last call that did reach it
             # left it.
-            result.update({"rejected_commands": rejected_commands, "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
-        elif backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS and not init_reached:
+            result.update({"rejected_commands": rejected_commands, **NOT_CONTACTED})
+        elif self._proves_no_contact(tool, backend_error_type) and not init_reached:
             # Same test as the rejected-commands branch, met by other evidence:
-            # OpenOCD named a failure of the phase before the adapter opens (a
-            # config script it could not load, an adapter it could not open),
-            # and the init-stage marker never printed, so `init` never
-            # completed and adapter_init never had a probe to drive. The board
-            # is exactly as the last call that did reach it left it, and a
+            # OpenOCD named a failure that left the target untouched (a config
+            # script it could not load, an adapter it could not open, a target
+            # that did not answer), and the init-stage marker never printed, so
+            # `init` never completed — adapter_init never had a probe to drive,
+            # or target examine never brought a core under debug control. The
+            # board is exactly as the last call that did reach it left it, and a
             # quarantine here would demand a physical inspection of hardware
             # this run provably never touched.
-            result.update({"target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+            result.update(NOT_CONTACTED)
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:

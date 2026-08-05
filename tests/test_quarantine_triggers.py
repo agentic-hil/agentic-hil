@@ -30,6 +30,7 @@ from conftest import (
     FAKE_OPENOCD_MISSING_CFG,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK_NO_PROBE,
+    FAKE_STLINK_UNCONFIRMED,
     write_config,
 )
 
@@ -43,6 +44,8 @@ from agentic_hil.knowledge import (
 from agentic_hil.tools import AgenticHILToolService
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "agentic_hil"
+
+DETECTED_PROBE = {"ok": True, "tool": "probe_target", "target_detected": True, "summary": "Target detected."}
 
 
 def config_for(workspace: Path, **kwargs):
@@ -138,8 +141,31 @@ def test_an_stlink_probe_that_enumerates_nothing_never_touched_the_bench(tmp_pat
 
 
 def test_a_readonly_result_claiming_an_unknown_effect_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The self-resolving middle class stays: a read that itself reports an
-    unknown side effect keeps quarantining, and machine recovery clears it."""
+    """The self-resolving middle class stays, and it is the one the backend's own
+    claim defines: the target was never contacted, so its run state is not in
+    question, but the read still reports an effect nobody can account for. Only
+    the host's bookkeeping is unsettled, so a read-only re-read is the predicate
+    that settles it and the reason is the machine-recoverable one."""
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(
+        service.backend,
+        "probe_target",
+        lambda: {"ok": False, "tool": "probe_target", "error_type": "probe_failed", "target_contacted": False, "side_effect_status": "unknown", "summary": "unconfirmed"},
+    )
+    try:
+        result = service.call("probe_target")
+
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["debugger_readonly_result_unconfirmed"]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_readonly_result_that_names_no_abort_point_needs_the_stronger_predicate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same unknown effect without the backend's claim. Nothing here places
+    the abort point before the target, so the run state is in question too and
+    the reason may not be one a bare re-read clears."""
     service = AgenticHILToolService(config_for(tmp_path))
     monkeypatch.setattr(
         service.backend,
@@ -150,7 +176,7 @@ def test_a_readonly_result_claiming_an_unknown_effect_still_quarantines(tmp_path
         result = service.call("probe_target")
 
         assert result["quarantined"] is True
-        assert result["cleanup_reasons"] == ["debugger_readonly_result_unconfirmed"]
+        assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
     finally:
         service.close()
@@ -578,6 +604,7 @@ INDIRECT_REASONS = {
     "owner_process_exited_without_release",
     "owner_closed_with_active_lease",
     "debugger_readonly_result_unconfirmed",
+    "debugger_readonly_target_state_unconfirmed",
     "debugger_result_unconfirmed",
     "debug_breakpoint_cleanup_unconfirmed",
     "debug_target_state_unconfirmed",
@@ -607,7 +634,7 @@ def test_every_quarantine_trigger_in_the_source_has_signer_guidance() -> None:
 
 
 def test_a_probe_read_killed_at_the_deadline_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A timeout is the one read-only failure the backend did not end itself.
+    """A timeout names no abort point at all.
 
     OpenOCD's and ST-Link's timeout branches report `timeout` and nothing about
     where the call stopped, and the process was killed rather than allowed to run
@@ -615,7 +642,8 @@ def test_a_probe_read_killed_at_the_deadline_still_quarantines(tmp_path: Path, m
     `init` leaves the core halted with nothing to resume it. Reaping the child
     proves no *future* action; it is not a statement about the target, and
     treating the absent side-effect fields as "unchanged" released a board that
-    may be sitting halted."""
+    may be sitting halted. The reason has to be one a re-read cannot settle,
+    because a re-read attests reachability and this is about run state."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config)
     monkeypatch.setattr(
@@ -627,7 +655,91 @@ def test_a_probe_read_killed_at_the_deadline_still_quarantines(tmp_path: Path, m
         result = service.call("probe_target")
 
         assert result["quarantined"] is True
-        assert result["cleanup_reasons"] == ["debugger_readonly_result_unconfirmed"]
+        assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_timed_out_probe_is_not_cleared_by_a_successful_re_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The incident the timeout raises must outlive a bare read-only re-probe.
+
+    A probe that answers proves the board is reachable. It does not resume a core
+    the killed backend may have left halted, so on a bench whose policy permits
+    only the read-only predicate the incident stands, `auto_recoverable` is false
+    and the operator is the way out."""
+    config = config_for(tmp_path, auto_recover="readonly")
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr(
+        service.backend,
+        "probe_target",
+        lambda: {"ok": False, "tool": "probe_target", "backend": "openocd", "error_type": "timeout", "summary": "Debugger command timed out."},
+    )
+    try:
+        first = service.call("probe_target")
+        assert first["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.status()["auto_recoverable"] is False
+
+        # The re-read succeeds, and that is exactly what must not be enough.
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        second = service.call("probe_target")
+
+        assert second["error_type"] == "resource_quarantined"
+        assert second["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is True
+        assert service._attempt_machine_recovery() is None
+    finally:
+        service.close()
+
+
+def test_a_timed_out_probe_is_cleared_only_by_a_verified_reset_into_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same incident under the stronger predicate: the bench's policy allows
+    driving the target, so recovery establishes the run state it lost rather than
+    re-reading around it, and says which predicate it used."""
+    config = config_for(tmp_path, auto_recover="reset_halt")
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr(
+        service.backend,
+        "probe_target",
+        lambda: {"ok": False, "tool": "probe_target", "backend": "openocd", "error_type": "timeout", "summary": "Debugger command timed out."},
+    )
+    try:
+        assert service.call("probe_target")["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+
+        resets: list[str] = []
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        monkeypatch.setattr(
+            service.backend,
+            "reset_target",
+            lambda mode: resets.append(mode) or {"ok": True, "tool": "reset_target", "summary": "Target reset."},
+        )
+        report = service._attempt_machine_recovery()
+
+        assert report is not None
+        assert report["reason"] == "debugger_readonly_target_state_unconfirmed"
+        assert report["safe_state_predicate"] == "reset_halt"
+        assert resets == ["halt"]
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+
+
+def test_an_stlink_probe_that_confirms_nothing_quarantines(tmp_path: Path) -> None:
+    """The post-`init` case that the timeout rule alone did not cover.
+
+    STM32CubeProgrammer exits 0 with output that confirms no connection: the run
+    is over, its child is reaped, and none of that says whether the ST-Link
+    attached to the target on the way. `probe_unconfirmed` names no abort point,
+    so the board's run state is unknown and containment is the answer — where
+    `No STM32 target found` from the same CLI is a claim, and refuses."""
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_UNCONFIRMED)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+
+        assert result["backend_error_type"] == "probe_unconfirmed"
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
     finally:
         service.close()
@@ -662,10 +774,12 @@ def test_a_probe_enumeration_timeout_that_names_its_abort_point_still_refuses(tm
         assert result["lease_state"] == "released"
         assert_refused_without_quarantine(result, config)
         assert service.coordinator.blocked is False
-        # The rule itself, on the one field that carries it: the same timeout
-        # settles with the backend's claim and does not without it.
+        # The rule itself, on the fields that carry it: the backend's claim
+        # settles the call, and half a claim — or none — does not.
         timed_out = {"ok": False, "error_type": "timeout", "summary": "Debugger command timed out."}
-        assert service._readonly_failure_is_settled({**timed_out, "target_contacted": False}) is True
+        named = {**timed_out, "target_contacted": False, "side_effect_status": "not_started"}
+        assert service._readonly_failure_is_settled(named) is True
+        assert service._readonly_failure_is_settled({**timed_out, "target_contacted": False}) is False
         assert service._readonly_failure_is_settled(timed_out) is False
     finally:
         service.close()

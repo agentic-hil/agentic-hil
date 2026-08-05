@@ -85,3 +85,16 @@ def test_no_arguments_still_runs_the_whole_suite_quietly(monkeypatch: pytest.Mon
 
 def test_the_separator_argparse_keeps_is_not_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pytest_arguments(built_command(monkeypatch, ["--", "-x"])) == ["-x"]
+
+
+def test_only_the_wrappers_own_separator_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pytest ends its own option parsing with a `--` of its own, so "everything
+    after the wrapper's options, unchanged" has to mean exactly that. Dropping
+    every `--` turned `-- tests -- -x` into `tests -x` and changed what ran."""
+    command = built_command(monkeypatch, ["--", "tests", "--", "-x"])
+
+    assert pytest_arguments(command) == ["tests", "--", "-x"]
+
+
+def test_a_separator_pytest_owns_survives_without_one_of_ours(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert pytest_arguments(built_command(monkeypatch, ["tests", "--", "-x"])) == ["tests", "--", "-x"]

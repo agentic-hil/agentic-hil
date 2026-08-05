@@ -253,7 +253,16 @@ def _permissions_source(config: AgenticHILConfig) -> JsonObject:
     to be compared against. What the two files' grants actually differed by was
     reported by the reload that produced the divergence, at the moment both were
     in hand.
+
+    ``permissions_digest`` never moves off the startup document, so the digest
+    and ``loaded_at`` below are always the same snapshot. What suppresses the
+    block is the reload's own answer to whether the description in force states
+    the grants being enforced (``permissions_match_description``) — a comparison,
+    not a claim about provenance, and the two are deliberately not the same
+    field.
     """
+    if config.permissions_match_description:
+        return {}
     if not config.permissions_digest or not config.config_digest or config.permissions_digest == config.config_digest:
         return {}
     return {

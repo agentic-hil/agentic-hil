@@ -800,10 +800,16 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "lease_release_report_audit_broken": _audit_guide("A one-shot debugger call released its lease and the final report of that release could not be persisted."),
     # -- Debugger one-shots and sessions ---------------------------------------
     "debugger_readonly_result_unconfirmed": QuarantineReasonGuide(
-        attempted="A read-only probe call (probe discovery or probe_target) returned a result that claims an unknown or partial side effect.",
-        confirmed="These calls send no stimulus by construction; the target keeps the state the last effectful call left.",
-        unknown="Why a read reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
+        attempted="A read-only probe call (probe discovery or probe_target) named an abort point before the target and still returned a result the host could not settle — an unknown or partial side effect, or cleanup left outstanding.",
+        confirmed="The backend's own report says the target was never contacted (`target_contacted: false`), so the board keeps the state the last effectful call left.",
+        unknown="Why a call that never reached the target reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
         physical_check="Normally none — the next hardware call re-reads the probe and clears this itself. If the probe stays unreachable, reseat it, then sign.",
+    ),
+    "debugger_readonly_target_state_unconfirmed": QuarantineReasonGuide(
+        attempted="A read-only probe call (probe discovery or probe_target) failed without naming where it stopped: the backend was killed at its deadline, or it reported a failure that does not place the abort point before the target.",
+        confirmed="The toolchain child process was reaped, so nothing from this call can still act on the board.",
+        unknown="Whether the read reached the target before it stopped. A read on this bench is not passive — an SWD attach halts the core — and a process killed at its deadline never ran the shutdown in its own command string, so the core may be sitting halted with nothing to resume it.",
+        physical_check="Establish the run state rather than the reachability: reset the board by its own controls and confirm the firmware runs, then sign. Under `recovery.auto_recover: reset_halt` the service settles this itself with a verified reset into halt; a bare re-read cannot, and does not clear it.",
     ),
     "debugger_result_unconfirmed": QuarantineReasonGuide(
         attempted="flash_firmware or reset_target reported an outcome the host could not confirm.",
@@ -1875,12 +1881,13 @@ Quarantine answers one question — "is the physical state of the hardware unkno
 | Failure | Outcome |
 |---|---|
 | toolchain executable not found (OpenOCD, pyOCD, STM32CubeProgrammer CLI, the debug server, GDB) | refusal — no process ever existed |
-| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, with the init-stage marker absent | refusal — the adapter was never opened |
-| pyOCD found no probe / could not open it, or refused the configured `target_type` | refusal — no connect sequence began |
-| ST-Link probe absent (`no ST-LINK detected`) | refusal — the transport never existed |
-| `probe_target` / `debugger_probes_list` returned any plain failure | refusal — the call is read-only by construction and its returned result proves the toolchain child was reaped |
+| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
+| pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
+| ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
+| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call, an exit that confirms nothing | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read |
 | COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
-| CAN adapter never initialized (python-can `CanInitializationError`) | refusal — the adapter never joined the bus |
+| CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
+| CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **quarantine** — python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same |
 | a direct CAN read failed | refusal — `recv()` transmits nothing |
 | anything whose abort point cannot be proven — an unconfirmed flash or reset, an exception mid-call, an unconfirmed cleanup, an owner that died holding a lease, a broken audit trail | quarantine; that is the feature |
 

@@ -299,6 +299,14 @@ class AgenticHILConfig:
     # say so instead of reporting "unchanged" over a divergence it is hiding.
     # Empty means there is nothing to distinguish and no claim to make.
     permissions_digest: str = ""
+    # Whether the description document in force *states* the grants being
+    # enforced, which is a different question from where those grants came from.
+    # A reload answers it afresh each time by comparing, and never moves
+    # `permissions_digest` onto the document it compared against: the permission
+    # objects still came from startup, and a later reload that does find a
+    # difference would otherwise report an intermediate file as their source and
+    # pair it with the startup `loaded_at` — two snapshots read as one.
+    permissions_match_description: bool = True
     # When the description in force was last re-read from disk. Empty on a
     # configuration that has never been reloaded, which is the normal case.
     # `loaded_at` stays the startup parse, because that is when the permissions

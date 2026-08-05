@@ -60,10 +60,15 @@ what the attempt recorded and why it failed, and `debugger_info` or
 A failed call and quarantined hardware are two different refusals, and the
 result says which one you have. A failure that proves it never reached the
 board — a toolchain that is not installed, an unplugged probe or adapter, a
-port that would not open, any plain failure of the read-only probe tools —
-carries `retry_safe: true` and no `quarantined: true`: the bench stays in
-service, so report the named cause, fix it or ask for it to be fixed, and
-retry. `quarantined: true` means the physical state is genuinely unknown. Stop
+port that would not open, a read whose backend reports that no target answered
+— carries `target_contacted: false`, `retry_safe: true` and no
+`quarantined: true`: the bench stays in service, so report the named cause, fix
+it or ask for it to be fixed, and retry. Being a read is not the proof; the
+backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
+anything else when the backend named no abort point — a call killed at its
+deadline, an exit that confirms nothing — because an SWD attach halts the core
+and nothing there says whether it got that far. `quarantined: true` means the
+physical state is genuinely unknown. Stop
 effects there and retry the hardware call once: an incident the bench's
 recovery policy can verify clears itself on that retry. A refusal carrying
 `auto_recovery_attempted: true` means that already ran and did not confirm the

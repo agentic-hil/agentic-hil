@@ -118,8 +118,14 @@ def main(argv: list[str] | None = None) -> int:
 
     root = repository_root()
     image = options.image or IMAGE.format(version=options.python)
-    # `--` separates our options from pytest's; argparse.REMAINDER keeps it.
-    forwarded = [argument for argument in options.pytest_args if argument != "--"]
+    # `--` separates our options from pytest's, and argparse.REMAINDER keeps it,
+    # so drop the leading one and nothing else: pytest uses a `--` of its own to
+    # end its option parsing, and a filter over the whole list ate that too — so
+    # `ci_linux.py -- tests -- -x` reached pytest as `tests -x`, which is not
+    # "everything after the options, unchanged".
+    forwarded = list(options.pytest_args)
+    if forwarded and forwarded[0] == "--":
+        forwarded.pop(0)
 
     # --init, or `bash -c` is PID 1 and reaps nothing: a SIGKILLed process-group
     # leader then lingers as a zombie that still counts as a live group member,

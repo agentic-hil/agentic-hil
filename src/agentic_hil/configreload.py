@@ -268,12 +268,17 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
         # The description in force now came from these bytes, so this is what
         # `config_status` compares the file against from here on.
         config_digest=disk.config_digest,
-        # The permissions did not move. Whether that is visible depends on
-        # whether the file's grants differ from the ones being enforced: when
-        # they are the same document's, there is nothing to report and both
-        # digests name the file; when they differ, this stays on the document
-        # that was parsed at startup and `config_status` says so.
-        permissions_digest=disk.config_digest if not permission_differences(loaded, disk) else (loaded.permissions_digest or loaded.config_digest),
+        # The permissions did not move, so neither does the digest that names
+        # where they came from: it stays on the document parsed at startup for
+        # the life of this process, however many reloads run over it. Whether
+        # the divergence is worth reporting is a separate, re-answered question
+        # — does this file *state* the grants being enforced — and it is kept in
+        # its own field. Folding the two together by moving the digest onto a
+        # file whose grants happened to match made the next reload that did find
+        # a difference name that intermediate file as the permission source, and
+        # pair it with the startup `loaded_at`.
+        permissions_digest=loaded.permissions_digest or loaded.config_digest,
+        permissions_match_description=not permission_differences(loaded, disk),
         description_reloaded_at=utc_now(),
     )
     return revalidate_permission_dependent_pinning(merged)

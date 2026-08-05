@@ -626,6 +626,45 @@ def test_a_second_reload_that_agrees_clears_the_divergence(tmp_path: Path, monke
         tools.close()
 
 
+def test_three_reloads_still_name_the_startup_document_as_the_permission_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A → B (same grants) → C (a different grant), which is where a provenance
+    that moves on equality goes wrong.
+
+    B was adopted as the permission source because its grants happened to match,
+    and C then carried B's digest forward — so `permissions_source` named a
+    document the permission objects never came from and paired it with the
+    startup `loaded_at`. The digest has to be A's throughout: A is where the
+    grants in force were parsed, and no comparison against a later file changes
+    that."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        startup_digest = tools.config.config_digest
+        startup_loaded_at = tools.config.loaded_at
+
+        # B: the description moves, the grants are written out identically.
+        rewrite(path, lambda document: document["debuggers"]["dut"].update({"probe_id": "B-PROBE"}))
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        assert "permissions_source" not in tools.call("debugger_info")["config_status"]
+        b_digest = tools.config.config_digest
+        assert b_digest != startup_digest
+        assert tools.config.permissions_digest == startup_digest
+
+        # C: now a grant differs, so the divergence has to be reported — against A.
+        rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_mass_erase": True}))
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+
+        status = tools.call("debugger_info")["config_status"]
+        source = status["permissions_source"]
+        assert source["digest"] == startup_digest
+        assert source["digest"] != b_digest
+        assert source["digest"] != status["current_digest"]
+        assert source["loaded_at"] == startup_loaded_at
+        assert tools.config.debugger.permissions.allow_mass_erase is False
+    finally:
+        tools.close()
+
+
 def test_an_edit_after_a_reload_is_stale_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A reload is not a licence: the next change is reported like any other."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -757,9 +796,23 @@ def test_merged_description_takes_nothing_but_the_four_sections(tmp_path: Path, 
 
     merged = merged_description(loaded, disk)
 
-    from_disk = {"target", "debuggers", "com_ports", "can_buses", "debugger", "debugger_id", "config_digest", "permissions_digest", "description_reloaded_at"}
+    # `permissions_digest` is in the exempt set because it is asserted below to
+    # be exactly the *loaded* document's — it is the one field the reload may
+    # neither take from disk nor let drift.
+    decided_by_the_reload = {
+        "target",
+        "debuggers",
+        "com_ports",
+        "can_buses",
+        "debugger",
+        "debugger_id",
+        "config_digest",
+        "permissions_digest",
+        "permissions_match_description",
+        "description_reloaded_at",
+    }
     for field in type(loaded).__dataclass_fields__:
-        if field in from_disk:
+        if field in decided_by_the_reload:
             continue
         assert getattr(merged, field) == getattr(loaded, field), field
     assert merged.target.name == "renamed-target"
