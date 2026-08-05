@@ -1005,11 +1005,12 @@ version: 2
 # describe the bench, regenerate it from hardware discovery, and narrow any
 # permission here on your say-so — without you opening YAML first.
 #
-# It can only ever narrow. Nothing an agent calls writes `true` into a
-# permission, so every one of these can go from true to false and none of them
-# back. allow_config_permissions_write is therefore the last one an agent can
-# close: after that it cannot change any permission again, and
-# `agentic-hil init --force` is what reopens the file.
+# Over MCP an agent can only ever narrow. `project_config_set` writes `false`
+# into a permission and no other value, so every one of these can go from true to
+# false and none of them back through that call.
+# allow_config_permissions_write is therefore the last one it can close: after
+# that it cannot change any permission again. Regenerating is yours —
+# `agentic-hil init --force` writes this file again with everything open.
 permissions:
   allow_config_write: true
   allow_config_description_write: true
