@@ -19,6 +19,7 @@ from check_version_consistency import (  # noqa: E402
     package_version,
     problems,
     render_list,
+    unclaimed_pins,
     uncovered_files,
     version_problems,
 )
@@ -79,12 +80,20 @@ def test_every_stated_position_actually_carries_a_version() -> None:
 
 
 def test_the_troubleshooting_pins_are_all_of_them() -> None:
-    """Five `agentic-hil>=` pins, not the one somebody happened to remember."""
-    pins = next(
-        location for location in locations(REPOSITORY_ROOT) if location.path == "TROUBLESHOOTING.md"
-    ).versions
+    """Five `agentic-hil>=` pins and one `@vX.Y.Z` git-tag pin.
 
-    assert len(pins) == 5, pins
+    Two entries for one file, because they are two claims: the requirement
+    pins the fix instructions hand a reader, and the git-tag pin hardci-hq#86
+    found drifting by hand while `_requirement_pins` could not see it.
+    """
+    entries = [location for location in locations(REPOSITORY_ROOT) if location.path == "TROUBLESHOOTING.md"]
+
+    assert len(entries) == 2, entries
+    requirement_pins, tag_pins = entries
+    assert ">=" in requirement_pins.carries
+    assert len(requirement_pins.versions) == 5, requirement_pins
+    assert "git-tag pin" in tag_pins.carries
+    assert len(tag_pins.versions) == 1, tag_pins
 
 
 def test_the_checklist_points_at_the_check_instead_of_repeating_it() -> None:
@@ -130,6 +139,7 @@ def test_the_copied_tree_is_a_fair_starting_point(tree: Path) -> None:
     assert version_problems(tree) == []
     assert contract_problems(tree) == []
     assert uncovered_files(tree) == []
+    assert unclaimed_pins(tree) == []
 
 
 @pytest.mark.parametrize(
@@ -182,6 +192,13 @@ def test_the_copied_tree_is_a_fair_starting_point(tree: Path) -> None:
             "TROUBLESHOOTING.md",
             lambda text, version: text.replace(f"agentic-hil>={version}", "agentic-hil>=9.9.9", 1),
             "TROUBLESHOOTING.md",
+        ),
+        # The pin hardci-hq#86 found: a git tag in an install URL, which is not
+        # a requirement pin and went unchecked while the file counted as covered.
+        (
+            "TROUBLESHOOTING.md",
+            lambda text, version: text.replace(f"agentic-hil@v{version}", "agentic-hil@v0.6.0", 1),
+            "TROUBLESHOOTING.md states 0.6.0",
         ),
         (
             "evals/install/matrix.example.json",
@@ -259,6 +276,74 @@ def test_a_deliberate_mention_is_declared_rather_than_forgotten(tree: Path) -> N
 
     assert uncovered_files(tree) == []
     assert "AI_AGENT_QUICKSTART.md" in UNTRACKED_MENTIONS
+
+
+def test_a_current_tag_pin_is_recognised_and_passes(tree: Path) -> None:
+    """The other half of the hardci-hq#86 test: a correct pin is not noise."""
+    version = package_version(tree)
+    path = tree / "TROUBLESHOOTING.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + f'\nuv tool install "git+https://github.com/agentic-hil/agentic-hil@v{version}"\n',
+        encoding="utf-8",
+    )
+
+    assert problems(tree) == []
+
+
+def test_a_tag_pin_in_a_covered_file_whose_entry_does_not_claim_it_fails(tree: Path) -> None:
+    """The class, not the instance, of hardci-hq#86.
+
+    evals/install/README.md is covered, but its entry extracts expected_version
+    fields — a git-tag pin there would again be a mention nothing checks, and
+    `uncovered_files` would again stay silent because the file is covered.
+    """
+    readme = tree / "evals" / "install" / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8")
+        + "\nuvx --from git+https://github.com/agentic-hil/agentic-hil@v0.6.0 agentic-hil --version\n",
+        encoding="utf-8",
+    )
+
+    found = unclaimed_pins(tree)
+
+    assert found
+    assert "evals/install/README.md" in found[0]
+    assert "@v0.6.0" in found[0]
+    assert CHECK in found[0]
+    assert any("@v0.6.0" in problem for problem in problems(tree))
+
+
+def test_a_tag_pin_in_an_untracked_file_is_reported(tree: Path) -> None:
+    """The sweep's version regex must see through the `@v` spelling."""
+    version = package_version(tree)
+    (tree / "docs").mkdir(parents=True, exist_ok=True)
+    (tree / "docs" / "outage.md").write_text(
+        f"uvx --from git+https://github.com/agentic-hil/agentic-hil@v{version} agentic-hil --version\n",
+        encoding="utf-8",
+    )
+
+    found = uncovered_files(tree)
+
+    assert found
+    assert "docs/outage.md" in found[0]
+
+
+def test_a_third_party_action_pin_is_not_this_projects_version(tree: Path) -> None:
+    """`actions/setup-python@v5.1.0` is somebody else's version.
+
+    The reference before the `@` must name this project, or the pin says
+    nothing about this release: a stale third-party pin in a covered file must
+    not fail the gate, and `@v4` is not even a release-version shape.
+    """
+    path = tree / "TROUBLESHOOTING.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\n- uses: actions/checkout@v4\n- uses: actions/setup-python@v5.1.0\n",
+        encoding="utf-8",
+    )
+
+    assert problems(tree) == []
 
 
 def test_a_version_inside_a_longer_number_is_not_a_mention(tree: Path) -> None:
@@ -350,7 +435,8 @@ def test_the_printed_list_names_every_position_and_its_count() -> None:
         assert path in listing
     counted = re.search(r"in (\d+) files, (\d+) occurrences", listing)
     assert counted is not None
-    assert int(counted.group(1)) == len(carried)
+    # Distinct files, not entries: TROUBLESHOOTING.md holds two claims.
+    assert int(counted.group(1)) == len({location.path for location in carried})
     assert int(counted.group(2)) == sum(len(location.versions) for location in carried)
 
 

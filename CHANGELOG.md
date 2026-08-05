@@ -44,6 +44,7 @@ The entries below add surface — configuration keys, MCP tools, a resource, a c
 
 ### Development
 
+- The version gate now sees `agentic-hil@vX.Y.Z` git-tag pins: TROUBLESHOOTING.md's pin is a tracked location of its own, and a project-tied `@v` pin in any covered file that no entry claims fails the gate — the mention shape that drifted by hand through four releases while the file counted as covered (hardci-hq#86). Third-party pins such as `actions/checkout@v4` stay invisible: only a pin whose reference names this project states this project's version.
 - `tools/ci_linux.py` runs the committed tree in a Linux container, so a Windows machine can see the POSIX half of the suite before CI does. Three changes in two days were green on Windows and failed on all four POSIX runners; each was obvious in ninety seconds here. It clones out of a read-only mount rather than working in it, because a bind mount would carry `.venv` in and present NTFS permissions to exactly the mode tests this exists to run.
 
 ### Removed
