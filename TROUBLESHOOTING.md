@@ -135,6 +135,8 @@ It reads the probe the way every other command here reaches hardware, so `device
 
 An agent does the same over MCP with `project_config_adopt_hardware`, which needs `permissions.allow_config_description_write`. Without it the call is refused and still returns the exact keys and values, so what you get is one command to run rather than a serial to transcribe.
 
+A running MCP server does not see the change yet: it parsed the file at startup. It no longer has to be restarted for this. Ask the agent to call `project_config_reload_description` — no arguments, and it re-reads `target`, `debuggers`, `com_ports` and `can_buses` from the file. It re-reads **no permission at all**, so a device that server has never seen arrives with none: it can be probed and read, and flashing, reset, mass erase and COM/CAN writes on it wait for a restart. `agentic-hil config-reload` shows what that call would take from this file and refuses the same way if the file no longer loads. A permission you changed, and anything outside those four sections, still needs the server restarted.
+
 ## 6. `adapter_not_found`
 
 Symptom: OpenOCD starts but Agentic HIL reports `error_type: "adapter_not_found"`.

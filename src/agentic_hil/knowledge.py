@@ -168,15 +168,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "a restart onto it would produce."
         ),
         remediation=(
-            "Ask the operator to restart the MCP server, then repeat the call. Say which server: the one the agent "
-            "host started for this workspace, not the `agentic-hil` command line, which reads the file fresh every "
-            "time and is already current.",
+            "If what changed is the description of the bench — `target`, a `debuggers`, `com_ports` or `can_buses` "
+            "entry, a probe id, a COM device, a baudrate — call `project_config_reload_description`. It re-reads those "
+            "four sections and clears this, without a restart and without touching a single permission. Its result "
+            "names anything in the file it did not take.",
+            "Otherwise, ask the operator to restart the MCP server, then repeat the call. Say which server: the one "
+            "the agent host started for this workspace, not the `agentic-hil` command line, which reads the file fresh "
+            "every time and is already current. A restart is what adopts a changed permission, a changed `version`, "
+            "and every section outside those four.",
             "If the restart does not come up, the startup refusal names what is wrong with the file — that is the "
             "message to report, and repairing the file is what the restart was waiting for. `agentic-hil doctor` "
             "reads the file fresh and produces the same refusal without stopping anything.",
-            "Until it is restarted, treat what this server says about the bench as the older file's answer. Do not "
-            "reconcile the difference by guessing which of the two is right — `config_status.path` names the file and "
-            "`loaded_digest` versus `current_digest` says they differ.",
+            "Until one of the two has happened, treat what this server says about the bench as the older file's "
+            "answer. Do not reconcile the difference by guessing which of the two is right — `config_status.path` "
+            "names the file and `loaded_digest` versus `current_digest` says they differ.",
             "If the change was made through `project_config_set` or `project_config_create` in this session, this is "
             "the same fact those results reported as `reload_required`, not a second problem.",
         ),
@@ -184,8 +189,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not carry on flashing, resetting or driving devices on the assumption that the new file is in force. "
             "It is not, and the permissions in force are the older ones — which may be wider than what the operator "
             "has just written.",
+            "Do not expect `project_config_reload_description` to take a permission. It re-reads the description and "
+            "nothing else, in either direction, and there is no argument that changes that; a permission the file now "
+            "states is adopted by a restart and by nothing on this surface.",
             "Do not try to make the server pick the file up by editing it again, by deleting it, or by calling a "
-            "configuration tool. Nothing short of a restart rebinds a running server, by design.",
+            "configuration write tool. Those two calls are the whole of what rebinds a running server.",
         ),
     ),
     f"config_file_not_found:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
@@ -381,6 +389,31 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not end a run early only to get the write through. The run is holding a board for a reason, and a "
             "configuration change is never urgent enough to abandon hardware in an unconfirmed state.",
+        ),
+    ),
+    "config_reload_in_open_run": ErrorRemedy(
+        meaning=(
+            "`project_config_reload_description` was called while this server holds hardware: a declared run, an open "
+            "COM or CAN session, or a debug session. Those holds name devices by their configuration entry, and the "
+            "description on disk decides which physical unit each of those names means — so re-reading it mid-run could "
+            "point a held name at another board. Nothing was re-read, nothing was written, and the run is untouched. "
+            "The same rule as `config_write_in_open_run` and the same remedy; it is a separate error type only because "
+            "this call writes nothing, and a caller should not be told it did."
+        ),
+        remediation=(
+            "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
+            "`com_session_stop` / `can_session_stop` and any debug session with `debug_stop_session`, then repeat the "
+            "reload.",
+            "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
+            "same in `open_holds`.",
+            "Nothing was lost by the refusal. The file is unchanged and the reload is exactly as available after the "
+            "run as it was before it.",
+        ),
+        do_not=(
+            "Do not end a run early only to get the reload through. The run is holding a board for a reason, and a "
+            "description that is one call newer is never urgent enough to abandon hardware in an unconfirmed state.",
+            "Do not ask for a server restart instead. A restart under an open run is strictly worse than this refusal: "
+            "it drops the run's holds without closing them.",
         ),
     ),
     "unsafe_configured_path": ErrorRemedy(
@@ -1580,6 +1613,7 @@ These calls are the only door. The file itself is protected by deny rules `agent
 | `project_config_set` | sets named keys, field-wise, after checking each value against the schema. |
 | `project_config_adopt_hardware` | reads the attached probe and fills in the identity keys that are still unset, through `project_config_set`. Supplies no value of its own. |
 | `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. It authors no permission value of its own, but it is a generation and not a narrowing: see below. |
+| `project_config_reload_description` | makes a changed **description** the one this running server answers out of, without a restart. Re-reads nothing else. See "Picking up a changed description without a restart". |
 
 ### Permissions move one way — through `project_config_set`
 
@@ -1680,12 +1714,54 @@ A refused write names the grant that is missing and the key in this file that ca
 | version 1 configurations | reading a probe there still needs `allow_probe` on the entry, and this is a probe read: `permission_denied` if it is false, exactly as `probe_target` answers. |
 | refused | `permission_denied` on `{CONFIG_DESCRIPTION_RIGHT}` still returns the plan. Report the keys and values it names and let the operator run `agentic-hil adopt-hardware`. |
 
+## Picking up a changed description without a restart
+
+A server parses this file once and enforces that document until it exits. That rule is about the **permissions**: they were taken as a whole, and a document that turned up underneath a running server may not widen them. It used to hold the **description** hostage too — a board plugged in and written down after the server started was invisible to it, and the only way across was a restart of the agent's MCP server.
+
+`project_config_reload_description` is the way across. It takes no arguments.
+
+```json
+{{"name": "project_config_reload_description", "arguments": {{}}}}
+```
+
+| Property | Rule |
+|---|---|
+| what it re-reads | `target`, `debuggers`, `com_ports`, `can_buses` — minus each entry's `permissions:` block. That is the whole list. |
+| what it does not | **every permission, in either direction.** Not narrowed, not compared, not adopted. The grants in force after a reload are byte for byte the ones parsed at startup. |
+| a device that is new to this server | arrives with **no grant at all**. It can be probed and read — from `version: 2` on, reading needs no grant; exclusivity is what protects it — and flashing, reset, mass erase and COM/CAN writes are denied on it until an operator restarts the server onto the file that grants them. |
+| a device renamed on disk | the new name is a device this server has never seen, so it arrives closed, and the old name is gone. Renaming an entry costs its grants until a restart. |
+| which board is bound | the name this server already drives, wherever it still exists. A second entry appearing does not repoint a bound server; a bench that configured no debugger at all binds the first one that appears, because there is exactly one board it could mean. |
+| refused while | a run, a COM/CAN session or a debug session holds this bench (`config_reload_in_open_run`), or an incident on it is unresolved (`resource_quarantined`). Both because a held name has to keep meaning the same physical board. |
+| refused when | the file is missing, unreadable, or does not load — `config_file_not_found`, `config_unreadable`, `config_invalid`, the same three states `config_status` reports. Nothing changes on any of them. |
+| what it writes | nothing. It reads the file, so no grant gates it; a bench whose `permissions.{CONFIG_DESCRIPTION_RIGHT}` is false can still pick up a board somebody plugged in. |
+
+### What still needs a restart, by name
+
+These are refused by name rather than quietly skipped, because each of them is either a permission wearing a description key's clothes or a section that mixes the two, and guessing one into the description half would make this a general reload:
+
+| Not re-read | Why |
+|---|---|
+| `permissions`, and every `<section>.<entry>.permissions` | the grants. The whole point. |
+| `version` | decides which permission model the file is read under. Moving 1 → 2 makes every read on this bench free, which is a permission change. |
+| `workspace_root`, `state_root` | what this server is bound to and where its trusted state lives. A reload may not rebind a running server or orphan its leases. |
+| `debug` | `allow_all_symbols` is a grant and `allowed_symbols` is an allowlist over what may be read out of a target. |
+| `artifacts` | `allow_upload` is a grant and `allowed_roots` decides which files may be flashed. |
+| `validation` | decides which artifacts are accepted at all. |
+| `recovery` | decides whether this machine may drive a physical reset on its own. |
+| `reports`, `logs` | operator-owned paths; a running server's audit trail may not move underneath it. |
+
+### After a reload
+
+`config_status` compares the file against the description now in force, so a reload that just took the file's description does **not** leave `config_stale: true` behind for it. What does not disappear is the other half: when the file's permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup and that a restart is what adopts the file's. The reload's own result lists them under `permission_differences`, taken at the moment both documents were in hand.
+
+At a shell the same operation is `agentic-hil config-reload`, which loads this file the way a server does and reports what a running server's reload would take from it and what it would leave — the pre-flight for asking an agent to make the call.
+
 ## Getting from "board attached" to a valid change
 
 1. `project_config_describe` — what may this caller change right now.
 2. `project_config_adopt_hardware` — what is attached, and which keys it would fill in. Nothing is written yet.
 3. The same call with `{{"apply": true}}`, or `project_config_set` for a key it left alone.
-4. The server keeps serving the configuration it loaded at startup; the result says `reload_required`. Ask the operator to restart the MCP server before relying on the change.
+4. `project_config_reload_description` — make what was just written the description this server answers out of. The write's `reload_required` is about that, and this is what clears it for the four device sections. A permission the write changed still waits for a restart.
 """
 
 
