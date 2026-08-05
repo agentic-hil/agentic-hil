@@ -1772,9 +1772,10 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # anything about what this bench is meant to drive; a config that granted
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
-    # and `debugger_drives_hardware` is literally the set config load insisted on
-    # resolving — which since hardci-hq#96 also excludes the starter entry `init`
-    # writes with every permission granted and no board attached yet.
+    # and `debugger_drives_hardware` is literally the set config load validated —
+    # which since hardci-hq#96 excludes the starter entry `init` writes with
+    # every permission granted and no toolchain named, and includes every entry
+    # that has one, whatever its scripts looked like before it did.
     probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(entry)}
     checks = {name: result for name, (result, _) in probed.items()}
     target_support = {name: support for name, (_, support) in probed.items()}
@@ -1783,7 +1784,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. Reading a probe needs no permission; granting allow_flash or allow_reset is what makes a board one this bench drives.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken
