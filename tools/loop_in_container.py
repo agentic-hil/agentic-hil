@@ -29,6 +29,11 @@ the Codex login because that file states no expiry; that is a real gap in the
 pre-flight and it is the evaluation's gap too, so it is reported rather than
 papered over.
 
+The operator's standing instructions to each CLI travel the same way, when they
+exist. A fresh home has none, and a fresh home is what the first containerised
+round ran in: the agent had never been told this operator's rules and signed its
+commit with an attribution trailer they forbid.
+
 The home the container builds from those files is a Docker volume that is
 deleted unconditionally afterwards. The evaluation scrubs instead, because its
 evidence is inspected later; here the only product is the commits in the
@@ -80,7 +85,7 @@ IMAGE_NAME = "agentic-hil-loop"
 
 MOUNTED_REPOSITORY = "/repo"
 CONTAINER_HOME = "/home/loop"
-MOUNTED_CREDENTIALS = "/run/loop-agent-logins"
+MOUNTED_FILES = "/run/loop-agent-files"
 
 EXIT_NO_DOCKER = 2
 EXIT_REFUSED = 3
@@ -88,10 +93,19 @@ EXIT_REFUSED = 3
 # One file per mount, addressed by kind, exactly as the evaluation does it. The
 # profile directories these live in are never mounted: they hold every project
 # the operator has ever opened, and none of that is the container's business.
-CREDENTIAL_FILES = {
+LOGIN_FILES = {
     "claude-auth": Path(".claude") / ".credentials.json",
     "claude-config": Path(".claude.json"),
     "codex-auth": Path(".codex") / "auth.json",
+}
+# The operator's standing instructions to each CLI, mounted when they exist.
+# A fresh home has none of them, and the first containerised round proved what
+# that costs: the agent knew nothing of this operator's rules and signed its
+# commit with an attribution trailer they forbid. The repository's own AGENTS.md
+# and CLAUDE.md arrive with the mount; these two do not.
+INSTRUCTION_FILES = {
+    "claude-instructions": Path(".claude") / "CLAUDE.md",
+    "codex-instructions": Path(".codex") / "AGENTS.md",
 }
 # claude-config carries account and onboarding state rather than a token, so
 # there is no expiry in it to judge.
@@ -99,17 +113,6 @@ HEALTH_CHECKED = ("claude-auth", "codex-auth")
 # Forwarded by name only when set on this machine, so a container never receives
 # an empty variable that looks like a configured credential.
 CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
-
-# Measured rather than guessed, from the evaluation's own limits. The suite
-# alone peaks at 287 MiB and 37 processes in this image; a full round adds the
-# editable install, the reviewer's clone and two Node CLIs on top of that, and
-# the container reports its own peak on every run (see report_peaks in the
-# entrypoint) so this number stays checkable. Memory is the one limit raised:
-# the evaluation's 2g is close enough to a measured round to be the cap that
-# kills it. The process limit and everything else in docker_security_options()
-# are taken unchanged.
-MEMORY_LIMIT = "3g"
-PIDS_LIMIT = "512"
 
 # The loop announces both directories on startup; they are the run's paperwork
 # and they land in the mount, so they can be named on this side afterwards.
@@ -227,9 +230,15 @@ def refresh_stale_login(kind: str, detail: str) -> None:
         raise Refused(f"the {kind} refresh attempt failed: {completed.stderr.strip() or completed.stdout.strip()}")
 
 
-def preflight_credentials() -> list[tuple[str, Path]]:
+def mounted_files() -> list[tuple[str, Path]]:
+    """The individual files the container gets, refusing before any model spend.
+
+    A login that cannot be used fails every round the same way, so it is decided
+    here. The instruction files are optional: an operator who keeps none simply
+    has none, and that is not a reason to refuse.
+    """
     resolved: list[tuple[str, Path]] = []
-    for kind, relative in CREDENTIAL_FILES.items():
+    for kind, relative in LOGIN_FILES.items():
         path = Path.home() / relative
         if not path.is_file():
             raise Refused(f"{kind}: no stored login at {path}. Sign in with the CLI on this machine first.")
@@ -250,20 +259,14 @@ def preflight_credentials() -> list[tuple[str, Path]]:
                     "Sign in again, then rerun."
                 )
         print(f"{kind}: {state} ({detail})", flush=True)
+
+    for kind, relative in INSTRUCTION_FILES.items():
+        path = Path.home() / relative
+        if path.is_file():
+            resolved.append((kind, path.resolve()))
+        else:
+            print(f"{kind}: none at {path}; the container gets the repository's instructions only", flush=True)
     return resolved
-
-
-def container_security_options() -> list[str]:
-    """The evaluation's options, with the two this loop's own work outgrows.
-
-    Substituted rather than appended: two `--memory` flags on one command line
-    is a bet on which one Docker keeps, and `.index` fails loudly here if the
-    evaluation ever stops setting one of them.
-    """
-    options = docker_security_options()
-    for flag, value in (("--memory", MEMORY_LIMIT), ("--pids-limit", PIDS_LIMIT)):
-        options[options.index(flag) + 1] = value
-    return options
 
 
 def container_command(
@@ -273,7 +276,7 @@ def container_command(
     container_name: str,
     home_volume: str,
     repository: Path,
-    credentials: list[tuple[str, Path]],
+    files: list[tuple[str, Path]],
     identity: tuple[str, str],
     forwarded: list[str],
 ) -> list[str]:
@@ -285,9 +288,16 @@ def container_command(
         "--name",
         container_name,
         # An agent CLI starts shells that start more processes; without a real
-        # init to reap them, zombies accumulate against --pids-limit.
+        # init to reap them, zombies accumulate against --pids-limit. It is also
+        # what makes the POSIX process-group tests pass here and fail under
+        # tools/ci_linux.py, which has no reaper.
         "--init",
-        *container_security_options(),
+        # Taken unchanged, because the numbers say they can be. Measured in this
+        # image with the container reporting its own cgroup peak (report_peaks
+        # in the entrypoint): the suite alone 287 MiB and 37 processes, a full
+        # implement-and-review round 405 MiB and 71, the heaviest run observed
+        # 807 MiB -- all well inside the evaluation's 2g and 512.
+        *docker_security_options(),
         "--mount",
         docker_mount("volume", home_volume, CONTAINER_HOME),
         # Read-write, and the one deviation that matters: the loop's product is
@@ -308,10 +318,10 @@ def container_command(
         "--env",
         f"GIT_COMMITTER_EMAIL={email}",
     ]
-    for kind, path in credentials:
+    for kind, path in files:
         command += [
             "--mount",
-            docker_mount("bind", docker_source(path), f"{MOUNTED_CREDENTIALS}/{kind}", readonly=True),
+            docker_mount("bind", docker_source(path), f"{MOUNTED_FILES}/{kind}", readonly=True),
         ]
     for variable in CREDENTIAL_ENVIRONMENT:
         if os.environ.get(variable):
@@ -319,8 +329,8 @@ def container_command(
     return [
         *command,
         image,
-        "--credential-kinds",
-        *[kind for kind, _path in credentials],
+        "--kinds",
+        *[kind for kind, _path in files],
         "--",
         *forwarded,
     ]
@@ -393,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     image = options.image or f"{IMAGE_NAME}:{recipe_digest()}"
 
     try:
-        credentials = preflight_credentials()
+        files = mounted_files()
         identity = git_identity(repository)
         if options.rebuild or not image_present(docker, image):
             build_image(docker, image)
@@ -415,14 +425,14 @@ def main(argv: list[str] | None = None) -> int:
         container_name=container_name,
         home_volume=home_volume,
         repository=repository,
-        credentials=credentials,
+        files=files,
         identity=identity,
         forwarded=forwarded,
     )
     print(f"repository : {repository} (read-write at {MOUNTED_REPOSITORY})")
     print(f"image      : {image}")
     print(f"identity   : {identity[0]} <{identity[1]}>")
-    print(f"logins     : {', '.join(kind for kind, _path in credentials)} (read-only, one file each)")
+    print(f"mounted    : {', '.join(kind for kind, _path in files)} (read-only, one file each)")
     print(f"home volume: {home_volume} (deleted when this exits)")
     print(f"$ {' '.join(command)}", flush=True)
 

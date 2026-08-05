@@ -4,8 +4,8 @@ This runs inside the throwaway container and never on a developer machine. It
 mirrors evals/install/container_entrypoint.py, which is the tested arrangement
 in this repository for handing a stored login to an agent CLI:
 
-* each credential arrives as its own read-only bind mount under
-  ``/run/loop-agent-logins``; the host profile directories are never mounted;
+* each file arrives as its own read-only bind mount under
+  ``/run/loop-agent-files``; the host profile directories are never mounted;
 * the bytes are copied to tmpfs and the home path is a symlink to that copy, so
   the secret lives in RAM rather than in the home volume's backing store, and a
   CLI that rewrites its login file writes to a copy that dies with the
@@ -27,8 +27,8 @@ from pathlib import Path
 
 HOME = Path("/home/loop")
 REPO = Path("/repo")
-MOUNTED_CREDENTIALS = Path("/run/loop-agent-logins")
-TEMPORARY_CREDENTIALS = Path("/tmp/loop-credentials")
+MOUNTED_FILES = Path("/run/loop-agent-files")
+TEMPORARY_FILES = Path("/tmp/loop-agent-files")
 # Everything scratch lives on the tmpfs, never on the repository mount. Temp
 # directories the suite hardens on the mount are the whole reason this container
 # exists.
@@ -36,29 +36,32 @@ SCRATCH = Path("/tmp")
 REVIEW_CHECKOUT = SCRATCH / "agentic-loop-review"
 VENV = HOME / ".venv"
 
-# Same kind names as the evaluation where the file is the same file, plus the
-# Claude Code account state, which is not a token but decides whether the CLI
-# considers itself onboarded at all.
-AUTH_PATHS = {
+# Same kind names as the evaluation where the file is the same file. The others
+# are what a fresh home is missing and an agent still needs: the Claude Code
+# account state, which is not a token but decides whether the CLI considers
+# itself onboarded, and the operator's standing instructions to each CLI.
+MOUNTED_PATHS = {
     "claude-auth": HOME / ".claude" / ".credentials.json",
     "claude-config": HOME / ".claude.json",
+    "claude-instructions": HOME / ".claude" / "CLAUDE.md",
     "codex-auth": HOME / ".codex" / "auth.json",
+    "codex-instructions": HOME / ".codex" / "AGENTS.md",
 }
 
 
-def place_credentials(kinds: list[str]) -> None:
+def place_mounted_files(kinds: list[str]) -> None:
     for kind in kinds:
-        source = MOUNTED_CREDENTIALS / kind
+        source = MOUNTED_FILES / kind
         if not source.is_file():
-            raise FileNotFoundError(f"credential mount missing: {source}")
-        temporary = TEMPORARY_CREDENTIALS / kind
+            raise FileNotFoundError(f"mount missing: {source}")
+        temporary = TEMPORARY_FILES / kind
         temporary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         shutil.copyfile(source, temporary)
         temporary.chmod(0o600)
-        target = AUTH_PATHS[kind]
+        target = MOUNTED_PATHS[kind]
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
-            raise FileExistsError(f"credential destination already exists: {target}")
+            raise FileExistsError(f"destination already exists: {target}")
         target.symlink_to(temporary)
 
 
@@ -119,9 +122,30 @@ def install_project() -> None:
     )
 
 
+def loop_command(forwarded: list[str]) -> list[str]:
+    return [
+        str(VENV / "bin" / "python"),
+        str(REPO / "tools" / "agent_review_loop.py"),
+        "--repo",
+        str(REPO),
+        # The container is the isolation boundary, so Codex needs no second one
+        # inside it. Its own sandbox is what could not run this suite on the
+        # host at all, and the blast radius of turning it off here is a
+        # throwaway container holding one repository mount.
+        "--codex-sandbox",
+        "danger-full-access",
+        # Committed work is the product; everything scratch stays on the tmpfs
+        # and never reaches the repository mount.
+        "--review-checkout-dir",
+        str(REVIEW_CHECKOUT),
+        # Forwarded last so a caller can override any default chosen here.
+        *[argument for argument in forwarded if argument != "--"],
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--credential-kinds", nargs="*", default=[])
+    parser.add_argument("--kinds", nargs="*", default=[])
     parser.add_argument("loop_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
 
@@ -130,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (REPO / ".git").exists():
         raise RuntimeError(f"no repository is mounted at {REPO}")
 
-    place_credentials(list(args.credential_kinds))
+    place_mounted_files(list(args.kinds))
     prepare_repository()
     report(["claude", "--version"])
     report(["codex", "--version"])
@@ -142,22 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     # same reason.
     environment.update({key: str(SCRATCH) for key in ("TMPDIR", "TMP", "TEMP")})
 
-    command = [
-        str(VENV / "bin" / "python"),
-        str(REPO / "tools" / "agent_review_loop.py"),
-        "--repo",
-        str(REPO),
-        # The container is the isolation boundary, so Codex needs no second one
-        # inside it. Its own sandbox is what could not run this suite on the
-        # host at all, and the blast radius of turning it off here is a
-        # throwaway container holding one repository mount.
-        "--codex-sandbox",
-        "danger-full-access",
-        "--review-checkout-dir",
-        str(REVIEW_CHECKOUT),
-        # Forwarded last so a caller can override any default chosen here.
-        *[argument for argument in args.loop_args if argument != "--"],
-    ]
+    command = loop_command(list(args.loop_args))
     print(f"loop: {' '.join(command)}", flush=True)
     try:
         return subprocess.run(command, cwd=str(REPO), env=environment, check=False).returncode
