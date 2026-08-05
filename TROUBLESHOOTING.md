@@ -50,7 +50,7 @@ Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
 Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
-Fix: run `agentic-hil init`, review the deny-by-default file outside the repository, then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init`, review the file it writes outside the repository — every permission in it is granted — then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
 `init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
@@ -117,7 +117,7 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
 
-Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the deny-by-default skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments.
+Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments.
 
 Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since.
 

@@ -15,7 +15,7 @@ from agentic_hil.backends.common import (
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -159,9 +159,9 @@ class OpenOCDBackend:
         if not self.config.debugger.permissions.allow_flash:
             return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
         if self.config.debugger.permissions.allow_raw_debugger_commands:
-            return self._permission_denied("flash_firmware", "Flashing is disabled while raw debugger commands are allowed.")
+            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_raw_debugger_commands", self.config.debugger_id))
         if self.config.debugger.permissions.allow_mass_erase:
-            return self._permission_denied("flash_firmware", "Flashing is disabled while mass erase is allowed.")
+            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_mass_erase", self.config.debugger_id))
 
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]

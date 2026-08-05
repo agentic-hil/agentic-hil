@@ -15,7 +15,7 @@ Not project-local. The whole of it, before you start:
 - A user-local package and console script in your home directory. No admin rights, ever.
 - An `agentic-hil` MCP entry in the agent CLI's **user-level** config, so every project sees it. It starts only where `workspace_root` matches. *(user-wide, `agent-install`)*
 - A skill file in your agent's skill directory. *(user-wide, `agent-install`)*
-- One external config per project, outside its repository: reading a device needs no permission, and every permission that writes or changes state is denied — unless `agentic-hil.config.example.yaml` declares bootstrap hardware requirements. *(per project, `init`)*
+- One external config per project, outside its repository. It grants **every** permission it declares — flashing, reset, raw debugger commands, mass erase, serial and CAN writes, artifact upload, unrestricted symbol access, and the three `permissions.allow_config_*` grants — so the bench is workable without anybody editing YAML. Report that and ask which of it the operator wants taken away, `allow_mass_erase` first. A shipped `agentic-hil.config.example.yaml` may narrow individual flags. *(per project, `init`)*
 - Nothing inside the firmware project, nothing committed — no `.mcp.json`, no config, no checkout. `setup` needs none of them, and writing one puts the hardware gate in a file anyone with repository access can change.
 
 Larger than what the operator asked for? Say so and let them decide.
@@ -89,7 +89,7 @@ One command instead of `agent-install`, `init` and `doctor` separately. It retur
 |---|---|---|
 | Scope | user: per user, per machine — every process of that OS user on this host, and no other OS user | one workspace |
 | Frequency | once per user and agent | once per project |
-| Writes | the agent's skill, the user-level MCP registration | the deny-by-default authoritative config; with `--agent claude-code`, that agent's refusal of its own write tools on the config and state root. For opencode nothing is written and the step reports that, see SECURITY.md; Codex needs nothing |
+| Writes | the agent's skill, the user-level MCP registration | the authoritative config, with every permission granted; with `--agent claude-code`, that agent's refusal of its own write tools on the config and state root. For opencode nothing is written and the step reports that, see SECURITY.md; Codex needs nothing |
 | Also | checks that a persistent trusted executable exists to register | runs `doctor` |
 | Cwd | anywhere; needs and creates no workspace and no config | the firmware project root |
 
@@ -97,9 +97,9 @@ Each half rolls back only its own writes; **a failing project half never removes
 
 `--force` on `setup` and `agent-install` repairs a managed skill or MCP entry. It never rewrites an authoritative config; only `agentic-hil init --force` does, and that is operator policy — ask first.
 
-The external config binds `workspace_root` and is written at `version: 2`: reading a device needs no permission, because a run locks the devices its test plan names for its whole duration and that exclusivity is what protects a read. Everything that writes or changes state is denied. A shipped `agentic-hil.config.example.yaml` instead authorizes bootstrap: setup locates STM32CubeProgrammer, requires one ST-Link, identifies it via HOTPLUG, matches its virtual COM port, then writes requested flash/reset/UART grants. Raw debugger commands and mass erase stay denied. Multiple probes, ambiguous COM matches, or existing configs cause refusal, never guessing or replacement.
+The external config binds `workspace_root` and is written at `version: 2`: reading a device needs no permission, because a run locks the devices its test plan names for its whole duration and that exclusivity is what protects a read. Everything that writes or changes state is **granted**, including raw debugger commands and mass erase — the owner's decision (hardci-hq#96), because the closed default cost a working day of hand-edited YAML and stopped nothing an agent with a shell was actually stopped by. A shipped `agentic-hil.config.example.yaml` also drives bootstrap: setup locates STM32CubeProgrammer, requires one ST-Link, identifies it via HOTPLUG, and matches its virtual COM port. A flag that profile sets to `false` is honoured, so a project can ship a narrower bench than the skeleton. Multiple probes, ambiguous COM matches, or existing configs cause refusal, never guessing or replacement.
 
-Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`. No profile means everything that writes or changes state is denied.
+Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`. No profile means the skeleton, which grants everything.
 
 **`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force` — `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
 

@@ -17,6 +17,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
+from agentic_hil.knowledge import exclusive_permission_summary
 from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
@@ -513,12 +514,12 @@ class GdbDebugSessions:
         if mode != "attach" and not permissions.allow_reset:
             return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the authoritative config.")
         if permissions.allow_raw_debugger_commands:
-            return self._permission_denied(tool, "Debug sessions are disabled while raw debugger commands are allowed.")
+            return self._permission_denied(tool, exclusive_permission_summary("A debug session", "allow_raw_debugger_commands", self.config.debugger_id))
         if mode == "load":
             if not permissions.allow_flash:
                 return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the authoritative config.")
             if permissions.allow_mass_erase:
-                return self._permission_denied(tool, "Debug session mode 'load' is disabled while mass erase is allowed.")
+                return self._permission_denied(tool, exclusive_permission_summary("Debug session mode 'load'", "allow_mass_erase", self.config.debugger_id))
         return {"ok": True}
 
     def _permission_denied(self, tool: str, summary: str) -> JsonObject:

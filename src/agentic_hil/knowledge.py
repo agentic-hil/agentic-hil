@@ -51,6 +51,40 @@ BACKENDS = ("openocd", "stlink", "pyocd")
 # caller has to do about it is the same kind of thing as a refusal: report it,
 # name the file, and let the operator decide.
 CONFIG_STALE_ERROR = "config_stale"
+# A configuration write that would have turned a permission on. Its own
+# error_type rather than a `permission_denied`, because the grant is usually
+# there: what is refused is the direction, and a caller told "permission denied"
+# would go looking for the permission that opens it. There is none.
+CONFIG_WIDENING_ERROR = "permission_widening_denied"
+# The one command that puts every permission back, named wherever a narrowing is
+# reported so that "only a human can undo this" is never left as an abstraction.
+# It regenerates from attached hardware, so it is also the command that repairs a
+# configuration nobody can change any more.
+CONFIG_REOPEN_COMMAND = "agentic-hil init --force"
+
+# Validated flashing and unrestricted debugger access are mutually exclusive
+# policies (docs/security-design.md), and hardci-hq#96 made that exclusion the
+# ordinary first state of a bench rather than a rare one: a generated
+# configuration grants both sides of it, so the first `flash_firmware` on a fresh
+# file is refused. The way out is a *narrowing*, which is the one direction this
+# surface still moves in, so the refusal names it rather than leaving a caller to
+# work out that it is asking for less rather than more.
+EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
+
+
+def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | None) -> str:
+    """Why an action is refused by a permission that is *granted*, and the fix.
+
+    One text for the four backends that raise it, because a refusal an operator
+    meets on their first flash must not read differently depending on which
+    programmer their board happens to use."""
+    entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
+    return (
+        f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: validated flashing and "
+        f"unrestricted debugger access are mutually exclusive policies, and a generated configuration grants both. Set "
+        f"`{entry}` to false — with `project_config_set`, or by asking the operator — and this works. Nothing here can "
+        "set it back to true afterwards."
+    )
 # The scope that separates "this project has no configuration", which
 # `project_config_create` answers, from "the configuration this running server
 # loaded is gone from disk", which it must not.
@@ -115,6 +149,7 @@ def _substitutions() -> dict[str, str]:
         "safe_user_root": safe_user_root(),
         "safe_state_root": safe_state_root_suggestion(),
         "safe_user_config": safe_user_config_suggestion(),
+        "reopen_command": CONFIG_REOPEN_COMMAND,
     }
 
 
@@ -171,7 +206,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not call `project_config_create` to replace it. A server bound to a configuration is gated by the "
             "permissions it loaded even when the file is gone, so that call is refused — and if it were not, it would "
-            "replace an operator's settings with a deny-by-default skeleton.",
+            "replace every narrowing an operator had asked for with the generated skeleton.",
         ),
     ),
     f"config_unreadable:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
@@ -219,18 +254,19 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
-            "the hardware attached to this machine, and writes every permission false — including the one that would "
-            "let it write the file again.",
+            "the hardware attached to this machine, and writes every permission true, so the bench is workable from "
+            "the file it produces without anyone editing YAML.",
             "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
-            "Then ask the operator to set the permissions the task actually needs; nothing but a human edit turns one "
-            "of them true.",
+            "Then report what it granted — flashing, resetting, raw debugger commands and mass erase among them — and "
+            "ask the operator which of those this bench should not have. You can write `false` into any of them with "
+            "`project_config_set`; you can never write `true`.",
         ),
         do_not=(
-            "Do not write the configuration by hand to give yourself a permission, and do not drive the hardware "
-            "another way while the project has none. A missing configuration is the absence of policy, not permission "
-            "to act without it.",
-            "Do not delete or move an existing configuration to reach this state. Generating a replacement produces "
-            "the deny-by-default skeleton again, so it throws the operator's settings away and gives you nothing.",
+            "Do not write the configuration by hand, and do not drive the hardware another way while the project has "
+            "none. A missing configuration is the absence of policy, not permission to act without it.",
+            "Do not delete or move an existing configuration to reach this state. What comes back is the generated "
+            "skeleton, so it throws away every narrowing the operator had asked for and gives you nothing you did not "
+            "already have.",
         ),
     ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
@@ -255,8 +291,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "permission_denied:allow_config_permissions_write": ErrorRemedy(
         meaning=(
-            "A field-wise configuration change reached a `permissions:` block — what the bench may be told to do — and "
-            "`permissions.allow_config_permissions_write` is false. This is the deliberate half of the split: a "
+            "A field-wise configuration change reached a permission — what the bench may be told to do — and "
+            "`permissions.allow_config_permissions_write` is false. That right gates every permission key in the file, "
+            "not only the ones inside a `permissions:` block: the project block, each entry's own block under "
+            "`debuggers`, `com_ports` and `can_buses`, and the two grants that sit directly on a section, "
+            "`artifacts.allow_upload` and `debug.allow_all_symbols`. This is the deliberate half of the split: a "
             "configuration may be open for describing the bench and closed for granting, and this refusal is that "
             "state working as intended. `denied_keys` lists the refused keys. Nothing was written."
         ),
@@ -272,6 +311,57 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "and after every write, so it fails, and it is the thing this grant exists to prevent.",
             "Do not carry out the action the permission would have allowed by another route. A debugger, serial "
             "device or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
+        ),
+    ),
+    CONFIG_WIDENING_ERROR: ErrorRemedy(
+        meaning=(
+            "A field-wise configuration change tried to write something other than a narrowing into a permission. A "
+            "generated configuration starts with every permission granted, and the one direction `project_config_set` "
+            "leaves is narrowing, so an agent writes `false` into a permission and never `true`. Two cases share this "
+            "error because for a caller they are one fact — nothing here turns a permission on. Either the request "
+            "carried a permission value that was not `false`, and `widened_keys` names those keys as the request spelled "
+            "them, including a `true` sent to a permission that is already `true` and would have moved nothing; or the "
+            "resulting document would have granted more than the current one, and `widened_keys` names the paths that "
+            "would have opened, read out of the document before and after rather than out of the request. Nothing was "
+            "written in either case, including the parts of the same call that were narrowings — a change is applied "
+            "whole or not at all."
+        ),
+        remediation=(
+            "If the intent was to narrow the bench, re-send the call with `false` values only; a call that mixes the "
+            "two is refused for the widening and loses the narrowing with it.",
+            "If a permission really has to come back, that is a person's decision at the command line: "
+            "`{reopen_command}` regenerates the configuration from attached hardware with every permission granted "
+            "again. Report which permission is needed and why, and stop.",
+            "`project_config_describe` says what this configuration grants right now, so the report names the actual "
+            "gap rather than a guess at one.",
+        ),
+        do_not=(
+            "Do not close a permission and reopen it later to work around something. You cannot: this refusal covers a "
+            "permission you narrowed yourself a moment ago exactly as it covers one you never touched.",
+            "Do not look for another key, another spelling or another tool that reaches the same value. The comparison "
+            "is made on the permissions present in the document, not on the keys the request named, so every route "
+            "lands here.",
+            "Do not carry out the action the permission would have allowed by another route. A debugger, serial device "
+            "or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
+        ),
+    ),
+    "debugger_config_not_found": ErrorRemedy(
+        meaning=(
+            "A debugger script this entry names could not be used: the interface or target configuration file the "
+            "backend was pointed at is not where the configuration says it is. Nothing was run and the bench was not "
+            "touched."
+        ),
+        remediation=(
+            "Check `debuggers.<name>.interface_cfg` and `.target_cfg` against what is installed on this machine; "
+            "`agentic-hil doctor` names the entry and the file it could not use.",
+            "Set them with `project_config_set` to the absolute paths of the scripts for this probe and target. A "
+            "configured script path must be absolute and must live outside the workspace.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger, and a configured absolute path inside the "
+            "workspace is refused at load for that reason.",
+            "Do not run `openocd` directly to get past it.",
         ),
     ),
     "config_write_in_open_run": ErrorRemedy(
@@ -537,12 +627,12 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     "openocd": {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant."},
-        "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
+        "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
-        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Resolved against OpenOCD's own search path."},
-        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`. Must match the MCU family."},
+        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Once this entry names a toolchain it must be an absolute path to an existing file outside the workspace: the relative default is what OpenOCD's own search path would resolve, and what that resolves to is not this configuration's to promise."},
+        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, absolute and outside the workspace like interface_cfg. Must match the MCU family."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
     "stlink": {
@@ -671,10 +761,19 @@ def config_schema_document() -> JsonObject:
 # Two rights, not one. One right for everything would be a master key: whoever
 # set it so an agent could enter a 24-character probe serial would have handed
 # over, in the same motion and without being told, the ability for that agent to
-# write `allow_flash: true` on itself.
+# write `allow_flash: false` on a bench somebody else was about to flash.
 #
 #   description  what the bench IS   — target, probe identity, port parameters
-#   permissions  what the bench MAY  — every permissions: block in the file
+#   permissions  what the bench MAY  — every permission key in the file: each
+#                                      permissions: block, and the two grants
+#                                      that sit directly on a section,
+#                                      artifacts.allow_upload and
+#                                      debug.allow_all_symbols
+#
+# Neither right reaches upward. `allow_config_permissions_write` opens the
+# permissions half in one direction only: `configwrite.permission_widening`
+# refuses any write that turns a permission on, so the grant that "hands over the
+# granting" hands over the taking-away.
 #
 # The model lives here, beside the error catalogue, for the same reason the
 # catalogue does: the refusal a caller reads, the reference it can fetch, and the
@@ -688,17 +787,64 @@ def config_schema_document() -> JsonObject:
 CONFIG_DESCRIPTION_RIGHT = "allow_config_description_write"
 CONFIG_PERMISSIONS_RIGHT = "allow_config_permissions_write"
 CONFIG_WRITE_RIGHT = "allow_config_write"
+# Named here rather than imported: `configwrite` imports this module, so the tool
+# whose reach the frozen notice below describes cannot be read back from it.
+PROJECT_CONFIG_SET_TOOL = "project_config_set"
 
 CONFIG_RIGHTS: dict[str, str] = {
     CONFIG_DESCRIPTION_RIGHT: (
         "Set the description of the bench field-wise: what hardware is there and how it is reached. "
-        "Never a permissions: block, so it cannot widen what may be done to the hardware."
+        "Never a permission, so it cannot touch what may be done to the hardware."
     ),
     CONFIG_PERMISSIONS_RIGHT: (
-        "Set the permissions: blocks field-wise, including these two keys themselves. This is the grant "
-        "that hands over the granting."
+        "Take permissions away, field-wise: every permissions: block, the two section-level grants "
+        "`artifacts.allow_upload` and `debug.allow_all_symbols`, and these two keys themselves. Only "
+        "false may be written: `project_config_set` turns no permission on, so this grant reduces "
+        "authority and never adds any. Setting it false is the last permission change that tool can make."
     ),
 }
+
+
+def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) -> JsonObject:
+    """What the call that closes the permissions grant has to say for itself.
+
+    Said here, in the result of that call, and nowhere else. A reference an agent
+    could have read beforehand is not where this belongs: whoever writes
+    ``allow_config_permissions_write: false`` loses the way back in the same
+    instant, and if the result does not say so, an agent nails the bench shut in
+    passing and the operator is in front of a file they have to open by hand —
+    the exact state hardci-hq#96 exists to end.
+
+    Three things, because three are what a reader needs: what stands frozen now,
+    that the agent itself cannot undo it, and the name of the command that can.
+
+    Said about `project_config_set` and about nothing else, because that is the
+    whole of what this closes. Regeneration is a different call under a different
+    grant and it is creation rather than a permissions write — the owner's
+    clarification on hardci-hq#96 keeps it out of the ratchet deliberately. A
+    notice that claimed the whole file was sealed would be describing a rule this
+    project does not have.
+    """
+    return {
+        "closed_key": closed_key,
+        "irreversible_by_agent": True,
+        "frozen_permissions": {name: bool(value) for name, value in sorted(frozen.items())},
+        "reopened_by": CONFIG_REOPEN_COMMAND,
+        "summary": (
+            f"`{closed_key}` is now false, so this was the last permission change `{PROJECT_CONFIG_SET_TOOL}` can make to "
+            f"{path}. Every permission listed in `frozen_permissions` stands as it is: the ones still true stay true, "
+            "the ones already false stay false, and no further call to that tool can move any of them."
+        ),
+        "next_steps": [
+            "Report this before anything else. The operator has to know the bench's permissions are now fixed, and "
+            "which of them were left granted — `frozen_permissions` is that list, read out of the file as written.",
+            f"You cannot undo it with `{PROJECT_CONFIG_SET_TOOL}` and there is no permission that would let you. Do not "
+            "call it on a permission again.",
+            f"A person reopens the file with `{CONFIG_REOPEN_COMMAND}` in the project root, which regenerates it from "
+            "attached hardware with every permission granted again. Ask for that rather than looking for a way around "
+            "this; regenerating a configuration is the operator's call, not yours.",
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -739,6 +885,15 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("com_ports", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("can_buses", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    # And the two grants the schema puts directly on a fixed section instead of
+    # inside a `permissions` block. A generation writes both true like every
+    # other permission, so leaving them out of the key model left two things a
+    # generated bench grants that an operator could only take back by opening the
+    # YAML — the one thing hardci-hq#96 exists to stop. Only the grant of each
+    # section is settable; `debug.allowed_symbols` and `artifacts.allowed_roots`
+    # are lists, and this surface writes scalars.
+    ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_all_symbols",)),
+    ConfigKeyRule("artifacts", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_upload",)),
 )
 
 # Sections whose entries are named by the operator and may be added.
@@ -925,10 +1080,11 @@ workspace_root: "C:/Users/dana/work/thermostat-fw"
 state_root: "C:/Users/dana/.agentic-hil/state"
 
 permissions:
-  # The agent may enter what it discovers about the bench …
+  # Generated true; still true, so the agent may enter what it discovers about
+  # the bench and take a permission away when the operator asks for it.
   allow_config_description_write: true
-  # … and may not grant itself anything.
-  allow_config_permissions_write: false
+  allow_config_permissions_write: true
+  # Taken back: this bench is not to be regenerated from hardware discovery.
   allow_config_write: false
 
 target:
@@ -938,14 +1094,20 @@ target:
 debuggers:
   dut:
     type: "openocd"
-    executable: null            # found on PATH
+    executable: null            # resolved from PATH when this file is loaded
     probe_id: "066AFF495451885087171450"
-    interface_cfg: "interface/stlink.cfg"
-    target_cfg: "target/stm32f4x.cfg"
+    # Absolute, and outside workspace_root. An OpenOCD entry that anything can
+    # reach — and under version 2 reading reaches every entry — is refused with
+    # relative script names: those resolve out of OPENOCD_SCRIPTS and the
+    # per-user script directories, which is not a path this file states.
+    interface_cfg: "C:/tools/openocd/share/openocd/scripts/interface/stlink.cfg"
+    target_cfg: "C:/tools/openocd/share/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
       allow_flash: true
       allow_reset: true
+      # Both generated true and both taken back, on the operator's say-so:
+      # this socket sees customer boards.
       allow_raw_debugger_commands: false
       allow_mass_erase: false
 
@@ -1068,7 +1230,7 @@ One authoritative file per project, **outside** the workspace, so repository con
 
 ## A worked example
 
-A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. The operator has opened flashing and reset on this board, and has let the agent keep the bench description current without letting it grant itself anything:
+A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. It was generated with every permission true; what you see is what the operator asked an agent to take back afterwards — no mass erase and no raw debugger commands on a socket that sees customer boards, and no regeneration of this file from hardware discovery:
 
 ```yaml
 {CONFIG_WORKED_EXAMPLE}```
@@ -1084,7 +1246,36 @@ These calls are the only door. The file itself is protected by deny rules `agent
 | `project_config_describe` | answers, for **this** configuration in **this** state, which keys you may change right now, which you may not, and which grant would open a locked one. Needs no permission; reading is free. |
 | `project_config_set` | sets named keys, field-wise, after checking each value against the schema. |
 | `project_config_adopt_hardware` | reads the attached probe and fills in the identity keys that are still unset, through `project_config_set`. Supplies no value of its own. |
-| `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. Contributes no permission value: the grants on disk are carried over unchanged. |
+| `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. It authors no permission value of its own, but it is a generation and not a narrowing: see below. |
+
+### Permissions move one way — through `project_config_set`
+
+A configuration is **generated with every permission true** — flashing, reset, raw debugger commands, mass erase, COM and CAN writes, and all three `permissions.allow_config_*` grants. The bench is workable from the moment the file exists, and nobody has to open an editor to make it so.
+
+What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
+
+```text
+Generation                  every permission true
+Through project_config_set  write false into a permission
+                            never true — not even into one you set to false yourself
+Last move there             permissions.{CONFIG_PERMISSIONS_RIGHT}: false
+After that                  no permission changes through project_config_set at all
+```
+
+A change that would turn any permission on is refused as `{CONFIG_WIDENING_ERROR}`, and the check reads the permissions present in the document before and after the write rather than the keys the request named — so there is no spelling of it that gets through. Report the refusal and stop; granting is the operator's.
+
+Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the command a person reopens it with. Do not make that call in passing.
+
+### What the ratchet does not cover
+
+Regeneration is a separate door, and it is honest to say so rather than to promise more than holds:
+
+* `{CONFIG_REOPEN_COMMAND}` at a person's shell rewrites this file from attached hardware with every permission granted. That is the reopen path and it is the operator's.
+* `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives with everything granted; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back grants everything. Its result names what it wrote.
+* **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file — the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
+* Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
+
+So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well — that closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it, taking effect for a running server once it is restarted onto the closed file.
 
 ### The two rights
 
@@ -1092,7 +1283,7 @@ These calls are the only door. The file itself is protected by deny rules `agent
 |---|---|
 {rights}
 
-The split is the point. Somebody who opens the file so an agent can enter a probe serial has not, in the same motion and without being told, handed over the ability for that agent to write `allow_flash: true` on itself.
+The split is the point. Somebody who opens the file so an agent can enter a probe serial has not, in the same motion and without being told, handed over that agent's ability to narrow the bench underneath somebody else's work.
 
 ### Which keys, and what may go in them
 
@@ -1100,7 +1291,7 @@ The split is the point. Somebody who opens the file so an agent can enter a prob
 |---|---|---|
 {keys}
 
-`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server, so a new entry can never arrive pre-granted.
+`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server. A generation grants; a write only ever takes away, and adding an entry is a write, so a device named this way arrives closed and `{CONFIG_REOPEN_COMMAND}` is what opens it.
 
 Entry names may contain dots. Keys are therefore read from the right: the field name is the last component, so `debuggers.a.b.probe_id` is the entry named `a.b`.
 
@@ -1123,10 +1314,12 @@ The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, 
 |---|---|
 | writing the file with your own file tools | `setup` writes host deny rules against exactly that. One door, audited, locked by a grant inside the file. |
 | sending a whole document, or a whole `debuggers.dut` subtree | the agent does not author this file. `value` accepts a string, number, boolean or null and nothing else, so no subtree — and no `permissions:` block inside one — can arrive as a value. |
-| widening your own permissions with only the description grant | refused twice over: the key does not resolve to the description grant, and the permissions actually present in the document are compared before and after the change. A permission that changed without `{CONFIG_PERMISSIONS_RIGHT}` fails the write. |
+| turning any permission on through `project_config_set`, with any grant | refused as `{CONFIG_WIDENING_ERROR}`, both for a value other than `false` and for a document that would end up granting more than it did. The permissions actually present in the document are compared before and after the change, so it holds whatever the key was called and whichever grant the caller holds. Regenerating the file is the other door and a different grant — see "What the ratchet does not cover". |
+| reaching a permission with only the description grant | refused twice over: the key does not resolve to the description grant, and the same before/after comparison catches a permission that moved without `{CONFIG_PERMISSIONS_RIGHT}`. |
 | changing anything while a run is open | a run holds devices under the policy this file states. Changing the policy underneath it is refused; close the run with `bench_run_stop` first. |
 | deleting a key, an entry, or the file | nothing on this surface removes configuration. Regenerating one costs an operator their settings. |
-| `version`, `workspace_root`, `state_root`, `artifacts`, `debug`, `validation`, `recovery` | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
+| `version`, `workspace_root`, `state_root`, `validation`, `recovery`, and every key of `artifacts` and `debug` except the two grants below | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
+| widening `artifacts.allow_upload` or `debug.allow_all_symbols` | those two are the exception to the row above: a generation grants them like every other permission, so `{CONFIG_PERMISSIONS_RIGHT}` reaches them and `false` is the only value that may be written into either. Their list and path neighbours — `artifacts.allowed_roots`, `debug.allowed_symbols`, `upload_directory` — stay operator-only, so narrowing here is the scalar grant and nothing else. |
 
 A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.
 
@@ -1384,7 +1577,7 @@ Rules that hold on both platforms:
 - `AGENTIC_HIL_CONFIG` is optional and must be an absolute path to the configuration file.
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
-- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the deny-by-default skeleton again, so the round trip costs a human their customised permissions and gains an agent nothing.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, with every permission granted, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.
 """
 
 

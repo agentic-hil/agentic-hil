@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -677,22 +678,53 @@ def configured_workspace_path(config: AgenticHILConfig, value: str, field: str) 
     return str(lexical)
 
 
-def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str, required: bool) -> DebuggerConfig:
-    candidates = {
-        "openocd": ["openocd"],
-        "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
-        "pyocd": ["pyocd"],
-    }[debugger.type]
+def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> DebuggerConfig:
+    # Two rules, and between them "this entry is exempt from validation" and
+    # "nothing can drive this entry" are the same set.
+    #
+    # The shipped OpenOCD skeleton is the one entry pinning does not go looking
+    # for a toolchain for. It is also the only entry allowed to keep the two
+    # relative script names, and those two facts have to travel together:
+    # autodetection used to resolve `openocd` off PATH for it as well, so on any
+    # host with OpenOCD installed `agentic-hil init` left behind an entry that
+    # granted everything (hardci-hq#96), had a real program behind it, and drove
+    # a board with `interface/stlink.cfg` — skipped by `doctor` and exempt from
+    # the absolute-and-outside-the-workspace rule, because both keyed on it being
+    # the starter entry. It stays inert until somebody names an executable in it.
+    starter = debugger_is_starter_entry(debugger)
+    candidates = (
+        []
+        if starter
+        else {
+            "openocd": ["openocd"],
+            "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
+            "pyocd": ["pyocd"],
+        }[debugger.type]
+    )
     configured = debugger.executable
-    if configured is None and debugger.type == "stlink":
+    if configured is None and not starter and debugger.type == "stlink":
         from agentic_hil.backends.common import find_stm32_programmer_cli
 
         configured = find_stm32_programmer_cli()
+    # Everything else resolves as it always did, including the entry an operator
+    # has typed but not yet given an executable — that is the documented first
+    # edit of `init`, plug the board in, adopt. What changed is when the answer
+    # is read: whether this entry drives hardware is decided from the *pinned*
+    # executable, so an entry that acquired a toolchain here is validated whole
+    # rather than staying classified by what it looked like before.
     pinned = replace(
         debugger,
-        executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates, required=required),
+        executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates),
     )
-    if required and pinned.type == "openocd":
+    # And whether the scripts are validated is decided by the same predicate
+    # `doctor` uses, so the set that is checked and the set that was validated
+    # stay one set. Not by the mutation grants: under version 2 reading needs no
+    # grant at all, so an entry with allow_probe, allow_flash and allow_reset all
+    # false still runs `probe_target` — a real OpenOCD, started on scripts nothing
+    # had looked at, resolved out of OPENOCD_SCRIPTS and the per-user script
+    # directories. "Nothing can drive this entry" has to mean nothing, reads
+    # included, before validation may be skipped.
+    if debugger_can_reach_hardware(config, pinned) and not debugger_is_placeholder(pinned) and pinned.type == "openocd":
         pinned = replace(
             pinned,
             interface_cfg=configured_external_file(config, pinned.interface_cfg, f"{field_prefix}.interface_cfg"),
@@ -722,10 +754,13 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         for name, bus in config.can_buses.items()
     }
     # Every named debugger MUST be pinned and validated: a named entry could
-    # otherwise point a backend at an unvalidated executable. Each is required to
-    # resolve on its own grants, so a board with no enabled permission does not
-    # force an operator to install a toolchain it will never drive.
-    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}", debugger_access_enabled(named)) for name, named in config.debuggers.items()}
+    # otherwise point a backend at an unvalidated executable. An entry whose
+    # toolchain does not resolve is not a load failure — a generated
+    # configuration grants everything (hardci-hq#96), so that would refuse to
+    # load on any host that has not installed the backend yet. It becomes the
+    # placeholder instead: `doctor` says the check was skipped and names why, and
+    # the entry drives nothing until it has a toolchain.
+    debuggers = {name: pin_one_debugger(config, named, f"debuggers.{name}") for name, named in config.debuggers.items()}
     return replace(
         config,
         debuggers=debuggers,
@@ -788,9 +823,22 @@ def configured_executable(
     return str(resolved)
 
 
+# What pinning writes in place of an executable that resolved to nothing and did
+# not have to. The name is the record: a path with this prefix is not a toolchain
+# somebody configured, and `executable_is_disabled` is how a later reader — a
+# `doctor` run, `debugger_is_placeholder` — knows the difference on a config that
+# has already been pinned.
+DISABLED_EXECUTABLE_PREFIX = ".agentic-hil-disabled-"
+
+
 def disabled_executable_path(config: AgenticHILConfig, field: str) -> str:
     safe_field = re.sub(r"[^A-Za-z0-9_.-]", "_", field)
-    return str(Path(config.config_path).parent / f".agentic-hil-disabled-{safe_field}")
+    return str(Path(config.config_path).parent / f"{DISABLED_EXECUTABLE_PREFIX}{safe_field}")
+
+
+def executable_is_disabled(executable: str) -> bool:
+    """Whether this is the placeholder pinning writes rather than a real toolchain."""
+    return Path(executable).name.startswith(DISABLED_EXECUTABLE_PREFIX)
 
 
 def configured_external_file(config: AgenticHILConfig, value: str, field: str) -> str:
@@ -964,29 +1012,53 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
         yield
 
 
-# The deny-by-default skeleton every generated configuration starts from —
-# `agentic-hil init` on the CLI and the one-time agent provisioning path over
-# MCP write the same file. It lives here rather than beside either caller
-# because a second skeleton is a second set of defaults, and defaults are the
-# thing this file exists to keep honest.
+# The skeleton every generated configuration starts from — `agentic-hil init` on
+# the CLI and the one-time agent provisioning path over MCP write the same file.
+# It lives here rather than beside either caller because a second skeleton is a
+# second set of defaults, and defaults are the thing this file exists to keep
+# honest.
+#
+# Every permission in it is true (hardci-hq#96). The previous skeleton granted
+# nothing and left opening it as hand work on YAML, which cost this project's
+# owner a working day; the property that survives is not the closed start but the
+# direction of travel: an agent may write `false` into a permission and never
+# `true`, so the bench an operator receives is workable and narrowing it is what
+# an agent does on request. `project_config_set` enforces that from the document
+# rather than from the request.
 DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. Every device a test plan
 # names is locked machine-wide for the whole run and a device the plan does not
 # name is refused, so an observation from outside cannot reach into a run, and a
 # reader while no run holds the board disturbs nobody. Writing and
-# state-changing operations are unchanged and stay deny-by-default. A config
+# state-changing operations are unchanged. A config
 # written without this key is read under version 1, where reading still needs
 # allow_probe / allow_read.
 version: 2
+
+# What may be done to this file itself. All three start true, so an agent can
+# describe the bench, regenerate it from hardware discovery, and narrow any
+# permission here on your say-so — without you opening YAML first.
+#
+# Over MCP an agent can only ever narrow. `project_config_set` writes `false`
+# into a permission and no other value, so every one of these can go from true to
+# false and none of them back through that call.
+# allow_config_permissions_write is therefore the last one it can close: after
+# that it cannot change any permission again. Regenerating is yours —
+# `agentic-hil init --force` writes this file again with everything open.
+permissions:
+  allow_config_write: true
+  allow_config_description_write: true
+  allow_config_permissions_write: true
 
 target:
   name: "example-target"
   controller: "unknown-controller"
 
-# Every debug probe is a named entry, and each carries its own
-# deny-by-default permissions. Test-reactor plan steps address a probe by that
-# name. The MCP tools drive one probe: with exactly one entry it is bound
-# automatically, and with several they refuse rather than pick a board, so
-# multi-board work runs through `agentic-hil test-reactor`.
+# Every debug probe is a named entry, and each carries its own permissions,
+# scoped to that probe alone — narrowing one board does not narrow a second that
+# shares this file. Test-reactor plan steps address a probe by that name. The MCP
+# tools drive one probe: with exactly one entry it is bound automatically, and
+# with several they refuse rather than pick a board, so multi-board work runs
+# through `agentic-hil test-reactor`.
 debuggers:
   dut:
     type: "openocd"
@@ -997,15 +1069,19 @@ debuggers:
     target_cfg: "target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
-      allow_flash: false
-      allow_reset: false
-      allow_raw_debugger_commands: false
-      allow_mass_erase: false
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: true
+      # A mass erase cannot be taken back: whatever was on the board is gone and
+      # no later setting returns it. It starts true anyway, because the person
+      # running these benches owns them. Set it false — or ask an agent to — on
+      # any bench where a foreign board can end up in the socket.
+      allow_mass_erase: true
 
 debug:
   gdb_executable: null
   allowed_symbols: []
-  allow_all_symbols: false
+  allow_all_symbols: true
   max_dump_size_bytes: 1048576
 
 artifacts:
@@ -1025,7 +1101,7 @@ artifacts:
     - ".hex"
     - ".bin"
   max_upload_size_mb: 64
-  allow_upload: false
+  allow_upload: true
 
 com_ports: {}
 
@@ -1059,10 +1135,13 @@ recovery:
 # ---------------------------------------------------------------------------
 # One-time agent provisioning of a project configuration.
 #
-# An agent that finds no configuration may generate one. The file it generates
-# denies further configuration writes, so the step is a ratchet: the agent
-# enables itself up to observation — reading needs no grant under decision 0018 —
-# and never up to modification.
+# An agent that finds no configuration may generate one, and the file it
+# generates is workable: every permission true (hardci-hq#96). The ratchet did
+# not disappear with the closed start, it turned around. It used to be "an agent
+# enables itself up to observation and never up to modification"; it is now "an
+# agent can only ever reduce its own authority", because nothing on this surface
+# writes `true` into a permission. Both are the same statement about direction,
+# and only the second one hands an operator a bench they can use.
 #
 # The ratchet lives in the configuration itself, and there is no second state
 # store anywhere. Two states, both readable from the one file a human inspects:
@@ -1071,11 +1150,15 @@ recovery:
 # whether the agent may write it.
 #
 # Deleting the configuration out of band therefore lets an agent generate a fresh
-# one. That is a downgrade, not an escalation: what it can generate is the fixed
-# deny-by-default skeleton filled from hardware discovery, never content of its
-# own choosing, so the cycle yields no capability that was not already there —
-# only the loss of whatever a human had opened. Nothing on the MCP surface
-# deletes or moves a configuration.
+# one. Under the closed default that was a downgrade; under this one it restores
+# what a generation grants, and the honest thing to say about it is that an agent
+# with a shell was never held back by the file's contents — the deny rules
+# `setup` writes into the agent host are what keep its own file tools off this
+# path, and they are untouched. What the generation still cannot do is produce
+# content of its own choosing: it is this fixed skeleton filled from hardware
+# discovery, so what comes back is what an operator would have got from
+# `agentic-hil init`, minus whatever they had narrowed. Nothing on the MCP
+# surface deletes or moves a configuration.
 #
 # An external record was tried and removed. It could not be a place the same OS
 # user cannot write — that needs a second principal, the compromise 0018 refused
@@ -1083,18 +1166,24 @@ recovery:
 # a boundary, while it moved part of the effective policy out of the file an
 # operator reads and blocked an operator who deliberately deletes a
 # configuration to start over.
-# Every permission an agent-generated configuration must carry as false. The
-# write class of decision 0018, per section, plus the project-scoped grants that
-# close the configuration behind the agent.
+# Every permission a generated configuration decides, per section. The write
+# class of decision 0018, plus the project-scoped grants below. A generation
+# writes every one of them true; the list has to be complete in either direction,
+# because a flag missing from it is one the skeleton alone decides.
 GENERATED_WRITE_PERMISSIONS = {
     "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
 # The project-scoped grants, all three of them. A generated configuration writes
-# every one false and a regenerated one carries every one over: whichever list is
+# every one true and a regenerated one carries every one over: whichever list is
 # short is the one that hands out a grant nobody set or drops one somebody did.
 GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+# The two grants the schema puts directly on a fixed section rather than inside a
+# `permissions` block. A generation writes both true, so they belong in every
+# list that claims to say what a generated configuration grants — and in the key
+# model, or an operator could take them back only by opening the file.
+GENERATED_SECTION_PERMISSIONS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
 
 
 def permission_summary(config: AgenticHILConfig) -> JsonObject:
@@ -1103,12 +1192,17 @@ def permission_summary(config: AgenticHILConfig) -> JsonObject:
     Read off the parsed policy rather than off a document, which is what makes
     it the answer when there is no document left to read: a server whose
     configuration was removed underneath it still enforces what it loaded, and
-    this is the only shape in which an operator can be shown what that is."""
+    this is the only shape in which an operator can be shown what that is.
+
+    Complete, including the two section-level grants — a summary that leaves a
+    grant out is one an operator reads as "not granted"."""
     return {
         **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
         "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
         "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
         "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
+        "debug": {"allow_all_symbols": bool(config.debug.allow_all_symbols)},
+        "artifacts": {"allow_upload": bool(config.artifacts.allow_upload)},
     }
 
 
@@ -1167,37 +1261,59 @@ def provisionable_state_root(workspace: Path) -> Path:
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})
 
 
-def deny_every_write(document: JsonObject) -> JsonObject:
-    """Set every write permission in a generated document to false.
+def grant_every_permission(document: JsonObject) -> JsonObject:
+    """Set every permission in a generated document to true.
 
-    The generated skeleton already says so; this makes it true regardless of what
-    filled it in. A generated configuration reaches exactly as far as reading
-    does and no further, so the one thing that must not depend on a template
-    staying correct is which grants it hands out."""
+    The generated skeleton already says so; this makes it hold regardless of what
+    filled it in, and that is the part worth keeping from the version of this
+    function that wrote `false` everywhere: a generation decides the permission
+    state *completely* rather than half. Whatever a workspace profile asked for,
+    whatever a template edit forgot, the answer here is the same one, and it is
+    the same one for `agentic-hil init` and for `project_config_create`.
+
+    Nothing about it hands an agent something it can keep widening. Every
+    permission is open the moment the file exists, so there is nothing left to
+    gain by calling this again; the direction that still holds is the other one,
+    enforced in `configwrite.project_config_set`, where an agent may write
+    `false` into a permission and never `true`."""
     for section, flags in GENERATED_WRITE_PERMISSIONS.items():
         entries = document.get(section)
         if not isinstance(entries, dict):
             continue
         for entry in entries.values():
             if isinstance(entry, dict):
-                entry["permissions"] = dict.fromkeys(flags, False)
-    artifacts = document.get("artifacts")
-    if isinstance(artifacts, dict):
-        artifacts["allow_upload"] = False
-    debug = document.get("debug")
-    if isinstance(debug, dict):
-        debug["allow_all_symbols"] = False
-    document["permissions"] = dict.fromkeys(GENERATED_PROJECT_PERMISSIONS, False)
+                entry["permissions"] = dict.fromkeys(flags, True)
+    for section, grants in GENERATED_SECTION_PERMISSIONS.items():
+        node = document.get(section)
+        if isinstance(node, dict):
+            node.update(dict.fromkeys(grants, True))
+    document["permissions"] = dict.fromkeys(GENERATED_PROJECT_PERMISSIONS, True)
     return document
 
 
 def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> list[str]:
-    """Give a regenerated document exactly the grants the existing file has.
+    """Give a regenerated document exactly the grants ``existing`` holds.
 
     Regeneration refreshes what the hardware is, never what it may do. Every
-    permission is copied from the configuration on disk, by name, so the grants a
-    human made survive and no new one appears; a device the regenerated document
-    does not contain is returned to the caller rather than dropped in silence."""
+    permission is copied from ``existing`` by name, so a narrowing survives a call
+    taken to refresh a probe id and no permission that configuration does not hold
+    appears; a device the regenerated document does not contain is returned to the
+    caller rather than dropped in silence.
+
+    ``existing`` is the configuration its caller is bound to, which on the MCP
+    path is the one that server parsed at startup — not a fresh read of the file.
+    Servers do not reload, by decision, so a `project_config_set` narrowing made
+    since startup is on disk and not in this object, and a regeneration in that
+    same session puts the loaded grant back. That is accepted: regeneration is
+    creation and belongs to the operator (hardci-hq#96), and the ratchet it is not
+    bound by is the MCP *write* path. Restarting the server onto the narrowed file
+    is what makes the narrowing bind here too — and it is the same restart a
+    `config_stale` result already asks for.
+
+    So this is not a promise that regeneration cannot widen. It is that the values
+    written come from a configuration rather than from the caller: nothing an
+    agent sends decides a permission here, and every entry already known keeps
+    what its loaded configuration says."""
     sources: dict[str, dict[str, Any]] = {
         "debuggers": dict(existing.debuggers),
         "com_ports": dict(existing.com_ports),
@@ -2121,6 +2237,109 @@ def debugger_access_enabled(debugger: DebuggerConfig) -> bool:
     return any([debugger.permissions.allow_probe, debugger.permissions.allow_flash, debugger.permissions.allow_reset])
 
 
+@cache
+def _skeleton_debugger() -> JsonObject:
+    """The one `debuggers` entry the shipped skeleton writes, parsed once."""
+    loaded = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    entries = loaded.get("debuggers") if isinstance(loaded, dict) else None
+    entry = next((value for value in entries.values() if isinstance(value, dict)), {}) if isinstance(entries, dict) else {}
+    return entry
+
+
+def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
+    """Whether this is the shipped skeleton entry, untouched in every driving field.
+
+    Asked before pinning, and the only entry pinning refuses to find a toolchain
+    for. Type and both script names exactly as the skeleton writes them, and no
+    executable named: that combination is the one entry allowed to keep relative
+    script names, and it may keep them only for as long as nothing can run them.
+    Autodetecting `openocd` for it would make "exempt from validation" and
+    "drives nothing" two different sets on any host with OpenOCD installed, which
+    is the hole this predicate closes.
+
+    Untouched has to mean untouched, identity included. The predicate once asked
+    only about the type, the two script names and the absent executable, and
+    called an entry with `probe_id: "066AFF49..."` in it a starter — so a bench
+    somebody had identified, on a host with OpenOCD on PATH, resolved no
+    executable, took the disabled marker instead, and was skipped by `doctor` for
+    looking untouched. An entry that names a board is not the shipped skeleton
+    however its scripts read; it resolves its toolchain normally and its scripts
+    are validated with everything else's, which for OpenOCD means absolute files
+    outside the workspace.
+
+    An entry an operator has typed is outside this in the same way — `type:
+    stlink` on the skeleton, the documented first edit of `init`, plug the board
+    in, adopt — and it simply has no relative scripts to be exempt about, because
+    no other backend reads them.
+    """
+    skeleton = _skeleton_debugger()
+    return (
+        debugger.executable is None
+        and debugger.type == skeleton.get("type")
+        and debugger.interface_cfg == skeleton.get("interface_cfg")
+        and debugger.target_cfg == skeleton.get("target_cfg")
+        # Nothing that names which physical board this is, or what runs on it.
+        # Each of these is a field only a person or an adoption fills in.
+        and debugger.probe_id is None
+        and debugger.resource_id is None
+        and debugger.target_type is None
+        and debugger.target is None
+        and debugger.flash_address is None
+    )
+
+
+def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
+    """Whether this entry has no toolchain behind it and so drives nothing.
+
+    One rule, asked of the pinned entry: no executable named, or the marker
+    pinning substituted because nothing resolved. That marker is what makes the
+    answer survive pinning, which replaces an unresolved executable with a path
+    under the configuration directory that deliberately does not exist.
+
+    It has to be asked because hardci-hq#96 made every permission true by
+    default. Two rules key on "this bench is meant to drive hardware": config
+    load insists such an entry's toolchain resolves and, for OpenOCD, that its
+    scripts are absolute files outside the workspace, and `doctor` probes it. A
+    granted permission used to be a deliberate human edit and so a good signal
+    for both; now it is what a generation writes, so the starter file would
+    otherwise demand an installed toolchain the moment `init` produced it.
+
+    The predicate used to answer "still holds both skeleton script names"
+    instead, and that was wrong in the one direction that matters: an entry with
+    a real OpenOCD executable behind it and those two relative names in it was
+    exempted from script validation and skipped by `doctor` while
+    `backends/openocd.py` passed exactly those names to a real program. Pinning
+    OpenOCD's working directory to its own executable's directory keeps the
+    workspace out of the search, but `OPENOCD_SCRIPTS` and the per-user script
+    directories are still in it, so what ran was neither inert nor validated.
+    An entry that can drive is now an entry that is checked, and an entry that is
+    exempt is one nothing can drive.
+    """
+    return debugger.executable is None or executable_is_disabled(debugger.executable)
+
+
+def debugger_can_reach_hardware(config: AgenticHILConfig, debugger: DebuggerConfig) -> bool:
+    """Whether anything this configuration permits reaches this entry's board.
+
+    The read model belongs in this answer, and leaving it out was the hole:
+    `debugger_access_enabled` names the three mutation grants, but under version 2
+    reading needs no grant at all, so an entry with all three false is still
+    probed. Nothing was validated for it and `doctor` skipped it, while
+    `probe_target` on it started a real debugger. Under version 1 the union is
+    just the three grants again, which is what that model says."""
+    return config.read_free or debugger_access_enabled(debugger)
+
+
+def debugger_drives_hardware(config: AgenticHILConfig, debugger: DebuggerConfig) -> bool:
+    """Whether this entry can reach a board: a toolchain behind it and a way in.
+
+    The single answer config load and `doctor` share, so the set `doctor` checks
+    stays exactly the set config load validated — for OpenOCD that means its
+    scripts had to be absolute files outside the workspace. Asked of the pinned
+    entry, because pinning is where an executable is resolved."""
+    return debugger_can_reach_hardware(config, debugger) and not debugger_is_placeholder(debugger)
+
+
 def debug_interface_config(raw: JsonObject) -> DebugInterfaceConfig:
     return DebugInterfaceConfig(
         gdb_executable=optional_string(raw.get("gdb_executable")),
@@ -2408,7 +2627,7 @@ def reject_read_permissions(raw: JsonObject, config_path: str, version: int) -> 
                         "field": f"{section}.{name}.permissions.{flag}",
                         "migration": {
                             "remove": f"{section}.<name>.permissions.{flag}",
-                            "keep": "allow_flash, allow_reset, allow_write, allow_mass_erase and allow_raw_debugger_commands are unchanged and still deny-by-default",
+                            "keep": "allow_flash, allow_reset, allow_write, allow_mass_erase and allow_raw_debugger_commands are unchanged; this migration touches the read permissions and nothing else",
                             "instead": "Declare the device in the test description; it is locked for the whole run, and a device the description does not name is refused.",
                         },
                     },

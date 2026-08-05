@@ -113,7 +113,12 @@ def main(argv: list[str] | None = None) -> int:
     forwarded = [argument for argument in options.pytest_args if argument != "--"]
     script = SCRIPT.format(args=" ".join(forwarded) if forwarded else "-q")
 
-    command = ["docker", "run", "--rm", "-v", f"{docker_mount_source(root)}:/src:ro", image, "bash", "-c", script]
+    # --init, or `bash -c` is PID 1 and reaps nothing: a SIGKILLed process-group
+    # leader then lingers as a zombie that still counts as a live group member,
+    # and test_process_cleanup_handles_exited_group_leader fails in the container
+    # while passing everywhere an init exists. The CI runners have one; give the
+    # container one too so this runs what CI runs.
+    command = ["docker", "run", "--rm", "--init", "-v", f"{docker_mount_source(root)}:/src:ro", image, "bash", "-c", script]
     print(f"{image}: the committed tree at {root}", flush=True)
     # `check=False` so we forward pytest's exit status instead of raising: a
     # failing suite must leave this process with pytest's code, not a traceback.

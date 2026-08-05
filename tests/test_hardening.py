@@ -9,11 +9,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import replace
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 
 from agentic_hil.artifacts import ArtifactManager
@@ -30,13 +32,19 @@ from agentic_hil.config import (
     _close_windows_handles,
     _windows_hold_directory_chain,
     config_schema_text,
+    debugger_drives_hardware,
+    debugger_is_placeholder,
+    debugger_is_starter_entry,
     derived_state_directory,
+    executable_is_disabled,
     load_authoritative_config,
     load_config,
+    project_config_path,
     project_state_directory,
 )
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.gdbmi import GdbMiClient
+from agentic_hil.knowledge import CONFIG_WORKED_EXAMPLE
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import (
     append_canonical_audit_log,
@@ -56,7 +64,7 @@ from agentic_hil.report import (
 )
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import CanBusConfig
+from agentic_hil.types import CanBusConfig, DebuggerConfig
 
 WAIT_TIMEOUT_S = 5.0
 POLL_INTERVAL_S = 0.01
@@ -1331,6 +1339,250 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
 
     assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_scripts_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both skeleton script names plus a real executable is a driving entry.
+
+    The placeholder exemption used to key on exactly this shape — an OpenOCD
+    entry still holding `interface/stlink.cfg` and `target/stm32f4x.cfg` — and so
+    let an entry with a real program behind it and every permission granted skip
+    script validation and `doctor` alike, while `backends/openocd.py` passed
+    those two relative names to that program. What the entry can drive is what
+    decides now, and this one can."""
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_flash": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    assert "interface/stlink.cfg" in config_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry nobody configured stays inert, on a host that has OpenOCD.
+
+    This is the other half of the rule above. Autodetection used to resolve
+    `openocd` off PATH for the starter entry too, so on such a host `agentic-hil
+    init` left behind an entry that granted everything (hardci-hq#96), had a real
+    program behind it, and drove a board with the skeleton's two relative script
+    names — exempt from validation and skipped by `doctor`, because both keyed on
+    it being the starter entry. It names no toolchain and nothing finds it one."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=None,
+        permissions={"allow_flash": True, "allow_reset": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    # The shipped skeleton names no executable; the conftest writer always does.
+    config_file = project_config_path(workspace)
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["executable"] = None
+    document["debuggers"]["dut"]["probe_id"] = None
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+
+    config = load_authoritative_config(workspace)
+
+    entry = config.debuggers["dut"]
+    assert debugger_is_placeholder(entry), "an entry nobody configured must not acquire a toolchain at load"
+    assert not debugger_drives_hardware(config, entry)
+    assert entry.executable is not None and executable_is_disabled(entry.executable)
+    # And the relative script names it still carries reach no program: the entry
+    # is inert, which is the only reason it may keep them.
+    assert entry.interface_cfg == "interface/stlink.cfg"
+
+
+def test_an_openocd_entry_with_no_mutation_grant_is_still_validated_under_version_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading is a way in, so script validation may not key on the write grants.
+
+    `allow_probe`, `allow_flash` and `allow_reset` all false, and under version 2
+    that stops nothing: reading needs no grant, so `probe_target` on this entry
+    starts the real OpenOCD behind it. Validation used to be conditional on those
+    three, so this exact configuration loaded with two relative script names in
+    it and `doctor` skipped the entry — a debugger run on scripts resolved out of
+    OPENOCD_SCRIPTS and the per-user script directories, which no part of this
+    file states."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=2,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": False, "allow_flash": False, "allow_reset": False, "allow_raw_debugger_commands": False, "allow_mass_erase": False},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_a_read_free_entry_without_mutation_grants_is_checked_by_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The set `doctor` checks is the set config load validated, read model included.
+
+    Same entry as above with its scripts made absolute: it loads, and it must not
+    then be skipped. An entry nothing validated and nothing checks, that a probe
+    read still reaches, is the pair of holes this predicate closes at once."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=2,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": False, "allow_flash": False, "allow_reset": False, "allow_raw_debugger_commands": False, "allow_mass_erase": False},
+    )
+
+    config = load_authoritative_config(workspace)
+
+    entry = config.debuggers["dut"]
+    assert not debugger_is_placeholder(entry)
+    assert debugger_drives_hardware(config, entry), "a read-free entry with a toolchain is reachable and must be checked"
+
+
+def test_a_configured_openocd_entry_resolves_from_path_and_is_validated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`executable: null` on an identified bench is a PATH lookup, not a starter.
+
+    The starter exemption used to ask only about the type, the two skeleton
+    script names and the absent executable, so a bench somebody had identified
+    with a probe serial — the shape the served worked example shows — was called
+    untouched on a host that has OpenOCD: no PATH candidate was tried, the entry
+    took the disabled marker, and `doctor` skipped a fully configured bench. An
+    entry that names a board is not the shipped skeleton."""
+    skeleton = DebuggerConfig(
+        type="openocd",
+        executable=None,
+        probe_id=None,
+        target_type=None,
+        interface="SWD",
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+        flash_address=None,
+        timeout_s=60,
+    )
+    assert debugger_is_starter_entry(skeleton), "the untouched skeleton entry is the one exemption"
+    for named in (
+        replace(skeleton, probe_id="066AFF495451885087171450"),
+        replace(skeleton, resource_id="bench-a"),
+        replace(skeleton, target_type="stm32f4x"),
+        replace(skeleton, flash_address="0x08000000"),
+    ):
+        assert not debugger_is_starter_entry(named), "an entry that names a board is not untouched"
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=2,
+        debugger_executable=None,
+        probe_id="066AFF495451885087171450",
+    )
+    config_file = project_config_path(workspace)
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["executable"] = None
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+
+    config = load_authoritative_config(workspace)
+
+    entry = config.debuggers["dut"]
+    assert entry.executable == str(FAKE_OPENOCD.resolve())
+    assert not debugger_is_placeholder(entry)
+    assert debugger_drives_hardware(config, entry)
+
+
+def test_a_configured_openocd_entry_from_path_keeps_no_relative_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the same rule: resolved from PATH means validated too.
+
+    The identified entry above with the skeleton's relative script names still in
+    it. It is not the starter entry, so it acquires the toolchain — and having
+    one, it has to say where its scripts are."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=2,
+        debugger_executable=None,
+        probe_id="066AFF495451885087171450",
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    config_file = project_config_path(workspace)
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["executable"] = None
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+
+
+def test_the_served_worked_example_is_not_an_inert_starter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The example a caller copies has to satisfy the rules a caller is held to.
+
+    It shows an identified OpenOCD bench with `executable: null`, so under the
+    corrected starter predicate it resolves from PATH and its scripts are
+    validated — which means the example's own scripts must be absolute paths
+    outside the workspace, or the file it teaches people to write is one config
+    load refuses."""
+    example = yaml.safe_load(CONFIG_WORKED_EXAMPLE)
+    entry = example["debuggers"]["dut"]
+
+    assert entry["executable"] is None
+    assert entry["probe_id"]
+    for field in ("interface_cfg", "target_cfg"):
+        script = PurePosixPath(entry[field])
+        assert script.is_absolute() or entry[field][1:3] == ":/", f"{field} must be absolute"
+        assert not entry[field].startswith(example["workspace_root"]), f"{field} must be outside the workspace"
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=2,
+        debugger_executable=None,
+        probe_id=entry["probe_id"],
+        interface_cfg=entry["interface_cfg"],
+        target_cfg=entry["target_cfg"],
+    )
+    config_file = project_config_path(workspace)
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["executable"] = None
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+
+    # The example's own scripts do not exist on this host, so the failure it must
+    # not produce is the starter one — a disabled marker and a skipped bench.
+    # Whatever load says, it says it about a resolved toolchain.
+    try:
+        config = load_authoritative_config(workspace)
+    except ConfigError as error:
+        assert error.error_type == "config_invalid"
+        assert error.details["field"].startswith("debuggers.dut.")
+    else:
+        assert not debugger_is_placeholder(config.debuggers["dut"])
 
 
 def test_artifact_root_symlink_cannot_pivot_after_startup(tmp_path: Path) -> None:

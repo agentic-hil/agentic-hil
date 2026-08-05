@@ -424,31 +424,38 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert filled["provenance"]["last_modified_by"] == ACTOR_HUMAN
     assert filled["provenance"]["last_modified_via"] == "cli:adopt-hardware"
-    # No grant was needed and none appeared. The skeleton names no project
-    # permissions at all, and it still names none.
-    assert CONFIG_DESCRIPTION_RIGHT not in (filled.get("permissions") or {})
+    # No grant was needed and none moved. The skeleton names all three project
+    # permissions granted, and they are still exactly what it named: this path
+    # carries hardware identity and touches no permission in either direction.
+    assert filled["permissions"] == {
+        CONFIG_WRITE_RIGHT: True,
+        CONFIG_DESCRIPTION_RIGHT: True,
+        CONFIG_PERMISSIONS_RIGHT: True,
+    }
 
     checked = doctor()
     assert checked["ok"] is True, checked
     assert checked["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert checked["target"]["controller"] == "stm32f446re"
     assert checked["com_ports"]["dut_uart"]["device"] == "COM9"
-    # Green, and honestly so: the skeleton grants nothing, so the debugger check
-    # is skipped rather than passed. That is the state the session behind #76 was
-    # in — the complaint was not that the check failed but that the file held
-    # placeholders and nothing could fill them.
-    assert checked["debugger"]["skipped"] is True
+    # Green, and the check really ran — this is the whole of hardci-hq#96 in one
+    # assertion. The skeleton granted everything, so the board this command just
+    # entered is one this bench drives, and nobody opened a YAML file between the
+    # empty directory and here. Under the closed default the same run reached a
+    # green doctor with `skipped: true` and a hand edit still to come.
+    assert checked["debugger"].get("skipped") is not True
+    assert checked["debuggers"]["dut"]["check"]["ok"] is True
+    assert checked["debuggers"]["dut"]["check"]["backend"] == "stlink"
 
-    # And once the operator grants what this bench is for — the one edit that is
-    # theirs to make and that no path here can make for them — the check really
-    # runs, against the probe this command entered.
-    opened = document_of(path)
-    opened["debuggers"]["dut"]["permissions"]["allow_reset"] = True
-    path.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
-    exercised = doctor()
-    assert exercised["ok"] is True, exercised
-    assert exercised["debuggers"]["dut"]["check"]["ok"] is True
-    assert exercised["debuggers"]["dut"]["check"]["backend"] == "stlink"
+    # And a permission the operator asks to have taken away is taken away, on
+    # the same path, with no editor either.
+    tools = service(Path(load_authoritative_config(Path.cwd()).workspace_root))
+    try:
+        narrowed = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]})
+    finally:
+        tools.close()
+    assert narrowed["ok"] is True, narrowed
+    assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
 
 
 # ---------------------------------------------------------------------------

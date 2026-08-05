@@ -8,7 +8,12 @@ from pathlib import Path
 import yaml
 
 from agentic_hil import __version__
-from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, project_config_adopt_hardware
+from agentic_hil.adopt import (
+    PROJECT_CONFIG_ADOPT,
+    configured_probe_resource,
+    discover_under_hardware_lease,
+    project_config_adopt_hardware,
+)
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bootstrap import apply_discovery_to_template, discover_attached_hardware
 from agentic_hil.can import CanBusService
@@ -19,7 +24,7 @@ from agentic_hil.config import (
     ConfigError,
     authoritative_config_target,
     carry_over_permissions,
-    deny_every_write,
+    grant_every_permission,
     load_authoritative_config,
     permission_summary,
     provisionable_state_root,
@@ -31,8 +36,10 @@ from agentic_hil.config import (
 )
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
+    NOT_STARTED,
     PROJECT_CONFIG_DESCRIBE,
     PROJECT_CONFIG_SET,
+    permission_surface,
     project_config_describe,
     project_config_set,
 )
@@ -372,8 +379,11 @@ class AgenticHILToolService:
             "bench_run_status": lambda: self.bench_run_status(),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
-            # person set permissions.allow_config_write on it.
-            PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config),
+            # person set permissions.allow_config_write on it. It also reads a
+            # board, so it goes in with this service's own coordinator and is
+            # refused while this service holds a run or a session, exactly like
+            # the adoption call below.
+            PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config, coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_DESCRIBE: lambda: project_config_describe(Path(self.config.work_dir), self.config, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_SET: lambda: project_config_set(Path(self.config.work_dir), self.config, args.get("changes"), open_holds=self.open_hardware_holds()),
             # This one reads a board, so it goes in with this service's own
@@ -909,16 +919,18 @@ def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
 
 
 def audited_hardware_tools() -> set[str]:
-    # project_config_adopt_hardware is here because it reads a probe, not because
-    # it writes the configuration: it enumerates and connects in HOTPLUG mode,
-    # which is the same board contact debugger_probes_list makes. So it is
-    # blocked while this bench is quarantined, its audit trail is proven writable
-    # before the board is touched, and an exception inside it quarantines.
+    # project_config_adopt_hardware and project_config_create are here because
+    # they read a probe, not because they write the configuration: both enumerate
+    # and connect in HOTPLUG mode, which is the same board contact
+    # debugger_probes_list makes. So they are blocked while this bench is
+    # quarantined, their audit trail is proven writable before the board is
+    # touched, and an exception inside either quarantines and comes back as the
+    # standard structured hardware failure rather than escaping the service.
     return {
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
-        PROJECT_CONFIG_ADOPT,
+        PROJECT_CONFIG_ADOPT, PROJECT_CONFIG_CREATE,
     }
 
 
@@ -1034,14 +1046,17 @@ def debugger_effect_tools() -> set[str]:
 # The engine is bootstrap.discover_attached_hardware(): probe id, controller and
 # the probe's own COM device are precisely the values that are laborious to write
 # by hand and impossible to guess, and they are the ONLY values the agent side
-# contributes. Everything else is the deny-by-default skeleton. The agent authors
-# no content, so it never decides allow_flash — an agent that could write the
-# contents of this file would be granting itself the hardware, not configuring it.
+# contributes. Everything else is the fixed skeleton. The agent authors no
+# content, so it does not decide allow_flash either — the skeleton does, and from
+# hardci-hq#96 it decides it open, so the bench an operator gets back is one they
+# can use without opening an editor.
 #
-# That closure is also why the gate needs no state outside the configuration. A
-# configuration deleted out of band lets an agent generate a fresh one, and the
-# fresh one is this same skeleton: the cycle costs a human their customised
-# permissions and yields the agent nothing it did not already have.
+# The gate still needs no state outside the configuration. A configuration
+# deleted out of band lets an agent generate a fresh one, and the fresh one is
+# this same skeleton — what the cycle costs is whatever a person or an agent had
+# narrowed, and what it yields is the file `agentic-hil init` writes. The
+# invariant is no longer in what the generation withholds; it is in the direction
+# `project_config_set` allows, which is `true` to `false` and never back.
 PROJECT_CONFIG_CREATE = "project_config_create"
 # The fixed profile the generated document is filled from. It carries names and
 # transport defaults, never a permission: a profile read out of the workspace
@@ -1052,33 +1067,121 @@ GENERATED_PROJECT_PROFILE: JsonObject = {
     "debuggers": {"dut": {"timeout_s": 60, "permissions": {}}},
     "com_ports": {"dut_uart": {"baudrate": 115200, "permissions": {}}},
 }
-GENERATED_CONFIG_HEADER = """# Generated by Agentic HIL for an AI agent that found no configuration for this
+GENERATED_CONFIG_HEADER_OPENING = """# Generated by Agentic HIL for an AI agent that found no configuration for this
 # workspace, out of what was attached to this machine at the time. No part of it
-# was authored by the agent: every permission below is false, including
-# permissions.allow_config_write, which is what stops the same agent from
-# widening anything it wrote here. Reading a device needs no permission, so this
-# file lets the agent observe the bench and nothing more.
+# was authored by the agent: the hardware facts come from discovery, and the
+# permissions come from the fixed skeleton or from the configuration the server
+# that wrote this had loaded.
+"""
+GENERATED_CONFIG_HEADER_CLOSING = """#
+# You are the one who narrows it. Tell the agent in prose which permission a bench
+# should not have and it writes false here, with a note in `provenance`. That write
+# is `project_config_set`, and it puts false into a permission and no other value,
+# so nothing an agent sends through it widens this file — closing
+# permissions.allow_config_permissions_write is the last permission change it can
+# make there at all.
 #
-# You are the one who opens it. Set the permission a task actually needs, and set
-# permissions.allow_config_write: true only if you want the agent to regenerate
-# this file from hardware discovery later.
+# Regenerating is the other door and it is not that ratchet. Both
+# `agentic-hil init --force` at your shell and `project_config_create` over MCP,
+# while permissions.allow_config_write is true, write this file again from
+# attached hardware: entries already in it keep the permissions of the
+# configuration the writing server loaded, an entry the discovery finds for the
+# first time arrives with everything granted, and a file that has been deleted
+# comes back granting everything. That loaded state is the one it parsed at
+# startup — a narrowing made over MCP since then is in this file and not in what
+# that server holds, so a regeneration before it is restarted writes the older,
+# wider value back. Set allow_config_write to false if this bench should not be
+# regenerated from the agent side at all.
+#
+# One combination is worth knowing before the first flash: validated flashing and
+# unrestricted debugger access are mutually exclusive, so while
+# allow_raw_debugger_commands or allow_mass_erase is true on a probe,
+# flash_firmware on that probe is refused. Take away whichever of the two a bench
+# does not need — or ask the agent to — and flashing works.
 """
 
 
-def project_config_create(workspace: Path, existing: AgenticHILConfig | None) -> JsonObject:
+def narrowed_permissions(document: JsonObject) -> list[str]:
+    """Every permission this document does *not* grant, by dotted path.
+
+    Read off the document that is about to be written, which is the only place
+    the answer is. A generation grants everything; a regeneration puts the
+    permissions of the file it replaces back on the entries that were already
+    there, so a document leaving this list empty and one leaving it long are both
+    ordinary outcomes of the same call — and a result that claimed the first
+    while writing the second would be telling an operator their narrowed bench
+    had just been reopened."""
+    return sorted(path for path, granted in permission_surface(document).items() if not granted)
+
+
+def _generated_config_header(document: JsonObject) -> str:
+    """The header of a generated file, saying what the file below it says.
+
+    Not a fixed sentence. `# every permission below is true` was written on a
+    regeneration that had just carried a narrowing over, and a header that
+    contradicts the document under it is worse than no header: it is the one part
+    a person reads before the keys."""
+    narrowed = narrowed_permissions(document)
+    if not narrowed:
+        middle = (
+            "# Every permission below is true: probing, resetting, raw debugger commands,\n"
+            "# mass erase, and the serial and CAN writes of every entry here. Flashing is\n"
+            "# granted too and is the one action that does not follow from its permission\n"
+            "# alone — see the interlock at the end of this header.\n"
+        )
+    else:
+        listed = "\n".join(f"#   {path}" for path in narrowed)
+        middle = (
+            f"# {len(narrowed)} permission(s) below are false, carried over from the configuration\n"
+            "# the writing server had loaded rather than reset to the skeleton's open default:\n"
+            f"{listed}\n"
+            "# Everything else below is true.\n"
+        )
+    return GENERATED_CONFIG_HEADER_OPENING + middle + GENERATED_CONFIG_HEADER_CLOSING
+
+
+def project_config_create(
+    workspace: Path,
+    existing: AgenticHILConfig | None,
+    *,
+    coordinator: HardwareCoordinator | None = None,
+    open_holds: JsonObject | None = None,
+) -> JsonObject:
     """Generate this workspace's authoritative configuration.
 
     ``existing`` is the configuration this server is bound to, or None when it
     started without one. It is never taken from a caller's argument: generation
     is for the workspace the server is bound to and for no other, and no
-    parameter exists that could name a different one."""
+    parameter exists that could name a different one.
+
+    ``coordinator`` and ``open_holds`` are the caller's own, and a configured
+    server passes both. Generation reads a board — hardware discovery enumerates
+    probes and connects in HOTPLUG mode — so it is a hardware call and is held to
+    what every hardware call on this machine is held to: it is refused while this
+    server holds a run or a session, and the probe it reads is leased, so a board
+    another process owns answers `device_busy` instead of being connected to
+    behind its owner's back. A server that has no configuration yet has neither,
+    and there is nothing for it to coordinate against: no policy, no state root,
+    no lease directory, and no run that could be holding anything."""
     try:
-        return _project_config_create(workspace, existing)
+        return _project_config_create(workspace, existing, coordinator=coordinator, open_holds=open_holds)
     except ConfigError as error:
         return {"tool": PROJECT_CONFIG_CREATE, **error.to_dict(), "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 
-def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -> JsonObject:
+def _project_config_create(
+    workspace: Path,
+    existing: AgenticHILConfig | None,
+    *,
+    coordinator: HardwareCoordinator | None,
+    open_holds: JsonObject | None,
+) -> JsonObject:
+    # Before the lock and before discovery. Those holds were taken under the
+    # policy this file states, and a regeneration replaces that policy while it
+    # also talks to the board the run is holding — one step earlier than a
+    # configuration write is refused, for the same reason adoption refuses here.
+    if existing is not None and open_holds:
+        return _create_in_open_run_refusal(existing, open_holds)
     target_path = authoritative_config_target(workspace)
     with secure_user_file_lock(target_path):
         # The gate is the configuration and nothing else. A server bound to one
@@ -1093,24 +1196,45 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         # Read-only, and the values it returns are the only ones the agent side
         # contributes. A file generated without discovery would name no probe and
         # no port, which leaves the project worse off than the
-        # config_file_not_found it started from, so it refuses instead.
-        discovery = discover_attached_hardware()
+        # config_file_not_found it started from, so it refuses instead. Read-only
+        # is not the same as free, though: this enumerates probes and connects to
+        # one, so on a configured server it goes in under that server's own
+        # coordinator.
+        discovery, refusal = _discover_for_generation(current, coordinator)
+        if refusal is not None:
+            return refusal
         if not overall_success(discovery):
             return {
                 **discovery,
                 "tool": PROJECT_CONFIG_CREATE,
                 "summary": f"{discovery.get('summary', 'Hardware discovery failed.')} No configuration was generated.",
                 "workspace_root": str(workspace),
-                "next_step": "Attach exactly one supported probe and target, then call this tool again. Nothing was written.",
+                # A refusal discovery itself produced keeps its own next step. A
+                # probe another process is holding aborts the read from inside
+                # `before_connect`, and telling that caller to attach a probe
+                # would be advice about the one thing that is not the problem.
+                "next_step": str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written."),
             }
         state_root = provisionable_state_root(workspace)
         document = _generated_document(workspace, state_root, discovery)
-        # Deny first in both cases, so that "this tool introduces no grant" holds
-        # by construction rather than by reading what filled the skeleton in. A
-        # regeneration then puts back exactly the grants already on disk.
-        deny_every_write(document)
+        # Grant everything in both cases, so that "a generation decides the
+        # permission state completely" holds by construction rather than by
+        # reading what filled the skeleton in — a workspace profile must not be
+        # what decides a permission on this path either way. A regeneration then
+        # puts back exactly the permissions of `current`, so a bench somebody
+        # narrowed does not come back open off a call made to refresh a probe id.
+        #
+        # `current` is this server's own loaded configuration whenever it has one,
+        # and deliberately not a fresh read: the file may have been narrowed since
+        # startup and the policy this server enforces has not moved with it, so
+        # generating against the file would write permissions this server is not
+        # running under. The cost is stated rather than fixed — in one session a
+        # narrow-then-regenerate puts the loaded grant back, which is accepted
+        # because regeneration is creation and the operator's (hardci-hq#96).
+        grant_every_permission(document)
         dropped: list[str] = [] if current is None else carry_over_permissions(document, current)
-        text = GENERATED_CONFIG_HEADER + yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
+        narrowed = narrowed_permissions(document)
+        text = _generated_config_header(document) + yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
 
         previous_text = secure_optional_read_text(target_path)
         write_generated_config(target_path, workspace, text)
@@ -1133,17 +1257,20 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
     result = {
         "ok": True,
         "tool": PROJECT_CONFIG_CREATE,
-        "summary": (
-            "Deny-by-default project configuration generated from attached hardware; it denies further configuration writes by this server."
-            if created
-            else "Project configuration regenerated from attached hardware; every permission was carried over unchanged."
-        ),
+        # Read off the document that was written, never asserted. A regeneration
+        # carries the permissions of the configuration this server loaded onto the
+        # entries that were already in it and gives anything newly discovered the
+        # skeleton's open default, so "every permission is granted" and "every
+        # permission was carried over unchanged" are each true only sometimes, and
+        # an operator cannot tell which from a sentence that never varies.
+        "summary": _generated_summary(created=created, narrowed=narrowed),
         "created": created,
         "path": written.config_path,
         "workspace_root": written.workspace_root,
         "state_root": written.state_root,
         "optional_override": f"{CONFIG_ENV}={written.config_path}",
         "permissions": permission_summary(written),
+        "narrowed_permissions": narrowed,
         "dropped_entries": dropped,
         # A server that started without a configuration binds the one it just
         # wrote. A server that already had one keeps serving what it loaded,
@@ -1155,9 +1282,144 @@ def _project_config_create(workspace: Path, existing: AgenticHILConfig | None) -
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
-        "next_steps": _generated_next_steps(written, created=created),
+        "next_steps": _generated_next_steps(written, created=created, narrowed=narrowed),
     }
     return result if status is None else with_config_status(result, status)
+
+
+def _generated_summary(*, created: bool, narrowed: list[str]) -> str:
+    if created:
+        return (
+            "Project configuration generated from attached hardware with every permission granted; this server can probe, "
+            "reset and erase the bench from it and write to its serial and CAN entries, and can narrow any of those on the "
+            "operator's request. `flash_firmware` is granted and still refused until one of the two conflicting grants it "
+            "is interlocked against is taken away — see `next_steps`."
+        )
+    if not narrowed:
+        return (
+            "Project configuration regenerated from attached hardware; every permission in it is granted. The "
+            "permissions come from the configuration this server loaded at startup, so a narrowing made over MCP since "
+            "then is not among them."
+        )
+    return (
+        f"Project configuration regenerated from attached hardware; {len(narrowed)} permission(s) were carried over as "
+        "false from the configuration this server loaded at startup, and every other permission in it is granted. "
+        "`narrowed_permissions` names them; anything this regeneration discovered for the first time is not among them "
+        "and starts open, and so is anything narrowed over MCP since this server started."
+    )
+
+
+def _create_in_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_CREATE,
+        "error_type": "config_write_in_open_run",
+        "summary": (
+            "This server is holding hardware right now. Regenerating reads the attached probe and replaces the policy "
+            "those holds were taken under, so nothing was read and nothing was written."
+        ),
+        "open_holds": open_holds,
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        **remediation_fields("config_write_in_open_run"),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": True,
+    }
+
+
+def _discover_for_generation(current: AgenticHILConfig | None, coordinator: HardwareCoordinator | None) -> tuple[JsonObject, JsonObject | None]:
+    """Read what is attached, holding everything a probe read holds.
+
+    Not a partial copy of the adoption path any more but the same function:
+    `discover_under_hardware_lease` proves the audit trail writable before the
+    board is touched, locks the enumeration pseudo-resource and the probe the
+    enumeration selects, writes the read to the audit trail, checks every release
+    and re-commits the state the leases ended in, and quarantines on an
+    exception, a failed release or a record it cannot write. A regeneration that
+    reported `ok: true` over a board this process is still holding was the one
+    thing that could not be allowed to differ between the two callers, so they no
+    longer have two implementations to differ in.
+
+    ``resources`` is what this call is about, and for a regeneration that is every
+    configured entry that names a physical board — not only the bound one. The
+    file being rewritten states the policy for all of them, so none may be under
+    another owner's run while it is replaced, and the entry another process holds
+    through its `resource_id` is exactly the case a lock on the enumerated serial
+    alone would miss.
+
+    A workspace with no configuration at all has none of that machinery — no
+    policy to audit against, no `state_root` under which a lease could be
+    recorded — and it is also the one case where nothing on this machine can be
+    holding a board on this project's behalf. That call reads directly, as it
+    always has.
+
+    ``current`` decides that, and ``coordinator`` never does. An unprovisioned
+    server has no coordinator and hands None, and the in-lock reread is exactly
+    where it may still find a configuration — the second of two racing servers
+    creates none, it loads the one the first just wrote. Treating "no coordinator"
+    as "no configuration" made that server read the board directly: unaudited,
+    unleased, past the `resource_id` holder the file it had just loaded names, and
+    outside the quarantine path. So a configuration without a coordinator gets one
+    of its own for the length of the read, and the read goes through the same
+    function every other caller uses.
+    """
+    if current is None:
+        return discover_attached_hardware(), None
+    if coordinator is None:
+        owned = HardwareCoordinator(current, frontend="mcp")
+        try:
+            discovery, refusal = _discover_under_lease(current, owned)
+        finally:
+            # Closing hands back the project lock and leaves any incident this
+            # read raised persisted, so the next owner adopts it rather than
+            # starting clean. A close that cannot give a lock back marks the
+            # coordinator `cleanup_required` and raises; this owner exists only
+            # for the length of the read, so that has to become an answer rather
+            # than an exception out of an MCP call.
+            cleanup_error = _closed_cleanly(owned)
+        if refusal is None and cleanup_error is not None:
+            return {}, _lock_cleanup_refusal(cleanup_error)
+        return discovery, refusal
+    return _discover_under_lease(current, coordinator)
+
+
+def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
+    try:
+        coordinator.close()
+    except Exception as error:  # noqa: BLE001 - reported, never swallowed
+        return error
+    return None
+
+
+def _lock_cleanup_refusal(error: Exception) -> JsonObject:
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_CREATE,
+        "error_type": "resource_quarantined",
+        "summary": (
+            "The attached probe was read and the coordination locks taken for that read could not all be given back, so "
+            "nothing was written to the configuration."
+        ),
+        "backend_error": str(error),
+        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        "cleanup_required": True,
+        "quarantined": True,
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
+
+
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator) -> tuple[JsonObject, JsonObject | None]:
+    resources = [resource for name in current.debuggers if (resource := configured_probe_resource(current, name)) is not None]
+    return discover_under_hardware_lease(
+        current,
+        coordinator,
+        tool=PROJECT_CONFIG_CREATE,
+        reason_prefix="config_create",
+        resources=resources,
+    )
 
 
 def _configuration_on_disk(workspace: Path) -> AgenticHILConfig | None:
@@ -1212,21 +1474,36 @@ def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject
     }
 
 
-def _generated_next_steps(config: AgenticHILConfig, *, created: bool) -> list[str]:
+def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: list[str]) -> list[str]:
+    granted = (
+        "that every permission in it is granted"
+        if not narrowed
+        else f"that every permission in it is granted except the {len(narrowed)} listed in `narrowed_permissions`, which were carried over from the configuration this server loaded at startup"
+    )
     steps = [
-        "Report where this configuration is and that an agent generated it.",
-        f"A person opens what this project needs by editing {config.config_path}; that is the only way any write permission in it becomes true.",
+        f"Report where this configuration is, that an agent generated it, and {granted} — read `permissions` for the "
+        "whole list. Name allow_mass_erase in particular wherever it is true: it cannot be taken back once it has run.",
+        f"Ask the operator which of them this bench should not have. You can write false into any permission in "
+        f"{config.config_path} with `project_config_set`; that call writes no other value, so nothing you do through it widens this file.",
     ]
     if created:
         steps.append(
-            "This server will not write this configuration again: the file it just wrote denies that, and the refusal "
-            "comes out of the file itself, so what holds is exactly what a person reads there."
+            "Hardware tools read this configuration from now on; `debugger_info` confirms the bench is reachable, and "
+            "probing, resetting and COM and CAN writes work as written."
         )
-        steps.append("Hardware tools read this configuration from now on; `debugger_info` confirms the bench is reachable.")
+        steps.append(
+            "`flash_firmware` is the one exception, and it is not a missing permission: validated flashing and "
+            "unrestricted debugger access are mutually exclusive policies, and this file grants both. Set "
+            f"`debuggers.{config.debugger_id or '<name>'}.permissions.allow_raw_debugger_commands` and "
+            "`.allow_mass_erase` to false with `project_config_set` — a narrowing, which is a change you may make — and "
+            "flashing works. Say which of the two the operator wants kept before you take it away."
+        )
     else:
         steps.append(
             "This server is still serving the configuration it loaded at startup. Ask the operator to restart the "
-            "MCP server before relying on anything this rewrite changed."
+            "MCP server before relying on anything this rewrite changed — and note that the permissions just written "
+            "came from that same loaded state, so any permission narrowed with `project_config_set` since this server "
+            "started is granted again in the file now on disk."
         )
     return steps
 
@@ -1263,8 +1540,9 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
         ),
         "workspace_root": str(workspace),
         "next_step": (
-            f"Call `{PROJECT_CONFIG_CREATE}`. It takes no arguments, writes a configuration in which every permission is "
-            "false, and then denies itself further writes. Ask a person for anything beyond reading the bench."
+            f"Call `{PROJECT_CONFIG_CREATE}`. It takes no arguments and writes a configuration from what is attached to "
+            "this machine, with every permission granted, so the bench is workable straight away. Report what it granted "
+            "and ask the operator which permissions to take back."
         ),
         **remediation_fields("config_file_not_found"),
         "side_effect_committed": False,
