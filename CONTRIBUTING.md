@@ -34,6 +34,25 @@ is not covered, so commit first.
 
 If you cannot run it, say in the pull request which tests you did not run.
 
+The agent review loop belongs in a container for the same reason and two more:
+
+```bash
+python tools/loop_in_container.py --task "..." --max-rounds 3
+```
+
+`tools/agent_review_loop.py` drives Claude Code and Codex against this
+repository. Run on Windows, the reviewer's test runs die with
+`PermissionError: [WinError 5]` on temporary directories a previous round
+hardened, and Codex under its own sandbox could not run the suite at all. In a
+Linux container both go away, and the container is itself the isolation
+boundary, so Codex runs inside it with its sandbox off. The wrapper mounts this
+repository read-write — the commits are the product and they land here — hands
+the two CLIs their stored logins as individual read-only files, keeps every
+temporary directory on the container's own filesystem, and deletes the
+container's home afterwards. Every option it does not consume goes to
+`agent_review_loop.py` unchanged. Nothing is pushed and no pull request is
+opened.
+
 ## Pull Requests
 
 - Keep changes focused and describe the user-facing behavior they affect.

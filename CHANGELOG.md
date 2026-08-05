@@ -45,6 +45,7 @@ The entries below add surface — configuration keys, MCP tools, a resource, a c
 ### Development
 
 - `tools/ci_linux.py` runs the committed tree in a Linux container, so a Windows machine can see the POSIX half of the suite before CI does. Three changes in two days were green on Windows and failed on all four POSIX runners; each was obvious in ninety seconds here. It clones out of a read-only mount rather than working in it, because a bind mount would carry `.venv` in and present NTFS permissions to exactly the mode tests this exists to run.
+- `tools/loop_in_container.py` runs the Claude/Codex review loop in a Linux container, on the credential and isolation pattern `evals/install/` already uses: health decided and refreshed on the host, individual login files bind-mounted read-only into a fresh home that is deleted unconditionally afterwards. Two days of failures came from running the loop on Windows — reviewer test runs dying with `WinError 5` on directories a previous round hardened, and Codex unable to run the suite under its own sandbox. The container is the isolation boundary, so Codex runs inside it with no sandbox; the repository mount is read-write because the commits are the product, and every temporary directory lives on the container's own filesystem.
 
 ### Removed
 
