@@ -42,6 +42,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# CI runs 3.10 through 3.13; this runs one of them. 3.12 is the newest version
+# every dependency ships wheels for, so the image builds without a compiler and
+# the run stays fast. Override with --python to reproduce a version-specific
+# failure.
 DEFAULT_PYTHON = "3.12"
 EXIT_NO_DOCKER = 2
 
