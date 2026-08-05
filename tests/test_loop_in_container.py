@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -14,8 +15,10 @@ from evals.install.runner import docker_security_options
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "loopimage"))
 import agent_review_loop  # noqa: E402
+import agent_shim  # noqa: E402
 import entrypoint  # noqa: E402
 import loop_in_container  # noqa: E402
+import loop_options  # noqa: E402
 
 
 def _epoch_milliseconds(offset: timedelta) -> int:
@@ -243,22 +246,148 @@ def test_the_container_refuses_to_forward_what_decides_its_own_isolation(forward
         entrypoint.loop_command(forwarded)
 
 
-def test_both_halves_own_the_same_options() -> None:
-    assert set(loop_in_container.CONTAINER_OWNED_OPTIONS) == set(entrypoint.CONTAINER_OWNED_OPTIONS)
+def test_one_rule_answers_for_both_halves() -> None:
+    """Two enforcement points were the point; two copies of the rule were the hole."""
+    assert loop_in_container.owned_options is loop_options.owned_options is entrypoint.owned_options
+    assert (
+        loop_in_container.isolating_codex_arguments
+        is loop_options.isolating_codex_arguments
+        is entrypoint.isolating_codex_arguments
+    )
 
 
-def test_the_project_is_installed_from_a_snapshot_rather_than_from_the_mount() -> None:
-    """An editable install of the mount resolves the reviewer's imports to it."""
-    snapshot = entrypoint.snapshot_command()
-    install = entrypoint.install_command()
+@pytest.mark.parametrize(
+    "forwarded",
+    [
+        # The outer option name is the same in every one of these; the payload is
+        # what moves the reviewer, so the payload is what has to be read.
+        ["--task", "x", "--codex-arg=--cd=/repo"],
+        ["--task", "x", "--codex-arg", "--cd", "--codex-arg", "/repo"],
+        ["--task", "x", "--codex-arg=-C/repo"],
+        ["--task", "x", "--codex-arg=-C"],
+        ["--task", "x", "--codex-arg=--sandbox=read-only"],
+        ["--task", "x", "--codex-arg=-sread-only"],
+        ["--task", "x", "--codex-arg=--dangerously-bypass-approvals-and-sandbox"],
+        ["--task", "x", "--codex-arg=-c", "--codex-arg=sandbox_mode=read-only"],
+        ["--task", "x", "--codex-arg=-csandbox_mode=read-only"],
+        ["--task", "x", "--codex-arg=--config=sandbox_workspace_write.network_access=true"],
+        # --codex-arg is itself reachable by any unambiguous abbreviation.
+        ["--task", "x", "--codex-a=--cd=/repo"],
+    ],
+)
+def test_a_nested_codex_argument_cannot_move_the_reviewer_out_of_its_checkout(forwarded: list[str]) -> None:
+    """The loop appends these after its own, and Codex takes the last occurrence."""
+    with pytest.raises(loop_in_container.Refused, match="move the reviewer"):
+        loop_in_container.forwarded_paperwork(forwarded)
+    with pytest.raises(SystemExit, match="move the reviewer"):
+        entrypoint.loop_command(forwarded)
 
-    assert snapshot[-2:] == [str(entrypoint.REPO), str(entrypoint.PROJECT_SNAPSHOT)]
-    assert entrypoint.PROJECT_SNAPSHOT.parent == entrypoint.SCRATCH
-    assert install[-1] == f"{entrypoint.PROJECT_SNAPSHOT}[dev,can]"
-    # Nothing is installed from the mount, and nothing is installed editable:
-    # both are ways of pointing the shared virtualenv at one agent's tree.
-    assert "--editable" not in install and "-e" not in install
-    assert not any(str(entrypoint.REPO) in argument for argument in install)
+
+@pytest.mark.parametrize(
+    "forwarded",
+    [
+        ["--task", "x", "--codex-arg=--json"],
+        ["--task", "x", "--codex-arg=-c", "--codex-arg=model_verbosity=high"],
+        ["--task", "x", "--codex-arg=-cmodel=gpt-5.1-codex"],
+        ["--task", "x", "--codex-arg", "--skip-git-repo-check"],
+    ],
+)
+def test_a_codex_argument_that_decides_nothing_about_isolation_is_forwarded(forwarded: list[str]) -> None:
+    """--codex-arg stays the way to reach a Codex flag this loop does not model."""
+    loop_in_container.forwarded_paperwork(forwarded)
+
+    assert entrypoint.loop_command(forwarded)[-2:] == ["--review-checkout-dir", str(entrypoint.REVIEW_CHECKOUT)]
+
+
+def test_the_reviewers_working_root_is_named_after_everything_forwarded() -> None:
+    """Ordering is the half of this that does not depend on a list of flag names."""
+    options = argparse.Namespace(
+        codex_bin="codex",
+        codex_model=None,
+        codex_effort=None,
+        codex_sandbox="danger-full-access",
+        codex_arg=["--cd=/repo", "--sandbox=read-only"],
+    )
+    workspace = Path("/tmp/review")
+    command = agent_review_loop.codex_command(
+        options, Path("/tmp/schema.json"), Path("/tmp/last.txt"), Path("/repo/reviews"), workspace
+    )
+
+    assert command[-4:] == ["--cd", str(workspace), "--sandbox", "danger-full-access"]
+    assert command.index("--cd=/repo") < command.index("--cd")
+
+
+def test_each_agent_gets_the_environment_of_the_tree_it_works_in() -> None:
+    """One shared virtualenv answered `importlib.metadata` out of the wrong commit."""
+    implement = agent_shim.virtualenv(agent_shim.ROLES["claude"])
+    review = agent_shim.virtualenv(agent_shim.ROLES["codex"])
+
+    assert implement != review
+    # The home volume, which the wrapper deletes, and not the tmpfs, which is
+    # charged against the memory limit the container's own peaks are measured
+    # against.
+    assert implement.parent == agent_shim.HOME and review.parent == agent_shim.HOME
+    assert agent_shim.export_directory("review").parent.parent == agent_shim.SCRATCH
+
+
+def test_an_agents_environment_is_rebuilt_when_its_commit_changes_the_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("", encoding="utf-8")
+    recipes = [b"[project]\nname = 'a'\n", b"[project]\nname = 'a'\n", b"[project]\nname = 'b'\n"]
+    installs: list[Path] = []
+
+    monkeypatch.setattr(agent_shim, "virtualenv", lambda _role: venv)
+    monkeypatch.setattr(agent_shim, "recipe", lambda _source: recipes.pop(0))
+    monkeypatch.setattr(agent_shim, "export_directory", lambda role: tmp_path / "export" / role)
+    monkeypatch.setattr(agent_shim, "export_head", lambda _source, _destination: None)
+    monkeypatch.setattr(
+        agent_shim,
+        "run",
+        lambda command, _timeout: installs.append(Path(command[0])) or subprocess.CompletedProcess([], 0, b"", b""),
+    )
+
+    for _ in range(3):
+        agent_shim.build_environment("review", tmp_path / "source")
+
+    # Three rounds, two recipes: the middle one changed nothing and paid nothing.
+    assert len(installs) == 2
+
+
+def test_an_agent_runs_with_its_own_virtualenv_first_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    venv = Path("/venv")
+    binaries = str(venv / "bin")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/opt/loop/bin", binaries, "/usr/bin"]))
+
+    environment = agent_shim.child_environment(venv)
+
+    # First, and once: an inherited copy further down would otherwise stay.
+    assert environment["PATH"].split(os.pathsep) == [binaries, "/opt/loop/bin", "/usr/bin"]
+    assert environment["VIRTUAL_ENV"] == str(venv)
+
+
+def test_the_loop_driver_needs_no_environment_of_its_own() -> None:
+    """It is standard library only, and neither agent's virtualenv is its business."""
+    command = entrypoint.loop_command(["--task", "x"])
+
+    assert command[0] == sys.executable
+    assert command[1] == str(entrypoint.REPO / "tools" / "agent_review_loop.py")
+
+
+def test_the_tool_caches_the_suite_writes_stay_off_the_repository_mount() -> None:
+    """TMPDIR does not move these, and a round of the loop left .ruff_cache on the mount."""
+    environment = entrypoint.loop_environment()
+
+    for key in ("RUFF_CACHE_DIR", "MYPY_CACHE_DIR", "COVERAGE_FILE", "TMPDIR", "TMP", "TEMP"):
+        assert Path(environment[key]).is_relative_to(entrypoint.SCRATCH)
+    assert f"-o cache_dir={entrypoint.PYTEST_CACHE}" in environment["PYTEST_ADDOPTS"]
+    assert not any(
+        value.startswith(str(entrypoint.REPO))
+        for key, value in environment.items()
+        if key.endswith(("_CACHE_DIR", "_FILE")) or key in {"TMPDIR", "TMP", "TEMP"}
+    )
 
 
 def test_the_reviewer_imports_the_commit_it_is_reviewing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,7 +525,7 @@ def test_a_comma_in_a_path_is_refused_instead_of_corrupting_the_mount(tmp_path: 
 
 
 def test_paperwork_that_would_die_with_the_container_is_refused(tmp_path: Path) -> None:
-    for value in ("/var/tmp/reviews", "../outside/reviews", "C:\\reviews"):
+    for value in ("/var/tmp/reviews", "../outside/reviews", "C:\\reviews", "C:/reviews", "c:reviews"):
         with pytest.raises(loop_in_container.Refused):
             loop_in_container.forwarded_paperwork(["--review-dir", value])
 
@@ -420,6 +549,64 @@ def test_an_announced_directory_is_named_on_this_side_of_the_mount(tmp_path: Pat
     # Nothing outside the mount has a path here, and inventing one sends an
     # operator looking for a directory that never existed.
     assert "inside the container only" in loop_in_container.on_this_side("/tmp/reviews", tmp_path)
+
+
+def test_a_paperwork_directory_that_is_a_symlink_out_of_the_mount_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spelling is all a host can check; a symlink is only visible in the container."""
+    mount = tmp_path / "repo"
+    (mount / ".agentic-loop").mkdir(parents=True)
+    (mount / "notes").mkdir()
+    monkeypatch.setattr(entrypoint, "REPO", mount)
+
+    entrypoint.check_paperwork(["--review-dir", "notes"])
+
+    escaped = tmp_path / "elsewhere"
+    escaped.mkdir()
+    try:
+        (mount / "escape").symlink_to(escaped, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    with pytest.raises(SystemExit, match="outside the repository mounted at"):
+        entrypoint.check_paperwork(["--review-dir", "escape/reviews"])
+    # The default is checked too: an operator whose .agentic-loop is a link out
+    # of the tree forwards nothing at all and still loses every artifact.
+    (mount / ".agentic-loop").rmdir()
+    (mount / ".agentic-loop").symlink_to(escaped, target_is_directory=True)
+    with pytest.raises(SystemExit, match="--log-dir lands at"):
+        entrypoint.check_paperwork(["--task", "x"])
+
+
+def test_a_task_that_mentions_a_credential_is_not_a_credential_failure() -> None:
+    """The catalogue's phrases are ordinary English; a task may contain any of them."""
+    pending: dict[str, str] = {}
+    transcript = [
+        "loop: /usr/local/bin/python /repo/tools/agent_review_loop.py --task handle unauthorized errors\n",
+        "[claude r1] $ /opt/loop/bin/claude -p --output-format text\n",
+        "[claude r1] I will handle unauthorized errors in the middleware.\n",
+        "[claude r1] exit 0 after 91s (log: /repo/.agentic-loop/logs/round-01-claude.log)\n",
+        "[codex  r1] ORIGINAL TASK: handle unauthorized errors\n",
+        "[codex  r1] exit 0 after 47s (log: /repo/.agentic-loop/logs/round-01-codex.log)\n",
+    ]
+
+    assert [loop_in_container.credential_evidence(line, pending) for line in transcript] == [None] * len(transcript)
+
+
+def test_a_login_the_failing_agent_refused_is_still_reported() -> None:
+    pending: dict[str, str] = {}
+    transcript = [
+        "[claude r1] $ /opt/loop/bin/claude -p --output-format text\n",
+        "[claude r1] OAuth token expired\n",
+        "[claude r1] exit 1 after 3s (log: /repo/.agentic-loop/logs/round-01-claude.log)\n",
+    ]
+
+    assert [loop_in_container.credential_evidence(line, pending) for line in transcript] == [
+        None,
+        None,
+        "OAuth token expired",
+    ]
 
 
 def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

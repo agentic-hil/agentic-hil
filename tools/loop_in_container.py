@@ -51,7 +51,10 @@ unchanged, except the four that decide what the container isolates -- `--repo`,
 set here and refused rather than forwarded: a second `--codex-sandbox` is how
 the value that was measured stops being the value that runs, and a reviewer
 checkout pointed back at the repository mount is the Windows failure this
-wrapper exists to bury.
+wrapper exists to bury. `--codex-arg` is forwarded, because it is how a caller
+reaches a Codex flag the loop does not model, but the payloads that reach the
+same four decisions from inside it are refused by name; `tools/loopimage/
+loop_options.py` is where both halves read that rule from.
 """
 
 from __future__ import annotations
@@ -68,9 +71,19 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-# evals/ is a source tree rather than an installed package, so a script run as
-# "python tools/loop_in_container.py" cannot import it without this.
+CONTAINER_DIRECTORY = REPOSITORY_ROOT / "tools" / "loopimage"
+# evals/ is a source tree rather than an installed package, and the container's
+# own modules are not on the path of a script run as
+# "python tools/loop_in_container.py" either.
 sys.path.insert(0, str(REPOSITORY_ROOT))
+sys.path.insert(0, str(CONTAINER_DIRECTORY))
+
+from loop_options import (  # noqa: E402
+    CODEX_ARGUMENT_OPTION,
+    isolating_codex_arguments,
+    owned_options,
+    paperwork_values,
+)
 
 from evals.install.credentials import authentication_failure, credential_health  # noqa: E402
 from evals.install.runner import (  # noqa: E402
@@ -82,11 +95,18 @@ from evals.install.runner import (  # noqa: E402
     run_capture,
 )
 
-CONTAINER_DIRECTORY = REPOSITORY_ROOT / "tools" / "loopimage"
 # Everything the image is built from. The tag carries their digest, so editing
-# the Dockerfile or the entrypoint produces a tag that does not exist yet and
-# gets built, instead of a silent run against yesterday's recipe.
-RECIPE = ("Dockerfile", "entrypoint.py", "package.json", "package-lock.json")
+# the Dockerfile or any module that goes into the image produces a tag that does
+# not exist yet and gets built, instead of a silent run against yesterday's
+# recipe.
+RECIPE = (
+    "Dockerfile",
+    "entrypoint.py",
+    "agent_shim.py",
+    "loop_options.py",
+    "package.json",
+    "package-lock.json",
+)
 IMAGE_NAME = "agentic-hil-loop"
 
 MOUNTED_REPOSITORY = "/repo"
@@ -99,17 +119,6 @@ EXIT_REFUSED = 3
 # inside it returned: that volume is the one place a copy of a login can be.
 EXIT_CLEANUP_FAILED = 4
 
-# Inner options that decide what the container isolates rather than how the loop
-# is run. The wrapper sets all four and refuses to forward any of them: a second
-# --codex-sandbox would take the value argparse saw last, and a
-# --review-checkout-dir or --review-checkout none puts the reviewer's test runs
-# back onto the repository mount, which is the Windows failure this exists to
-# bury. tools/loopimage/entrypoint.py repeats the refusal on the far side.
-CONTAINER_OWNED_OPTIONS = ("--repo", "--codex-sandbox", "--review-checkout", "--review-checkout-dir")
-# Inner options naming where the run's paperwork lands. They are forwarded, and
-# they are checked: a directory outside the mount dies with the container, and
-# then nothing this wrapper printed about it was ever true.
-PAPERWORK_OPTIONS = ("--review-dir", "--log-dir")
 DEFAULT_PAPERWORK = {
     "--review-dir": f"{MOUNTED_REPOSITORY}/.agentic-loop/reviews",
     "--log-dir": f"{MOUNTED_REPOSITORY}/.agentic-loop/logs",
@@ -145,6 +154,14 @@ CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENA
 # The path is taken whole rather than up to the first space, because a directory
 # an operator named may contain one and half a path is worse than none.
 ANNOUNCED_DIRECTORY = re.compile(r"^(reviews|logs)\s+:\s+(\S.*?)\s*$")
+
+# Every line the loop prints on behalf of an agent carries that agent's round
+# prefix. Anything without one -- this wrapper's own output, the entrypoint's
+# echo of the command, the loop's summary -- is not an agent saying anything.
+AGENT_LINE = re.compile(r"^(?P<agent>\[(?:claude|codex)\s+r\d+\])\s(?P<rest>.*)$")
+# The loop prints this for every agent invocation, failed or not, and it is what
+# ties a phrase in the output to an invocation that actually could not run.
+AGENT_EXIT = re.compile(r"^exit (?P<code>\d+) after ")
 
 
 class Refused(RuntimeError):
@@ -216,11 +233,23 @@ def inside_the_mount(option: str, value: str) -> str:
     plain name is fine. An absolute path or one that climbs out lands on the
     container's own filesystem, where it is deleted with the container -- and
     this wrapper would then print a host path that nothing ever wrote.
+
+    This is the spelling half of the question, and it is all a host can answer:
+    whether a component of the path is a symlink out of the mount is decided in
+    the container, by `check_paperwork` in tools/loopimage/entrypoint.py.
     """
     if "\\" in value:
         raise Refused(
             f"{option} {value!r} is read inside a Linux container, where a backslash is part of the name "
             "rather than a separator. Use forward slashes."
+        )
+    # A drive letter is not a separator there either: `C:/reviews` would join
+    # into `/repo/C:/reviews`, which Docker cannot even mount, and which this
+    # wrapper would report back to the operator as `C:\reviews`.
+    if re.match(r"^[A-Za-z]:", value):
+        raise Refused(
+            f"{option} {value!r} names a Windows drive, and the loop reads it inside a Linux container where "
+            "there are none. Name a directory inside the repository instead."
         )
     landing = posixpath.normpath(posixpath.join(MOUNTED_REPOSITORY, value))
     if landing != MOUNTED_REPOSITORY and not landing.startswith(f"{MOUNTED_REPOSITORY}/"):
@@ -229,29 +258,6 @@ def inside_the_mount(option: str, value: str) -> str:
             "so it would be deleted with the container. Name a directory inside the repository."
         )
     return landing
-
-
-def expansions(name: str, options: tuple[str, ...]) -> list[str]:
-    """Which of `options` a forwarded name can reach.
-
-    The inner loop's parser accepts any unambiguous prefix of an option, so a
-    rule that reads `--codex-sandbox` and lets `--codex-sand` past reads
-    nothing at all: both arrive at the same destination.
-    """
-    if not name.startswith("--"):
-        return []
-    return [option for option in options if option.startswith(name)]
-
-
-def owned_options(forwarded: list[str]) -> list[str]:
-    """The forwarded options that decide what the container isolates."""
-    return sorted(
-        {
-            name
-            for argument in forwarded
-            if expansions(name := argument.split("=", 1)[0], CONTAINER_OWNED_OPTIONS)
-        }
-    )
 
 
 def forwarded_paperwork(forwarded: list[str]) -> dict[str, str]:
@@ -269,18 +275,21 @@ def forwarded_paperwork(forwarded: list[str]) -> dict[str, str]:
             "forward them. The reviewer's checkout stays on the container's own filesystem, and codex runs "
             "with no sandbox of its own because the container is the boundary."
         )
+    # The option itself is forwarded -- it is how a caller reaches a Codex flag
+    # the loop does not model -- but not the payloads that decide where the
+    # reviewer works. The loop appends them after its own Codex arguments and
+    # Codex takes the last occurrence, so `--codex-arg=--cd=/repo` is the
+    # reviewer in the implementer's mount however the loop was configured.
+    isolating = isolating_codex_arguments(forwarded)
+    if isolating:
+        raise Refused(
+            f"{', '.join(isolating)} passed through {CODEX_ARGUMENT_OPTION} would move the reviewer out of its "
+            "own checkout or replace the sandbox this container settled on. Codex reads the last one it is "
+            "given, so these arrive after the loop's own."
+        )
     landing = dict(DEFAULT_PAPERWORK)
-    for index, argument in enumerate(forwarded):
-        name, separator, attached = argument.partition("=")
-        reached = expansions(name, PAPERWORK_OPTIONS)
-        if len(reached) != 1:
-            # No match, or an abbreviation the inner parser will reject as
-            # ambiguous; either way there is nothing here to place.
-            continue
-        if separator:
-            landing[reached[0]] = inside_the_mount(name, attached)
-        elif index + 1 < len(forwarded):
-            landing[reached[0]] = inside_the_mount(name, forwarded[index + 1])
+    for option, value in paperwork_values(forwarded).items():
+        landing[option] = inside_the_mount(option, value)
     return landing
 
 
@@ -517,6 +526,39 @@ def container_command(
     ]
 
 
+def credential_evidence(line: str, pending: dict[str, str]) -> str | None:
+    """Attribute a login-refusal phrase to the agent invocation that then failed.
+
+    The phrases are the ones evals/install/credentials.py catalogues, and they
+    are ordinary English: a run whose task is "handle unauthorized errors" has
+    the word in the echoed prompt, in the model's own prose, and in the diff it
+    writes. Reading them off the combined stream is how an operator gets told to
+    renew a credential that was never the problem.
+
+    So a phrase is only evidence when the agent it came from went on to exit
+    non-zero, and the line it came from is the agent's output rather than the
+    printed command line. Two gaps are left open on purpose: an agent that fails
+    to start at all prints no exit line, and a reviewer discussing the word while
+    failing for an unrelated reason still counts. Both cost a misleading hint
+    rather than a wrong exit code.
+    """
+    match = AGENT_LINE.match(line)
+    if match is None:
+        return None
+    agent, rest = match.group("agent"), match.group("rest")
+    if rest.startswith("$ "):
+        return None  # the command line the loop echoes: argv, not output
+    exited = AGENT_EXIT.match(rest)
+    if exited is None:
+        if agent not in pending:
+            phrase = authentication_failure(rest)
+            if phrase is not None:
+                pending[agent] = phrase
+        return None
+    phrase = pending.pop(agent, None)
+    return phrase if exited.group("code") != "0" else None
+
+
 def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], str | None]:
     """Run the container, printing its output as it arrives.
 
@@ -525,6 +567,7 @@ def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], s
     refusing a login -- which is the failure worth naming rather than debugging.
     """
     announced: dict[str, str] = {}
+    pending: dict[str, str] = {}
     failure: str | None = None
     process = subprocess.Popen(
         command,
@@ -542,8 +585,9 @@ def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], s
         match = ANNOUNCED_DIRECTORY.match(line)
         if match is not None:
             announced[match.group(1)] = on_this_side(match.group(2), repository)
+        evidence = credential_evidence(line, pending)
         if failure is None:
-            failure = authentication_failure(line)
+            failure = evidence
     return process.wait(), announced, failure
 
 

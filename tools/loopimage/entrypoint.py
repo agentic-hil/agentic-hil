@@ -15,11 +15,10 @@ Unlike the evaluation, nothing is exported back to the host: the wrapper deletes
 the home volume unconditionally, because the only product of a loop run is the
 commits it made in the repository mount.
 
-The virtualenv it builds installs a *snapshot* of the project rather than the
-mount, so the one environment both agents share maps ``agentic_hil`` to neither
-working tree. Each agent's tree comes first on its own ``PYTHONPATH`` instead:
-the implementer's is the mount it is editing, the reviewer's is the checkout of
-the commit it is reviewing.
+Neither agent is installed into a shared environment here. Each gets one of its
+own, built from the committed tree it works in and rebuilt when that tree's
+``pyproject.toml`` moves -- see ``agent_shim.py``, which stands in front of both
+CLIs on PATH and does it.
 """
 
 from __future__ import annotations
@@ -31,6 +30,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent_shim import REAL_CLI_DIRECTORY
+from loop_options import (
+    CODEX_ARGUMENT_OPTION,
+    isolating_codex_arguments,
+    owned_options,
+    paperwork_values,
+)
+
 HOME = Path("/home/loop")
 REPO = Path("/repo")
 MOUNTED_FILES = Path("/run/loop-agent-files")
@@ -40,10 +47,6 @@ TEMPORARY_FILES = Path("/tmp/loop-agent-files")
 # exists.
 SCRATCH = Path("/tmp")
 REVIEW_CHECKOUT = SCRATCH / "agentic-loop-review"
-# The committed tree, cloned here so that installing it writes its build
-# leavings here rather than into the operator's checkout.
-PROJECT_SNAPSHOT = SCRATCH / "loop-project"
-VENV = HOME / ".venv"
 
 # Same kind names as the evaluation where the file is the same file. The others
 # are what a fresh home is missing and an agent still needs: the Claude Code
@@ -57,15 +60,24 @@ MOUNTED_PATHS = {
     "codex-instructions": HOME / ".codex" / "AGENTS.md",
 }
 
-# The extras the suite needs; the project's own requirements come with them.
-EXTRAS = ("dev", "can")
+# Where the loop puts its paperwork when the caller names nothing, relative to
+# --repo exactly as the loop resolves it.
+DEFAULT_PAPERWORK = {"--review-dir": ".agentic-loop/reviews", "--log-dir": ".agentic-loop/logs"}
 
-# Inner options that decide what this container isolates rather than how the
-# loop is run. tools/loop_in_container.py refuses them on the host, before any
-# model is spent; this is the second half of the same rule, so a value that
-# reached the loop another way cannot move the reviewer's checkout back onto the
-# repository mount or hand codex a sandbox that was never measured here.
-CONTAINER_OWNED_OPTIONS = ("--repo", "--codex-sandbox", "--review-checkout", "--review-checkout-dir")
+# Scratch every standard tool writes beside the code unless it is told
+# otherwise. Setting TMPDIR moves what a tool asks the system for; it does not
+# move these, and a round of the loop proved it -- Ruff left `.ruff_cache` on the
+# repository mount, which on Windows is the NTFS filesystem whose leftover
+# directories this container exists to stop inheriting.
+TOOL_CACHES = {
+    "RUFF_CACHE_DIR": SCRATCH / "ruff-cache",
+    "MYPY_CACHE_DIR": SCRATCH / "mypy-cache",
+    "COVERAGE_FILE": SCRATCH / "coverage" / ".coverage",
+}
+# pytest's cache has no environment variable of its own; the ini option it does
+# have can be set for every invocation this way, including the ones an agent
+# starts for itself.
+PYTEST_CACHE = SCRATCH / "pytest-cache"
 
 
 def place_mounted_files(kinds: list[str]) -> None:
@@ -108,11 +120,16 @@ def report_peaks() -> None:
         print(f"peak processes: {processes}", flush=True)
 
 
-def report(command: list[str]) -> None:
-    """Print what a CLI says about itself, so a transcript records the build."""
+def report(name: str) -> None:
+    """Print what a CLI says about itself, so a transcript records the build.
+
+    The real executable, not the name: the shim in front of it on PATH would
+    build an agent's whole environment to answer a version question.
+    """
+    command = [str(REAL_CLI_DIRECTORY / name), "--version"]
     result = subprocess.run(command, text=True, capture_output=True, timeout=120, check=False)
     answer = (result.stdout or result.stderr).strip().splitlines()
-    print(f"{command[0]}: {answer[0] if answer else f'exit {result.returncode}'}", flush=True)
+    print(f"{name}: {answer[0] if answer else f'exit {result.returncode}'}", flush=True)
 
 
 def prepare_repository() -> None:
@@ -125,62 +142,58 @@ def prepare_repository() -> None:
         subprocess.run(["git", "config", "--global", "--add", "safe.directory", str(path)], check=True, timeout=60)
 
 
-def snapshot_command() -> list[str]:
-    return ["git", "clone", "--quiet", "--no-hardlinks", str(REPO), str(PROJECT_SNAPSHOT)]
+def paperwork_directories(arguments: list[str]) -> dict[str, Path]:
+    """Where this run's review documents and transcripts will actually land.
 
-
-def install_command() -> list[str]:
-    return [str(VENV / "bin" / "pip"), "install", "--quiet", f"{PROJECT_SNAPSHOT}[{','.join(EXTRAS)}]"]
-
-
-def install_project() -> None:
-    """Install a snapshot of the project, and import from neither copy of it.
-
-    Two things have to be true at once. The suite reads the real distribution
-    metadata in one place -- which extras are installed -- so the project must
-    be installed and not only its requirements: without it,
-    `test_installed_extras_names_only_the_extras_whose_requirements_are_present`
-    fails in every round for a reason no agent put there.
-
-    And no install may map ``agentic_hil`` to a working tree, because there are
-    two of them. An editable install of ``/repo`` resolves the import to the
-    implementer's tree, so the reviewer -- running from a checkout pinned to the
-    commit under review -- would have tested the implementer's code, across the
-    bind mount and possibly mid-edit. It would also have setuptools write
-    ``src/agentic_hil.egg-info`` into the mount, where nothing disposable
-    belongs.
-
-    So the install is a plain one, from a clone of the committed tree on the
-    container's own filesystem: metadata and console script exist, the build
-    writes its own leavings next to the clone, and the copy in site-packages is
-    only ever the fallback -- each agent's tree comes first on PYTHONPATH, the
-    implementer's mount for one and the reviewer's checkout for the other.
+    A relative value is resolved against --repo, which is what the loop itself
+    does with it.
     """
-    subprocess.run(snapshot_command(), check=True, timeout=600)
-    subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True, timeout=300)
-    subprocess.run(install_command(), check=True, timeout=1800)
+    chosen = {**DEFAULT_PAPERWORK, **paperwork_values(arguments)}
+    return {option: Path(value) if Path(value).is_absolute() else REPO / value for option, value in chosen.items()}
+
+
+def check_paperwork(arguments: list[str]) -> None:
+    """Refuse a run whose only lasting product would die with the container.
+
+    The host checks these paths as text, and text cannot see a symlink: an
+    ``.agentic-loop`` pointing at /tmp passes every spelling rule, takes the
+    reviews and the transcripts with the container, and leaves the wrapper
+    naming a directory on the host that received nothing. In here the components
+    exist, so resolving them answers the question instead of guessing at it.
+    """
+    mount = REPO.resolve()
+    for option, path in sorted(paperwork_directories(arguments).items()):
+        landing = path.resolve()
+        if landing != mount and mount not in landing.parents:
+            raise SystemExit(
+                f"{option} lands at {landing}, outside the repository mounted at {mount}: this run's only "
+                "lasting product would be deleted with the container. Name a directory inside the repository, "
+                "and check whether one of its components is a symlink out of it."
+            )
 
 
 def loop_command(forwarded: list[str]) -> list[str]:
     arguments = [argument for argument in forwarded if argument != "--"]
-    # A prefix, not an equality: the loop's parser expands any unambiguous
-    # abbreviation, so refusing `--codex-sandbox` while `--codex-sand` reaches
-    # the same destination refuses nothing.
-    owned = sorted(
-        {
-            name
-            for argument in arguments
-            if (name := argument.split("=", 1)[0]).startswith("--")
-            for option in CONTAINER_OWNED_OPTIONS
-            if option.startswith(name)
-        }
-    )
+    owned = owned_options(arguments)
     if owned:
         raise SystemExit(
             f"these options decide what this container isolates and cannot be forwarded into it: {', '.join(owned)}"
         )
+    # The option is forwarded; these payloads of it are not. The loop appends
+    # them after its own Codex arguments, and Codex takes the last occurrence --
+    # so `--codex-arg=--cd=/repo` is the reviewer working in the implementer's
+    # mount, whatever the loop asked for.
+    isolating = isolating_codex_arguments(arguments)
+    if isolating:
+        raise SystemExit(
+            f"these {CODEX_ARGUMENT_OPTION} payloads would move the reviewer out of its own checkout or replace "
+            f"the sandbox this container settled on: {', '.join(isolating)}"
+        )
+    check_paperwork(arguments)
     return [
-        str(VENV / "bin" / "python"),
+        # The loop driver itself needs nothing but the standard library, and the
+        # environments the two agents run in are built per round by agent_shim.
+        sys.executable,
         str(REPO / "tools" / "agent_review_loop.py"),
         *arguments,
         # Last, and after everything forwarded, because argparse takes the final
@@ -206,6 +219,22 @@ def loop_command(forwarded: list[str]) -> list[str]:
     ]
 
 
+def loop_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    # Both agents and everything they start get their scratch space on the
+    # tmpfs. The reviewer's checkout is placed there explicitly for the same
+    # reason, and so are the tool caches below -- TMPDIR does not move those.
+    environment.update({key: str(SCRATCH) for key in ("TMPDIR", "TMP", "TEMP")})
+    environment.update({key: str(path) for key, path in TOOL_CACHES.items()})
+    addopts = environment.get("PYTEST_ADDOPTS", "").strip()
+    environment["PYTEST_ADDOPTS"] = f"{addopts} -o cache_dir={PYTEST_CACHE}".strip()
+    # The implementer edits this tree, so this is the tree its tests must
+    # import. The reviewer's own checkout replaces this in the environment
+    # agent_review_loop.reviewer_env builds for it.
+    environment["PYTHONPATH"] = str(REPO / "src")
+    return environment
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kinds", nargs="*", default=[])
@@ -219,24 +248,13 @@ def main(argv: list[str] | None = None) -> int:
 
     place_mounted_files(list(args.kinds))
     prepare_repository()
-    report(["claude", "--version"])
-    report(["codex", "--version"])
-    install_project()
-
-    environment = dict(os.environ)
-    # Both agents and everything they start get their scratch space on the
-    # tmpfs. The reviewer's checkout is placed there explicitly below for the
-    # same reason.
-    environment.update({key: str(SCRATCH) for key in ("TMPDIR", "TMP", "TEMP")})
-    # The implementer edits this tree, so this is the tree its tests must
-    # import. The reviewer's own checkout replaces this in the environment
-    # agent_review_loop.reviewer_env builds for it.
-    environment["PYTHONPATH"] = str(REPO / "src")
+    report("claude")
+    report("codex")
 
     command = loop_command(list(args.loop_args))
     print(f"loop: {' '.join(command)}", flush=True)
     try:
-        return subprocess.run(command, cwd=str(REPO), env=environment, check=False).returncode
+        return subprocess.run(command, cwd=str(REPO), env=loop_environment(), check=False).returncode
     finally:
         report_peaks()
 

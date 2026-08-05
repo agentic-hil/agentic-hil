@@ -32,7 +32,16 @@ RUN cd /opt/agent-clis \
 
 RUN useradd --create-home --user-group --shell /bin/bash loop
 
-COPY entrypoint.py /opt/loop/entrypoint.py
+COPY entrypoint.py agent_shim.py loop_options.py /opt/loop/
+
+# The shim stands in front of both CLIs under their own names, first on PATH, so
+# the loop's own `shutil.which` finds it without being told: it builds the
+# environment of the commit that agent is working on and then execs the real
+# CLI. One file under two names, which is how it knows which agent it is.
+RUN chmod 0755 /opt/loop/agent_shim.py \
+    && mkdir -p /opt/loop/bin \
+    && ln -s ../agent_shim.py /opt/loop/bin/claude \
+    && ln -s ../agent_shim.py /opt/loop/bin/codex
 
 ENV HOME=/home/loop \
     USERPROFILE=/home/loop \
@@ -45,7 +54,7 @@ ENV HOME=/home/loop \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DISABLE_AUTOUPDATER=1 \
-    PATH=/home/loop/.venv/bin:/home/loop/.local/bin:/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/loop/bin:/home/loop/.local/bin:/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
 USER loop
 WORKDIR /repo

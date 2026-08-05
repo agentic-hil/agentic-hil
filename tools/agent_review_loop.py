@@ -336,19 +336,28 @@ def codex_command(
     schema_path: Path,
     last_message_path: Path,
     review_dir: Path,
+    workspace: Path,
 ) -> list[str]:
     command = [options.codex_bin, "exec", "-"]
     if options.codex_model:
         command += ["--model", options.codex_model]
     if options.codex_effort:
         command += ["-c", f"model_reasoning_effort={options.codex_effort}"]
-    command += ["--sandbox", options.codex_sandbox]
     # The review document is the one thing the reviewer writes outside its own
     # workspace, because it is the one thing the implementer has to read next.
     command += ["--add-dir", str(review_dir)]
     command += ["--output-schema", str(schema_path), "--output-last-message", str(last_message_path)]
     command += ["--color", "never"]
     command += options.codex_arg
+    # Last, after everything the caller passed through, because Codex takes the
+    # final occurrence of either. `--codex-arg=--cd=/repo` is otherwise a
+    # reviewer working in the implementer's tree -- under
+    # tools/loop_in_container.py, the read-write repository mount -- and
+    # `--codex-arg=--sandbox=...` a sandbox nobody chose. Naming the working
+    # root rather than relying on the process's cwd is what makes the ordering
+    # mean something.
+    command += ["--cd", str(workspace)]
+    command += ["--sandbox", options.codex_sandbox]
     return command
 
 
@@ -786,10 +795,11 @@ def perform_review(
     last_message_path = setup.log_dir / f"round-{number:02d}-verdict.txt"
     if setup.checkout is not None:
         sync_review_checkout(options.review_checkout, setup.repo, setup.checkout, commit)
+    workspace = setup.checkout or setup.repo
     run_agent(
-        codex_command(options, setup.schema_path, last_message_path, setup.review_dir),
+        codex_command(options, setup.schema_path, last_message_path, setup.review_dir, workspace),
         review_prompt(setup.task, review_path, diff_range, number, previous_review, setup.checkout is not None),
-        setup.checkout or setup.repo,
+        workspace,
         f"[codex  r{number}]",
         setup.log_dir / f"round-{number:02d}-codex.log",
         options.timeout,

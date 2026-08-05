@@ -54,10 +54,18 @@ container's home afterwards. Every option it does not consume goes to
 isolates — `--repo`, `--codex-sandbox`, `--review-checkout` and
 `--review-checkout-dir`. Those it sets itself and refuses to forward, because
 forwarding one is how the isolation stops being the isolation that was measured.
-It also refuses a repository that would carry your profile into the read-write
-mount, and it exits non-zero when the container's home outlives the run, since
-that home is the one place a copy of a login can be. Nothing is pushed and no
-pull request is opened.
+`--codex-arg` still reaches a Codex flag the loop does not model, but not a
+payload that decides the same things from inside it — `--cd`, `--sandbox`,
+`-c sandbox_mode=…`, and every short or attached spelling of them — because
+Codex reads the last one it is given and these arrive after the loop's own.
+Neither agent shares an environment with the other: each gets a virtualenv built
+from the committed tree it works in and rebuilt when that tree's
+`pyproject.toml` moves, so a round that changes the packaging is reviewed
+against the commit that changed it rather than against the one the run started
+from. It also refuses a repository that would carry your profile into the
+read-write mount, and it exits non-zero when the container's home outlives the
+run, since that home is the one place a copy of a login can be. Nothing is
+pushed and no pull request is opened.
 
 ## Pull Requests
 
