@@ -484,9 +484,15 @@ def container_command(
         # image with the container reporting its own cgroup peak (report_peaks
         # in the entrypoint): the suite alone 287 MiB and 37 processes, a full
         # implement-and-review round 405 MiB and 71, and 1019 MiB with 77
-        # processes for the heaviest round measured since the virtualenv started
-        # installing a clone of the project on the tmpfs. Half of 2g, and 77 of
-        # 512: still the evaluation's limits, still with room.
+        # processes for the heaviest round measured while the virtualenv was
+        # still a clone of the project on the tmpfs. Since each agent builds its
+        # own environment on the home volume instead, an implementer round that
+        # built one and ran ruff and pytest in it peaked at 755 MiB and 35
+        # processes. That last figure covers one agent: the reviewer's own
+        # environment has not been measured yet, because the run that would have
+        # built it was refused for quota. The two are built one after the other,
+        # so it is a peak rather than a sum -- but it is the number to watch.
+        # Half of 2g, and 77 of 512: still the evaluation's limits, with room.
         *docker_security_options(),
         "--mount",
         docker_mount("volume", home_volume, CONTAINER_HOME),
