@@ -166,7 +166,13 @@ class OpenOCDBackend:
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
-        result = self._run_openocd("flash_firmware", f'program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        # `program` runs `init` itself, so the explicit prefix changes nothing
+        # about the flash — `init` guards against running twice. What it adds is
+        # the stage echo: a failure whose output lacks the init marker provably
+        # stopped before adapter_init opened the probe, which is what lets a
+        # missing config script or an absent adapter refuse instead of
+        # quarantining the bench (see _failure_result).
+        result = self._run_openocd("flash_firmware", f'{OPENOCD_INIT_PREFIX}program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -311,19 +317,31 @@ class OpenOCDBackend:
 
         output = f"{completed.stdout}{completed.stderr}"
         rejected = rejected_openocd_commands(openocd_command, output)
+        init_reached = OPENOCD_INIT_STAGE_MARKER in output
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected, init_reached=init_reached), audit_error)
             if success_marker is not None and success_marker not in output:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, rejected), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, rejected, init_reached=init_reached), audit_error)
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
             return self._finish_log_audit(result, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, rejected), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, rejected, init_reached=init_reached), audit_error)
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None) -> JsonObject:
+    # Failures whose classification already names the phase before the adapter
+    # opens. Config scripts load at the configuration stage, and the adapter is
+    # first opened by adapter_init inside `init`; an adapter that could not be
+    # opened is the other face of the same boundary. Each of these may be read
+    # as "never reached the bench" ONLY together with the absent init-stage
+    # marker (see _failure_result) — the classification alone is string
+    # matching, and the marker is what makes it a proof.
+    PRE_CONTACT_BACKEND_ERRORS = frozenset(
+        {"interface_config_not_found", "target_config_not_found", "config_file_not_found", "adapter_not_found"}
+    )
+
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
@@ -339,6 +357,16 @@ class OpenOCDBackend:
             # service - the board is exactly as the last call that did reach it
             # left it.
             result.update({"rejected_commands": rejected_commands, "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+        elif backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS and not init_reached:
+            # Same test as the rejected-commands branch, met by other evidence:
+            # OpenOCD named a failure of the phase before the adapter opens (a
+            # config script it could not load, an adapter it could not open),
+            # and the init-stage marker never printed, so `init` never
+            # completed and adapter_init never had a probe to drive. The board
+            # is exactly as the last call that did reach it left it, and a
+            # quarantine here would demand a physical inspection of hardware
+            # this run provably never touched.
+            result.update({"target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:

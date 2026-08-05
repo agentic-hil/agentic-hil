@@ -109,6 +109,9 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # comment records. Neither file pins a version anything installs against.
     "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
     "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
+    # NOT_CONTACTED's comment names the release that introduced the shape it
+    # generalizes (hardci-hq#97). History, not a pin.
+    "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",
 }
 
 

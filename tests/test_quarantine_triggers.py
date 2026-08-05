@@ -1,0 +1,602 @@
+"""Quarantine is the answer to "I do not know what state the hardware is in".
+
+It is not the answer to "something went wrong" (hardci-hq#97). Quarantine is
+the one state a human must physically resolve — walk to the bench, inspect,
+type `agentic-hil recover --confirm-safe-state` — so every trigger has to pass
+one test: can the failure prove it never reached the hardware (or that the
+hardware provably ended where a normal call would leave it)?
+
+* Provably-not-contacted failures refuse with a named error and `retry_safe`,
+  and write no quarantine record.
+* Failures that cannot prove their abort point keep quarantining. That is the
+  feature, and the tests here pin that direction too.
+* A justified quarantine now tells the signer what was attempted, what is
+  confirmed, what remains unknown, and what to check on the physical board —
+  out of the one catalogue in knowledge.py.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from conftest import (
+    FAKE_GDB,
+    FAKE_OPENOCD,
+    FAKE_OPENOCD_MISSING_CFG,
+    FAKE_OPENOCD_NO_TARGET,
+    FAKE_STLINK_NO_PROBE,
+    write_config,
+)
+
+from agentic_hil.config import load_config
+from agentic_hil.coordination import HardwareCoordinator
+from agentic_hil.knowledge import (
+    QUARANTINE_REASON_GUIDES,
+    attach_quarantine_guidance,
+    quarantine_reason_details,
+)
+from agentic_hil.tools import AgenticHILToolService
+
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "agentic_hil"
+
+
+def config_for(workspace: Path, **kwargs):
+    return load_config(str(write_config(workspace, **kwargs)))
+
+
+def coordination_record_states(config) -> set[str]:
+    records = Path(config.state_root) / "coordination" / "records"
+    if not records.is_dir():
+        return set()
+    states = set()
+    for path in records.glob("*.json"):
+        state = json.loads(path.read_text(encoding="utf-8")).get("state")
+        if isinstance(state, str):
+            states.add(state)
+    return states
+
+
+def assert_no_quarantine_record(config) -> None:
+    """The DoD's own check: a provably-not-contacted failure writes no
+    quarantine record — nothing an operator would ever have to recover."""
+    blocking = coordination_record_states(config) & {"cleanup_required", "quarantined", "recovery_pending"}
+    assert not blocking, blocking
+
+
+def assert_refused_without_quarantine(result: dict, config) -> None:
+    assert result["ok"] is False
+    assert result.get("quarantined") is not True, result
+    assert result.get("cleanup_required") is not True, result
+    assert "quarantine_guidance" not in result
+    assert_no_quarantine_record(config)
+
+
+# ---------------------------------------------------------------------------
+# Read-only one-shots: a failed read is a failed call, not an unconfirmed board.
+
+
+def test_a_probe_read_that_fails_refuses_instead_of_quarantining(tmp_path: Path) -> None:
+    """The owner's report in one test: probe an unreachable target, and the
+    bench used to need a physical `recover --confirm-safe-state`."""
+    config = config_for(tmp_path, debugger_executable=FAKE_OPENOCD_NO_TARGET)
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("probe_target")
+        second = service.call("probe_target")
+
+        assert refused["error_type"] == "target_not_detected"
+        assert refused["retry_safe"] is True
+        assert refused["hardware_state"] == "unchanged"
+        assert refused["lease_state"] == "released"
+        assert_refused_without_quarantine(refused, config)
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+        # The bench stays in service: the second call is the same refusal, not
+        # resource_quarantined.
+        assert second["error_type"] == "target_not_detected"
+    finally:
+        service.close()
+    assert_no_quarantine_record(config)
+
+
+def test_a_probe_listing_that_fails_refuses_instead_of_quarantining(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr(
+        service.backend,
+        "list_probes",
+        lambda: {"ok": False, "tool": "debugger_probes_list", "error_type": "probe_discovery_failed", "summary": "enumeration failed"},
+    )
+    try:
+        refused = service.call("debugger_probes_list")
+
+        assert refused["error_type"] == "probe_discovery_failed"
+        assert refused["retry_safe"] is True
+        assert_refused_without_quarantine(refused, config)
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+
+
+def test_an_stlink_probe_that_enumerates_nothing_never_touched_the_bench(tmp_path: Path) -> None:
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_NO_PROBE)
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("probe_target")
+
+        assert refused["error_type"] == "adapter_not_found"
+        assert refused["target_contacted"] is False
+        assert refused["side_effect_status"] == "not_started"
+        assert_refused_without_quarantine(refused, config)
+    finally:
+        service.close()
+
+
+def test_a_readonly_result_claiming_an_unknown_effect_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The self-resolving middle class stays: a read that itself reports an
+    unknown side effect keeps quarantining, and machine recovery clears it."""
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(
+        service.backend,
+        "probe_target",
+        lambda: {"ok": False, "tool": "probe_target", "error_type": "probe_failed", "side_effect_status": "unknown", "summary": "unconfirmed"},
+    )
+    try:
+        result = service.call("probe_target")
+
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["debugger_readonly_result_unconfirmed"]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_readonly_result_with_a_broken_audit_trail_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(
+        service.backend,
+        "probe_target",
+        lambda: {"ok": False, "tool": "probe_target", "error_type": "target_not_detected", "audit_ok": False, "summary": "audit broke"},
+    )
+    try:
+        result = service.call("probe_target")
+
+        assert result["quarantined"] is True
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+# ---------------------------------------------------------------------------
+# Effectful one-shots: only a proven abort point may skip the quarantine.
+
+
+def test_a_missing_pyocd_is_a_call_that_never_started(tmp_path: Path) -> None:
+    config = config_for(tmp_path, debugger_type="pyocd", debugger_executable=tmp_path / "missing-pyocd.exe")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+
+        assert result["error_type"] == "debugger_not_found"
+        assert result["target_contacted"] is False
+        assert result["side_effect_status"] == "not_started"
+        assert result["retry_safe"] is True
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+def test_a_missing_stlink_cli_is_a_call_that_never_started(tmp_path: Path) -> None:
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=tmp_path / "missing-stlink.exe")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+
+        assert result["error_type"] == "debugger_not_found"
+        assert result["target_contacted"] is False
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+def test_an_openocd_script_that_cannot_load_never_reaches_the_bench(tmp_path: Path) -> None:
+    """OpenOCD loads -f scripts in its configuration stage and exits before
+    `init` when one is missing; the absent init-stage marker is the proof."""
+    config = config_for(tmp_path, debugger_executable=FAKE_OPENOCD_MISSING_CFG)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "halt"})
+
+        assert result["error_type"] == "debugger_config_not_found"
+        assert result["backend_error_type"] == "interface_config_not_found"
+        assert result["target_contacted"] is False
+        assert result["side_effect_status"] == "not_started"
+        assert result["retry_safe"] is True
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+def test_a_flash_whose_scripts_cannot_load_refuses_without_quarantine(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, debugger_executable=FAKE_OPENOCD_MISSING_CFG)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+
+        assert result["error_type"] == "debugger_config_not_found"
+        assert result["target_contacted"] is False
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+def test_openocd_flash_now_carries_the_init_stage_marker(tmp_path: Path) -> None:
+    """The proof channel for the flash path: the init-stage echo rides in front
+    of `program`, which runs `init` itself and guards against running twice, so
+    the command's effect is unchanged and its abort point becomes visible."""
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, debugger_executable=FAKE_OPENOCD)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert "AGENTIC_HIL_STAGE:init:ok" in logged
+    assert logged.index("AGENTIC_HIL_STAGE:init:ok") < logged.index("program")
+
+
+def test_a_reset_the_openocd_fake_aborts_after_init_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction: once the init marker printed, the adapter was open,
+    and no error classification may talk the quarantine away."""
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(
+        service.backend,
+        "reset_target",
+        lambda mode="run": {
+            "ok": False,
+            "tool": "reset_target",
+            "error_type": "reset_failed",
+            "side_effect_status": "unknown",
+            "summary": "reset unconfirmed",
+        },
+    )
+    try:
+        result = service.call("reset_target", {"mode": "halt"})
+
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+# ---------------------------------------------------------------------------
+# Debug sessions: failures before any process exists refuse, later ones keep
+# quarantining.
+
+
+def test_a_debug_server_that_cannot_spawn_refuses_without_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, gdb_executable=FAKE_GDB)
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.spawn_managed_process", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("spawn refused")))
+    try:
+        result = service.call("debug_start_session", {"image_path": "build/firmware.elf"})
+
+        assert result["error_type"] == "debugger_not_found"
+        assert result["target_contacted"] is False
+        assert result["side_effect_status"] == "not_started"
+        assert_refused_without_quarantine(result, config)
+        assert service.coordinator.blocked is False
+        assert service._debug_lease is None
+    finally:
+        service.close()
+
+
+def test_a_missing_gdb_refuses_a_debug_session_without_quarantine(tmp_path: Path) -> None:
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, gdb_executable=tmp_path / "missing-gdb.exe")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("debug_start_session", {"image_path": "build/firmware.elf"})
+
+        assert result["error_type"] == "gdb_not_found"
+        assert result["target_contacted"] is False
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+# ---------------------------------------------------------------------------
+# COM ports: an open that provably rolled back refuses; an unconfirmed handle
+# keeps quarantining.
+
+
+def com_config(tmp_path: Path):
+    return config_for(tmp_path, com_ports_yaml='com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n')
+
+
+def failing_serial_module(handle) -> SimpleNamespace:
+    return SimpleNamespace(Serial=lambda *args, **kwargs: handle)
+
+
+def test_an_unopenable_com_port_refuses_and_frees_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dominant serial failure — device absent, port busy, adapter
+    unplugged — used to hold the bench for a physical recovery."""
+    config = com_config(tmp_path)
+    service = AgenticHILToolService(config)
+    handle = SimpleNamespace(is_open=False)
+    handle.open = lambda: (_ for _ in ()).throw(OSError("could not open port"))
+    monkeypatch.setitem(sys.modules, "serial", failing_serial_module(handle))
+    try:
+        result = service.call("com_session_start", {"port_id": "dut"})
+
+        assert result["error_type"] == "com_port_open_failed"
+        assert result["cleanup_confirmed"] is True
+        assert result["retry_safe"] is True
+        assert result["lease_state"] == "released"
+        assert_refused_without_quarantine(result, config)
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+    finally:
+        service.close()
+    assert_no_quarantine_record(config)
+
+
+def test_a_com_open_whose_rollback_fails_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = com_config(tmp_path)
+    service = AgenticHILToolService(config)
+    handle = SimpleNamespace(is_open=True)
+    handle.open = lambda: (_ for _ in ()).throw(OSError("open failed late"))
+    handle.close = lambda: (_ for _ in ()).throw(OSError("close failed too"))
+    monkeypatch.setitem(sys.modules, "serial", failing_serial_module(handle))
+    try:
+        result = service.call("com_session_start", {"port_id": "dut"})
+
+        assert result["error_type"] == "com_port_open_failed"
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["com_open_cleanup_unconfirmed"]
+        assert service.coordinator.blocked is True
+        # The justified quarantine tells the signer what to verify.
+        assert result["quarantine_guidance"][0]["reason"] == "com_open_cleanup_unconfirmed"
+    finally:
+        service.close()
+
+
+def test_a_com_open_that_never_built_a_handle_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = com_config(tmp_path)
+    service = AgenticHILToolService(config)
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("constructor refused"))))
+    try:
+        result = service.call("com_session_start", {"port_id": "dut"})
+
+        assert result["error_type"] == "com_port_open_failed"
+        assert result["side_effect_status"] == "not_started"
+        assert_refused_without_quarantine(result, config)
+    finally:
+        service.close()
+
+
+# ---------------------------------------------------------------------------
+# CAN buses.
+
+
+def can_config(tmp_path: Path):
+    return config_for(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n')
+
+
+class FakeCanInitializationError(Exception):
+    pass
+
+
+def test_a_can_adapter_that_never_initialized_refuses_and_frees_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = can_config(tmp_path)
+    service = AgenticHILToolService(config)
+    fake_can = SimpleNamespace(
+        Bus=lambda **kwargs: (_ for _ in ()).throw(FakeCanInitializationError("channel vcan0 does not exist")),
+        CanInitializationError=FakeCanInitializationError,
+    )
+    monkeypatch.setitem(sys.modules, "can", fake_can)
+    try:
+        result = service.call("can_session_start", {"bus_id": "bench"})
+
+        assert result["error_type"] == "can_adapter_open_failed"
+        assert result["side_effect_status"] == "not_started"
+        assert result["retry_safe"] is True
+        assert result["lease_state"] == "released"
+        assert_refused_without_quarantine(result, config)
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+    assert_no_quarantine_record(config)
+
+
+def test_a_can_open_failure_python_can_cannot_classify_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partially initialized channel participates on the bus, and a generic
+    exception cannot disprove one was left behind."""
+    config = can_config(tmp_path)
+    service = AgenticHILToolService(config)
+    fake_can = SimpleNamespace(
+        Bus=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("driver fault mid-initialization")),
+        CanInitializationError=FakeCanInitializationError,
+    )
+    monkeypatch.setitem(sys.modules, "can", fake_can)
+    try:
+        result = service.call("can_session_start", {"bus_id": "bench"})
+
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["can_open_cleanup_unconfirmed"]
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+class FlakyRecvBus:
+    def __init__(self) -> None:
+        self.fail = False
+
+    def recv(self, timeout=0):
+        if self.fail:
+            raise RuntimeError("device I/O error")
+        return None
+
+    def shutdown(self) -> None:
+        pass
+
+
+def test_a_failed_direct_can_read_refuses_without_quarantining_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """recv() transmits nothing, so a read failure proves the bus was not
+    stimulated by this call."""
+    config = can_config(tmp_path)
+    service = AgenticHILToolService(config)
+    bus = FlakyRecvBus()
+    monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus, CanInitializationError=FakeCanInitializationError))
+    try:
+        started = service.call("can_session_start", {"bus_id": "bench"})
+        assert started["ok"] is True, started
+        bus.fail = True
+
+        result = service.call("can_read", {"bus_id": "bench"})
+
+        assert result["ok"] is False
+        assert result["error_type"] == "can_read_failed"
+        assert result["retry_safe"] is True
+        assert result.get("quarantined") is not True
+        assert result.get("cleanup_required") is not True
+        assert service.coordinator.blocked is False
+        bus.fail = False
+    finally:
+        service.close()
+
+
+# ---------------------------------------------------------------------------
+# The signature: what a justified quarantine tells the operator.
+
+
+def test_a_justified_quarantine_names_what_the_signer_must_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AgenticHILToolService(config_for(tmp_path))
+    monkeypatch.setattr(
+        service.backend,
+        "reset_target",
+        lambda mode="run": {"ok": False, "tool": "reset_target", "error_type": "reset_failed", "side_effect_status": "unknown", "summary": "unconfirmed"},
+    )
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+        status = service.hardware_lease_status()
+
+        for carrier in (result, status):
+            guidance = carrier["quarantine_guidance"]
+            assert [entry["reason"] for entry in guidance] == ["debugger_result_unconfirmed"]
+            for field in ("attempted", "confirmed", "unknown", "physical_check"):
+                assert isinstance(guidance[0][field], str) and guidance[0][field], field
+        # The physical check is the criterion the signature attests.
+        assert "sign" in status["quarantine_guidance"][0]["physical_check"]
+    finally:
+        service.close()
+
+
+def test_lease_status_of_a_second_process_carries_the_same_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator usually reads the incident from another process (the CLI),
+    off the persisted record; the guidance must arrive there too."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config)
+    monkeypatch.setattr(
+        service.backend,
+        "reset_target",
+        lambda mode="run": {"ok": False, "tool": "reset_target", "error_type": "reset_failed", "side_effect_status": "unknown", "summary": "unconfirmed"},
+    )
+    try:
+        service.call("reset_target", {"mode": "run"})
+        observer = HardwareCoordinator(config, "observer")
+        status = observer.status()
+
+        assert status["blocked"] is True
+        assert [entry["reason"] for entry in status["quarantine_guidance"]] == ["debugger_result_unconfirmed"]
+    finally:
+        service.close()
+
+
+def test_a_healthy_status_carries_no_guidance(tmp_path: Path) -> None:
+    coordinator = HardwareCoordinator(config_for(tmp_path), "healthy")
+    lease = coordinator.acquire("physical:healthy")
+    try:
+        status = coordinator.status()
+        assert status["blocked"] is False
+        assert "quarantine_guidance" not in status
+    finally:
+        lease.release()
+        coordinator.close()
+
+
+def test_an_unknown_reason_gets_the_explicit_fallback_guidance() -> None:
+    """An incident persisted by another Agentic HIL version must still be
+    resolvable at this one's CLI."""
+    details = quarantine_reason_details(["a_reason_from_the_future"])
+
+    assert details[0]["reason"] == "a_reason_from_the_future"
+    for field in ("attempted", "confirmed", "unknown", "physical_check"):
+        assert details[0][field]
+    assert "catalogue" in details[0]["attempted"]
+
+
+def test_guidance_attaches_only_to_quarantined_results() -> None:
+    clean = attach_quarantine_guidance({"ok": True, "cleanup_reasons": ["audit_broken"]})
+    quarantined = attach_quarantine_guidance({"ok": False, "quarantined": True, "cleanup_reasons": ["audit_broken"]})
+
+    assert "quarantine_guidance" not in clean
+    assert quarantined["quarantine_guidance"][0]["reason"] == "audit_broken"
+
+
+QUARANTINE_LITERAL = re.compile(
+    r"(?:\.quarantine\(|_poison_quietly\(|_quarantine_registered_lease\(lease, )\s*\"([a-z0-9_]+)\""
+)
+PREFIXED_REASON = re.compile(r"f\"\{reason_prefix\}_([a-z0-9_]+)\"")
+# Reasons reaching quarantine calls through variables or ternaries; kept
+# explicit so a rename in the source fails this list loudly.
+INDIRECT_REASONS = {
+    "safe_state_unconfirmed",
+    "process_reap_unconfirmed",
+    "audit_broken",
+    "lease_release_unconfirmed",
+    "owner_process_exited_without_release",
+    "owner_closed_with_active_lease",
+    "debugger_readonly_result_unconfirmed",
+    "debugger_result_unconfirmed",
+    "debug_breakpoint_cleanup_unconfirmed",
+    "debug_target_state_unconfirmed",
+    "debug_session_result_unconfirmed",
+}
+REASON_PREFIXES = ("config_adopt", "config_create")
+
+
+def test_every_quarantine_trigger_in_the_source_has_signer_guidance() -> None:
+    """The inventory that hardci-hq#97 demanded, kept honest going forward: a
+    new trigger without catalogue guidance fails here by name."""
+    reasons: set[str] = set(INDIRECT_REASONS)
+    for path in SRC_ROOT.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        reasons.update(QUARANTINE_LITERAL.findall(text))
+        for suffix in PREFIXED_REASON.findall(text):
+            reasons.update(f"{prefix}_{suffix}" for prefix in REASON_PREFIXES)
+
+    missing = sorted(reasons - set(QUARANTINE_REASON_GUIDES))
+    assert not missing, f"quarantine reasons without signer guidance: {missing}"
+    # And the inventory is not empty by accident of the regexes.
+    assert len(reasons) >= 30

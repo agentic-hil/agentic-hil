@@ -406,6 +406,10 @@ class ComPortService:
             import serial
         except ImportError:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
+
+        def open_failure(error: BaseException) -> JsonObject:
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+
         try:
             # Built unopened so the modem lines are decided BEFORE the port is
             # opened. Passing the device to the constructor opens it immediately
@@ -422,23 +426,70 @@ class ComPortService:
             serial_handle.write_timeout = port_config.write_timeout_s
             serial_handle.dtr = port_config.assert_dtr
             serial_handle.rts = port_config.assert_rts
-            serial_handle.open()
-            provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
-            try:
-                session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
-            except BaseException as primary_error:
-                try:
-                    serial_handle.close()
-                except BaseException as cleanup_error:
-                    # The raw handle stays registered so service.close() can retry
-                    # closing it; do not discharge the provisional owner here.
-                    raise RuntimeError(f"COM session construction failed and raw handle cleanup remains unconfirmed: {cleanup_error}") from primary_error
-                discharge_provisional_handle(provisional)
-                raise
-            discharge_provisional_handle(provisional)
-            return {"ok": True, "session": session}
         except Exception as error:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            # No OS handle exists before open(): configuring the unopened
+            # object cannot touch the device, so this failure proves the port
+            # was never reached and must refuse rather than quarantine
+            # (hardci-hq#97).
+            return {**open_failure(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        try:
+            serial_handle.open()
+        except Exception as error:
+            # The dominant failures — device absent, port held by another
+            # program, adapter unplugged — end here. pyserial's contract for a
+            # failed open() is that no open handle remains (it closes any
+            # partially created descriptor on its own error path and leaves
+            # is_open False); that contract is verified rather than assumed,
+            # and a handle that contradicts it is closed here. Only a close
+            # that then fails leaves the unknown state that still quarantines.
+            # The port never carried a byte of this session either way — a
+            # failed open does at most what a normal open/close cycle does, and
+            # that cycle never needed a physical inspection.
+            if not getattr(serial_handle, "is_open", False):
+                return {**open_failure(error), "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            try:
+                serial_handle.close()
+            except Exception as close_error:
+                return {**open_failure(error), "cleanup_error": str(close_error)}
+            return {**open_failure(error), "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        try:
+            provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
+        except BaseException as register_error:
+            # The open handle could not be registered for retried cleanup, so
+            # it is closed right here; a close failure leaves the markerless
+            # result whose quarantine is exactly the unconfirmed handle.
+            try:
+                serial_handle.close()
+            except BaseException as cleanup_error:
+                if not isinstance(register_error, Exception):
+                    register_error.args = (*register_error.args, f"Cleanup error: {cleanup_error}")
+                    raise
+                return {**open_failure(register_error), "cleanup_error": str(cleanup_error)}
+            if not isinstance(register_error, Exception):
+                raise
+            return {**open_failure(register_error), "cleanup_confirmed": True}
+        try:
+            session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
+        except BaseException as primary_error:
+            try:
+                serial_handle.close()
+            except BaseException as cleanup_error:
+                # The raw handle stays registered so service.close() can retry
+                # closing it; do not discharge the provisional owner here. The
+                # unconfirmed handle is exactly the unknown that justifies the
+                # quarantine the caller raises over this markerless result.
+                if not isinstance(primary_error, Exception):
+                    primary_error.args = (*primary_error.args, f"Cleanup error: {cleanup_error}")
+                    raise
+                return {**open_failure(primary_error), "cleanup_error": str(cleanup_error)}
+            discharge_provisional_handle(provisional)
+            if not isinstance(primary_error, Exception):
+                raise
+            # The raw handle was confirmed closed, so the port ends where a
+            # normal open/close cycle ends it.
+            return {**open_failure(primary_error), "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        discharge_provisional_handle(provisional)
+        return {"ok": True, "session": session}
 
     def _configured_port(self, port_id: str, tool: str) -> JsonObject:
         if not port_id:

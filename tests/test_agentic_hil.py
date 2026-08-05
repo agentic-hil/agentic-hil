@@ -1797,6 +1797,8 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
         "config_stale",
         "permissions_frozen",
         "allow_mass_erase",
+        "quarantine_guidance",
+        "physical_check",
     }
 
     referenced = {

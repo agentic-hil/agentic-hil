@@ -14,6 +14,20 @@ from agentic_hil.process import (
     spawn_managed_process,
     terminate_process_tree,
 )
+from agentic_hil.types import JsonObject
+
+# The markers a failure carries when it can prove it never reached the bench:
+# no target contact, no side effect, safe to retry. 0.7.1's
+# `debugger_command_rejected` fix introduced this shape for one OpenOCD case;
+# every backend failure that can prove its abort point reuses it, because the
+# alternative — quarantining hardware a call provably never touched — demands a
+# physical inspection nothing justifies (hardci-hq#97).
+NOT_CONTACTED: JsonObject = {
+    "target_contacted": False,
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "retry_safe": True,
+}
 
 
 @dataclass(frozen=True)
