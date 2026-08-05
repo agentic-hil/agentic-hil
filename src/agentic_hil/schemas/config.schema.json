@@ -113,7 +113,7 @@
             "agent",
             "human"
           ],
-          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission false."
+          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission true; a regeneration carries the permissions already on disk over instead."
         },
         "created_via": {
           "type": "string",

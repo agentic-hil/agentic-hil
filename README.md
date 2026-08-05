@@ -223,19 +223,19 @@ permissions:
 
 #### Permissions move one way
 
-A generated configuration grants everything, and an agent can only ever take grants away. `project_config_set` writes `false` into a permission and never `true` — not one it never touched, and not one it set to `false` itself a moment earlier. A change that would turn any permission on is refused as `permission_widening_denied`, whatever key it named, because what is compared is the permissions present in the document before and after the write rather than the keys the request used.
+A generated configuration grants everything, and the one MCP call that writes a permission can only ever take grants away. `project_config_set` writes `false` into a permission and no other value — not `true` into one it never touched, and not into one it set to `false` itself a moment earlier. Such a call is refused as `permission_widening_denied`, whatever key it named: once on the value it carried, and again on a comparison of the permissions present in the document before and after the write, so a permission that came on some way the key model did not anticipate is caught too.
 
 ```text
-Generation         every permission true
-Agent may          write false into a permission
-Agent may not      write true into one — ever, not even one it just closed
-Last move          permissions.allow_config_permissions_write: false
-After that         only you, with `agentic-hil init --force`
+Generation              every permission true
+project_config_set may  write false into a permission
+             may not    write anything else into one — ever, not even into one it just closed
+Last move               permissions.allow_config_permissions_write: false
+After that              only you, with `agentic-hil init --force`
 ```
 
-So "the agent may set permissions" does not mean "the agent may set itself anything". It means you can say *narrow this bench* in prose and have it done, with a `provenance` record, and no editor. Closing `allow_config_permissions_write` freezes the file: nothing on the MCP surface can move a permission in it again, and the call that does it says so in its own result — which permissions stand frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens it.
+So "the agent may set permissions" does not mean "the agent may set itself anything". It means you can say *narrow this bench* in prose and have it done, with a `provenance` record, and no editor. Closing `allow_config_permissions_write` is terminal for that call: it cannot move a permission in the file again, and the call that does it says so in its own result — which permissions stand frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens it.
 
-`project_config_create` is not a route back either: it regenerates the hardware facts and carries every permission already on disk over unchanged. Only a file that does not exist gets the open skeleton.
+**Regenerating is yours, and is not covered by that rule.** `project_config_create` refreshes the hardware facts and carries the permissions already on disk over for the entries that are still there — but a workspace whose configuration is gone gets the open skeleton, anything a regeneration discovers for the first time arrives open, and `agentic-hil init --force` in your own terminal rewrites the whole file open. Regeneration is creation rather than a permissions write, and it belongs to you and your command line.
 
 With the first set, an agent calls `project_config_describe` — which keys are open right now, which are not, and which permission would open a locked one — and then `project_config_set`:
 

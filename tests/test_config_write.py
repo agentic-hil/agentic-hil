@@ -447,12 +447,14 @@ def test_a_permission_does_not_bring_a_device_into_existence(tmp_path: Path, mon
 
     Otherwise `debuggers.ghost.permissions.allow_flash` would conjure a probe
     that is not on the bench, and the refusal that followed would be about the
-    wrong thing."""
+    wrong thing. Sent as `false`, which is the only value this surface writes
+    into a permission at all, so what is being tested is the entry and not the
+    direction."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True, CONFIG_PERMISSIONS_RIGHT: True})
     before = path.read_bytes()
     tools = service(workspace)
     try:
-        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.ghost.permissions.allow_flash", True)))
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.ghost.permissions.allow_flash", False)))
     finally:
         tools.close()
 
@@ -755,8 +757,18 @@ def test_the_key_model_maps_every_key_to_exactly_one_rule() -> None:
     # A key that names a container resolves to nothing at all.
     for container in ("debuggers", "debuggers.dut", "debuggers.dut.permissions", "permissions", "target"):
         assert resolve_config_key(container) is None, container
-    # Nothing outside the two halves is reachable, however it is spelled.
-    for outside in ("workspace_root", "state_root", "version", "artifacts.allow_upload", "debug.allow_all_symbols", "recovery.auto_recover", "debuggers.dut.flash_address", "com_ports.dut_uart.assert_dtr", "provenance.created_by"):
+    # The two grants the schema puts directly on a fixed section are part of the
+    # permissions half, not outside it. A generation writes both true, so leaving
+    # them unreachable left two things a generated bench grants that an operator
+    # could take back only by opening the YAML.
+    for grant in ("artifacts.allow_upload", "debug.allow_all_symbols"):
+        section_grant = resolve_config_key(grant)
+        assert section_grant is not None, grant
+        assert section_grant.right == "allow_config_permissions_write", grant
+    # Nothing outside the two halves is reachable, however it is spelled — and
+    # that still includes the list-valued neighbours of those two grants, which
+    # are not scalars.
+    for outside in ("workspace_root", "state_root", "version", "artifacts.allowed_roots", "artifacts.upload_directory", "debug.allowed_symbols", "debug.max_dump_size_bytes", "recovery.auto_recover", "debuggers.dut.flash_address", "com_ports.dut_uart.assert_dtr", "provenance.created_by"):
         assert resolve_config_key(outside) is None, outside
 
 
@@ -940,3 +952,162 @@ def test_setup_still_denies_the_agents_own_file_tools_on_the_configuration(tmp_p
     assert len(patterns) == 2
     assert any(pattern.startswith("//") and pattern.endswith("/config/**") for pattern in patterns), patterns
     assert any(pattern.startswith("//") and pattern.endswith("/state/**") for pattern in patterns), patterns
+
+
+# ---------------------------------------------------------------------------
+# The `false`-only rule, and the surface it is about.
+#
+# hardci-hq#96's owner drew this line explicitly: the rule nails the MCP surface
+# shut and nothing else. So there are two things to prove — that the MCP surface
+# writes `false` and nothing else at all, including a `true` that would move
+# nothing, and that a person at the command line is not held to it.
+
+
+def test_a_permission_already_true_cannot_be_sent_true_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case a before/after comparison cannot see.
+
+    `true` for a permission that is already `true` produces no delta, so a rule
+    that only watched for movement would accept it, rewrite the file and stamp
+    `provenance` for a write the surface is not allowed to make at all. The rule
+    is about the value, and the document comparison is the backstop behind it."""
+    workspace, path = bench(
+        tmp_path,
+        monkeypatch,
+        device_permissions={"allow_flash": True, "allow_reset": True},
+        **{CONFIG_PERMISSIONS_RIGHT: True},
+    )
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_flash", True)))
+        # A truthy value the schema would not accept never gets as far as the
+        # direction check: the shipped schema refuses it on the way in. Either
+        # refusal is the same outcome — nothing applied — and the point is that
+        # neither of them writes.
+        coerced = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_reset", 1)))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "permission_widening_denied"
+    assert refused["widened_keys"] == ["debuggers.dut.permissions.allow_flash"]
+    assert refused["retry_safe"] is False
+    assert "false is the only value" in refused["summary"]
+    assert coerced["ok"] is False
+    assert coerced["error_type"] in ("permission_widening_denied", "invalid_argument")
+    assert path.read_bytes() == before
+    assert document_of(path)["provenance"] == PROVENANCE
+
+
+def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator's own shell is not the surface this ratchet was decided for.
+
+    The owner's clarification on hardci-hq#96: "we only nail the MCP shut, the
+    rest is left to the user and the agent CLI". So the human actor keeps the
+    authorization check — `allow_config_permissions_write` still gates the
+    permissions half for everybody — and is not held to the direction."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_flash"] is False
+
+    widened = project_config_set(
+        workspace,
+        load_authoritative_config(workspace),
+        [{"key": "debuggers.dut.permissions.allow_flash", "value": True}],
+        open_holds=None,
+        actor="human",
+        via="cli:test",
+    )
+
+    assert widened["ok"] is True, widened
+    assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    assert document_of(path)["provenance"]["last_modified_by"] == "human"
+
+    # The grant itself is not waived for them: a bench that closed the
+    # permissions half is closed to the command line too.
+    closed = project_config_set(
+        workspace,
+        load_authoritative_config(workspace),
+        [{"key": "permissions.allow_config_permissions_write", "value": False}],
+        open_holds=None,
+        actor="human",
+        via="cli:test",
+    )
+    assert closed["ok"] is True, closed
+    refused = project_config_set(
+        workspace,
+        load_authoritative_config(workspace),
+        [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": True}],
+        open_holds=None,
+        actor="human",
+        via="cli:test",
+    )
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+
+
+# ---------------------------------------------------------------------------
+# The two grants the schema puts on a section rather than in a permissions block.
+
+
+def test_the_section_grants_a_generation_writes_can_be_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`debug.allow_all_symbols` and `artifacts.allow_upload` are permissions.
+
+    A generation writes both `true` like every other permission. Leaving them out
+    of the key model left two things a generated bench grants that an operator
+    could take back only by opening the YAML — which is the single thing
+    hardci-hq#96 exists to stop."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    opened = document_of(path)
+    opened["debug"]["allow_all_symbols"] = True
+    opened["artifacts"]["allow_upload"] = True
+    path.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+        narrowed = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(("debug.allow_all_symbols", False), ("artifacts.allow_upload", False)),
+        )
+        # Still one way, on these two like on every other permission.
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("artifacts.allow_upload", True)))
+    finally:
+        tools.close()
+
+    writable = {entry["key"]: entry["right"] for entry in described["writable_keys"]}
+    assert writable["debug.allow_all_symbols"] == CONFIG_PERMISSIONS_RIGHT
+    assert writable["artifacts.allow_upload"] == CONFIG_PERMISSIONS_RIGHT
+    assert narrowed["ok"] is True, narrowed
+    assert sorted(narrowed["permissions_changed"]) == ["artifacts.allow_upload", "debug.allow_all_symbols"]
+    written = document_of(path)
+    assert written["debug"]["allow_all_symbols"] is False
+    assert written["artifacts"]["allow_upload"] is False
+    assert refused["error_type"] == "permission_widening_denied"
+    # Their list-valued neighbours stay out of reach: this surface writes scalars.
+    assert document_of(path)["debug"]["allowed_symbols"] == opened["debug"]["allowed_symbols"]
+
+
+def test_the_frozen_notice_names_the_section_grants_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`frozen_permissions` is the whole list or it is misleading.
+
+    An operator reads it as "this is what the bench is now allowed to do". A
+    grant missing from it reads as "not granted", which for `allow_upload` and
+    `allow_all_symbols` would be the opposite of what the file says."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    opened = document_of(path)
+    opened["debug"]["allow_all_symbols"] = True
+    opened["artifacts"]["allow_upload"] = True
+    path.write_text(yaml.safe_dump(opened, sort_keys=False), encoding="utf-8")
+
+    tools = service(workspace)
+    try:
+        froze = tools.call(PROJECT_CONFIG_SET, changes(("permissions.allow_config_permissions_write", False)))
+    finally:
+        tools.close()
+
+    frozen = froze["permissions_frozen"]["frozen_permissions"]
+    assert frozen["debug.allow_all_symbols"] is True
+    assert frozen["artifacts.allow_upload"] is True
+    assert frozen["permissions.allow_config_permissions_write"] is False
+    # And the notice claims only what it closes: this call, not the whole file.
+    assert "project_config_set" in froze["permissions_frozen"]["summary"]
+    assert "agentic-hil init --force" in " ".join(froze["permissions_frozen"]["next_steps"])

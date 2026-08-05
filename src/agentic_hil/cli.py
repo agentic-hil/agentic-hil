@@ -35,6 +35,7 @@ from agentic_hil.config import (
     is_path_within_frozen,
     load_authoritative_config,
     load_config,
+    permission_summary,
     project_config_path,
     safe_directory,
     secure_atomic_write_text,
@@ -47,7 +48,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN
+from agentic_hil.configwrite import ACTOR_HUMAN, permission_surface
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
@@ -993,7 +994,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     snapshot = FileSnapshot(target_path, existing)
     try:
         secure_atomic_write_text(target_path, text)
-        load_authoritative_config(workspace)
+        written = load_authoritative_config(workspace)
     except ConfigError as error:
         rollback_errors = _restore_file_snapshots([snapshot])
         result = error.to_dict()
@@ -1003,18 +1004,27 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             result["rollback_errors"] = rollback_errors
         return result
     available_com_ports = list_available_com_ports()
+    # Read off the file that was written rather than asserted. The skeleton path
+    # grants everything, but a project's own `agentic-hil.config.example.yaml`
+    # may set a flag false and that is honoured — an operator who wrote
+    # `allow_mass_erase: false` into their profile meant it. A fixed sentence
+    # here told them the opposite about their own bench.
+    narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
+    granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
     return {
         "ok": True,
         "summary": (
-            "Attached hardware was discovered and configured, with every permission granted."
+            f"Attached hardware was discovered and configured, {granted_clause}."
             if discovery is not None and overall_success(discovery)
-            else "Agentic HIL project configuration written, with every permission granted."
+            else f"Agentic HIL project configuration written, {granted_clause}."
         ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
+        "permissions": permission_summary(written),
+        "narrowed_permissions": sorted(narrowed),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
-        "next_steps": init_next_steps(available_com_ports, target_path),
+        "next_steps": init_next_steps(available_com_ports, target_path, narrowed=sorted(narrowed)),
     }
 
 
@@ -1175,16 +1185,25 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     return written
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path) -> list[str]:
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None) -> list[str]:
+    granted_step = (
+        "Every permission in this file is true, so the bench is workable as written: probing, flashing, resetting, raw "
+        "debugger commands, mass erase, and serial and CAN writes. Read the permissions blocks and decide which of them "
+        "this bench should not have — allow_mass_erase in particular cannot be undone once it has run."
+        if not narrowed
+        else "Every permission in this file is true except the ones your project profile set to false ("
+        + ", ".join(narrowed)
+        + "), so the rest of the bench is workable as written. Read the permissions blocks and decide which of them "
+        "this bench should not have — allow_mass_erase in particular cannot be undone once it has run."
+    )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",
         "Set interface_cfg and target_cfg on your debuggers entry for your OpenOCD setup.",
-        "Every permission in this file is true, so the bench is workable as written: probing, flashing, resetting, raw "
-        "debugger commands, mass erase, and serial and CAN writes. Read the permissions blocks and decide which of them "
-        "this bench should not have — allow_mass_erase in particular cannot be undone once it has run.",
-        "You can also just tell the agent: it may write false into any permission here and can never write true into "
-        f"one, so nothing it does widens this file. `{CONFIG_REOPEN_COMMAND}` regenerates it with everything open again.",
+        granted_step,
+        "You can also just tell the agent: over MCP it may write false into any permission here and can write no other "
+        f"value, so nothing it does through `project_config_set` widens this file. `{CONFIG_REOPEN_COMMAND}` is yours "
+        "and regenerates the file with everything open again.",
         "Flashing needs one of those decisions before it works: validated flashing and unrestricted debugger access are "
         "mutually exclusive policies, so while allow_raw_debugger_commands or allow_mass_erase is true on a probe, "
         "flash_firmware on that probe is refused. Set whichever of the two this bench does not need to false.",

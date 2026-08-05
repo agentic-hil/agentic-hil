@@ -338,6 +338,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
         ),
     ),
+    "debugger_config_not_found": ErrorRemedy(
+        meaning=(
+            "A debugger script this entry names could not be used: the interface or target configuration file the "
+            "backend was pointed at is not where the configuration says it is. Nothing was run and the bench was not "
+            "touched."
+        ),
+        remediation=(
+            "Check `debuggers.<name>.interface_cfg` and `.target_cfg` against what is installed on this machine; "
+            "`agentic-hil doctor` names the entry and the file it could not use.",
+            "Set them with `project_config_set` to the absolute paths of the scripts for this probe and target. A "
+            "configured script path must be absolute and must live outside the workspace.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger, and a configured absolute path inside the "
+            "workspace is refused at load for that reason.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
     "config_write_in_open_run": ErrorRemedy(
         meaning=(
             "A configuration write was attempted while this server holds hardware: a declared run, an open COM or CAN "
@@ -757,6 +776,9 @@ def config_schema_document() -> JsonObject:
 CONFIG_DESCRIPTION_RIGHT = "allow_config_description_write"
 CONFIG_PERMISSIONS_RIGHT = "allow_config_permissions_write"
 CONFIG_WRITE_RIGHT = "allow_config_write"
+# Named here rather than imported: `configwrite` imports this module, so the tool
+# whose reach the frozen notice below describes cannot be read back from it.
+PROJECT_CONFIG_SET_TOOL = "project_config_set"
 
 CONFIG_RIGHTS: dict[str, str] = {
     CONFIG_DESCRIPTION_RIGHT: (
@@ -765,8 +787,8 @@ CONFIG_RIGHTS: dict[str, str] = {
     ),
     CONFIG_PERMISSIONS_RIGHT: (
         "Take permissions away, field-wise, including these two keys themselves. Only false may be "
-        "written: no call on this surface turns a permission on, so this grant reduces authority and "
-        "never adds any. Setting it false is the last permission change an agent can make."
+        "written: `project_config_set` turns no permission on, so this grant reduces authority and "
+        "never adds any. Setting it false is the last permission change that tool can make."
     ),
 }
 
@@ -783,6 +805,13 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
 
     Three things, because three are what a reader needs: what stands frozen now,
     that the agent itself cannot undo it, and the name of the command that can.
+
+    Said about `project_config_set` and about nothing else, because that is the
+    whole of what this closes. Regeneration is a different call under a different
+    grant and it is creation rather than a permissions write — the owner's
+    clarification on hardci-hq#96 keeps it out of the ratchet deliberately. A
+    notice that claimed the whole file was sealed would be describing a rule this
+    project does not have.
     """
     return {
         "closed_key": closed_key,
@@ -790,18 +819,18 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
         "frozen_permissions": {name: bool(value) for name, value in sorted(frozen.items())},
         "reopened_by": CONFIG_REOPEN_COMMAND,
         "summary": (
-            f"`{closed_key}` is now false, so this was the last permission change this server can make to "
+            f"`{closed_key}` is now false, so this was the last permission change `{PROJECT_CONFIG_SET_TOOL}` can make to "
             f"{path}. Every permission listed in `frozen_permissions` stands as it is: the ones still true stay true, "
-            "the ones already false stay false, and no call on this surface can move any of them again."
+            "the ones already false stay false, and no further call to that tool can move any of them."
         ),
         "next_steps": [
             "Report this before anything else. The operator has to know the bench's permissions are now fixed, and "
             "which of them were left granted — `frozen_permissions` is that list, read out of the file as written.",
-            "You cannot undo this and there is no permission that would let you. Do not call `project_config_set` on a "
-            f"permission again, and do not call `project_config_create`: it needs `{CONFIG_WRITE_RIGHT}`, which is one "
-            "of the permissions that just froze.",
+            f"You cannot undo it with `{PROJECT_CONFIG_SET_TOOL}` and there is no permission that would let you. Do not "
+            "call it on a permission again.",
             f"A person reopens the file with `{CONFIG_REOPEN_COMMAND}` in the project root, which regenerates it from "
-            "attached hardware with every permission granted again. That is the only route back, and it is theirs.",
+            "attached hardware with every permission granted again. Ask for that rather than looking for a way around "
+            "this; regenerating a configuration is the operator's call, not yours.",
         ],
     }
 
@@ -844,6 +873,15 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("com_ports", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("can_buses", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    # And the two grants the schema puts directly on a fixed section instead of
+    # inside a `permissions` block. A generation writes both true like every
+    # other permission, so leaving them out of the key model left two things a
+    # generated bench grants that an operator could only take back by opening the
+    # YAML — the one thing hardci-hq#96 exists to stop. Only the grant of each
+    # section is settable; `debug.allowed_symbols` and `artifacts.allowed_roots`
+    # are lists, and this surface writes scalars.
+    ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_all_symbols",)),
+    ConfigKeyRule("artifacts", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_upload",)),
 )
 
 # Sections whose entries are named by the operator and may be added.

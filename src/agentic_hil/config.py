@@ -1145,6 +1145,11 @@ GENERATED_WRITE_PERMISSIONS = {
 # every one true and a regenerated one carries every one over: whichever list is
 # short is the one that hands out a grant nobody set or drops one somebody did.
 GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+# The two grants the schema puts directly on a fixed section rather than inside a
+# `permissions` block. A generation writes both true, so they belong in every
+# list that claims to say what a generated configuration grants — and in the key
+# model, or an operator could take them back only by opening the file.
+GENERATED_SECTION_PERMISSIONS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
 
 
 def permission_summary(config: AgenticHILConfig) -> JsonObject:
@@ -1153,12 +1158,17 @@ def permission_summary(config: AgenticHILConfig) -> JsonObject:
     Read off the parsed policy rather than off a document, which is what makes
     it the answer when there is no document left to read: a server whose
     configuration was removed underneath it still enforces what it loaded, and
-    this is the only shape in which an operator can be shown what that is."""
+    this is the only shape in which an operator can be shown what that is.
+
+    Complete, including the two section-level grants — a summary that leaves a
+    grant out is one an operator reads as "not granted"."""
     return {
         **{name: bool(getattr(config.permissions, name, False)) for name in GENERATED_PROJECT_PERMISSIONS},
         "debuggers": {name: {flag: bool(getattr(entry.permissions, flag)) for flag in GENERATED_WRITE_PERMISSIONS["debuggers"]} for name, entry in config.debuggers.items()},
         "com_ports": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.com_ports.items()},
         "can_buses": {name: {"allow_write": entry.permissions.allow_write} for name, entry in config.can_buses.items()},
+        "debug": {"allow_all_symbols": bool(config.debug.allow_all_symbols)},
+        "artifacts": {"allow_upload": bool(config.artifacts.allow_upload)},
     }
 
 
@@ -1239,12 +1249,10 @@ def grant_every_permission(document: JsonObject) -> JsonObject:
         for entry in entries.values():
             if isinstance(entry, dict):
                 entry["permissions"] = dict.fromkeys(flags, True)
-    artifacts = document.get("artifacts")
-    if isinstance(artifacts, dict):
-        artifacts["allow_upload"] = True
-    debug = document.get("debug")
-    if isinstance(debug, dict):
-        debug["allow_all_symbols"] = True
+    for section, grants in GENERATED_SECTION_PERMISSIONS.items():
+        node = document.get(section)
+        if isinstance(node, dict):
+            node.update(dict.fromkeys(grants, True))
     document["permissions"] = dict.fromkeys(GENERATED_PROJECT_PERMISSIONS, True)
     return document
 
@@ -2215,6 +2223,16 @@ def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
       absolute and outside the workspace — so an entry that kept them cannot
       drive anything however its permissions read, whether or not
       `project_config_adopt_hardware` has since filled in its probe serial.
+
+      Deliberately not narrowed by probe id or executable. Adoption fills a
+      serial into exactly this entry without touching its scripts, and requiring
+      the scripts from that point on would make the one flow this issue exists
+      to make work — `init`, plug the board in, adopt — end in a configuration
+      that no longer loads. What keeps the relative names harmless is not this
+      predicate: OpenOCD is spawned with its working directory pinned to the
+      directory of the executable itself (`spawn_command` in
+      `backends/openocd.py`), so `interface/stlink.cfg` resolves inside the
+      toolchain's own script tree and the workspace cannot shadow it.
     * Any other entry with no toolchain behind it: none named, or the one pinning
       substituted because nothing resolved. That marker is what makes the answer
       survive pinning, which replaces an unresolved executable with a path under

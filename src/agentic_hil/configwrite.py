@@ -98,18 +98,22 @@ PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 # So the actor decides whether the description grant is consulted, and it is
 # recorded so the file says which of the two moved it.
 #
-# The permissions half is waived for nobody. The before/after comparison further
-# down reads the document rather than the request and refuses a permission that
-# moved without `allow_config_permissions_write`, whoever asked.
+# The *authorization* on the permissions half is waived for nobody: the
+# before/after comparison further down reads the document rather than the request
+# and refuses a permission that moved without `allow_config_permissions_write`,
+# whoever asked. The *direction* rule from hardci-hq#96 is narrower on purpose —
+# it nails the MCP surface shut, so only the agent actor is held to writing
+# `false` and nothing else. What an operator does to their own configuration from
+# their own shell is theirs.
 ACTOR_AGENT = "agent"
 ACTOR_HUMAN = "human"
 ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
 
 # One comment line, rewritten rather than appended, so a file changed a hundred
 # times does not grow a hundred lines of banner. It sits in the header because
-# the header is what a person reads first, and a generated header states that
-# every permission below is true — which was so when it was written, and is
-# exactly what a narrowing since then has stopped being. A reader must not go on
+# the header is what a person reads first, and a generated header states which
+# permissions below are true — which was so when it was written, and is exactly
+# what a narrowing since then has stopped being. A reader must not go on
 # believing the header without being told the file has moved.
 CHANGE_MARKER_PREFIX = "# Changed by "
 NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
@@ -173,11 +177,13 @@ def permission_delta(before: dict[str, Any], after: dict[str, Any]) -> list[str]
 def permission_widening(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     """Which permission paths a change opens rather than closes.
 
-    The whole of hardci-hq#96 rests on this list being empty for every write this
-    server makes. A generated configuration now grants everything, so the
+    The whole of hardci-hq#96 rests on this list being empty for every write an
+    agent makes over MCP. A generated configuration now grants everything, so the
     property left to defend is the direction: an agent writes ``false`` into a
     permission and never ``true``, which means it can only ever reduce its own
-    authority.
+    authority. It says nothing about creation — a regeneration writes the open
+    skeleton and is the operator's call, not a permissions write — and nothing
+    about what a person does at the command line.
 
     Read off ``permission_delta``, so the two answers cannot disagree about what
     moved, and truthiness rather than ``is True`` decides which way. That is
@@ -378,7 +384,7 @@ def _marked_header(text: str, timestamp: str, actor: str, via: str) -> str:
 
     One line, and it replaces the previous one rather than following it — a file
     changed a hundred times must not grow a hundred banners. It matters because a
-    generated header states that every permission below is true, which was so when
+    generated header states which permissions below are true, which was so when
     it was written and is the kind of thing a later reader keeps believing unless
     something in front of them says the file has moved — and a narrowing is
     precisely the change that makes it wrong. It names the actor because "an agent
@@ -427,6 +433,40 @@ def _right_key(right: str) -> str:
 # "this call was the terminal move" and the key a caller is told about cannot
 # come apart.
 GRANTING_PATH = _right_key(CONFIG_PERMISSIONS_RIGHT)
+
+
+def _only_false_allowed(requested: list[str], path: Path) -> JsonObject:
+    """A permission change that carried any value other than literal ``false``.
+
+    Refused on the request rather than on the document, because this is the case
+    the document cannot show: sending ``true`` for a permission that is already
+    ``true`` moves nothing, and a rule that only watched for movement would let
+    that through, rewrite the file and stamp its provenance for a write this
+    surface is not allowed to make. The same error type as a widening, because
+    for a caller it is the same fact — nothing here turns a permission on."""
+    return {
+        "ok": False,
+        "tool": PROJECT_CONFIG_SET,
+        "error_type": CONFIG_WIDENING_ERROR,
+        "summary": (
+            f"{len(requested)} permission change(s) in this call carried a value other than false, and false is the only "
+            "value this surface writes into a permission. A configuration is generated with every permission granted, so "
+            "an agent can narrow one and never open one — including one that is already open, which this call would not "
+            "have changed. Nothing was written."
+        ),
+        "widened_keys": sorted(requested),
+        "path": str(path),
+        "reopened_by": CONFIG_REOPEN_COMMAND,
+        "reference": CONFIG_SHAPE_URI,
+        "next_step": (
+            "Send `false` for a permission you mean to take away, and send no change at all for one that should stay as "
+            "it is. If the operator asked for a permission to be turned on, that is theirs to do with "
+            f"`{CONFIG_REOPEN_COMMAND}` in the project root; report it and stop."
+        ),
+        **remediation_fields(CONFIG_WIDENING_ERROR),
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
 
 
 def _widening_denied(widened: list[str], path: Path) -> JsonObject:
@@ -580,6 +620,26 @@ def _project_config_set(
             if needed.get(right) and not rights[right]:
                 return _permission_denied(PROJECT_CONFIG_SET, right, needed[right], target_path)
 
+        # 1b. The direction, stated where the rule is actually about: the value a
+        #     request carries. hardci-hq#96 nails the MCP surface shut and nothing
+        #     else, and on that surface an agent writes `false` into a permission
+        #     and never anything else. The document comparison in 2b below is the
+        #     backstop and cannot be this check: a request that sends `true` for a
+        #     permission that is already `true` moves nothing, so it produces no
+        #     delta to catch, and the file would be rewritten and its provenance
+        #     stamped for a write the rule does not allow to be made at all. A
+        #     value the schema would coerce — `1`, `"false"` — is refused here for
+        #     the same reason, before anything is applied.
+        #
+        #     A person at the command line is not held to it. That is the owner's
+        #     clarification on this issue: the ratchet binds the MCP surface, and
+        #     what an operator does to their own configuration from their own
+        #     shell is theirs.
+        if actor != ACTOR_HUMAN:
+            not_false = [resolved.key for resolved, value in requested if resolved.right == CONFIG_PERMISSIONS_RIGHT and value is not False]
+            if not_false:
+                return _only_false_allowed(not_false, target_path)
+
         before_permissions = permission_surface(document)
         before_description = description_view(document)
         updated = deepcopy(document)
@@ -610,15 +670,20 @@ def _project_config_set(
         moved = permission_delta(before_permissions, after_permissions)
         if moved and not rights[CONFIG_PERMISSIONS_RIGHT]:
             return _permission_denied(PROJECT_CONFIG_SET, CONFIG_PERMISSIONS_RIGHT, moved, target_path)
-        # 2b. And the direction, read from the same comparison. Nothing this
-        #     server writes may open a permission — not one it never touched, and
-        #     not one it closed a moment earlier. This is the only invariant left
-        #     after hardci-hq#96 turned the generated default over, so it holds
-        #     without help: no actor waives it, because "a human at the CLI"
-        #     reaches this function through `agentic-hil adopt-hardware`, which
-        #     names no permission at all. A person widens by regenerating the
-        #     file, which is a different call under a different grant.
-        widened = permission_widening(before_permissions, after_permissions)
+        # 2b. And the direction again, read from the document rather than from
+        #     the request. 1b above refuses the value an agent sent; this refuses
+        #     a permission that came *on* however it got there — under a key the
+        #     key model resolved somewhere else, on an entry a change created, in
+        #     a shape a path parser would not have recognised. Extending the
+        #     comparison that was already here rather than replacing it is the
+        #     point: it is the layer that does not depend on having anticipated
+        #     the key.
+        #
+        #     Scoped to the same surface as 1b, and for the same reason: a person
+        #     at the CLI reaches this function through `agentic-hil
+        #     adopt-hardware`, which names no permission, and their own shell is
+        #     not what this ratchet was decided against.
+        widened = permission_widening(before_permissions, after_permissions) if actor != ACTOR_HUMAN else []
         if widened:
             return _widening_denied(widened, target_path)
         if description_view(updated) != before_description and not rights[CONFIG_DESCRIPTION_RIGHT]:

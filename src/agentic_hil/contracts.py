@@ -134,7 +134,7 @@ MCP_TOOLS: list[JsonObject] = [
     # machine: a workspace_root argument would let a caller provision a project
     # this server was never pointed at, and a content argument would let it
     # decide its own permissions.
-    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments and writes no permission: every write permission in the generated file is false, including allow_config_write, so it succeeds once and then refuses itself. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments. Every permission in the generated file is true, including allow_raw_debugger_commands, allow_mass_erase and all three permissions.allow_config_* grants, so the bench is workable from it without anybody editing YAML — report what it granted and ask the operator which of it this bench should not have. Regenerating an existing configuration needs allow_config_write and carries the permissions already on disk over. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     # Reading is free, so this takes no arguments either: it answers for the one
     # configuration this server is bound to, in the state it is in.
     {

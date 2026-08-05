@@ -27,16 +27,19 @@ import pytest
 import yaml
 
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT
+from agentic_hil.bench import BenchMutex
 from agentic_hil.config import (
+    config_schema,
     load_authoritative_config,
     project_config_path,
     provisionable_state_root,
     user_state_root,
 )
 from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
-from agentic_hil.contracts import MCP_TOOL_NAMES, TOOL_SCHEMAS
-from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
+from agentic_hil.mcp import SERVER_INSTRUCTIONS, handle_mcp_message
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
+from agentic_hil.types import fold_hardware_id
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
 # outside the workspace, because loading the configuration pins the executable.
@@ -68,7 +71,19 @@ def attached_hardware(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> d
         "summary": "One attached STM32 target was identified through ST-Link HOTPLUG discovery.",
     }
     discovery.update(overrides)
-    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", lambda: discovery)
+
+    def discover(*, before_connect: object = None) -> dict:
+        # Generation reads a board, so on a configured server it goes in under
+        # that server's coordinator and announces the probe it selected before it
+        # connects. The stand-in has to make that call, or a test would pass with
+        # the probe lease never taken.
+        if callable(before_connect):
+            refusal = before_connect(str(discovery.get("probe_id") or ""))
+            if refusal is not None:
+                return refusal
+        return discovery
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", discover)
     return discovery
 
 
@@ -884,3 +899,161 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
     }
     assert document["permissions"]["allow_config_permissions_write"] is False
     assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Regeneration reads a board, and is held to what every board read is held to.
+#
+# Under the closed default this path was reachable exactly once per workspace, so
+# a run could not be open across it and there was nothing to coordinate with.
+# hardci-hq#96 grants `allow_config_write` in every generated file, which makes
+# regeneration an ordinary call an agent can make at any moment — including the
+# middle of a run, and including while another process on this machine is driving
+# the probe it would enumerate.
+
+
+def test_regeneration_is_refused_while_this_server_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run's holds were taken under the policy this call would replace.
+
+    The same refusal `project_config_set` gives, one step earlier: this one also
+    talks to the board before it writes anything."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+    assert created["ok"] is True, created
+    before = Path(created["path"]).read_bytes()
+
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        started = service.call("bench_run_start", {"devices": [{"kind": "uart", "id": "dut_uart"}], "label": "boot-smoke"})
+        assert started["ok"] is True, started
+
+        refused = service.call(PROJECT_CONFIG_CREATE)
+
+        assert refused["ok"] is False
+        assert refused["error_type"] == "config_write_in_open_run"
+        assert refused["open_holds"]["run_active"] is True
+        assert refused["open_holds"]["run_label"] == "boot-smoke"
+        assert refused["retry_safe"] is True
+        assert any("bench_run_stop" in step for step in refused["remediation"])
+        assert Path(created["path"]).read_bytes() == before
+
+        assert service.call("bench_run_stop")["ok"] is True
+        assert service.call(PROJECT_CONFIG_CREATE)["ok"] is True
+    finally:
+        service.close()
+
+
+def test_regeneration_does_not_reach_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A board belongs to whoever holds it, whatever this file says.
+
+    The holder is a stranger — another MCP server, another project's run. It has
+    the physical probe, which is the lock this path takes between enumerating and
+    connecting, so the HOTPLUG connect never happens and nothing is written."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+    before = Path(created["path"]).read_bytes()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"probe:{fold_hardware_id('STLINK123')}"])
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+        stranger.release_all()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "device_busy"
+    assert refused["holder"]["label"] == "other-bench-session"
+    assert refused["side_effect_committed"] is False
+    # The advice is about the owner of the board, not about attaching one.
+    assert "attach" not in refused["next_step"].lower()
+    assert Path(created["path"]).read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# What a generation says about itself is read out of what it wrote.
+
+
+def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A carried-over narrowing is reported, not papered over.
+
+    Regeneration is creation and the owner's clarification keeps it outside the
+    one-way rule, so a regenerated file legitimately holds a mix: the permissions
+    of the file it replaced on the entries that were already there, the skeleton's
+    open default on anything discovered for the first time. What must not happen
+    is a result — or a header a person reads first — that claims one when the
+    other was written."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert created["narrowed_permissions"] == []
+    assert "every permission granted" in created["summary"]
+    config_file = Path(created["path"])
+    assert "Every permission below is true" in config_file.read_text(encoding="utf-8")
+
+    narrowed = written_document(created)
+    narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+    narrowed["artifacts"]["allow_upload"] = False
+    config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
+
+    attached_hardware(monkeypatch)
+    reopened = UnprovisionedToolService(workspace)
+    try:
+        rewritten = reopened.call(PROJECT_CONFIG_CREATE)
+    finally:
+        reopened.close()
+
+    assert rewritten["ok"] is True, rewritten
+    assert rewritten["narrowed_permissions"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_mass_erase"]
+    assert "carried over from the previous file as false" in rewritten["summary"]
+    assert "every permission was carried over unchanged" not in rewritten["summary"]
+    header = config_file.read_text(encoding="utf-8")
+    assert "Every permission below is true" not in header
+    assert "2 permission(s) below are false" in header
+    assert "#   debuggers.dut.permissions.allow_mass_erase" in header
+    # And the next steps do not tell the agent to report a bench that is fully
+    # granted when it is not.
+    assert any("narrowed_permissions" in step for step in rewritten["next_steps"])
+
+
+def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server instructions and the tool description are read before the call.
+
+    They are the only statement about this tool most callers ever see, so a
+    sentence left over from the closed default is not stale documentation — it is
+    a live instruction telling a connected agent that a bench it just generated
+    grants nothing, at the moment it in fact grants mass erase."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+    assert set(granted(written_document(created))) == set(declared(written_document(created)))
+
+    description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
+    for text in (SERVER_INSTRUCTIONS, description):
+        assert "every permission in it is true" in text or "Every permission in the generated file is true" in text
+        assert "allow_mass_erase" in text or "mass erase" in text
+        assert "every permission in it is false" not in text
+        assert "every write permission in the generated file is false" not in text
+    # And what the schema says a provenance record means says it too.
+    provenance = config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"]
+    assert "every permission true" in provenance

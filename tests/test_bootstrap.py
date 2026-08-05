@@ -294,3 +294,71 @@ def test_cube_clt_programmer_paths_find_versioned_install(tmp_path: Path) -> Non
     executable.write_bytes(b"exe")
 
     assert cube_clt_programmer_paths(tmp_path) == [str(executable)]
+
+
+def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile may narrow, and the result has to say when it did.
+
+    The profile path is the operator's own, and hardci-hq#96's owner left it
+    theirs: a flag a project's `agentic-hil.config.example.yaml` sets to `false`
+    is honoured. What must not survive that is a summary claiming every
+    permission was granted — an operator who wrote `allow_mass_erase: false`
+    would be told their own decision had been overridden."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    (workspace / "agentic-hil.config.example.yaml").write_text(
+        "target:\n  name: demo\n  controller: stm32f446ret6\n"
+        "debuggers:\n  dut:\n    permissions:\n      allow_mass_erase: false\n"
+        "com_ports:\n  uart:\n    baudrate: 115200\n    permissions:\n      allow_write: false\n",
+        encoding="utf-8",
+    )
+    executable = Path(__file__).resolve()
+    monkeypatch.setattr(
+        "agentic_hil.cli.discover_attached_hardware",
+        lambda: {
+            "ok": True,
+            "executable": str(executable),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
+
+    result = init_config()
+    written = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+
+    assert result["ok"] is True, result
+    assert written["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+    assert written["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
+    assert result["narrowed_permissions"] == [
+        "com_ports.dut_uart.permissions.allow_write",
+        "debuggers.dut.permissions.allow_mass_erase",
+    ]
+    assert "every permission granted." not in result["summary"]
+    assert "the project profile set to false" in result["summary"]
+    assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
+    assert any("allow_mass_erase" in step for step in result["next_steps"])
+    assert not any(step.startswith("Every permission in this file is true, so") for step in result["next_steps"])
+
+
+def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The skeleton path, which is the one the issue is about.
+
+    Nothing narrowed, so the result says so plainly and the next steps name the
+    destructive grant an operator has to decide about."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert result["narrowed_permissions"] == []
+    assert result["summary"].endswith("with every permission granted.")
+    assert result["permissions"]["allow_config_permissions_write"] is True
+    assert result["permissions"]["debug"]["allow_all_symbols"] is True
+    assert result["permissions"]["artifacts"]["allow_upload"] is True
+    assert any(step.startswith("Every permission in this file is true, so") for step in result["next_steps"])

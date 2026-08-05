@@ -37,15 +37,19 @@ This boundary assumes the agent cannot modify the authoritative config, parent-p
 
 A configuration produced by `agentic-hil init` or `project_config_create` grants **every** permission it declares: flashing, reset, raw debugger commands, mass erase, serial and CAN writes, artifact upload, unrestricted symbol access, and all three project-scoped `permissions.allow_config_*` grants. That is the owner's decision (hardci-hq#96), taken after the destructive ones were named: the person who runs these benches owns them, and the previous closed default cost a working day of hand-edited YAML while protecting against nothing an agent with a shell was actually stopped by. Review the file `setup` prints and take back what your bench should not have — `allow_mass_erase` first, on any bench where a board you did not program can end up in the socket, because a mass erase cannot be undone.
 
-The property that carries the weight is no longer what a generation withholds. It is the direction:
+The property that carries the weight is no longer what a generation withholds. It is the direction of the one MCP call that writes a permission, `project_config_set`:
 
-- An agent may set any permission in the file to `false`, through `project_config_set`, gated by `permissions.allow_config_permissions_write` and recorded in `provenance`.
-- An agent may **never** set one to `true`. Not one it never touched, and not one it set to `false` itself. Any write that would turn a permission on is refused as `permission_widening_denied`. The check compares the permissions present in the document before and after the change rather than the keys the request named, so it does not depend on a path parser being right, and no actor waives it.
+- An agent may set any permission in the file to `false` through it, gated by `permissions.allow_config_permissions_write` and recorded in `provenance`.
+- An agent may **never** send any other value for a permission — not `true` for one it never touched, not `true` for one it set to `false` itself, and not a value the schema would coerce. Such a call is refused as `permission_widening_denied` and nothing is written. It is refused twice: on the value the request carried, and again on a comparison of the permissions present in the document before and after the change, which catches a permission that came on however it got there rather than depending on a path parser being right.
 - An entry an agent creates under `debuggers`, `com_ports` or `can_buses` arrives with every permission `false`, written by the server. Adding a device is a write, and a write never grants.
-- `project_config_create` carries the permissions on disk over unchanged, so regenerating is not a route back to the open skeleton. Only a workspace with no configuration at all gets that.
-- Setting `permissions.allow_config_permissions_write: false` is terminal: after it nothing on the MCP surface can move a permission in that file again. The call that does it reports what stands frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens the file.
+- Setting `permissions.allow_config_permissions_write: false` is terminal for that call: after it, `project_config_set` cannot move a permission in that file again. The call that does it reports what stands frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens the file.
 
-So an agent can only ever reduce its own authority. Widening is a person's, at the command line, and `agentic-hil init --force` is the command — it regenerates the configuration from attached hardware with every permission granted again. Treat a report that a permission is missing as a request for that command, not as something to work around.
+**That is the whole claim, and it is deliberately narrow.** The rule binds the MCP write path and nothing else:
+
+- **Regeneration is creation, not a permissions write, and it is not bound by it.** `project_config_create` on a workspace whose configuration is gone writes the open skeleton, and so does `agentic-hil init --force` at the command line. A regeneration over a configuration that is still there carries the permissions on disk over for the entries that are still in it — but anything it discovers for the first time arrives at the skeleton's open default. Regenerating is the operator's call and is treated as theirs.
+- **Anything a person does at the command line is theirs.** The `false`-only rule is not applied to CLI paths.
+
+So an agent can only ever reduce its own authority *through the tool it has*. Widening is a person's, at the command line, and `agentic-hil init --force` is the command — it regenerates the configuration from attached hardware with every permission granted again. Treat a report that a permission is missing as a request for that command, not as something to work around.
 
 The file-level deny rules `setup` writes into an agent host are a different mechanism and are unaffected by any of this.
 
