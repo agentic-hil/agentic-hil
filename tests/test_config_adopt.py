@@ -167,6 +167,7 @@ def test_a_placeholder_configuration_is_completed_without_transcription(tmp_path
         assert planned["applied"] is False, "reading hardware must not write by itself"
         assert sorted(item["key"] for item in planned["carried"]) == [
             "com_ports.dut_uart.device",
+            "com_ports.dut_uart.serial_number",
             "debuggers.dut.executable",
             "debuggers.dut.probe_id",
             "target.controller",
@@ -318,7 +319,7 @@ def test_the_pure_planner_refuses_a_mixed_board_plan() -> None:
     same_board = plan_adoption({**document, "debuggers": {"dut": {**document["debuggers"]["dut"], "probe_id": "probe-b"}}}, discovery)
     assert same_board["ok"] is True
     assert [item["key"] for item in same_board["kept"]] == ["debuggers.dut.probe_id"]
-    assert sorted(item["key"] for item in same_board["carried"]) == ["com_ports.dut_uart.device", "debuggers.dut.executable", "target.controller"]
+    assert sorted(item["key"] for item in same_board["carried"]) == ["com_ports.dut_uart.device", "com_ports.dut_uart.serial_number", "debuggers.dut.executable", "target.controller"]
 
 
 def _skeleton_from_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Path:
@@ -366,6 +367,7 @@ def test_the_untouched_skeleton_carries_the_board_with_nobody_editing_yaml(tmp_p
         "debuggers.dut.probe_id",
         "target.controller",
         "com_ports.dut_uart.device",
+        "com_ports.dut_uart.serial_number",
     }
     unavailable = {item["key"]: item for item in carried["unavailable"]}
     assert "debuggers.dut.executable" in unavailable
@@ -419,6 +421,7 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
         "debuggers.dut.executable",
         "target.controller",
         "com_ports.dut_uart.device",
+        "com_ports.dut_uart.serial_number",
     }
     filled = document_of(path)
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
@@ -501,6 +504,7 @@ def test_a_value_that_already_matches_the_hardware_is_not_written_again(tmp_path
     assert second["carried"] == []
     assert sorted(item["key"] for item in second["already_current"]) == [
         "com_ports.dut_uart.device",
+        "com_ports.dut_uart.serial_number",
         "debuggers.dut.executable",
         "debuggers.dut.probe_id",
         "target.controller",
@@ -1216,7 +1220,7 @@ def test_the_cli_dry_run_writes_nothing(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert result["ok"] is True, result
     assert result["applied"] is False
-    assert len(result["carried"]) == 4
+    assert len(result["carried"]) == 5
     assert path.read_text(encoding="utf-8") == before
 
 
