@@ -18,11 +18,9 @@ import yaml
 
 from agentic_hil import __version__
 from agentic_hil.adopt import project_config_adopt_hardware
-from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
-    discover_attached_hardware,
     load_project_profile,
 )
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
@@ -55,7 +53,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, permission_surface, set_permission
+from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, set_permission
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
@@ -64,10 +62,21 @@ from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
-from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, unbound_debugger_error
+from agentic_hil.tools import (
+    AgenticHILToolService,
+    UnprovisionedToolService,
+    discover_for_generation,
+    narrowed_permissions,
+    unbound_debugger_error,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SKILL_NAME = "agentic-hil"
+# What `agentic-hil init`'s read of the board is called in the audit record it
+# leaves and in any incident it files. Deliberately not `project_config_create`,
+# though the two write the same file from the same read: a record that could not
+# say which of them touched the bench is the wrong record to hand an operator.
+CLI_INIT = "cli_init"
 # How far up the process tree the upgrade guard follows launchers before it
 # stops looking, and how many holding processes a refusal names before the
 # count carries the rest.
@@ -146,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted, and verify it with doctor")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
@@ -1136,6 +1145,73 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     return None
 
 
+def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None]:
+    """Read the attached board for `init`, holding what a probe read holds.
+
+    `init` called `discover_attached_hardware` directly: no `before_connect`, no
+    coordinator, no record. Enumerating probes and connecting in HOTPLUG mode is
+    a hardware read either way, so that reached a board another run was holding —
+    where `project_config_create`, which writes the same file out of the same
+    read, answers `device_busy` — and it did so leaving nothing in the audit
+    trail (hardci-hq#108). Since agentic-hil/agentic-hil#112 made `init` look
+    unconditionally that applied to every `init` rather than only to a workspace
+    carrying a profile.
+
+    That the CLI is the operator's authority does not carry the exception, and
+    `adopt_hardware` is the proof: it makes the same argument about the *grant*,
+    waives that, and leases anyway. Authority over your own configuration is not
+    authority over somebody else's running bench — and `--force` rewriting the
+    file in the middle of a stranger's run is not something the operator wants
+    either. So this goes through `discover_for_generation`, which is the function
+    `project_config_create` uses, under this command's own coordinator.
+
+    Returns the discovery, the refusal that is the whole answer when the read did
+    not happen or did not end cleanly, and — when the board was read without a
+    lease — the reason it could not be leased.
+    """
+    try:
+        current: AgenticHILConfig | None = load_authoritative_config(workspace)
+    except ConfigError as error:
+        # No configuration to lease against, so no `state_root` to record a lease
+        # under and no policy to audit against — the machinery does not exist
+        # rather than being skipped. Both cases that reach here are that: the
+        # first `init` of a workspace, and an `init --force` over a file that
+        # cannot be loaded, which is the one command that repairs it. Refusing
+        # either would leave no way to reach a configured bench at all, which is
+        # worse than what this fixes. Named in the result instead of inferred
+        # from a record that is not there.
+        current, unleased = None, error.error_type
+    else:
+        unleased = None
+    discovery, refusal = discover_for_generation(
+        current,
+        None,
+        tool=CLI_INIT,
+        reason_prefix=CLI_INIT,
+        frontend="operator-cli",
+    )
+    return discovery, refusal, unleased
+
+
+def _init_lease_note(unleased: str | None) -> JsonObject:
+    """Whether the board `init` read was read under a lease, and if not, why not."""
+    if unleased is None:
+        return {
+            "leased": True,
+            "tool": CLI_INIT,
+            "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
+        }
+    return {
+        "leased": False,
+        "reason": unleased,
+        "summary": (
+            "This workspace had no loadable configuration to lease or audit against, so the attached probe was read "
+            "directly. That is the one case where nothing on this machine can be holding a board on this project's "
+            "behalf; every read after this one goes through the lease."
+        ),
+    }
+
+
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
@@ -1157,7 +1233,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery = discover_attached_hardware()
+    discovery, refusal, unleased = _init_bench_read(workspace)
+    if refusal is not None:
+        # The read is what was refused, so there is nothing to write a file from
+        # and nothing was written. The refusal is the whole answer.
+        return {**refusal, "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
@@ -1198,12 +1278,21 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         return result
     available_com_ports = list_available_com_ports()
     # Read off the file that was written rather than asserted. The skeleton path
-    # grants everything, but a project's own `agentic-hil.config.example.yaml`
-    # may set a flag false and that is honoured — an operator who wrote
-    # `allow_mass_erase: false` into their profile meant it. A fixed sentence
-    # here told them the opposite about their own bench.
-    narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
-    granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
+    # grants everything it can, but a project's own
+    # `agentic-hil.config.example.yaml` may set a flag false and that is honoured
+    # — an operator who wrote `allow_mass_erase: false` into their profile meant
+    # it. A fixed sentence here told them the opposite about their own bench.
+    #
+    # `narrowed_permissions` rather than a walk of the whole surface, so that the
+    # two flags the skeleton itself writes false are not reported as the
+    # profile's doing (hardci-hq#107). They are the same two on every bench,
+    # profile or no profile, and are stated once here instead.
+    narrowed = narrowed_permissions(yaml.safe_load(text) or {})
+    granted_clause = (
+        "with every permission granted except the two that are false so that flashing works"
+        if not narrowed
+        else f"with every permission granted except the two that are false so that flashing works, and {len(narrowed)} the project profile set to false"
+    )
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
@@ -1235,6 +1324,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "narrowed_permissions": sorted(narrowed),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
+        "hardware_lease": _init_lease_note(unleased),
         "next_steps": next_steps,
     }
 
@@ -1256,7 +1346,7 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     enforces from the document rather than from the request. Nothing here needs
     to be argued as the lesser evil either: the same shell already has
     `agentic-hil init --force`, which since hardci-hq#96 rewrites the whole file
-    with every permission granted. Whoever has that shell has the operator's
+    at the generated defaults. Whoever has that shell has the operator's
     authority over this configuration outright, and the ratchet was never a
     promise about them — it holds on the MCP write path, which is where an agent
     that has only the MCP tools lives.
@@ -1283,7 +1373,7 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
 
     hardci-hq#96 left an agent able to write `false` into a permission and
     nothing else, and answered the other direction for a file that does not exist
-    yet: a generation opens everything. For a bench that has been running a while
+    yet: a generation opens everything it can. For a bench that has been running a while
     there was no answer. `init --force` carries the existing grants over by name,
     so the `false` survives it; deleting the configuration does come back open,
     at the cost of the baudrate, the `resource_id`, the `state_root` and every
@@ -1306,23 +1396,22 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
 
     The MCP service asks its own coordinator and gets an exact answer, because
     the holder is itself. A command line is a different process and has to ask
-    the two locks instead, which is why both are asked:
+    the locks, and both of them have to be asked: a lease takes the project lock
+    and holds it for as long as the session lives, while a declared run takes the
+    machine-wide device locks and *not* the project lock, so a run between two of
+    its own calls is invisible to the first question.
 
-    * The **project lock**, through `HardwareCoordinator.status()`. A lease takes
-      it — a COM or CAN session, a debug session, any single hardware call — and
-      holds it for as long as the session lives.
-    * The **device locks**, through the machine-wide mutex. A declared run takes
-      those and *not* the project lock, so a run between two of its own calls is
-      invisible to the first check. Asked by taking each device lock and giving
-      it straight back rather than by reading the holder records beside them: the
-      OS lock is what makes a hold true, a record is only what the last owner
-      wrote, and an owner that died leaves the record saying `held` forever. A
-      check that believed the record would refuse every permission change on a
-      bench whose last run crashed — a new dead end inside the change that exists
-      to remove one.
+    Asking is `HardwareCoordinator.status()`'s job, not this one's. Until
+    hardci-hq#105 the device half lived here and helped no other caller — the
+    same status read a second terminal makes still reported a run's held bench as
+    free. This reshapes the one answer for the refusal; it does not go back to
+    the locks a second time. Why the holder records are not that answer, and why
+    each device is taken and released on its own, is in `device_holds`.
 
-    One device at a time and released immediately, so this never holds a set
-    somebody else is midway through taking.
+    `held_devices` here is deliberately wider than the field of that name in
+    `status()`: the locks say which devices are held, and the project record
+    additionally names what the live owner declared. A refusal that says what a
+    permission change would move underneath wants both.
 
     From out here a declared run and a session that outlived one are the same
     fact, so neither is claimed: what is reported is that the bench is held and
@@ -1335,13 +1424,13 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         status = coordinator.status()
     finally:
         coordinator.close()
-    busy = busy_devices(config)
-    if not status.get("owner_active") and not busy:
+    if not status.get("bench_held"):
         return None
     record = status.get("record") or {}
+    busy = list(status.get("device_holds") or [])
     holds: JsonObject = {
         "owner_active": bool(status.get("owner_active")),
-        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item["resource"]) for item in busy)}),
+        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item) for item in (status.get("held_devices") or []) if isinstance(item, str))}),
         "busy_devices": busy,
         # The project record is advisory while somebody holds the lock, so say so
         # rather than presenting a read that could have straddled their write.
@@ -1351,32 +1440,6 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         if record.get(field) is not None:
             holds[field] = record[field]
     return holds
-
-
-# What a busy device is reported with. `error_class` and `errno` are carried
-# because `BenchMutex` answers a lock it could not even open the same way as one
-# somebody holds — fail-closed, which is right — and without them an unwritable
-# lock directory would read as "another run has the bench" forever.
-_HOLDER_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
-
-
-def busy_devices(config: AgenticHILConfig) -> list[JsonObject]:
-    """Every device of this configuration another owner is holding right now.
-
-    Each lock is taken and released on its own. Taking the whole set at once
-    would be the acquisition a run makes, and this is a question rather than a
-    run: holding six devices to find out whether one of them is free is how a
-    question turns into a collision."""
-    mutex = BenchMutex(frontend="operator-cli")
-    busy: list[JsonObject] = []
-    for key in config_devices(config).lock_keys:
-        try:
-            mutex.acquire([key], wait_s=0.0)
-        except DeviceBusyError as error:
-            busy.append({field: error.result[field] for field in _HOLDER_FIELDS if error.result.get(field) is not None})
-        else:
-            mutex.release([key])
-    return busy
 
 
 def initialized_config_path(workspace: Path) -> Path:
@@ -1502,14 +1565,14 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
     granted_step = (
-        "Every permission in this file is true: probing, flashing, resetting, raw debugger commands, mass erase, and "
-        "serial and CAN writes. Read the permissions blocks and decide which of them this bench should not have — "
-        "allow_mass_erase in particular cannot be undone once it has run."
+        "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
+        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works. Read the "
+        "permissions blocks and decide which of the rest this bench should not have."
         if not narrowed
-        else "Every permission in this file is true except the ones your project profile set to false ("
-        + ", ".join(narrowed)
-        + "). Read the permissions blocks and decide which of the rest this bench should not have — allow_mass_erase in "
-        "particular cannot be undone once it has run."
+        else "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
+        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works, and the ones your "
+        "project profile set to false (" + ", ".join(narrowed) + "). Read the permissions blocks and decide which of "
+        "the rest this bench should not have."
     )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
@@ -1532,10 +1595,11 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
     next_steps.extend([
         "You can also just tell the agent: over MCP it may write false into any permission here and can write no other "
         f"value, so nothing it does through `project_config_set` widens this file. `{CONFIG_REOPEN_COMMAND}` is yours "
-        "and regenerates the file with everything open again.",
-        "Flashing needs one of those decisions before it works: validated flashing and unrestricted debugger access are "
-        "mutually exclusive policies, so while allow_raw_debugger_commands or allow_mass_erase is true on a probe, "
-        "flash_firmware on that probe is refused. Set whichever of the two this bench does not need to false.",
+        "and regenerates the file with the same defaults again.",
+        "Leave allow_raw_debugger_commands and allow_mass_erase alone unless something outside these tools needs the "
+        "probe that way: validated flashing and unrestricted debugger access are mutually exclusive policies, so while "
+        "either is true on a probe, flash_firmware on that probe is refused. Neither has a tool behind it here, so "
+        "turning one on costs you flashing and buys nothing.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
     if available_com_ports.get("ok"):
@@ -2147,7 +2211,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken

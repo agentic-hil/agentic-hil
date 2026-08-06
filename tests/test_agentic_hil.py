@@ -95,16 +95,20 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
     # Born on the read-free model: reading has no key to set, so every
     # permission line a fresh config carries is about writing — and since
-    # hardci-hq#96 every one of them is granted, so the bench this writes is
-    # workable without anybody opening it.
+    # hardci-hq#96 every one of them that grants a capability is granted, so the
+    # bench this writes is workable without anybody opening it.
     assert "version: 2" in config_text
     assert "allow_probe: " not in config_text
     assert "allow_flash: true" in config_text
     assert "allow_reset: true" in config_text
     assert "allow_upload: true" in config_text
-    assert "allow_mass_erase: true" in config_text
     assert "allow_config_permissions_write: true" in config_text
-    # And nothing in the file it wrote is off, whatever the key is called: a
+    # The two exceptions, and the reason the bench above is workable: either one
+    # true refuses flash_firmware on that probe, and neither has a tool behind it
+    # to trade for that (hardci-hq#107).
+    assert "allow_raw_debugger_commands: false" in config_text
+    assert "allow_mass_erase: false" in config_text
+    # And nothing else in the file it wrote is off, whatever the key is called: a
     # generation decides the permission state completely rather than half.
     document = yaml.safe_load(config_text)
 
@@ -119,7 +123,10 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
             found += denied(value, path)
         return found
 
-    assert denied(document) == []
+    assert denied(document) == [
+        "debuggers.dut.permissions.allow_raw_debugger_commands",
+        "debuggers.dut.permissions.allow_mass_erase",
+    ]
     assert initialized_config_path(workspace) == config_path
 
 
