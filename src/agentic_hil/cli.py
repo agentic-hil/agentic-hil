@@ -24,7 +24,7 @@ from agentic_hil.bootstrap import (
     discover_attached_hardware,
     load_project_profile,
 )
-from agentic_hil.comports import list_available_com_ports
+from agentic_hil.comports import list_available_com_ports, port_identity_fields
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
@@ -56,6 +56,7 @@ from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOA
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN, permission_surface
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
+from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
@@ -2055,6 +2056,13 @@ def doctor(config_path: str | None = None) -> JsonObject:
         status,
         prominent=True,
     )
+    # Not a failure. A configuration whose devices are identified by a name the
+    # host can reassign still works, and saying so is exactly why it is named
+    # here rather than refused at load: `doctor` is where an operator looks
+    # before a bench misbehaves, and the warning says what to run to fix it.
+    identity_warnings = config_devices(config).warnings()
+    if identity_warnings:
+        report["warnings"] = identity_warnings
     return {
         **report,
         "config_path": config.config_path,
@@ -2072,7 +2080,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
             }
             for name, entry in config.debuggers.items()
         },
-        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, "permissions": asdict(port.permissions)} for port_id, port in config.com_ports.items()},
+        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": asdict(port.permissions)} for port_id, port in config.com_ports.items()},
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": asdict(bus.permissions)} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }

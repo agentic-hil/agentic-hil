@@ -113,6 +113,8 @@ If the board, debugger, COM port or artifact path cannot be inferred, ask one co
 
 Discover them with `tools/list`. Build, `probe_target`, `flash_firmware`, then `com_session_*` or `can_session_*` for stimulus and feedback, and `get_last_report` plus `classify_last_error` to diagnose.
 
+Each entry carries MCP `annotations` saying what that tool does to the bench: `project_config_reload_description` and the reads are `readOnlyHint: true`, `flash_firmware` is `destructiveHint: true`, `probe_target` is neither because an SWD attach halts the core. A host may use them to decide what it prompts for. They grant nothing — the permissions in the authoritative config still decide, and `permission_denied` is still the answer.
+
 A sequence of hardware calls is one run and has to say so: `bench_run_start` with `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds those devices until `bench_run_stop`. Without it each call holds its device only for its own duration and the board is free between two steps; inside a run only the declared devices may be touched.
 
 Never substitute raw `openocd`, `pyocd`, `st-flash`, `gdb`, `screen` or `candump`, a Makefile target that runs one, or direct `/dev/tty*` access. `permission_denied` is the answer to the request, not an obstacle: report it, name the permission, stop. Never edit the config to grant yourself one.
