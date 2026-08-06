@@ -1324,7 +1324,11 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
     return holds
 
 
-_HOLDER_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale")
+# What a busy device is reported with. `error_class` and `errno` are carried
+# because `BenchMutex` answers a lock it could not even open the same way as one
+# somebody holds — fail-closed, which is right — and without them an unwritable
+# lock directory would read as "another run has the bench" forever.
+_HOLDER_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
 
 
 def busy_devices(config: AgenticHILConfig) -> list[JsonObject]:

@@ -1096,7 +1096,7 @@ def resolve_permission_key(key: str) -> tuple[ResolvedConfigKey | None, str | No
     return resolved, None
 
 
-def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path, document: JsonObject | None) -> JsonObject:
+def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path, document: JsonObject) -> JsonObject:
     """A name that is not a permission, answered with the ones that are.
 
     The list comes out of *this* document rather than out of the key patterns,
@@ -1105,7 +1105,6 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
     whole of the discoverability answer, and it is why there is no wildcard and
     no section form — a name has to be read before it can be typed, and the
     refusal is where it is read."""
-    available = sorted(str(entry["key"]) for entry in _concrete_keys(document)) if document is not None else []
     return {
         "ok": False,
         "command": f"agentic-hil {command}",
@@ -1116,7 +1115,7 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
             "`permission_keys_here`, read out of this file as it stands."
         ),
         "rejected_keys": rejected,
-        "permission_keys_here": [key for key in available if _is_permission_key(key)],
+        "permission_keys_here": sorted(str(entry["key"]) for entry in _concrete_keys(document) if entry["right"] == CONFIG_PERMISSIONS_RIGHT),
         "path": str(path),
         "reference": CONFIG_SHAPE_URI,
         "next_step": (
@@ -1126,11 +1125,6 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
         **NOT_STARTED,
         "retry_safe": False,
     }
-
-
-def _is_permission_key(key: str) -> bool:
-    resolved = resolve_config_key(key)
-    return resolved is not None and resolved.right == CONFIG_PERMISSIONS_RIGHT
 
 
 def _permission_open_run_refusal(existing: AgenticHILConfig, command: str, open_holds: JsonObject) -> JsonObject:
@@ -1232,14 +1226,17 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
     if open_holds:
         return _permission_open_run_refusal(existing, command, open_holds)
 
-    changing: list[ResolvedConfigKey] = []
+    changing: dict[str, Any] = {}
     unchanged: list[JsonObject] = []
     for item in resolved:
         current = _current_value(document, item.section, item.entry, item.under_permissions, item.field)
-        if bool(current) is value and isinstance(current, bool):
+        # `is value` on a bool and nothing else: a permission holding `1` or
+        # `"true"` is not a permission holding `true`, and rewriting it as one is
+        # a change rather than the no-op a truthiness test would call it.
+        if isinstance(current, bool) and current is value:
             unchanged.append({"key": item.key, "value": current})
         else:
-            changing.append(item)
+            changing[item.key] = current
 
     if not changing:
         return _nothing_to_change(command, value, unchanged, existing)
@@ -1252,14 +1249,18 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
     written = project_config_set(
         workspace,
         existing,
-        [{"key": item.key, "value": value} for item in changing],
+        [{"key": key, "value": value} for key in changing],
         open_holds=None,
         actor=ACTOR_HUMAN,
         via=f"cli:{command}",
-        expect={item.key: _current_value(document, item.section, item.entry, item.under_permissions, item.field) for item in changing},
+        expect=dict(changing),
         waive_permissions_grant=True,
     )
     if written.get("ok") is not True:
+        # Carried through as the write path stated it, with `command` added so a
+        # reader knows which of the two asked. The refusals worth reaching this
+        # way are its own — a permission on an entry that does not exist, a
+        # document somebody else moved in between, a file that stopped loading.
         return {**written, "command": f"agentic-hil {command}"}
     return _permission_change_result(command, value, written, unchanged, existing)
 
