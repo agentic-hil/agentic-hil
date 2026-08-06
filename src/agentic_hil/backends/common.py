@@ -41,6 +41,46 @@ NOT_CONTACTED: JsonObject = {
 READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
 
 
+def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
+    """Refuse `reset_target(mode="init")` on a backend that cannot run it.
+
+    `init` is not a third spelling of `halt`. On OpenOCD, `reset init` halts the
+    core and then runs the target's `reset-init` event script, which is where a
+    board's clock tree, wait states and watchdog are set up before anything
+    reads memory. Neither STM32CubeProgrammer nor pyOCD has that event, and
+    through 0.8.0 both took `init` and sent their plain halt in its place -
+    `-halt` and `reset halt`, the same argument each already sends for mode
+    `halt` - so the reset-init script never ran and the mode was the same call
+    twice under two names. pyOCD then reported `Target reset with mode 'init'.`
+    over it, which told a caller that asked for an initialised core that it had
+    one (hardci-hq#58). One enum, three values, and the third meant a different
+    machine depending on which debugger the project happened to configure;
+    nothing shipped said so.
+
+    Refusing is the answer these two backends already give for typed debug
+    sessions: the capability is OpenOCD's, and a caller that needs it needs an
+    OpenOCD debugger rather than a quieter approximation of one. The refusal is
+    also cheaper than what it replaces - it returns before the CLI is spawned,
+    so it carries NOT_CONTACTED and leaves the board where the last call that
+    did reach it left it. `run` and `halt` are unaffected: those two do agree
+    across the backends, and a step that only wanted the core stopped names
+    `halt` and keeps working.
+    """
+    return {
+        "ok": False,
+        "tool": "reset_target",
+        "backend": backend_name,
+        "error_type": "not_supported",
+        "mode": "init",
+        **NOT_CONTACTED,
+        "summary": (
+            f"Reset mode 'init' requires the OpenOCD backend: it runs the target's reset-init event script, and {missing}. "
+            "Use mode 'halt' if stopping the core is what this step needs, or configure an openocd debugger to run reset-init."
+        ),
+        "supported_modes": ["run", "halt"],
+    }
+
+
 @dataclass(frozen=True)
 class CompletedCommand:
     stdout: str

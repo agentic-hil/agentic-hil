@@ -17,7 +17,7 @@ from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames, payload_frame
 from agentic_hil.cli import debugger_probes, entrypoint
-from agentic_hil.config import ConfigError, config_schema, debugger_config, load_config
+from agentic_hil.config import ConfigError, config_digest, config_schema, debugger_config, load_config
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
@@ -27,6 +27,7 @@ from agentic_hil.coordination import (
     _LifetimeLock,
     resource_digest,
 )
+from agentic_hil.devices import config_devices
 from agentic_hil.mcp import call_tool
 from agentic_hil.process import (
     cleanup_registered_processes,
@@ -1239,6 +1240,89 @@ def test_recovery_config_change_requires_explicit_audited_override(tmp_path: Pat
     assert audit_lines[-1]["current_config_sha256"] == recovery.config_sha256
 
 
+def test_lease_record_is_stamped_with_the_parsed_config_not_a_later_edit(tmp_path: Path) -> None:
+    """The stamp names the document in force, even when the file moved since.
+
+    The write lands in the window between the load and the coordinator, which is
+    the only window in which the two can disagree. A stamp taken from a fresh
+    read there names a document nobody parsed.
+    """
+    config = config_for(tmp_path)
+    config_file = Path(config.config_path)
+    parsed = config_file.read_bytes()
+    config_file.write_bytes(parsed + b"\n# edited after the load, parsed by nobody\n")
+
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        # Same algorithm, different spelling: the record carries the bare hex of
+        # the prefixed digest the load took.
+        assert config_digest(parsed) == f"sha256:{coordinator.config_sha256}"
+        assert config_digest(config_file.read_bytes()) != f"sha256:{coordinator.config_sha256}"
+
+        lease = coordinator.acquire("physical:stamp-window")
+        try:
+            assert coordinator._read_record("physical:stamp-window")["config_sha256"] == coordinator.config_sha256
+        finally:
+            lease.release()
+    finally:
+        coordinator.close()
+
+
+def test_recovery_is_not_refused_over_an_edit_no_coordinator_parsed(tmp_path: Path) -> None:
+    """Two coordinators over one parsed configuration agree about it.
+
+    Neither of them ever saw a different document, so `config_changed` here would
+    be a delta invented by the clock: it would demand an operator override to
+    clear an incident recorded under the very policy still in force.
+    """
+    config = config_for(tmp_path)
+    config_file = Path(config.config_path)
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "\n# lands before the owner exists\n", encoding="utf-8")
+
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:unparsed-edit")
+    lease.quarantine("incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    owner.close()
+
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "\n# and another before the recovery owner\n", encoding="utf-8")
+    recovery = HardwareCoordinator(config, "recovery")
+
+    assert recovery.config_sha256 == owner.config_sha256
+    recovered = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert recovered["ok"] is True
+
+
+def test_recovery_is_refused_over_an_edit_that_landed_before_the_incident_owner(tmp_path: Path) -> None:
+    """The other direction: a real delta the old stamp hid.
+
+    The incident ran under the document loaded first; the recovery process parsed
+    the edited one. A stamp taken from a second read would have recorded the
+    edited file for an incident that never ran under it, matched the restart, and
+    cleared the quarantine without ever telling the operator the policy moved.
+    """
+    config = config_for(tmp_path)
+    config_file = Path(config.config_path)
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "\n# lands before the owner exists\n", encoding="utf-8")
+
+    owner = HardwareCoordinator(config, "owner")
+    lease = owner.acquire("physical:hidden-delta")
+    lease.quarantine("incident")
+    quarantine_id = str(owner.status()["quarantine_id"])
+    owner.close()
+
+    # A restart, which parses what is on disk now.
+    recovery = HardwareCoordinator(load_config(str(config_file)), "recovery")
+
+    refused = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
+    assert refused["error_type"] == "config_changed"
+    assert refused["recorded_config_sha256"] == owner.config_sha256
+    assert refused["current_config_sha256"] == recovery.config_sha256
+
+    accepted = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id, accept_config_change=True)
+    assert accepted["ok"] is True
+
+
 def test_arbitrary_quarantine_reason_cannot_be_caller_resolved(tmp_path: Path) -> None:
     coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
     lease = coordinator.acquire("physical:arbitrary")
@@ -1293,6 +1377,49 @@ def test_status_flags_non_atomic_snapshot_while_foreign_owner_holds_lock(tmp_pat
         assert status["blocked"] is False
     finally:
         lease.release()
+        owner.close()
+        observer.close()
+
+
+def test_status_reports_a_held_bench_while_a_declared_run_holds_the_devices(tmp_path: Path) -> None:
+    """hardci-hq#105: the project lock is a lease's, and a run does not take it.
+
+    `begin_run` locks every declared device and leaves the project lock alone, so
+    between two calls of a live run there is genuinely no project lock to find —
+    and every declared board is genuinely held. A status read derived from that
+    lock alone answered "free" at exactly the moment the bench was busiest.
+
+    Asked from a second coordinator with no call in flight, because that is where
+    the wrong answer was read: `agentic-hil lease-status` in another terminal."""
+    config = config_for(tmp_path)
+    device = config_devices(config).lock_keys[0]
+    owner = HardwareCoordinator(config, "owner")
+    observer = HardwareCoordinator(config, "observer")
+    try:
+        assert owner.begin_run([device])["ok"] is True
+
+        status = observer.status()
+        # No lease is open, so the lock this used to be derived from really is
+        # free. That answer is kept, and it is no longer the whole answer.
+        assert status["owner_active"] is False
+        assert status["bench_held"] is True
+        assert status["held_devices"] == [device]
+        assert [item["resource"] for item in status["device_holds"]] == [device]
+        assert status["device_holds"][0]["holder"]["frontend"] == "owner"
+        assert status["device_holds"][0]["holder"]["pid"] == os.getpid()
+
+        # And the owner's own read says held too, without probing a lock it is
+        # holding: reporting a free bench to the process holding it would be the
+        # same bug wearing the other hat.
+        own = owner.status()
+        assert own["bench_held"] is True
+        assert own["device_holds"][0]["holder_is_this_owner"] is True
+
+        assert owner.end_run()["ok"] is True
+        released = observer.status()
+        assert released["bench_held"] is False
+        assert released["held_devices"] == []
+    finally:
         owner.close()
         observer.close()
 
