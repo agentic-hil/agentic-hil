@@ -246,8 +246,9 @@
           },
           "timeout_s": {
             "type": "number",
-            "minimum": 0,
-            "default": 60.0
+            "exclusiveMinimum": 0,
+            "default": 60.0,
+            "description": "Seconds one debugger operation may take before it is abandoned. Greater than zero, not merely non-negative: the value reaches the backend as the subprocess wait, and at zero it has already expired when the probe is asked for, so every probe, flash and reset fails as a timeout against hardware that was never given a chance to answer."
           },
           "permissions": {
             "$ref": "#/$defs/debugger_permissions"

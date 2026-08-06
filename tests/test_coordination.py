@@ -15,9 +15,9 @@ import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
-from agentic_hil.can import CanBusService, normalize_received_frames
+from agentic_hil.can import CanBusService, normalize_received_frames, payload_frame
 from agentic_hil.cli import debugger_probes, entrypoint
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import ConfigError, config_schema, debugger_config, load_config
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
@@ -427,6 +427,59 @@ def test_nonfinite_config_timeout_is_rejected(tmp_path: Path, value: str) -> Non
     assert excinfo.value.error_type == "config_invalid"
     assert excinfo.value.details["field"] == "debuggers.dut.timeout_s"
     json.dumps(excinfo.value.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize("value", ["0", "0.0", "-0.5", "-30"])
+def test_a_debugger_timeout_at_or_below_zero_is_refused(tmp_path: Path, value: str) -> None:
+    path = write_config(tmp_path)
+    text = path.read_text(encoding="utf-8").replace("timeout_s: 5", f"timeout_s: {value}", 1)
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(str(path))
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.details["field"] == "debuggers.dut.timeout_s"
+    json.dumps(excinfo.value.to_dict(), allow_nan=False)
+
+
+def test_the_debugger_timeout_bound_is_enforced_where_the_number_is_built() -> None:
+    # A bound only the schema file states is a bound on the file. Zero is the
+    # case the old `minimum: 0` let through: it reaches the backend's
+    # subprocess wait already expired, so a probe times out against hardware
+    # that was never asked.
+    node = config_schema()["properties"]["debuggers"]["additionalProperties"]["properties"]["timeout_s"]
+    assert node["exclusiveMinimum"] == 0
+    assert "minimum" not in node
+
+    with pytest.raises(ConfigError) as excinfo:
+        debugger_config({"timeout_s": 0}, "openocd", "debuggers.dut")
+
+    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.details["field"] == "debuggers.dut.timeout_s"
+    json.dumps(excinfo.value.to_dict(), allow_nan=False)
+    assert debugger_config({"timeout_s": 0.5}, "openocd", "debuggers.dut").timeout_s == 0.5
+    assert debugger_config({}, "openocd", "debuggers.dut").timeout_s == node["default"]
+
+
+@pytest.mark.parametrize(("fd_flag", "expected"), [("false", 8), ("true", 64)])
+def test_the_can_payload_default_follows_the_fd_flag(tmp_path: Path, fd_flag: str, expected: int) -> None:
+    path = write_config(
+        tmp_path,
+        can_buses_yaml=f'can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "can0"\n    fd: {fd_flag}\n',
+    )
+    bus = load_config(str(path)).can_buses["bench"]
+
+    assert bus.max_frame_data_bytes == expected
+    # The default is only worth documenting because it is the limit the send
+    # guard compares against, so the guard is what pins it.
+    assert payload_frame(bus, {"frame_id": 1, "data_hex": "00" * expected})["ok"] is True
+    refused = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * (expected + 1)})
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["max_frame_data_bytes"] == expected
+    # And the number the shipped schema documents is the number it produced.
+    documented = config_schema()["properties"]["can_buses"]["additionalProperties"]["properties"]["max_frame_data_bytes"]["description"]
+    assert str(expected) in documented
 
 
 def test_workspace_snapshots_never_bootstrap_canonical_state(tmp_path: Path) -> None:

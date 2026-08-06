@@ -1836,7 +1836,7 @@ def _schema_type_label(node: JsonObject) -> str:
     pattern = node.get("pattern")
     if isinstance(pattern, str):
         label += f", matching `{pattern}`"
-    for bound in ("minimum", "maximum", "minLength"):
+    for bound in ("minimum", "exclusiveMinimum", "maximum", "minLength"):
         if bound in node:
             label += f", {bound} {node[bound]}"
     return label

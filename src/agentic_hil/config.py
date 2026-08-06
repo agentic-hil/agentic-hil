@@ -2325,7 +2325,7 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
         interface_cfg=str(raw.get("interface_cfg", "interface/stlink.cfg")),
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),
         flash_address=optional_string(raw.get("flash_address")),
-        timeout_s=float(raw.get("timeout_s", 60)),
+        timeout_s=positive_timeout_config(raw.get("timeout_s"), 60.0, f"{field}.timeout_s"),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
         target=target,
@@ -2798,3 +2798,22 @@ def positive_integer_config(value: Any, default_value: int, field: str) -> int:
     if parsed < 1:
         raise ConfigError("config_invalid", f"{field} must be a finite integer >= 1.", {"field": field, "value": value})
     return parsed
+
+
+def positive_timeout_config(value: Any, default_value: float, field: str) -> float:
+    """A timeout the loader itself refuses at zero, not only the schema.
+
+    The shipped schema says `exclusiveMinimum: 0`, and every documented load
+    path validates against it — but the bound has to hold where the value is
+    turned into the number a backend waits on, or it is a bound on the file
+    rather than on the configuration. Zero is the case worth naming: it passes
+    a `>= 0` check, reaches `communicate(timeout=...)` already expired, and
+    reports hardware that never answered as a timeout."""
+    parsed = float(value if value is not None else default_value)
+    if math.isfinite(parsed) and parsed > 0:
+        return parsed
+    details: JsonObject = {"field": field}
+    # Non-finite is echoed as a string, because this travels into a report that
+    # is serialized with allow_nan=False.
+    add_scalar_schema_value(details, value)
+    raise ConfigError("config_invalid", f"{field} must be a number greater than 0.", details)
