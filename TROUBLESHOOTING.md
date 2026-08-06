@@ -245,10 +245,10 @@ Use `agentic-hil upgrade` to move an existing installation forward. It upgrades 
 | Result | What happened | What to do |
 |---|---|---|
 | `ok: true`, `restart_required: true` | `previous_version` and `version` differ; the summary names both | Restart the agent hosts |
-| `ok: false`, `error_type: upgrade_did_not_change_version` | Nothing newer to install; both version fields are the same number | Nothing. Do not restart — the same release would be reloaded |
+| `ok: true`, `already_current: true` | Nothing newer to install; both version fields are the same number | Nothing. Do not restart — the same release would be reloaded |
 | `ok: false`, `error_type: upgrade_blocked_by_pin` | The manager records an exact version pin, so the upgrade could not move it | Run the line in `reinstall_command`, with the host stopped |
 
-Both refusals exit non-zero at the command line, like every other `ok: false` result. A provisioning script that runs `agentic-hil upgrade` unconditionally therefore fails on a machine that is already current; branch on `error_type` — `upgrade_did_not_change_version` is the benign one — rather than on the exit code alone.
+Only the pinned case is a refusal, and only it exits non-zero: a machine that is already at the newest release has nothing wrong with it, so a provisioning script may run `agentic-hil upgrade` unconditionally. Read `restart_required` rather than assuming one: it is true on exactly the outcome that replaced something.
 
 An exact pin comes from the requirement the installation was created with: `uv tool install "agentic-hil==X.Y.Z"` records `==X.Y.Z`, and every later `uv tool upgrade` honours it and reports `hint: agentic-hil is pinned to ... (installed with an exact version pin)` on stderr. The Claude Code plugin's skill installs that way on purpose — it ships guidance for one release and says so — so a bench set up from the plugin is the case this refusal names. `reinstall_command` is the fix, and it carries the extras `installed_extras` found on the installation; `uv`'s own hint suggests `agentic-hil@latest`, which re-resolves the bare distribution and uninstalls whatever `[can]` or `[pyocd]` brought in. Stop the agent host before running it: it reinstalls the environment, and none of `uv tool install`'s forms have the `installation_in_use` check. Agentic HIL never runs that reinstall for you — which version a machine runs is the operator's decision, and a pin can be deliberate.
 

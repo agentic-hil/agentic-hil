@@ -407,14 +407,19 @@ def test_upgrade_blocked_by_an_exact_pin_names_the_pin_and_keeps_the_extras(
     assert any("agentic-hil@latest" in step for step in result["do_not"])
 
 
-def test_upgrade_that_finds_nothing_newer_reports_neither_success_nor_a_restart(
+def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Already current is its own answer, and its next step is to do nothing.
+    """Already current is a success: nothing to do, and nothing wrong.
 
     Told apart from the pinned case by what the manager said, not by the exit
-    code, which is 0 for both -- and both are `ok: false`, because the upgrade
-    that was asked for did not happen either way.
+    code, which is 0 for both. The two answers differ in what they cost the
+    operator: this one costs nothing, while a pin means the release they wanted
+    is not the one they are running. Refusing both would make
+    `agentic-hil upgrade` exit non-zero on every up-to-date machine and break
+    the provisioning scripts that run it unconditionally -- hardci-hq#99 was
+    about claiming an upgrade that never happened, not about reporting that
+    there was none to make.
     """
     calls = _upgrade_reporting(
         monkeypatch,
@@ -426,15 +431,18 @@ def test_upgrade_that_finds_nothing_newer_reports_neither_success_nor_a_restart(
 
     result = upgrade_installation(["opencode"])
 
-    assert result["ok"] is False
-    assert result["error_type"] == "upgrade_did_not_change_version"
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "error_type" not in result
+    # The success that matters: it does not claim an upgrade and does not send
+    # anyone to a restart that would reload the same release.
     assert result["restart_required"] is False
+    assert "upgraded" not in result["summary"]
     assert result["previous_version"] == __version__
     assert result["version"] == __version__
     assert "reinstall_command" not in result
     assert "pinned_version" not in result
     assert not any("skill-install" in call for call in calls)
-    assert any("`uv tool list`" in step for step in result["remediation"])
 
 
 @pytest.mark.parametrize(

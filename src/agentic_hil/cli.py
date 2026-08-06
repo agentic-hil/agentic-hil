@@ -344,8 +344,9 @@ def _upgrade_requirement() -> str:
 # (hardci-hq#99): "hint: `agentic-hil` is pinned to `0.7.1` (installed with an
 # exact version pin); reinstall with `uv tool install agentic-hil@latest` to
 # upgrade to a new version." A future wording that matches neither phrase falls
-# through to `upgrade_did_not_change_version`, which is still a refusal rather
-# than a false success.
+# through to the already-current answer, which claims no upgrade happened —
+# never a false success, and never a refusal for a machine that is simply
+# up to date.
 _EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
 _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
 
@@ -529,6 +530,13 @@ def _upgrade_changed_nothing(
     exact pin needs a reinstall the operator has to decide on and run.
     """
     base: JsonObject = {
+        # Set per branch below: an installation that is already current is a
+        # success — nothing to do and nothing wrong — while one held at a pin is
+        # not, because the operator wanted a newer release and did not get it.
+        # Refusing both would make `agentic-hil upgrade` exit non-zero on every
+        # up-to-date machine, which breaks the provisioning scripts that run it
+        # unconditionally. The defect in #99 was claiming an upgrade that never
+        # happened, not reporting that there was none to make.
         "ok": False,
         "tool": "agentic_hil_upgrade",
         "manager": manager,
@@ -556,12 +564,12 @@ def _upgrade_changed_nothing(
         }
     return {
         **base,
-        "error_type": "upgrade_did_not_change_version",
+        "ok": True,
         "summary": (
-            f"Agentic HIL was not upgraded: {manager} reported no failure and the installation is still "
-            f"{current_version}. Nothing was replaced, so there is nothing to restart for."
+            f"Agentic HIL is already at {current_version}; {manager} had nothing to replace. No restart is needed. "
+            f"If a newer release was expected, the installation's recorded requirement is what holds it here."
         ),
-        **remediation_fields("upgrade_did_not_change_version"),
+        "already_current": True,
     }
 
 

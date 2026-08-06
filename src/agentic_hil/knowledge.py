@@ -298,28 +298,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "bigger surprise than the one being reported here.",
         ),
     ),
-    "upgrade_did_not_change_version": ErrorRemedy(
-        meaning=(
-            "The package manager ran and reported no failure, and the installed version is the one that was already "
-            "there. Nothing was replaced, so there is nothing new to load and no restart is owed. This is the ordinary "
-            "answer on an installation that is already at the newest release the configured index offers — it is "
-            "reported as a refusal rather than a success only because no upgrade happened, which is what was asked for."
-        ),
-        remediation=(
-            "If this installation was expected to be current, stop here. `version` on this result is what it runs, and "
-            "no agent host needs restarting.",
-            "If a newer release was expected, check what the manager records for this tool — `uv tool list`, "
-            "`pipx list` — and compare it against the index. A requirement recorded with an exact version, or a "
-            "restrictive one, makes every upgrade a no-op in exactly this shape; `install.stderr` on this result "
-            "carries whatever the manager said about it.",
-            "A private or mirrored package index that has not yet carried the release forward produces the same "
-            "answer. That is the operator's index to check, not something this command can work around.",
-        ),
-        do_not=(
-            "Do not tell the operator the upgrade succeeded or ask for a restart to pick up new behaviour. Both "
-            "version fields on this result say the installation did not move.",
-        ),
-    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "
