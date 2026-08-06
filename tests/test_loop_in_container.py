@@ -1075,6 +1075,67 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_path: Path) -> None:
+    """A reaped leader is not an empty group; its descendants must still be killed.
+
+    The agent leads its own process group, and a POSIX process group outlives its
+    leader: the descendants that inherited it stay in it after the leader exits.
+    When the leader has already exited and been reaped by the time
+    `_terminate_tree` runs -- the agent quitting a moment after the timeout fired --
+    `os.getpgid(leader_pid)` raises `ProcessLookupError` even while those
+    descendants are still alive and writing the tree. The old code read the group
+    that way and returned on that error as if it were empty, so `salvage_commit`
+    ran against a tree a survivor was still editing. `_terminate_tree` now signals
+    the group by the pid-as-pgid fixed at launch, so the survivor is killed even
+    with the leader already gone (or, failing that, cleanup is reported unconfirmed
+    so salvage is skipped -- the one thing it must never do is return clean here)."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    child_pid_file = workdir / "child.pid"
+    script = tmp_path / "leader_that_exits.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys\n"
+        "devnull = open(os.devnull, 'w')\n"
+        # A child left in the leader's own process group (no start_new_session), so
+        # it stays in the group whose id is the leader's pid once the leader exits.
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    stdout=devnull, stderr=devnull,\n"
+        ")\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        # The leader returns here, leaving the child alive behind it.
+        ,
+        encoding="utf-8",
+    )
+
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        cwd=str(workdir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Reap the leader before cleanup runs, reproducing the race exactly: the leader
+    # is gone, so os.getpgid(leader_pid) now raises ProcessLookupError -- the lookup
+    # the old code returned early on -- while its child lives on in the group whose
+    # id is the leader's pid, which the kernel keeps reserved while a member remains.
+    process.wait(timeout=30)
+    child_pid = int(child_pid_file.read_text())
+    assert _pid_alive(child_pid), "the child must outlive its leader for this test to mean anything"
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(process.pid)
+
+    try:
+        agent_review_loop._terminate_tree(process, grace_s=5.0)
+    except agent_review_loop.CleanupUnconfirmed:
+        # Acceptable: reporting cleanup unconfirmed skips salvage. The bug under
+        # test was returning as if the group were empty while the child still ran.
+        return
+
+    assert not _pid_alive(child_pid), "a descendant survived after its group leader had been reaped"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
 def test_terminate_tree_reports_cleanup_unconfirmed_when_the_group_never_clears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

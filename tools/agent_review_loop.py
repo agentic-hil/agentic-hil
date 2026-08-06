@@ -279,17 +279,18 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
             )
         return
 
-    try:
-        pgid = os.getpgid(process.pid)
-    except ProcessLookupError:
-        # The leader is already gone and so is its group; reap the zombie.
-        _reap_leader(process, grace_s)
-        return
-    except OSError as error:
-        # The group could not even be read, so its members cannot be signalled and
-        # their state is unknown. Reap what we can and report cleanup unconfirmed.
-        _reap_leader(process, grace_s)
-        raise CleanupUnconfirmed(f"could not read the process group of pid {process.pid} to kill it: {error}") from error
+    # The agent leads its own process group: `start_new_session` ran setsid() in
+    # the child, so its pgid equals its pid at launch. Target that pid-as-pgid
+    # directly instead of reading it back with os.getpgid(pid). A POSIX process
+    # group outlives its leader -- the descendants that inherited it stay in it
+    # after the leader exits -- and once the leader has been reaped
+    # os.getpgid(pid) raises ProcessLookupError even while those descendants are
+    # still alive and writing the tree. The old code read the group that way and
+    # returned on that error as if the group were empty, so the very members this
+    # exists to kill were left running for `salvage_commit` to race. The kernel
+    # keeps the pid-as-pgid reserved while the group has any member, so signalling
+    # it here cannot stray onto an unrelated group.
+    pgid = process.pid
 
     # SIGTERM first for a clean stop, then SIGKILL for whatever ignored it. After
     # each, the leader is reaped -- a group whose only remaining member is an
