@@ -213,6 +213,26 @@ Fix: run `agentic-hil com-ports`, have the operator add only the approved projec
 
 Linux permission note: if opening the device fails with a permission error, the user typically needs membership in the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or a udev rule for the adapter. This is the one setup step that may genuinely need an administrator once; Agentic HIL itself never needs admin rights.
 
+## 11a. The COM Port Moved To Another Board
+
+Symptom: `com_session_start` refuses with `error_type: "com_port_identity_mismatch"` — usually right after a second adapter was attached, after a replug, or after a reboot with both boards in.
+
+What it means: the entry is fine and the *name* is not. `/dev/ttyACM0` and `COM7` are an enumeration order — which device the host saw first — so attaching a second ST-Link can move a board from `ttyACM0` to `ttyACM1` and give the vacated name to the other one. The refusal says `expected_serial_number` (what the configuration names, and `expected_from` says where), and `found_serial_number` (the adapter actually behind that name now). Nothing was opened and nothing was written to either board.
+
+The refusal is the good outcome. Without it an unchanged configuration keeps working against a board nobody meant, and a flash, a reset or a `com_write` goes there with nothing in the result saying so.
+
+Fix: read `expected_device`. When it is present, the board this entry names is still attached under that name and the entry is simply out of date — run `agentic-hil adopt-hardware` (add `--com-port <id>` on a bench with several ports) and it rewrites the entry from the attached hardware. When it is absent, the named board is not attached at all: plug it in, or work on the board that is there by naming its own entry.
+
+Do not point `serial_number` at the serial that was found, and do not delete the key. That turns the one check that noticed into agreement with whatever happens to be plugged in.
+
+Preventing it: name ports so the name cannot move.
+
+- On Linux, set `device` to the udev symlink — `/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_<serial>-if02`. It is built from the vendor, the product and the device's own serial, so it follows the board. `agentic-hil com-ports` lists it as `stable_device` next to each port, and `adopt-hardware` writes it.
+- On both platforms, set `serial_number` to the adapter's USB serial — on a Nucleo the same serial `probe_id` carries. This is what makes the machine-wide lock follow the board rather than the name, and it is what the check at open time compares. Windows has no openable stable device name, so there `device` stays `COM5` and this key carries the identity by itself.
+- `agentic-hil doctor` names every port that has neither, under `warnings`, and every `com_ports` entry reports its `identity_source`. Such an entry keeps working exactly as before — it is simply identified by something the host can reassign.
+
+An entry that names no hardware is not checked at all, and neither is one whose port the host does not enumerate (a pseudo-terminal, a URL handler) or one whose adapter reports no serial. Those say so in the result's `identity` block rather than guessing.
+
 ## 12. CAN Bus Does Not Work
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.

@@ -2504,6 +2504,7 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         max_write_bytes=int(raw.get("max_write_bytes", 4096)),
         assert_dtr=bool(raw.get("assert_dtr", True)),
         assert_rts=bool(raw.get("assert_rts", True)),
+        serial_number=optional_string(raw.get("serial_number")),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )

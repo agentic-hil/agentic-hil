@@ -41,6 +41,7 @@ from agentic_hil.types import (
     JsonObject,
     fold_device_path,
     fold_hardware_id,
+    is_stable_device_name,
 )
 
 DEVICE_KINDS = ("debugger", "uart", "can")
@@ -53,6 +54,18 @@ UNIDENTIFIED_DEBUGGER_WARNING = (
     "toolchain rather than to hardware. Two boards driven by the same backend on this machine would share "
     "one lock, and one board reached through two backends would take two. Give the entry a probe_id (or a "
     "resource_id shared by every entry that names this unit) so the lock follows the board."
+)
+
+# The same failure one kind down, and the reason it is worse: a debugger without
+# hardware identity falls back to a name that at least does not move, while a
+# serial port falls back to a name that moves the moment a second adapter is
+# attached. Named once for the same reason as above (hardci-hq#100).
+VOLATILE_SERIAL_DEVICE_WARNING = (
+    "This COM port names no serial_number and no resource_id, so its identity is the kernel name in `device` "
+    "— and a kernel name is an enumeration order, not hardware: attaching a second adapter can hand this "
+    "entry another board, at which point the lock protects a name rather than a board and nothing refuses "
+    "the wrong one. Run `agentic-hil adopt-hardware` to record the port's serial_number (and, on Linux, its "
+    "/dev/serial/by-id/... name), or give the entry the resource_id its probe already carries."
 )
 
 
@@ -276,7 +289,12 @@ class DebuggerDevice(Device):
 
 @dataclass(frozen=True)
 class UartDevice(Device):
-    """A configured serial line."""
+    """A configured serial line.
+
+    Identity prefers the operator-declared ``resource_id``, then the adapter's
+    own USB serial, and falls back to the device name only when the entry says
+    nothing about hardware — see ``identity_warning`` for why that fallback is a
+    hazard rather than a default."""
 
     kind: ClassVar[str] = "uart"
     scope_field: ClassVar[str | None] = "port_id"
@@ -298,13 +316,55 @@ class UartDevice(Device):
     def lock_key(self) -> str:
         if self.port.resource_id:
             return f"physical:{fold_hardware_id(self.port.resource_id)}"
+        if self.port.serial_number:
+            # The adapter's USB serial is an opaque hardware id and never a path,
+            # exactly like a probe serial: it is one adapter on Windows and on
+            # Linux, and it does not move when the enumeration order does.
+            #
+            # Its own prefix rather than the probe's. One ST-Link is a debug
+            # probe and a virtual COM port carrying one serial, and the two are
+            # independently usable — flashing while watching the UART is the
+            # normal shape of a HIL run — so collapsing `probe:<serial>` and this
+            # key on the strength of an equal serial would deadlock every
+            # single-board bench. Saying that two entries *are* one unit stays
+            # what it has always been: an equal `resource_id`, which folds them
+            # both into `physical:`.
+            #
+            # An adapter exposing two ports under one serial does over-collapse
+            # here — two independent lines, one lock. That is the direction this
+            # repository already chose for hardware identity (see
+            # types.fold_hardware_id): an over-collapse costs concurrency and
+            # announces itself as a wait naming its holder, while an
+            # under-collapse lets two runs each believe they hold the board.
+            return f"com:serial:{fold_hardware_id(self.port.serial_number)}"
         # A serial device is a host path: COM7 and com7 are one port on Windows,
         # /dev/ttyACM0 and /dev/ttyacm0 are two names on Linux.
         return f"com:{fold_device_path(self.port.device)}"
 
     @property
     def identity_source(self) -> str:
-        return "resource_id" if self.port.resource_id else "device"
+        if self.port.resource_id:
+            return "resource_id"
+        return "serial_number" if self.port.serial_number else "device"
+
+    @property
+    def identity_warning(self) -> str | None:
+        """Set when this entry's identity is a name the host may reassign.
+
+        A ``/dev/serial/by-id/...`` name is exempt: udev builds it out of the
+        vendor, the product and the device's own serial, so a lock key derived
+        from it already follows the board. Every other device name — ``COM7``,
+        ``/dev/ttyACM0`` — is an enumeration order.
+
+        The key is deliberately *not* rewritten to the hardware behind such a
+        name. A lock key is a pure function of the configuration, asked on hosts
+        where nothing is attached; deriving it from what is currently enumerated
+        would make one entry's key change as boards come and go, which is a worse
+        failure than the one being fixed. The entry says what it knows, and this
+        says when that is not enough."""
+        if self.identity_source != "device" or is_stable_device_name(self.port.device):
+            return None
+        return VOLATILE_SERIAL_DEVICE_WARNING
 
 
 @dataclass(frozen=True)

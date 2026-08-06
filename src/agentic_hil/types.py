@@ -50,6 +50,35 @@ def fold_device_path(value: str) -> str:
     return os.path.normcase(value)
 
 
+# The directory udev fills with one symlink per serial port, named after the
+# vendor, the product and the device's own serial number:
+#
+#     /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_0669FF...-if02
+#
+# Deliberately not ``/dev/serial/by-path``. That directory is stable too, but
+# against a *different* question: it names the USB topology slot, so it survives
+# a reboot and does not survive moving the board to the next socket. The name
+# this project wants is the one that follows the board.
+SERIAL_BY_ID_DIRECTORY = "/dev/serial/by-id/"
+
+
+def is_stable_device_name(value: str) -> bool:
+    """Whether this serial device name survives replugging.
+
+    ``/dev/ttyACM0`` and ``COM7`` are an enumeration order, not an identity: they
+    say which device the host happened to see first, so attaching a second
+    adapter can hand one board the name the other had. The kernel name is what an
+    operator reads off ``dmesg``, and it is the wrong thing to write into a
+    configuration.
+
+    A pure question about the *name*, with no branch on the host asking it. A
+    configuration is read on the machine whose paths it names — a POSIX device
+    name in a file loaded on Windows names nothing either way — and a rule that
+    answered differently per platform could not be pinned by a test that runs on
+    both."""
+    return value.startswith(SERIAL_BY_ID_DIRECTORY) and len(value) > len(SERIAL_BY_ID_DIRECTORY)
+
+
 # A configuration with no `version:` key was written under the deny-by-default
 # read model and is still read under it. Version 2 has no read permission at
 # all: probing, COM reads and CAN reads need no grant, and the schema refuses
@@ -188,6 +217,17 @@ class ComPortConfig:
     # them false is how a target is observed provably undisturbed.
     assert_dtr: bool = True
     assert_rts: bool = True
+    # The USB serial number of the adapter behind this port — for a Nucleo, the
+    # ST-Link serial that `probe_id` also carries. What `probe_id` is to a debug
+    # probe: an opaque hardware id, never a path, folding case everywhere. It is
+    # what makes `device` merely the way in rather than the identity, so a port
+    # that moves from ttyACM0 to ttyACM1 is refused instead of opened as if it
+    # were still the same board.
+    #
+    # Optional, and unset in every configuration written before it existed. Unset
+    # means the entry is identified by its kernel name alone, which is the
+    # situation `UartDevice.identity_warning` names and `adopt-hardware` fills in.
+    serial_number: str | None = None
     resource_id: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
 
