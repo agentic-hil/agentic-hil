@@ -924,7 +924,15 @@ def receive_line(lines: queue.Queue[str | None]) -> dict[str, Any]:
             return json.loads(line)
 
 
-def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]]:
+def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str], list[str]]:
+    """Initialize, list the tools, and report which of them arrived bare.
+
+    The third element is the names whose `tools/list` entry carries no
+    annotations. A host reads those to decide what passes without a prompt, so
+    a build that ships the tool table without them is a regression this eval
+    sees from outside the package, on the wire, where the unit tests cannot
+    (hardci-hq#101).
+    """
     process = subprocess.Popen(
         trusted_command(arguments),
         cwd=cwd,
@@ -993,8 +1001,14 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
         process.stdin.flush()
         listed = receive_line(lines)
         tools = listed.get("result", {}).get("tools", [])
-        names = {item["name"] for item in tools if isinstance(item, dict) and isinstance(item.get("name"), str)}
-        return initialized, names
+        entries = [item for item in tools if isinstance(item, dict) and isinstance(item.get("name"), str)]
+        names = {item["name"] for item in entries}
+        unannotated = sorted(
+            item["name"]
+            for item in entries
+            if not isinstance(item.get("annotations"), dict) or not str(item["annotations"].get("title", "")).strip()
+        )
+        return initialized, names, unannotated
     except (OSError, RuntimeError, TimeoutError, ValueError) as error:
         raise RuntimeError(explain(f"{type(error).__name__}: {error}")) from error
     finally:
@@ -1242,15 +1256,19 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
         if trusted_package_ready and registered_ok:
 
             def probe_check() -> tuple[bool, str]:
-                initialized, names = mcp_probe(["mcp-stdio"], WORKSPACE)
+                initialized, names, unannotated = mcp_probe(["mcp-stdio"], WORKSPACE)
                 server = initialized.get("result", {}).get("serverInfo", {})
                 expected_tools = target_mcp_tools(target)
                 ok = (
                     server.get("name") == "agentic-hil"
                     and server.get("version") == target["expected_version"]
                     and names == expected_tools
+                    and not unannotated
                 )
-                return ok, f"server={server}; tools={len(names)}"
+                detail = f"server={server}; tools={len(names)}"
+                if unannotated:
+                    detail = f"{detail}; tools without annotations={unannotated}"
+                return ok, detail
 
             add("MCP initialize and tools/list succeed", probe_check)
             add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"]))

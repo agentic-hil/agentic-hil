@@ -508,6 +508,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "would let two runs drive one board, which is the failure the mutex exists to prevent.",
         ),
     ),
+    "com_port_identity_mismatch": ErrorRemedy(
+        meaning=(
+            "The device name in a COM port entry currently leads to different hardware than the entry says it belongs "
+            "to. `expected_serial_number` is what the configuration names and where it says so (`expected_from`); "
+            "`found_serial_number` is the adapter actually behind `configured_device` right now. The port was not "
+            "opened and nothing was written to it. A device name — `COM7`, `/dev/ttyACM0` — is an enumeration order "
+            "rather than an identity, so attaching a second adapter or replugging in another order can hand one entry "
+            "another board; this refusal is that having happened."
+        ),
+        remediation=(
+            "Read `expected_device` when it is present: the board this entry names is still attached, under that name, "
+            "and the entry is simply out of date. `agentic-hil adopt-hardware` rewrites it from the attached hardware.",
+            "Without `expected_device` the named board is not attached at all. Plug it in, or work on the board that is "
+            "there by naming its own entry.",
+            "On Linux, prefer `/dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN` for `device`. udev builds that "
+            "name from the device's own serial, so it follows the board instead of the enumeration order.",
+        ),
+        do_not=(
+            "Do not change `serial_number` to the serial that was found, and do not delete the key. That turns the one "
+            "check that noticed into agreement with whatever is plugged in, which is the silent wrong-board flash this "
+            "refusal exists to prevent. Change the board or change `device`; the identity is not the thing to edit.",
+        ),
+    ),
     "undeclared_device": ErrorRemedy(
         meaning=(
             "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "
@@ -1360,7 +1383,10 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # board is, and none of it is what an attached probe hands you.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
-    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate")),
+    # `serial_number` is in the description half for the same reason `probe_id`
+    # is: it is what an attached board hands you, and it says which unit this
+    # entry is rather than what may be done to it.
+    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # The permissions half, every block of it.
     ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
@@ -1547,7 +1573,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
-    "com_ports": "The serial lines. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": "The CAN buses. `listen_only` is how a bus is observed without sending ACK bits.",
     "validation": "How strictly a firmware artifact is checked before it is accepted.",
     "reports": "Where structured reports are written, relative to `state_root`.",
@@ -1889,12 +1915,15 @@ Two different things guard the hardware, and they live in two different places.
 
 **The lease** is per configuration, lives under `state_root`, and records what a call did and whether the hardware was left in a confirmed state. It survives process exit; that is what makes an abandoned incident visible instead of forgotten.
 
+A third thing *describes* the hardware contact and guards nothing. Every tool in `tools/list` carries MCP `annotations` — `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — set from what the tool demonstrably does, on the same line this document already draws for hardware contact. `project_config_reload_description`, `com_read`, `can_read`, `bench_run_status` and `project_config_describe` change nothing and say so; `flash_firmware` and `debug_start_session` — whose `load` mode programs flash, which is why it needs `allow_flash` — are declared destructive; `probe_target` is deliberately *not* read-only, because an SWD attach halts the core. They exist so a host can tell a harmless call from an irreversible one instead of judging by the tool's name. They are hints in the protocol's sense and this server enforces nothing by them: what a call may do is decided by the configuration's permissions and by the exclusivity below, exactly as before. A `readOnlyHint: true` is not a grant, and a `destructiveHint: false` is not a promise that a call will be allowed.
+
 ## Device exclusivity
 
 | Property | Rule |
 |---|---|
-| what is locked | the physical device: `physical:<resource_id>`, `probe:<identity>`, `com:<device>`, `can:<adapter>:<channel>` |
-| case | a name for hardware — `resource_id`, a probe serial, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one probe wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
+| what is locked | the physical device: `physical:<resource_id>`, `probe:<identity>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
+| case | a name for hardware — `resource_id`, a probe serial, a port's `serial_number`, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. An entry that *does* name hardware is compared against what is attached when it is opened, and a port that has come to be a different board is refused with `com_port_identity_mismatch` rather than used |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

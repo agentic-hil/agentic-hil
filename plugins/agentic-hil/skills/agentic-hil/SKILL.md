@@ -80,6 +80,20 @@ board — and ask them to run `agentic-hil recover --confirm-safe-state
 --quarantine-id <id>` after that check. Never clear the server's own state
 files yourself.
 
+`com_port_identity_mismatch` is a refusal about *which board*, not about
+permissions. A serial device name — `/dev/ttyACM0`, `COM7` — is an enumeration
+order, so attaching a second adapter can leave a configured entry pointing at a
+different board; the check at open time compares the entry's `serial_number` (or
+the probe serial it shares a `resource_id` with) against what is actually behind
+that name and refuses rather than connecting. Nothing was opened. Report
+`expected_serial_number` and `found_serial_number`, and read `expected_device`:
+present, it names where the configured board is now, and
+`agentic-hil adopt-hardware` rewrites the entry from the attached hardware;
+absent, the configured board is not attached and the operator has to plug it in.
+Never resolve it by writing the found serial into `serial_number` or by removing
+the key — that makes the one check that noticed agree with whatever is plugged
+in, which is the silent wrong-board flash it exists to prevent.
+
 Report those findings together with the refusal, name the permission that is
 denied, and ask the user before changing it. Never work around it with a raw
 command, with the configuration file, or with the CLI.
@@ -139,8 +153,8 @@ you may change, which you may not, and which permission would open a locked one;
 reading needs no grant. `project_config_set` then sets named keys with scalar
 values checked against the shipped schema:
 `permissions.allow_config_description_write` opens what the bench *is* —
-`target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device`, CAN bus
-settings — and `permissions.allow_config_permissions_write` opens every
+`target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device` /
+`serial_number`, CAN bus settings — and `permissions.allow_config_permissions_write` opens every
 permission key: each `permissions:` block, plus the two grants that sit directly
 on a section, `artifacts.allow_upload` and `debug.allow_all_symbols`. The split
 is deliberate. The first is the one an operator
