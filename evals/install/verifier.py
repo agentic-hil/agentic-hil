@@ -899,8 +899,15 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
         return False, f"top-level permissions were not all granted by the install: {ungranted}"
     # The check is "the agent added no hardware while installing", not "the
     # template is empty": `init` writes one starter probe, so `debuggers` must
-    # hold exactly that entry and nothing else.
-    nonempty_resources = [name for name in ("can_buses", "com_ports") if data.get(name, {}) != {}]
+    # hold exactly that entry and nothing else. Since hardci-hq#104 it also reads
+    # the attached bench on a workspace with no profile, so on a host with a board
+    # plugged in it writes the one COM port carrying that probe's serial. That is
+    # discovery, not an agent configuring hardware, and the entry it writes is
+    # always `dut_uart`; anything else here is still the thing this catches.
+    com_ports = sorted(data.get("com_ports") or {})
+    nonempty_resources = [name for name in ("can_buses",) if data.get(name, {}) != {}]
+    if com_ports not in ([], ["dut_uart"]):
+        nonempty_resources.append(f"com_ports={com_ports}")
     if nonempty_resources:
         return False, f"hardware resources configured during install: {nonempty_resources}"
     if len(debuggers) != 1:

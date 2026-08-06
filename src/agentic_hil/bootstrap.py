@@ -19,6 +19,22 @@ PROJECT_PROFILE = "agentic-hil.config.example.yaml"
 # added to the schema.
 DEBUGGER_PERMISSION_FLAGS = GENERATED_WRITE_PERMISSIONS["debuggers"]
 
+# The profile a generated configuration is filled from when the workspace has no
+# `agentic-hil.config.example.yaml` of its own. Names and transport defaults, and
+# deliberately no permission: every flag it leaves unnamed follows the skeleton's
+# open default, so this decides entry names and baudrates and nothing about what
+# the board may be told to do.
+#
+# It is one constant because it answers a question both generation paths ask.
+# `agentic-hil init` and `project_config_create` write the same file for the same
+# machine, so a default that lived on one of them would be a second answer waiting
+# to differ from the first.
+DEFAULT_PROJECT_PROFILE: JsonObject = {
+    "target": {"name": "detected-target"},
+    "debuggers": {"dut": {"timeout_s": 60, "permissions": {}}},
+    "com_ports": {"dut_uart": {"baudrate": 115200, "permissions": {}}},
+}
+
 
 def load_project_profile(workspace: Path) -> JsonObject | None:
     path = workspace / PROJECT_PROFILE
