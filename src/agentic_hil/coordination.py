@@ -222,7 +222,7 @@ class HardwareCoordinator:
         self.frontend = frontend
         self.owner_marker = secrets.token_hex(32)
         self.owner_started_at = utc_now_iso()
-        self.config_sha256 = hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
+        self.config_sha256 = lease_config_sha256(config)
         self._state_directories: dict[tuple[str, ...], Path] = {}
         self.project_key = project_resource(config)
         self.project_lock: _LifetimeLock | None = None
@@ -263,7 +263,8 @@ class HardwareCoordinator:
         It is recomputed from the digest the reload already took rather than by
         reading the file again: a second read can straddle an edit, and a record
         stamped with a document nobody parsed would answer that question wrong in
-        both directions.
+        both directions. ``__init__`` derives it the same way, through the same
+        ``lease_config_sha256``, so a reload cannot change the answer on its own.
 
         ``project_key`` is not recomputed because it cannot move: it is derived
         from ``config_path`` and ``work_dir``, and a reload that changed either is
@@ -271,9 +272,7 @@ class HardwareCoordinator:
         """
         with self._guard:
             self.config = config
-            digest = str(config.config_digest or "")
-            _, _, hexdigest = digest.rpartition(":")
-            self.config_sha256 = hexdigest or hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
+            self.config_sha256 = lease_config_sha256(config)
 
     def _state_directory(self, *parts: str) -> Path:
         """Create coordination state only once hardware coordination is used.
@@ -1186,6 +1185,32 @@ class HardwareCoordinator:
         finally:
             for lock in reversed(locks):
                 lock.release()
+
+
+def lease_config_sha256(config: AgenticHILConfig) -> str:
+    """The configuration fingerprint a lease record is stamped with.
+
+    Taken from the digest the load already computed over the bytes it parsed,
+    never from a fresh read of the path. A second read can straddle an edit, and
+    a record stamped with a document nobody parsed answers ``recover``'s question
+    — "was the file the same then as it is now" — wrong in both directions: it
+    reports a change over an untouched file, or none over an edited one. The same
+    decision is made one layer up for the report stamp; see
+    ``agentic_hil.report.config_in_force``.
+
+    The spelling stays the bare hex digest rather than ``config_digest``'s
+    ``sha256:``-prefixed one. Both name the same bytes under the same algorithm,
+    but they are not the same string, and records already on disk carry the bare
+    form while ``_record_matches_config`` compares it literally — publishing the
+    other spelling would report a change over every record written before this,
+    which is the very answer this exists to get right.
+
+    Only a configuration carrying no digest falls back to reading the file, and
+    that is one that did not come from a file this process parsed.
+    """
+    digest = str(config.config_digest or "")
+    _, _, hexdigest = digest.rpartition(":")
+    return hexdigest or hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
 
 
 def project_resource(config: AgenticHILConfig) -> str:

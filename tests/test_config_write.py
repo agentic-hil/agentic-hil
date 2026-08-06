@@ -857,9 +857,10 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
     assert "### Permissions move one way — through `project_config_set`" in document
     assert "### What the ratchet does not cover" in document
     assert "the MCP permission-write path can only narrow" in document
-    # Regeneration, described as it behaves rather than as the ratchet.
-    assert "arrives with everything granted" in document
-    assert "grants everything" in document
+    # Regeneration, described as it behaves rather than as the ratchet — and at
+    # the generated defaults, which since hardci-hq#107 are not "everything".
+    assert "arrives at the generated defaults" in document
+    assert "is at those same defaults" in document
     assert "`permissions.allow_config_write` to false" in document
 
 
@@ -1270,6 +1271,6 @@ def test_the_schema_says_what_each_door_does_to_a_permission() -> None:
     assert "through project_config_set is false and nothing else" in top
     assert "regenerating it is a separate door" in top
     assert "project_config_set writes false into a permission and no other value" in project
-    assert "grants everything to an entry it discovers for the first time" in project
+    assert "gives an entry it discovers for the first time the same generated defaults" in project
     assert "is not the narrowing path and does not obey its ratchet" in write_grant
     assert "the last permission change it can make through project_config_set" in permissions_grant

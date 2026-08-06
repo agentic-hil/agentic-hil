@@ -237,6 +237,9 @@ def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:
     assert "version: 2" in DEFAULT_CONFIG_TEMPLATE
     assert "allow_probe: " not in DEFAULT_CONFIG_TEMPLATE
     # Reading needs no grant, and since hardci-hq#96 the writing grants are not
-    # withheld either: the skeleton states each of them, granted.
+    # withheld either: the skeleton states each of them, granted. The two
+    # exceptions are the pair that refuses flashing while it is true, which the
+    # skeleton states false (hardci-hq#107) — see
+    # test_generated_configurations_can_flash.py for the rule that binds them.
     assert "allow_flash: true" in DEFAULT_CONFIG_TEMPLATE
-    assert "allow_mass_erase: true" in DEFAULT_CONFIG_TEMPLATE
+    assert "allow_mass_erase: false" in DEFAULT_CONFIG_TEMPLATE
