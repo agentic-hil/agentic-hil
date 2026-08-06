@@ -53,7 +53,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, set_permission
+from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, permission_surface, set_permission
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import (

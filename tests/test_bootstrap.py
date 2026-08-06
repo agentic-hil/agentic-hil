@@ -679,7 +679,7 @@ def test_a_first_init_reports_no_discard_at_all(tmp_path: Path, monkeypatch: pyt
     assert result["ok"] is True, result
     assert "discarded_narrowings" not in result
     assert "discarded_narrowings_unreadable" not in result
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert not any("replaced a file" in step for step in result["next_steps"])
 
 
@@ -698,7 +698,7 @@ def test_init_force_over_a_file_that_narrowed_nothing_reports_nothing(tmp_path: 
     assert result["ok"] is True, result
     assert "discarded_narrowings" not in result
     assert "discarded_narrowings_unreadable" not in result
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
 
 
 def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
