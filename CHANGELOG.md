@@ -27,6 +27,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - `tools/agent_review_loop.py` survives a round it cannot finish: an implementer killed at `--timeout` — measured rounds reached 79% of the default hour — now has its work committed as a `wip(review-loop)` commit naming the timeout, instead of leaving a whole round uncommitted with the loop gone. Each agent also gets a freshly created per-round scratch directory, named in its prompt and not just in its environment, because the agent writes its own `--basetemp` and kept choosing one Windows would not let pytest recreate.
 - The same tool now says something while it works and stops when it stops helping: a `--heartbeat` line during the 35–50 minutes `claude -p` prints nothing, a run-header line stating that the reviewer has no network (so a task that links to an issue is written out in full instead), and `--stop-after-flat-rounds`, which ends a run whose finding count has stopped falling — observed at 10, 9, 4, 4 and 8, 7, 6. Implements hardci-hq#94.
+- An unusable `timeout_s` was already refused as `invalid_argument` on all four debug tools, by the schema gate in `call` rather than by the coercion in `number_argument` that hardci-hq#57 read as the shipped answer; nothing behaves differently, but the refusal is now pinned by tests covering the eight value classes that differ — including the numeric string and the bool that plain coercion would have accepted — and the `_dispatch_depth` guard that stops a direct call walking around the gate.
 
 ## [0.8.0] - 2026-08-06
 
