@@ -37,6 +37,7 @@ import pytest
 import yaml
 from conftest import write_authoritative_config
 
+from agentic_hil.bench import BenchMutex
 from agentic_hil.config import load_authoritative_config
 from agentic_hil.configwrite import (
     PERMISSION_COMMAND_VALUES,
@@ -597,6 +598,58 @@ def test_a_run_blocks_it_as_completely_as_a_lease(tmp_path: Path, monkeypatch: p
         assert bench_open_holds(config) is None
     finally:
         tools.close()
+
+
+def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check and the write are one transaction against a run starting.
+
+    hardci-hq#80 refuses a permission change while the bench is held, but reading
+    the holds and then writing left a gap: a run that began in it took the bench
+    under the old policy while the write moved the policy underneath. The command
+    now holds every configured device across the check-and-write on the same
+    machine-wide locks a run takes, so a run that begins the instant after the
+    status read — modelled here by starting one inside the seam the writer used to
+    leave open — collides with the writer rather than slipping through. Either the
+    run or the write is refused; here it is the write, and nothing is written.
+
+    Against the pre-fix command this passed the status read, wrote the file, and
+    reported success with a run holding the bench underneath it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    from agentic_hil import cli
+
+    config = load_authoritative_config(workspace)
+    device_keys = config_devices(config).lock_keys
+    a_run = BenchMutex(frontend="a-run")
+    real_bench_open_holds = cli.bench_open_holds
+
+    def a_run_starts_in_the_gap(cfg: Any) -> dict | None:
+        holds = real_bench_open_holds(cfg)  # the real read: the bench is free
+        if holds is None:
+            # The instant after the writer saw the bench free, a run takes it, on
+            # the very device locks the writer is about to reach for.
+            a_run.acquire(device_keys, wait_s=0)
+        return holds
+
+    monkeypatch.setattr(cli, "bench_open_holds", a_run_starts_in_the_gap)
+
+    before = path.read_bytes()
+    try:
+        refused = cli.change_permission("grant", ["can_buses.dut.allow_write"])
+    finally:
+        a_run.release_all()
+
+    assert refused["error_type"] == PERMISSION_CHANGE_IN_OPEN_RUN
+    assert refused["command"] == "agentic-hil grant"
+    assert refused["side_effect_committed"] is False
+    assert refused["open_holds"]["raced_a_run"] is True
+    # The one thing hardci-hq#80 rules out did not happen: the file is untouched.
+    assert path.read_bytes() == before
+
+    # With the seam gone — no run in the gap — the same command writes, so the
+    # atomic hold did not close the ordinary path along with the race.
+    monkeypatch.setattr(cli, "bench_open_holds", real_bench_open_holds)
+    assert cli.change_permission("grant", ["can_buses.dut.allow_write"])["ok"] is True
+    assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is True
 
 
 def test_a_typo_is_answered_before_somebody_elses_run_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

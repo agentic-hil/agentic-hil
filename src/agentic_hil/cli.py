@@ -18,6 +18,7 @@ import yaml
 
 from agentic_hil import __version__
 from agentic_hil.adopt import project_config_adopt_hardware
+from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
@@ -42,7 +43,9 @@ from agentic_hil.config import (
     permission_summary,
     project_config_path,
     safe_directory,
+    secure_atomic_write_bytes,
     secure_atomic_write_text,
+    secure_optional_read_bytes,
     secure_optional_read_text,
     secure_remove_file,
     secure_user_file_lock,
@@ -117,8 +120,36 @@ class SkillAgent:
 
 @dataclass(frozen=True)
 class FileSnapshot:
+    """The exact prior state of one file, for transactional rollback.
+
+    Bytes, and existence tracked as its own fact (``raw is None`` ⟺ the path did
+    not exist; ``raw == b""`` is an empty file that did). A rollback has to put
+    back what was there, and a file that is not UTF-8 — a UTF-16 config, a
+    truncated write, something binary dropped on the path — is still something a
+    forced regeneration must restore rather than delete. Snapshotting it as
+    decoded text mapped those bytes to ``None``, which reads as "absent", and a
+    failed final validation then removed the original instead of restoring it
+    (hardci-hq#106)."""
+
     path: Path
-    content: str | None
+    raw: bytes | None
+
+    @property
+    def existed(self) -> bool:
+        """Whether the file was there when the snapshot was taken."""
+        return self.raw is not None
+
+    @property
+    def content(self) -> str | None:
+        """The snapshot decoded as UTF-8, or ``None`` when it was absent or its
+        bytes are not text. For callers that reason about text — the skill-install
+        ownership check — never for restoring, which is byte-exact."""
+        if self.raw is None:
+            return None
+        try:
+            return self.raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
 
 def skill_agents() -> list[SkillAgent]:
@@ -805,7 +836,7 @@ def _capture_file_snapshots(paths: list[Path]) -> list[FileSnapshot]:
         if identity in seen:
             continue
         seen.add(identity)
-        snapshots.append(FileSnapshot(absolute, secure_optional_read_text(absolute)))
+        snapshots.append(FileSnapshot(absolute, secure_optional_read_bytes(absolute)))
     return snapshots
 
 
@@ -813,13 +844,13 @@ def _restore_file_snapshots(snapshots: list[FileSnapshot]) -> list[JsonObject]:
     errors: list[JsonObject] = []
     for snapshot in reversed(snapshots):
         try:
-            current = secure_optional_read_text(snapshot.path)
-            if current == snapshot.content:
+            current = secure_optional_read_bytes(snapshot.path)
+            if current == snapshot.raw:
                 continue
-            if snapshot.content is None:
+            if snapshot.raw is None:
                 secure_remove_file(snapshot.path)
             else:
-                secure_atomic_write_text(snapshot.path, snapshot.content)
+                secure_atomic_write_bytes(snapshot.path, snapshot.raw)
         except BaseException as error:
             errors.append({"path": str(snapshot.path), "exception_type": type(error).__name__, "summary": str(error)})
     return errors
@@ -1135,7 +1166,10 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     """
     identity = os.path.normcase(str(absolute_without_symlinks(skill_target)))
     for snapshot in snapshots:
-        if os.path.normcase(str(snapshot.path)) != identity or snapshot.content is None:
+        # `existed`, not the decoded text: a skill that was already there is one
+        # rollback restored, and whether its bytes happen to be UTF-8 does not
+        # change that it survived.
+        if os.path.normcase(str(snapshot.path)) != identity or not snapshot.existed:
             continue
         if not _path_entry_exists(snapshot.path):
             return None
@@ -1151,29 +1185,38 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     return None
 
 
-def _existing_config_text(target_path: Path) -> tuple[str | None, str | None]:
-    """The file `--force` is about to overwrite, and why it could not be read.
+def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, str | None]:
+    """The file `--force` is about to overwrite: its exact bytes, its decoded
+    text, and why the text could not be read.
 
     `--force` is the operator's reset, so it has to work on exactly the file most
     in need of one. Bytes that are not UTF-8 — a UTF-16 save, a truncated write,
-    something binary dropped on the path — left this command with an unhandled
-    ``UnicodeDecodeError`` and no way to regenerate at all.
+    something binary dropped on the path — once left this command with an
+    unhandled ``UnicodeDecodeError`` and no way to regenerate at all.
 
-    The price of the answer is that such a file gets no rollback snapshot: if the
-    regenerated configuration then fails its final validation, the path is
-    restored as absent rather than as bytes this command cannot hold. That is the
-    honest reading of a file it could not read, and it is the same double fault
-    the ``rollback_errors`` field already reports.
+    Three returns because a rollback and a permission-narrowing analysis want
+    different reads of one file. The bytes are what a failed regeneration
+    restores — the original, exactly, whether or not it is UTF-8 — so a non-UTF-8
+    file is put back rather than deleted (hardci-hq#106); before this, the
+    snapshot was taken from the decoded text, and text that would not decode was
+    recorded as absence, so rollback removed the original it claimed to restore.
+    The decoded text is for the narrowing comparison, which is over UTF-8 YAML
+    and has no answer for bytes that are not text; there the reason takes its
+    place.
 
-    The decode and nothing else. A ``ConfigError`` from the guarded open — the
-    path is a symlink, a hardlink, or sits under a directory this user does not
-    solely own — must keep coming out, because it says the object about to be
-    overwritten is not the one that was named. Widening this to swallow it would
-    turn a fail-closed refusal into a silent write over the wrong file."""
+    The decode is caught and nothing else. A ``ConfigError`` from the guarded
+    read — the path is a symlink, a hardlink, or sits under a directory this user
+    does not solely own — must keep coming out of it, because it says the object
+    about to be overwritten is not the one that was named. Widening this to
+    swallow it would turn a fail-closed refusal into a silent write over the
+    wrong file."""
+    raw = secure_optional_read_bytes(target_path)
+    if raw is None:
+        return None, None, None
     try:
-        return secure_optional_read_text(target_path), None
+        return raw, raw.decode("utf-8"), None
     except UnicodeDecodeError:
-        return None, "the file it replaced is not UTF-8 text, so nothing in it could be read"
+        return raw, None, "the file it replaced is not UTF-8 text, so nothing in it could be read"
 
 
 def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tuple[list[str], str | None]:
@@ -1285,7 +1328,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not _locked:
         with secure_user_file_lock(target_path):
             return init_config(config_path, force, _locked=True)
-    existing, unreadable_existing = _existing_config_text(target_path)
+    original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
     # cannot say whether looking is allowed, and gating the read on it (hardci-hq#104)
@@ -1328,7 +1371,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     finally:
         secure_remove_file(temporary_path)
 
-    snapshot = FileSnapshot(target_path, existing)
+    # Snapshotted as the exact bytes that were there, not as `existing` (the
+    # decoded text, which is None for a non-UTF-8 file): a failed final
+    # validation below has to put the original back byte-for-byte rather than
+    # delete a file it could not decode (hardci-hq#106).
+    snapshot = FileSnapshot(target_path, original_bytes)
     try:
         secure_atomic_write_text(target_path, text)
         written = load_authoritative_config(workspace)
@@ -1489,9 +1536,74 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     --force`, which rewrites every permission in the file at once without
     consulting a grant — so a command that moves one named permission is strictly
     narrower than the authority already standing here, not a new one.
+
+    The check and the write are one transaction against a run starting. Reading
+    the holds and then writing left a gap: a run that began inside it took the
+    bench under the old policy while the write moved the policy underneath —
+    hardci-hq#80's open-run refusal, defeated by timing rather than argued away.
+    So when the bench reads free, every configured device is held for the length
+    of the check-and-write, on the same machine-wide locks a run or a session
+    takes; one that begins now collides with those instead of slipping between the
+    read and the write, and the outcome is that either it is refused or this write
+    is. The holds are given back the moment the write returns.
     """
     config = load_cli_authoritative_config(None)
-    return set_permission(Path(config.work_dir), config, keys, command=command, open_holds=bench_open_holds(config))
+    return _change_permission_holding_the_bench(command, keys, config)
+
+
+def _change_permission_holding_the_bench(command: str, keys: list[str], config: AgenticHILConfig) -> JsonObject:
+    workspace = Path(config.work_dir)
+    # The holder that is already there: a live session or a quarantine on the
+    # project lock, or a run's device holds. Answered first, so a busy bench is a
+    # refusal that still validates the key names before it (set_permission decides
+    # that order), and so the one holder a device-lock hold cannot see — a project
+    # lock with no device under it — is still caught.
+    holds = bench_open_holds(config)
+    if holds is not None:
+        return set_permission(workspace, config, keys, command=command, open_holds=holds)
+    device_keys = config_devices(config).lock_keys
+    if not device_keys:
+        # No physical device to hold, and so no run to race: the file is the whole
+        # of what changes, and its own write lock makes that atomic already.
+        return set_permission(workspace, config, keys, command=command, open_holds=None)
+    # Hold every configured device across the check-and-write. `begin_run` and a
+    # lease both take these machine-wide device locks, so a run or session that
+    # begins now waits or is refused here rather than starting under the old
+    # policy — and a run that got in first makes this acquisition fail, which is
+    # the "the write is refused" side of the same guarantee.
+    bench = BenchMutex(frontend="operator-cli")
+    try:
+        try:
+            bench.acquire(device_keys, wait_s=0)
+        except DeviceBusyError as collision:
+            return set_permission(workspace, config, keys, command=command, open_holds=_holds_from_collision(collision.result))
+        return set_permission(workspace, config, keys, command=command, open_holds=None)
+    finally:
+        bench.release_all()
+
+
+def _holds_from_collision(busy: JsonObject) -> JsonObject:
+    """A `BenchMutex` device-busy result, shaped as the open-holds a refusal names.
+
+    `bench_open_holds` describes the bench from outside its holder; a collision
+    the writer hit while taking the bench for its own write describes the same
+    fact from the other side — the device it could not take, and who holds it.
+    Marked `owner_active: False` because what refused here was a device lock, not
+    the project lock a live session holds, and `raced_a_run` so the reason the
+    write stopped is legible rather than looking like a bench that was busy all
+    along."""
+    resource = busy.get("resource")
+    holds: JsonObject = {"owner_active": False, "raced_a_run": True}
+    if isinstance(resource, str):
+        holds["held_devices"] = [resource]
+        holds["busy_devices"] = [resource]
+    holder = busy.get("holder")
+    if isinstance(holder, dict):
+        holds["holder"] = holder
+    for field in ("held_since", "heartbeat_age_s"):
+        if busy.get(field) is not None:
+            holds[field] = busy[field]
+    return holds
 
 
 def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:

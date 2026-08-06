@@ -19,7 +19,14 @@ from agentic_hil.bootstrap import (
     select_probe_id,
 )
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
-from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_authoritative_config, load_config
+from agentic_hil.config import (
+    ConfigError,
+    debugger_drives_hardware,
+    debugger_is_placeholder,
+    load_authoritative_config,
+    load_config,
+)
+from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import project_config_create
 from agentic_hil.types import JsonObject, fold_hardware_id
@@ -262,7 +269,7 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
         "agentic_hil.tools.discover_attached_hardware",
-        lambda: {
+        lambda *args, **kwargs: {
             "ok": True,
             "executable": str(executable),
             "probe_id": "STLINK123",
@@ -330,7 +337,7 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
         "agentic_hil.tools.discover_attached_hardware",
-        lambda: {
+        lambda *args, **kwargs: {
             "ok": True,
             "executable": str(executable),
             "probe_id": "STLINK123",
@@ -662,6 +669,129 @@ def test_init_force_replaces_a_configuration_that_is_not_utf8_at_all(tmp_path: P
     assert "discarded_narrowings" not in result
     assert "not UTF-8 text" in result["discarded_narrowings_unreadable"]
     assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+
+
+def test_init_force_restores_a_non_utf8_original_when_the_new_file_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed regeneration puts the exact original back, non-UTF-8 included.
+
+    `--force` authorises replacing the file on success, not deleting the original
+    after the replacement fails. The rollback snapshot used to be the decoded
+    text, and a file that would not decode was recorded as absence — so when the
+    regenerated file failed its final validation, `_restore_file_snapshots`
+    removed the original it reported having restored (hardci-hq#106). The
+    snapshot is the exact bytes now, so the file that could not be read is the
+    file that comes back, byte for byte, rather than a deleted path under a
+    result that says "was rolled back"."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    original = b"\xff\xfe\x00\x00truncated \x80\x81 not utf-8 at all"
+    target.write_bytes(original)
+
+    # The failure is the final validation, after the new file is already written
+    # over the original — the double fault the rollback path exists to survive.
+    def refuse_final_validation(_workspace: Path) -> object:
+        raise ConfigError("config_invalid", "injected final-validation failure", {})
+
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", refuse_final_validation)
+
+    result = init_config(force=True)
+
+    assert "rolled back" in result["summary"], result
+    # A clean rollback, not a second fault dressed up as one: the original was
+    # restorable because it was held as bytes.
+    assert "rollback_errors" not in result, result.get("rollback_errors")
+    # The whole of the fix: the exact original is on disk, neither deleted nor
+    # re-encoded.
+    assert target.read_bytes() == original
+
+
+def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first `init` reads the board under machine-wide exclusion, lease or not.
+
+    A workspace with no configuration has no `state_root` to lease against, so the
+    read goes without the audit trail — but "this project holds no lease" was
+    never "nobody holds this board". Another workspace on the machine can be
+    mid-HOTPLUG on the same ST-Link, and the probe lock lives under the user's
+    home keyed on the device, reachable with no shared config. So the read takes
+    it in `before_connect` — the last point before the HOTPLUG connect — and a
+    held board comes back `device_busy` with nothing said to it, exactly as the
+    leased path answers (hardci-hq#108). Against the previous behaviour this
+    connected regardless."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    other_workspace = BenchMutex(frontend="other-workspace")
+    other_workspace.acquire([f"probe:{fold_hardware_id('STLINK123')}"])
+
+    state = {"connected": False}
+
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+        # Enumeration selected this probe; `before_connect` is the last gate before
+        # HOTPLUG, and where the machine-wide probe lock is taken.
+        if before_connect is not None:
+            refusal = before_connect("STLINK123")
+            if refusal is not None:
+                return refusal
+        state["connected"] = True
+        return {
+            "ok": True,
+            "tool": "bootstrap_hardware_discovery",
+            "backend": "stlink",
+            "executable": str(Path(__file__).resolve()),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "available_com_ports": {"ok": True, "ports": []},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        }
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", fake_discovery)
+
+    try:
+        result = init_config()
+    finally:
+        other_workspace.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert result["retry_safe"] is True
+    # Nothing was said to the board, and nothing was written: the read is what was
+    # refused, so there is no file to have written it from.
+    assert state["connected"] is False, "a HOTPLUG connect was attempted on a held probe"
+    assert not Path(result["path"]).exists()
+
+
+def test_first_init_refuses_while_another_read_holds_the_enumeration_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bootstrap enumeration serialises machine-wide too, not only the connect.
+
+    `debugger-discovery:all` is the enumeration pseudo-resource. The leased path
+    locks it beneath `state_root`; a bootstrap read has none, so it takes it as a
+    machine-wide lock beside the device locks and two first-time `init`s enumerate
+    one at a time. Held here, the read refuses before it ever runs `st-link -l`."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    other_read = BenchMutex(frontend="other-read")
+    other_read.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+
+    def never(*args: object, **kwargs: object) -> JsonObject:
+        raise AssertionError("enumeration ran while another read held the enumeration lock")
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", never)
+
+    try:
+        result = init_config()
+    finally:
+        other_read.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert not Path(result["path"]).exists()
 
 
 def test_a_first_init_reports_no_discard_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

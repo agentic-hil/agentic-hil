@@ -246,8 +246,15 @@ class DebuggerDevice(Device):
             return f"probe:{fold_hardware_id(self.debugger.probe_id)}"
         if self.debugger.executable:
             # The fallback that genuinely is a path, and the only component of a
-            # debugger key whose case rule belongs to the host.
-            return f"probe:{fold_device_path(self.debugger.executable)}"
+            # debugger key whose case rule belongs to the host. Its own prefix so
+            # the fold rule survives a round trip through a bare resource name:
+            # `probe:` is now unambiguously a hardware id (a serial or the type
+            # fallback) and folds case on every platform, while `probe-exe:` is a
+            # host path and folds only where the host does. Sharing `probe:`
+            # between the two forced one rule on both, and a hand-written
+            # `probe:<SERIAL>` then split from the `probe:<serial>` a configured
+            # probe_id locks on POSIX (hardci-hq#106).
+            return f"probe-exe:{fold_device_path(self.debugger.executable)}"
         return f"probe:{fold_hardware_id(self.debugger.type)}"
 
     @property

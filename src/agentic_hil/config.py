@@ -1068,11 +1068,33 @@ def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str 
         raise ConfigError("unsafe_configured_path", "User configuration file disappeared after replacement.", {"field": "user_config", "path": str(path)})
 
 
+def secure_atomic_write_bytes(file_path: str | Path, data: bytes) -> None:
+    """Atomically replace one user file with exact owner-only bytes.
+
+    The byte twin of ``secure_atomic_write_text``, for a rollback that has to put
+    the original back exactly — bytes that are not UTF-8 text included, which a
+    text write cannot express and which ``agentic-hil init --force`` must restore
+    rather than delete when a regenerated file fails its final validation
+    (hardci-hq#106)."""
+    path = absolute_without_symlinks(Path(file_path))
+    safe_directory(path.parent)
+    # Refuse an existing alias before atomic replacement, exactly as the text
+    # writer does; the guarded read is over bytes so a non-UTF-8 original is
+    # replaceable rather than unreadable.
+    secure_optional_read_bytes(path)
+    atomic_write_bytes(path, data)
+    if secure_optional_read_bytes(path) is None:
+        raise ConfigError("unsafe_configured_path", "User configuration file disappeared after replacement.", {"field": "user_config", "path": str(path)})
+
+
 def secure_remove_file(file_path: str | Path) -> None:
     """Remove a single-link regular file, primarily for transaction rollback."""
     path = absolute_without_symlinks(Path(file_path))
     safe_directory(path.parent)
-    if secure_optional_read_text(path) is None:
+    # Bytes, not text: a rollback may remove a file whose bytes are not UTF-8, and
+    # deciding whether it is there must not raise a decode error on the way
+    # (hardci-hq#106).
+    if secure_optional_read_bytes(path) is None:
         return
     if os.name == "nt":
         handles = _windows_hold_directory_chain(path.parent)
@@ -2328,7 +2350,10 @@ def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     if debugger.probe_id:
         return f"probe:{fold_hardware_id(debugger.probe_id)}"
     if debugger.executable:
-        return f"probe:{fold_device_path(debugger.executable)}"
+        # `probe-exe:`, not `probe:`: the executable is the one path-like
+        # component, and it keeps its own prefix so `probe:` stays a hardware id
+        # that folds identically raw or derived — see DebuggerDevice.lock_key.
+        return f"probe-exe:{fold_device_path(debugger.executable)}"
     return f"probe:{fold_hardware_id(debugger.type)}"
 
 

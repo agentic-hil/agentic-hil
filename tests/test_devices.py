@@ -329,6 +329,10 @@ def test_a_path_like_device_value_folds_the_way_its_own_host_does(tmp_path: Path
 
     assert as_written.identity_source == "executable"
     assert (as_written.lock_key == as_lowercased.lock_key) is one_name_on_this_host
+    # It keeps a prefix of its own so `probe:` can stay a hardware id that folds
+    # case everywhere (see the probe-serial test below). The executable is the
+    # one path-like fallback, and this is where that shows.
+    assert as_written.lock_key.startswith("probe-exe:")
 
 
 def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_path: Path) -> None:
@@ -370,6 +374,45 @@ def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_pa
     ports = config_for(tmp_path / "com9", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "com9"\n')
     assert uart_device(ports, "dut_uart").lock_key == "com:com9"
     assert (lock_keys(["com:COM9"]) == ["com:com9"]) is (os.name == "nt")
+
+
+def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_path: Path) -> None:
+    """A probe serial is an opaque hardware id, so it folds case on POSIX too.
+
+    hardci-hq#106: `fold_resource_name` treated every `probe:` name as a host
+    path, and a host path is left untouched on POSIX. A configured
+    `probe_id: STLINK123` locks `probe:stlink123` — `DebuggerDevice.lock_key`
+    builds it with `fold_hardware_id`, which casefolds everywhere — while a
+    hand-written `acquire("probe:STLINK123")` stayed uppercase and split into a
+    second lock file for one probe. Unlike a serial device name, a probe serial
+    has no per-host reading: it is one probe on Windows and on Linux alike, so
+    this assertion carries no platform branch. The executable fallback keeps its
+    own `probe-exe:` prefix precisely so `probe:` can fold this way."""
+    config = config_for(tmp_path, debuggers_yaml='debuggers:\n  dut:\n    type: stlink\n    probe_id: "STLINK123"\n')
+    device = debugger_device(config, "dut")
+    assert device.lock_key == "probe:stlink123"
+    # The operator's own uppercase spelling folds onto that exact key, here and
+    # on POSIX, with no `os.name` branch — the split this fixes.
+    assert lock_keys(["probe:STLINK123"]) == [device.lock_key] == ["probe:stlink123"]
+
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        coordinator.begin_run(DeviceSet.of([device]), label="one-probe")
+        # Declared as a device, reached under the uppercase spelling: the run
+        # recognises its own probe instead of refusing it as undeclared.
+        lease = coordinator.acquire("probe:STLINK123")
+        try:
+            assert lease.resources == [device.lock_key]
+        finally:
+            lease.release()
+        # And the machine-wide hold answers to either spelling — the lock file
+        # two keys would have split in two on POSIX.
+        stranger = BenchMutex(frontend="stranger")
+        with pytest.raises(DeviceBusyError):
+            stranger.acquire(["probe:STLINK123"])
+    finally:
+        coordinator.end_run()
+        coordinator.close()
 
 
 def test_config_load_refuses_one_resource_id_spelled_in_two_cases(tmp_path: Path) -> None:

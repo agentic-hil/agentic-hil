@@ -7,8 +7,8 @@ nobody. Two properties follow, and both are about *where* the lock lives rather
 than what it locks.
 
 **One place per machine.** The lock is keyed on the physical device
-(``physical:<resource_id>``, ``probe:<identity>``, ``com:<device>``,
-``can:<adapter>:<channel>``) and lives under the user's home, never under
+(``physical:<resource_id>``, ``probe:<serial>``, ``probe-exe:<executable>``,
+``com:<device>``, ``can:<adapter>:<channel>``) and lives under the user's home, never under
 ``state_root``. On 2026-08-02 two sessions held the same Nucleo and could not
 see each other because their ``state_root`` differed; a lock kept per
 configuration is not a bench lock. There is deliberately no environment override
@@ -63,7 +63,7 @@ MAX_WAIT_S = 900.0
 # configuration and `debugger-discovery:` a host-wide enumeration, and locking
 # either machine-wide would serialize unrelated benches instead of protecting a
 # board.
-PHYSICAL_RESOURCE_PREFIXES = ("physical:", "probe:", "com:", "can:")
+PHYSICAL_RESOURCE_PREFIXES = ("physical:", "probe:", "probe-exe:", "com:", "can:")
 
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
@@ -192,20 +192,27 @@ def fold_resource_name(resource: str) -> str:
     ``debugger-discovery:all`` names a host-wide enumeration; neither is a
     board, neither is reachable under a second spelling, and folding them would
     only suggest they were hardware."""
-    # Opaque hardware ids. `com:serial:` is tried before `com:` below because
-    # the longer prefix carries an adapter serial while the shorter one carries
-    # a host path, and they fold by different rules.
-    for prefix in ("com:serial:", "physical:", "can:"):
+    # Opaque hardware ids, folded case on every platform. `com:serial:` is tried
+    # before `com:` below because the longer prefix carries an adapter serial
+    # while the shorter one carries a host path, and they fold by different
+    # rules. `probe:` belongs here too: it is a probe serial or the `type`
+    # fallback, both hardware ids, and `DebuggerDevice.lock_key` builds them with
+    # `fold_hardware_id`, which casefolds on POSIX as well as on Windows. Folding
+    # it as a path instead left a hand-written `probe:<SERIAL>` uppercase on
+    # POSIX while the configured `probe_id` locked `probe:<serial>`, so two
+    # spellings of one probe bypassed each other (hardci-hq#106). `probe:` never
+    # carries an executable now — that fallback is `probe-exe:` below.
+    for prefix in ("com:serial:", "physical:", "can:", "probe:"):
         if resource.startswith(prefix):
             return prefix + fold_hardware_id(resource[len(prefix) :])
-    # Host paths. `probe:` is a probe serial *or* a debugger executable, and the
-    # path rule is the one that is safe for both: it leaves an opaque serial
-    # alone on POSIX and lowercases it on Windows, which is what
-    # `fold_hardware_id` has already done to it by the time it is a name.
-    # Folding case into a POSIX path instead would rewrite `probe:/usr/bin/Foo`
-    # to a name no configured debugger ever locks — this same bug, facing the
-    # other way.
-    for prefix in ("com:", "probe:"):
+    # Host paths. `com:<device>` is a serial device name and `probe-exe:` a
+    # debugger executable; the path rule leaves an opaque name alone on POSIX and
+    # lowercases it on Windows, which is what `fold_device_path` already did to
+    # it by the time it was a name. Folding case into a POSIX path would rewrite
+    # `probe-exe:/usr/bin/Foo` to a name no configured debugger ever locks — the
+    # same bug facing the other way, which is why the executable keeps a prefix
+    # of its own rather than sharing `probe:`.
+    for prefix in ("com:", "probe-exe:"):
         if resource.startswith(prefix):
             return prefix + fold_device_path(resource[len(prefix) :])
     return resource
@@ -318,6 +325,24 @@ class BenchMutex:
                     self._drop(resource)
                 raise
             return taken
+
+    def acquire_named(self, resource: str, *, wait_s: float = 0.0) -> bool:
+        """Hold one machine-wide lock by name, whether or not it is a device.
+
+        `acquire` locks devices and skips everything else, because a run declares
+        devices and the mutex's job is boards. The one non-device name that still
+        wants a machine-wide lock is the enumeration pseudo-resource
+        `debugger-discovery:all`: it serialises probe enumeration across the
+        machine rather than naming a board. Under a lease the coordinator locks it
+        through its own per-resource lock beneath `state_root`; a bootstrap read
+        has no `state_root`, so it takes the lock here, beside the device locks, so
+        two first-time `init`s enumerate one at a time rather than over each other.
+        Folded and taken through the same path as a device, so a caller cannot
+        split it by spelling and the holder record names whoever holds it. Raises
+        DeviceBusyError naming the holder, exactly as `acquire` does."""
+        deadline = time.monotonic() + _validated_wait(wait_s)
+        with self._guard:
+            return self._take(fold_resource_name(resource), deadline)
 
     def release(self, resources: list[str] | tuple[str, ...]) -> None:
         with self._guard:

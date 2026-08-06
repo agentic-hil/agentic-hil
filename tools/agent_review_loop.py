@@ -54,6 +54,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -225,11 +226,22 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress)
                 print(f"{prefix} {safe}", flush=True)
 
 
-def _terminate_tree(process: subprocess.Popen[str]) -> None:
-    """Kill the agent and everything it spawned.
+def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:
+    """Kill the agent and everything it spawned, and wait for it to be gone.
 
     An agent that hit the timeout is usually blocked inside a child shell it
-    started. Killing only the agent leaves that shell holding the working tree.
+    started, and that shell has its own children -- a test runner, a compiler --
+    still writing to the working tree. Killing only the agent leaves them running,
+    and `salvage_commit` runs the moment this returns: a descendant that outlives
+    this call races that commit, so it has to be gone, not merely signalled,
+    before this returns.
+
+    On Windows `taskkill /T` walks the tree from the agent's pid. On POSIX the
+    agent leads its own process group (``start_new_session`` on the `Popen`), so
+    its shells and their children share its pgid; the whole group is signalled,
+    the leader reaped so the group can empty, and the group waited out. A plain
+    `kill(pid)` reached only the leader, which is the bug this fixes -- the
+    grandchildren editing the tree never saw a signal at all.
     """
     if sys.platform == "win32":
         subprocess.run(
@@ -237,7 +249,58 @@ def _terminate_tree(process: subprocess.Popen[str]) -> None:
             capture_output=True,
             text=True,
         )
-    process.kill()
+        process.kill()
+        _reap_leader(process, grace_s)
+        return
+
+    try:
+        pgid = os.getpgid(process.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Already gone, or never a group of its own; reap whatever is left.
+        _reap_leader(process, grace_s)
+        return
+
+    # SIGTERM first for a clean stop, then SIGKILL for whatever ignored it. After
+    # each, the leader is reaped -- a group whose only remaining member is an
+    # unreaped zombie leader never looks empty -- and the group waited out.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        _signal_group(pgid, sig)
+        _reap_leader(process, grace_s)
+        if _group_gone(pgid, deadline=time.monotonic() + grace_s):
+            return
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    """Signal every process in the group, tolerating a group that is already gone."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, sig)
+
+
+def _reap_leader(process: subprocess.Popen[str], grace_s: float) -> None:
+    """Wait out the agent process so it is neither left running nor left a zombie."""
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+        process.wait(timeout=grace_s)
+
+
+def _group_gone(pgid: int, *, deadline: float) -> bool:
+    """Whether the process group has no members left, waited for until `deadline`.
+
+    `killpg(pgid, 0)` sends no signal; it asks whether the group still has a
+    member. ``ProcessLookupError`` is the answer this wants -- nothing is left in
+    the group -- so a descendant the SIGTERM did not stop keeps this False until
+    the SIGKILL pass, which is exactly the "not gone yet" salvage must not race.
+    """
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            # Not ours to signal any more; treat as gone rather than spin.
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def run_agent(
@@ -289,6 +352,11 @@ def run_agent(
             errors="replace",
             bufsize=1,
             env=env,
+            # POSIX only (a no-op on Windows, which walks the tree by pid with
+            # taskkill /T). The agent leads its own session and process group, so
+            # `_terminate_tree` can signal the shells and test processes it spawns
+            # as one group rather than reaching only the agent itself.
+            start_new_session=True,
         )
         assert process.stdin is not None and process.stdout is not None
         reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle, progress), daemon=True)

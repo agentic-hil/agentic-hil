@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -788,6 +789,17 @@ def _in(repository: Path, *arguments: str) -> str:
     ).stdout
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process still exists, without signalling it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _cut_short(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
     monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
     monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
@@ -1000,6 +1012,66 @@ def test_an_agent_that_says_nothing_for_minutes_still_reports_that_it_is_running
     assert heartbeats, "an agent that printed nothing for its whole run printed nothing about itself either"
     assert all(line.startswith("[claude r1] ... ") for line in heartbeats)
     assert "no output yet" in heartbeats[0]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the process-group kill is the POSIX path; Windows walks the tree by pid with taskkill /T",
+)
+def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_path: Path) -> None:
+    """A timeout leaves no descendant running and no late write in the tree.
+
+    An agent blocked at the timeout is usually blocked inside a shell whose own
+    children are still writing. Killing only the agent left them running, and
+    `salvage_commit` runs the moment `run_agent` raises: a surviving descendant
+    then races that commit and edits the tree after the round was recorded. The
+    agent now leads its own process group and `_terminate_tree` signals the whole
+    group and waits for it to be gone, so this delayed writer -- a grandchild of
+    the loop -- is dead before the timeout is raised. Its stdout is redirected off
+    the agent's pipe so the drain thread cannot mistake it for the agent still
+    talking; the point under test is the kill, not the plumbing."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    marker = workdir / "late-write.txt"
+    child_pid_file = workdir / "child.pid"
+    script = tmp_path / "agent_with_child.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys, time\n"
+        "devnull = open(os.devnull, 'w')\n"
+        # A grandchild that would write to the tree only after the timeout, then
+        # stay alive -- so a survivor is both a late write and a live process.
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c',\n"
+        "     \"import pathlib, time; time.sleep(2.0); \"\n"
+        "     \"pathlib.Path('late-write.txt').write_text('a descendant wrote after the timeout', encoding='utf-8'); \"\n"
+        "     \"time.sleep(120)\"],\n"
+        "    stdout=devnull, stderr=devnull,\n"
+        ")\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "sys.stdout.write('spawned\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(agent_review_loop.AgentTimeout):
+        agent_review_loop.run_agent(
+            [sys.executable, str(script)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=1,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    child_pid = int(child_pid_file.read_text())
+    # Past when the descendant's write would have landed had it lived, so an
+    # absent marker is the kill beating it rather than the check merely being early.
+    time.sleep(1.5)
+    assert not marker.exists(), "a descendant wrote to the working tree after the timeout"
+    assert not _pid_alive(child_pid), "a descendant survived the timeout"
 
 
 def test_each_agent_gets_a_scratch_directory_no_round_has_used_before(tmp_path: Path) -> None:

@@ -87,6 +87,12 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 # opened.
 
 COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
+# A declared identity that could not be confirmed before opening — the host has
+# no serial backend, the port is not enumerated exactly once, or the matched
+# port reports no serial. Distinct from a mismatch: the name may still lead to
+# the right board, but nothing proved it does, and an entry that asked for the
+# guarantee is not opened on a check that did not run (hardci-hq#100).
+COM_PORT_IDENTITY_UNVERIFIED = "com_port_identity_unverified"
 
 
 @dataclass(frozen=True)
@@ -168,18 +174,71 @@ def port_names_device(host_port: JsonObject, configured_device: str) -> bool:
     return any(name and fold_device_path(name) == wanted for name in candidates)
 
 
+def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectation: PortIdentity, identity: JsonObject) -> JsonObject:
+    """Refuse a declared port whose identity could not be confirmed before opening.
+
+    Distinct from a mismatch: a mismatch found the wrong board behind the name,
+    this found no way to check which board is behind it. Both refuse before the
+    port is opened and for the same reason — an entry that names hardware is
+    opened only against a `confirmed` comparison, and a check that could not run
+    is not one. ``identity['status']`` says which of the three ways the question
+    had no answer, and ``identity['summary']`` says it in a sentence.
+
+    Retry-safe and no-contact by construction: the port was never touched, so
+    restoring the check — installing the serial backend, plugging the board in,
+    a host that reports the adapter's serial — or running `adopt-hardware` to
+    rewrite the entry, then calling again, is the whole repair."""
+    return {
+        "ok": False,
+        "tool": tool,
+        "port_id": port_id,
+        "error_type": COM_PORT_IDENTITY_UNVERIFIED,
+        "summary": (
+            f"'{port.device}' names hardware '{expectation.expected}', but that could not be confirmed before opening, so "
+            f"the port was not opened: {identity['summary']}"
+        ),
+        "identity": identity,
+        "configured_device": port.device,
+        "expected_serial_number": expectation.expected,
+        "expected_from": expectation.field,
+        "next_step": (
+            "This entry names a board on purpose, so it is opened only once the host confirms the name still leads to it. "
+            "Restore the check — install the serial backend, plug the board in, or use a host that reports the adapter's "
+            "serial — or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
+            "entry's `serial_number`/`resource_id` only if it genuinely names no fixed board."
+        ),
+        # Nothing was reached, so the bench stays in service and this is not an
+        # incident: restore the check and call again.
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": True,
+    }
+
+
 def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> JsonObject:
     """Refuse a configured port that is currently a different board.
 
     ``{"ok": True, "identity": ...}`` when the port may be opened, and the
-    identity block says on what grounds — confirmed against the attached
-    hardware, or unchecked and why. ``{"ok": False, ...}`` is the refusal, and it
-    is returned before anything is opened: a mismatch means the name in the file
-    now leads somewhere else, and connecting to find out is the failure.
+    identity block says on what grounds. ``{"ok": False, ...}`` is the refusal,
+    and it is returned before anything is opened: connecting to find out which
+    board a name now leads to is itself the failure.
+
+    An entry that declares hardware is opened on one ground only: the attached
+    device was `confirmed` to be the board it names. The three ways that question
+    has no answer — the serial backend is missing (`backend_unavailable`), the
+    device is not enumerated exactly once (`port_not_enumerated`), or the matched
+    port reports no serial (`serial_unknown`) — are refusals too, not opens with
+    a note (hardci-hq#100). The entry asked that this name be proved to still
+    reach its board before use, and "the check could not run" does not prove it;
+    reporting the gap in a result the caller reads *after* it has already written
+    to whatever the name now reaches is no protection at all. Every one is
+    retry-safe and no-contact: restore the check, or `adopt-hardware` the entry,
+    and call again.
 
     An entry that declares no hardware costs nothing here — the host is not
     enumerated at all, so a configuration written before any of this existed
-    behaves exactly as it did."""
+    behaves exactly as it did, `not_declared` and openable."""
     port = config.com_ports[port_id]
     expectation = expected_port_identity(config, port_id)
     identity: JsonObject = {"device": port.device}
@@ -193,14 +252,15 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     identity.update({"expected_serial_number": expectation.expected, "expected_from": expectation.field})
     available = list_available_com_ports("com_ports_available")
     if not available.get("ok"):
-        # The inventory is how this question is answered at all. Refusing a port
-        # because pyserial is missing would take a working bench off the air over
-        # a check that cannot run; the open proceeds and the result says the
-        # check did not happen.
+        # The inventory is how this question is answered at all. This entry named
+        # a board so that the name would be proved to still reach it before use;
+        # pyserial missing means it cannot be, and opening anyway is the wrong-
+        # board write the identity exists to prevent. Nothing was contacted, so
+        # the refusal is retry-safe — install the backend and call again.
         identity["status"] = "backend_unavailable"
         identity["summary"] = "Host serial ports could not be enumerated, so this port's identity was not verified."
         identity["backend_error"] = str(available.get("summary", ""))
-        return {"ok": True, "identity": identity}
+        return _identity_unverified(tool, port_id, port, expectation, identity)
 
     ports = [entry for entry in available.get("ports", []) if isinstance(entry, dict)]
     matches = [entry for entry in ports if port_names_device(entry, port.device)]
@@ -210,7 +270,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
             "The host's serial port inventory does not name this device exactly once, so its identity was not "
             "verified. A pseudo-terminal, a URL handler and a port that has gone away all look like this."
         )
-        return {"ok": True, "identity": identity}
+        return _identity_unverified(tool, port_id, port, expectation, identity)
 
     found = str(matches[0].get("serial_number") or "")
     stable = matches[0].get("stable_device")
@@ -219,7 +279,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     if not found:
         identity["status"] = "serial_unknown"
         identity["summary"] = "This host port reports no serial number, so it could not be compared with the hardware this entry names."
-        return {"ok": True, "identity": identity}
+        return _identity_unverified(tool, port_id, port, expectation, identity)
 
     identity["found_serial_number"] = found
     if fold_hardware_id(found) == fold_hardware_id(expectation.expected):
