@@ -206,10 +206,13 @@ def test_discovery_applies_project_requirements() -> None:
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     profile = {
         "target": {"name": "demo", "controller": "stm32f446ret6"},
-        # Every flag is granted by default now, so what a profile can still say
-        # is "not this one". allow_mass_erase below is the narrowing; the
-        # version 1 read grants beside it are the request that is dropped.
-        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_mass_erase": False}}},
+        # Every flag a generation can grant is granted by default now, so what a
+        # profile can still say is "not this one". allow_reset below is the
+        # narrowing — it has to be a flag the default leaves *true*, or the test
+        # passes without the profile being consulted at all. The version 1 read
+        # grant beside it is the request that is dropped, and allow_mass_erase is
+        # a profile agreeing with a default that is already false (hardci-hq#107).
+        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_reset": False, "allow_mass_erase": False}}},
         "com_ports": {"uart": {"baudrate": 115200, "permissions": {"allow_read": True, "allow_write": False}}},
     }
     discovery = {
@@ -229,12 +232,15 @@ def test_discovery_applies_project_requirements() -> None:
     # refused by name, so the request is satisfied by dropping it.
     assert configured["version"] == 2
     # Granted unless the profile said otherwise: a flag it does not name follows
-    # the generated default, and one it names is honoured — which can now only
-    # narrow, because the default it would have to beat is already true.
+    # the generated default, and one it names is honoured — which can only
+    # narrow, because the default it would have to beat is already true wherever
+    # a generation grants anything. allow_raw_debugger_commands is not named here
+    # and is false, which is the generated default arriving through this path
+    # rather than through the template text.
     assert configured["debuggers"]["dut"]["permissions"] == {
         "allow_flash": True,
-        "allow_reset": True,
-        "allow_raw_debugger_commands": True,
+        "allow_reset": False,
+        "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
@@ -337,11 +343,11 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert result["ok"] is True, result
     assert written["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
     assert written["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
-    assert result["narrowed_permissions"] == [
-        "com_ports.dut_uart.permissions.allow_write",
-        "debuggers.dut.permissions.allow_mass_erase",
-    ]
-    assert "every permission granted." not in result["summary"]
+    # allow_mass_erase is false here too, and is deliberately *not* in this list:
+    # the generated default writes it false on every bench, so reporting it as
+    # something the profile narrowed would be a standing false positive
+    # (hardci-hq#107). `permissions` below still carries its actual value.
+    assert result["narrowed_permissions"] == ["com_ports.dut_uart.permissions.allow_write"]
     assert "the project profile set to false" in result["summary"]
     assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
     assert any("allow_mass_erase" in step for step in result["next_steps"])
@@ -361,11 +367,11 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
 
     assert result["ok"] is True, result
     assert result["narrowed_permissions"] == []
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert result["permissions"]["allow_config_permissions_write"] is True
     assert result["permissions"]["debug"]["allow_all_symbols"] is True
     assert result["permissions"]["artifacts"]["allow_upload"] is True
-    assert any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
+    assert any(step.startswith("Every permission in this file is true") for step in result["next_steps"])
     # The permissions are open and the entry still drives nothing. The starter
     # entry names no toolchain and pinning does not find it one, so the steps say
     # that rather than promising a bench that works as written.
@@ -470,7 +476,7 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     assert result["hardware_discovery"]["ok"] is False
     assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
     assert result["summary"].startswith("No attached bench was found")
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
 
