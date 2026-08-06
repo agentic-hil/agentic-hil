@@ -241,6 +241,35 @@ Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
 
+### `can_listen_only_unsupported` / `can_listen_only_unconfirmed`
+
+Symptom: a bus with `listen_only: true` refuses `can_session_start` with one of these two, instead of starting.
+
+This is the flag working. `listen_only: true` is the claim that observing this bus sends nothing — a controller outside listen-only sends dominant ACK bits, and on a bus with one other participant that ACK decides whether the sender considers its frame delivered. So the mode is enforced per adapter rather than assumed, and where it cannot be backed the session is refused rather than silently downgraded to listening anyway.
+
+| adapter | how the mode is obtained | what backs the claim |
+|---|---|---|
+| `peak` | set through PCAN's `BusState.PASSIVE`, re-asserted once the channel is initialized | `PCAN_LISTEN_ONLY` is read back from the driver |
+| `socketcan` | not obtainable from this process: the mode belongs to the kernel's CAN device, and only `ip link` sets it | the control mode is read before the socket is created |
+| `process` | sent to the bridge in its `open` request | the bridge's `open` result must answer `listen_only: true` |
+
+`can_listen_only_unsupported` is settled before the bus is touched, so it carries `retry_safe: true` and quarantines nothing. On SocketCAN it means the interface is not in listen-only, or its control mode could not be read; `link_state` on the result says which. Put a real interface into the mode outside Agentic HIL:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 500000 listen-only on
+sudo ip link set can0 up
+ip -details link show dev can0     # prints <LISTEN-ONLY> when it took
+```
+
+A `vcan` interface has no CAN controller and therefore no listen-only mode — and no physical bus to disturb. Set `listen_only: false` on a virtual bus. If `link_state` says the control mode could not be read, install iproute2: `ip` is read from `/sbin`, `/usr/sbin`, `/bin` or `/usr/bin` and deliberately not from `PATH`, because a proof read from a PATH-resolved binary is not a proof.
+
+`can_listen_only_unconfirmed` is settled after the adapter was opened: it was asked for the mode, it did not confirm, and it was closed again. The exposure is the open rather than the session, and the result says so instead of implying otherwise. `driver_state` names what came back. On PEAK, check that the channel supports listen-only at all and that PCANBasic and python-can are current. On a `process` bridge, make the bridge answer `"listen_only": true` from `open` once it has actually put its controller into the mode — the bridge protocol version does not change, and a bridge that is never asked for the mode is unaffected.
+
+If the bus may be ACKed — a bench nobody else is driving, a rig where this is the only participant — set `listen_only: false` on that entry. That is an honest configuration and the refusal goes away, because nothing is being claimed any more. Do not instead drop the flag and keep calling the reading passive.
+
+None of this proves what the silicon does; it reaches as far as the driver's or the kernel's own report of its mode. The bench proof stays with the operator: a single sender with no other participant reports its frame unacknowledged.
+
 ## 13. `device_busy`, `resource_busy` Or Quarantined Hardware
 
 Symptom: a call returns `device_busy` and names a `holder`, or tools return `resource_busy`, `cleanup_required`, or `quarantined` with a `quarantine_id`.

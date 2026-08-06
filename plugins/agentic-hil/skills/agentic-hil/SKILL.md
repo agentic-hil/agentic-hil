@@ -93,6 +93,20 @@ Never resolve it by writing the found serial into `serial_number` or by removing
 the key — that makes the one check that noticed agree with whatever is plugged
 in, which is the silent wrong-board flash it exists to prevent.
 
+`can_listen_only_unsupported` and `can_listen_only_unconfirmed` are a third kind
+again, and the one most likely to look like an obstacle worth removing. The bus
+is configured `listen_only: true`, which is the claim that observing it sends
+nothing — a CAN controller outside listen-only sends dominant ACK bits, and on a
+bus with one other participant that ACK decides whether the sender considers its
+frame delivered. The adapter could not be held to that claim, so the session was
+refused instead of downgraded. `link_state` or `driver_state` on the result says
+what was found. Relay it and let the operator decide: put the interface into
+listen-only outside Agentic HIL, or set `listen_only: false` because this bus may
+be ACKed. Never clear it by removing the flag yourself, and never read the bus
+with `candump`, `ip link` or a python-can script instead — the controller mode is
+the same for those, and the only thing that changes is that no report says the
+bus was ACKed.
+
 Report those findings together with the refusal, name the permission that is
 denied, and ask the user before changing it. Never work around it with a raw
 command, with the configuration file, or with the CLI.
