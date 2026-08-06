@@ -173,6 +173,18 @@ class AgentTimeout(AgentError):
     """
 
 
+class CleanupUnconfirmed(AgentError):
+    """The killed agent's process tree could not be confirmed gone.
+
+    Distinct from AgentTimeout on purpose, and more serious. A timeout leaves an
+    unfinished but *quiescent* tree, which `salvage_commit` can commit. This says
+    the shells and test processes the agent spawned may still be running and
+    writing to the working tree — so nothing may `git add` it, and the run has to
+    stop with the tree untouched rather than capture a half-written one as a
+    round's work. It ends the loop where salvage would have raced the survivors.
+    """
+
+
 class _Done(Exception):
     """Internal signal: the run finished before reaching the implement loop."""
 
@@ -227,7 +239,7 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress)
 
 
 def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:
-    """Kill the agent and everything it spawned, and wait for it to be gone.
+    """Kill the agent and everything it spawned, or raise CleanupUnconfirmed.
 
     An agent that hit the timeout is usually blocked inside a child shell it
     started, and that shell has its own children -- a test runner, a compiler --
@@ -242,38 +254,82 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
     the leader reaped so the group can empty, and the group waited out. A plain
     `kill(pid)` reached only the leader, which is the bug this fixes -- the
     grandchildren editing the tree never saw a signal at all.
+
+    Returns only once the tree is *positively confirmed* gone. If a signal cannot
+    be delivered, or the group still has a member after the final SIGKILL and its
+    deadline, this raises CleanupUnconfirmed rather than returning: returning would
+    tell the caller the tree is safe to commit when a process may still be editing
+    it, which is the race this exists to prevent.
     """
     if sys.platform == "win32":
-        subprocess.run(
+        result = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(process.pid)],
             capture_output=True,
             text=True,
         )
         process.kill()
         _reap_leader(process, grace_s)
+        # 0 is a kill; 128 is "process not found", i.e. already gone. Any other
+        # code means taskkill did not confirm the tree was killed, so its members
+        # may still be live -- exactly what must not be reported as clean.
+        if result.returncode not in (0, 128):
+            raise CleanupUnconfirmed(
+                f"taskkill could not confirm the process tree for pid {process.pid} was killed "
+                f"(exit {result.returncode}): {(result.stderr or '').strip()}"
+            )
         return
 
     try:
         pgid = os.getpgid(process.pid)
-    except (ProcessLookupError, PermissionError, OSError):
-        # Already gone, or never a group of its own; reap whatever is left.
+    except ProcessLookupError:
+        # The leader is already gone and so is its group; reap the zombie.
         _reap_leader(process, grace_s)
         return
+    except OSError as error:
+        # The group could not even be read, so its members cannot be signalled and
+        # their state is unknown. Reap what we can and report cleanup unconfirmed.
+        _reap_leader(process, grace_s)
+        raise CleanupUnconfirmed(f"could not read the process group of pid {process.pid} to kill it: {error}") from error
 
     # SIGTERM first for a clean stop, then SIGKILL for whatever ignored it. After
     # each, the leader is reaped -- a group whose only remaining member is an
     # unreaped zombie leader never looks empty -- and the group waited out.
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        _signal_group(pgid, sig)
+        if not _signal_group(pgid, sig):
+            # A signal that could not be delivered leaves the group's members
+            # running with their state unknown; SIGKILL failing here is the worst
+            # case and must not be swallowed.
+            raise CleanupUnconfirmed(f"could not signal process group {pgid} with {_signal_name(sig)} while killing pid {process.pid}")
         _reap_leader(process, grace_s)
         if _group_gone(pgid, deadline=time.monotonic() + grace_s):
             return
+    raise CleanupUnconfirmed(
+        f"process group {pgid} (agent pid {process.pid}) still had a member after SIGKILL and a {grace_s:.0f}s wait"
+    )
 
 
-def _signal_group(pgid: int, sig: int) -> None:
-    """Signal every process in the group, tolerating a group that is already gone."""
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+def _signal_name(sig: int) -> str:
+    try:
+        return signal.Signals(sig).name
+    except ValueError:  # pragma: no cover - only the two constants above are passed
+        return str(sig)
+
+
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Signal every process in the group.
+
+    True when the signal was delivered or the group was already gone -- both mean
+    there is nothing left this call failed to reach. False when it could not be
+    delivered (``PermissionError`` or another ``OSError``): the members are still
+    there and were not signalled, which the caller must not read as a clean kill.
+    """
+    try:
         os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
 
 
 def _reap_leader(process: subprocess.Popen[str], grace_s: float) -> None:
@@ -286,18 +342,21 @@ def _group_gone(pgid: int, *, deadline: float) -> bool:
     """Whether the process group has no members left, waited for until `deadline`.
 
     `killpg(pgid, 0)` sends no signal; it asks whether the group still has a
-    member. ``ProcessLookupError`` is the answer this wants -- nothing is left in
-    the group -- so a descendant the SIGTERM did not stop keeps this False until
-    the SIGKILL pass, which is exactly the "not gone yet" salvage must not race.
+    member. ``ProcessLookupError`` -- the group is empty -- is the *only* positive
+    answer, and the only one that returns True. A ``PermissionError`` means a
+    member is still there but not ours to signal, which is the opposite of gone;
+    any other ``OSError`` leaves the answer unknown. Both keep waiting and then
+    report not-gone, so `_terminate_tree` treats an unclearable group as cleanup
+    unconfirmed rather than as the absence salvage may build on -- the "not gone
+    yet" that salvage must never race.
     """
     while True:
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return True
-        except (PermissionError, OSError):
-            # Not ours to signal any more; treat as gone rather than spin.
-            return True
+        except OSError:
+            pass  # still present (EPERM) or unknowable: not the absence this needs
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
@@ -1487,10 +1546,27 @@ def main(argv: list[str] | None = None) -> int:
                     env=agent_env(scratch),
                     heartbeat=options.heartbeat,
                 )
+            except CleanupUnconfirmed as error:
+                # The killed agent's shells and test processes were not confirmed
+                # gone, so they may still be writing to the tree. Salvage would
+                # `git add -A` and commit underneath them, capturing a half-written
+                # tree as if it were the round's work -- the race salvage exists to
+                # avoid, arriving through cleanup that could not finish. Touch
+                # nothing: end the run with the tree as it is and let an operator
+                # resolve the survivors.
+                print(
+                    f"\nround {number}: {error}. The working tree was left untouched -- a killed "
+                    f"agent's processes may still be running in {repo}; stop them and inspect the tree "
+                    "by hand before starting another run.",
+                    file=sys.stderr,
+                )
+                raise
             except AgentError as error:
                 # This ends the run, and the round's work is uncommitted: a round
                 # commits once, at the end, and the implementer never got there.
-                # Commit it before the run leaves it behind.
+                # Commit it before the run leaves it behind. Safe here and not
+                # above because the tree is quiescent: the agent's process tree was
+                # confirmed gone before this raised (`_terminate_tree`).
                 salvaged = salvage_commit(repo, number, error, (review_root, log_root, checkout_dir))
                 if salvaged is not None:
                     record.commits = [salvaged]

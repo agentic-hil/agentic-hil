@@ -652,6 +652,60 @@ def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_pat
     assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is True
 
 
+def test_a_device_repointed_after_the_status_read_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gap round 1's transaction still left: the key set itself moves.
+
+    The command derived the devices to hold from the config it loaded before the
+    status read. If another writer repoints a device in the gap — `COM9` to
+    `COM10` — a run can take `com:COM10` while the command holds only `com:COM9`,
+    and the two never collide: the old command re-read the moved document and
+    wrote the permission with a run holding the bench underneath it, the exact
+    outcome hardci-hq#80 rules out. The command now derives its locks and the
+    document it writes against from one read taken after the status probe, so it
+    holds the moved key and collides with the run rather than slipping past it.
+    Nothing is written.
+
+    Against the pre-fix command this held the stale `com:COM9`, missed the run on
+    `com:COM10`, and wrote the permission underneath it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    from agentic_hil import cli
+
+    a_run = BenchMutex(frontend="a-run-on-the-new-key")
+    real_bench_open_holds = cli.bench_open_holds
+    moved: dict[str, str | None] = {"key": None}
+
+    def a_device_moves_then_a_run_starts(cfg: Any) -> dict | None:
+        holds = real_bench_open_holds(cfg)  # the real read: the bench is free
+        if holds is None and moved["key"] is None:
+            # Another writer repoints the port, and a run takes its new lock — both
+            # inside the seam the command used to leave between the read and the write.
+            document = document_of(path)
+            document["com_ports"]["dut_uart"]["device"] = "COM10"
+            path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+            new_key = f"com:{os.path.normcase('COM10')}"
+            a_run.acquire([new_key], wait_s=0)
+            moved["key"] = new_key
+        return holds
+
+    monkeypatch.setattr(cli, "bench_open_holds", a_device_moves_then_a_run_starts)
+
+    try:
+        refused = cli.change_permission("grant", ["can_buses.dut.allow_write"])
+    finally:
+        a_run.release_all()
+
+    # The command derived the moved key from the fresh document and collided with
+    # the run holding it, rather than holding the stale key and slipping past.
+    assert moved["key"] is not None
+    assert refused["error_type"] == PERMISSION_CHANGE_IN_OPEN_RUN
+    assert refused["command"] == "agentic-hil grant"
+    assert refused["side_effect_committed"] is False
+    # The permission did not move: only the other writer's port change is in the
+    # file, never the grant this refused.
+    assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is not True
+    assert document_of(path)["com_ports"]["dut_uart"]["device"] == "COM10"
+
+
 def test_a_typo_is_answered_before_somebody_elses_run_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator whose command was a typo is told about the typo.
 

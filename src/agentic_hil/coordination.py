@@ -1222,17 +1222,26 @@ def project_resource(config: AgenticHILConfig) -> str:
 # key. They derive nothing themselves any more: agentic_hil.devices owns the
 # identity, so a backend, the reactor's declaration and a run over MCP cannot
 # disagree about which lock a board falls under.
-def debugger_resource(config: AgenticHILConfig) -> str:
+def _bound_debugger_device(config: AgenticHILConfig) -> DebuggerDevice:
     debugger = config.debugger
     if debugger is None:
         raise CoordinationError({"ok": False, "error_type": "invalid_argument", "summary": "No debugger is bound, so no probe resource can be leased.", "configured_debuggers": sorted(config.debuggers), "retry_safe": True})
-    return DebuggerDevice(config_id=str(config.debugger_id), debugger=debugger).lock_key
+    return DebuggerDevice(config_id=str(config.debugger_id), debugger=debugger)
 
 
-def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, str]:
+def debugger_resource(config: AgenticHILConfig) -> str:
+    return _bound_debugger_device(config).lock_key
+
+
+def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, ...]:
     # The discovery pseudo-resource is not a device: it names a host-wide
     # enumeration, and locking it machine-wide would serialize unrelated benches.
-    return DEBUGGER_DISCOVERY_RESOURCE, debugger_resource(config)
+    # Every one of the debugger's own lock keys follows it, not just the primary:
+    # a probe known by both a resource_id and a serial has to be held under both
+    # here, or a flash under `physical:<resource_id>` would leave a bootstrap read
+    # elsewhere free to take `probe:<serial>` and connect underneath it
+    # (hardci-hq#108).
+    return (DEBUGGER_DISCOVERY_RESOURCE, *_bound_debugger_device(config).lock_keys)
 
 
 def com_resource(config: AgenticHILConfig, port_id: str) -> str:

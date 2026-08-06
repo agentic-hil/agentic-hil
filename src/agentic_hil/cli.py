@@ -56,7 +56,14 @@ from agentic_hil.config import (
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, permission_surface, set_permission
+from agentic_hil.configwrite import (
+    ACTOR_HUMAN,
+    PERMISSION_COMMAND_VALUES,
+    authoritative_write_target,
+    load_config_document,
+    permission_surface,
+    set_permission,
+)
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import (
@@ -1561,11 +1568,28 @@ def _change_permission_holding_the_bench(command: str, keys: list[str], config: 
     holds = bench_open_holds(config)
     if holds is not None:
         return set_permission(workspace, config, keys, command=command, open_holds=holds)
-    device_keys = config_devices(config).lock_keys
+    # The devices to hold and the document to write against come from one read
+    # taken here, after the (slow) holds probe above rather than from the config
+    # loaded before it. The keys and the description then describe the same file
+    # state, so a device repointed in the gap — `COM9` to `COM10`, a `resource_id`
+    # moved from one board to another — cannot leave this command holding the old
+    # key while a run takes the new one. `expect_document` carries that same
+    # description into the write, which refuses if it has moved by the time the
+    # write lock is held: either the run collides with the keys held here, or the
+    # write is refused, never a policy landing over a bench held under keys this
+    # call never saw (hardci-hq#80).
+    try:
+        fresh, document = _config_and_document_for_hold(workspace, config)
+    except ConfigError:
+        # The file stopped loading between the CLI's own load and here. Let
+        # set_permission read it again and return the structured refusal it owns.
+        return set_permission(workspace, config, keys, command=command)
+    device_keys = config_devices(fresh).lock_keys
     if not device_keys:
         # No physical device to hold, and so no run to race: the file is the whole
-        # of what changes, and its own write lock makes that atomic already.
-        return set_permission(workspace, config, keys, command=command, open_holds=None)
+        # of what changes, and its own write lock makes that atomic already. The
+        # description CAS still guards against an entry appearing in the gap.
+        return set_permission(workspace, fresh, keys, command=command, expect_document=document)
     # Hold every configured device across the check-and-write. `begin_run` and a
     # lease both take these machine-wide device locks, so a run or session that
     # begins now waits or is refused here rather than starting under the old
@@ -1576,10 +1600,24 @@ def _change_permission_holding_the_bench(command: str, keys: list[str], config: 
         try:
             bench.acquire(device_keys, wait_s=0)
         except DeviceBusyError as collision:
-            return set_permission(workspace, config, keys, command=command, open_holds=_holds_from_collision(collision.result))
-        return set_permission(workspace, config, keys, command=command, open_holds=None)
+            return set_permission(workspace, fresh, keys, command=command, open_holds=_holds_from_collision(collision.result), expect_document=document)
+        return set_permission(workspace, fresh, keys, command=command, expect_document=document)
     finally:
         bench.release_all()
+
+
+def _config_and_document_for_hold(workspace: Path, config: AgenticHILConfig) -> tuple[AgenticHILConfig, JsonObject]:
+    """A fresh pinned config and the document it was read from, for one hold.
+
+    Two adjacent reads of the one authoritative file: the config gives the lock
+    keys a run would take (pinned, so an executable-identified debugger's key
+    matches what a run holds), and the document is what the write refuses a
+    description move of. Reading both here rather than reusing the config the CLI
+    loaded before the holds probe is what ties the keys acquired to the state the
+    write is checked against."""
+    target_path = authoritative_write_target(workspace, config)
+    _, document = load_config_document(target_path)
+    return load_authoritative_config(workspace), document
 
 
 def _holds_from_collision(busy: JsonObject) -> JsonObject:

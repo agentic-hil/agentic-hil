@@ -1170,6 +1170,7 @@ def set_permission(
     *,
     command: str,
     open_holds: JsonObject | None = None,
+    expect_document: JsonObject | None = None,
 ) -> JsonObject:
     """Move the named permissions to what ``command`` writes, or change nothing.
 
@@ -1205,12 +1206,12 @@ def set_permission(
       permission key of *this* configuration, entry names and all.
     """
     try:
-        return _set_permission(workspace, existing, keys, command=command, open_holds=open_holds)
+        return _set_permission(workspace, existing, keys, command=command, open_holds=open_holds, expect_document=expect_document)
     except ConfigError as error:
         return with_config_status({"command": f"agentic-hil {command}", **error.to_dict(), **NOT_STARTED}, config_status(existing))
 
 
-def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: list[str], *, command: str, open_holds: JsonObject | None) -> JsonObject:
+def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: list[str], *, command: str, open_holds: JsonObject | None, expect_document: JsonObject | None = None) -> JsonObject:
     if existing is None:  # pragma: no cover - the CLI fails to load before it gets here
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
     value = PERMISSION_COMMAND_VALUES[command]
@@ -1266,6 +1267,13 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
         actor=ACTOR_HUMAN,
         via=f"cli:{command}",
         expect=dict(changing),
+        # The document the bench hold was planned against, when the caller took
+        # one. `agentic-hil grant`/`revoke` derive the devices they lock from a
+        # document read outside this write lock; if a device is repointed in the
+        # gap, the keys held no longer match the ones a run would take, and the
+        # description compare-and-swap here refuses rather than writing a policy
+        # over a bench held under keys this call never saw (hardci-hq#80).
+        expect_document=expect_document,
         waive_permissions_grant=True,
     )
     if written.get("ok") is not True:

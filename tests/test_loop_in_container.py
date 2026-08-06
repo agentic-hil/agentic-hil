@@ -1074,6 +1074,155 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
     assert not _pid_alive(child_pid), "a descendant survived the timeout"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_reports_cleanup_unconfirmed_when_the_group_never_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure the previous version returned from instead of reporting.
+
+    After the SIGKILL pass `_group_gone` can still be false -- a member is wedged
+    in an uninterruptible syscall, or the deadline was simply too short. The old
+    `_terminate_tree` fell off the end of its loop and returned as if the tree were
+    gone, and `salvage_commit` then ran against a tree a survivor might still be
+    editing. It must raise instead, so the caller knows cleanup did not finish."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+    )
+    # The real SIGTERM/SIGKILL still go out; only the liveness answer is forced, so
+    # this pins the decision `_terminate_tree` makes when the group looks unclear.
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+    try:
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+            agent_review_loop._terminate_tree(process, grace_s=0.1)
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_reports_cleanup_unconfirmed_when_a_signal_cannot_be_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGKILL that cannot be delivered leaves the group's state unknown.
+
+    `_terminate_tree` used to suppress every signalling error, so a killpg that
+    failed with EPERM was indistinguishable from one that worked. A signal that
+    did not land means the members are still there and were not stopped, which is
+    the one thing that must not be read as a clean kill."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+    )
+    monkeypatch.setattr(agent_review_loop, "_signal_group", lambda pgid, sig: False)
+    try:
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+            agent_review_loop._terminate_tree(process, grace_s=0.1)
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_group_gone_treats_an_unclearable_group_as_not_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a group with no members left counts as gone.
+
+    `killpg(pgid, 0)` raising `ProcessLookupError` is the group being empty --
+    the one positive answer. A `PermissionError` is a member still there but not
+    ours to signal, and the old code returned True for it, calling a group that
+    demonstrably still had a process 'gone'. It has to keep waiting and then
+    report not-gone, or an unkillable descendant would be reported as cleaned up."""
+    monkeypatch.setattr(agent_review_loop.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError()))
+    assert agent_review_loop._group_gone(4321, deadline=time.monotonic() + 0.05) is False
+
+    monkeypatch.setattr(agent_review_loop.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert agent_review_loop._group_gone(4321, deadline=time.monotonic() + 5.0) is True
+
+
+def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows tree walk, faced the same way: a taskkill that did not confirm.
+
+    `taskkill /T` returns 0 on a kill and 128 when the pid is already gone; any
+    other code means it did not confirm the tree was killed. Exercised on every
+    platform by forcing the Windows branch, because that is the half a POSIX CI
+    never runs and where an unconfirmed kill would otherwise pass silently."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    monkeypatch.setattr(
+        agent_review_loop.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 1, "", "the process could not be terminated"),
+    )
+
+    class _FakeProcess:
+        pid = 4242
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_run_agent_surfaces_cleanup_unconfirmed_rather_than_a_plain_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distinct failure the loop reads to skip salvage.
+
+    When the timeout fires and the tree cannot be confirmed gone, `run_agent` must
+    raise `CleanupUnconfirmed`, not the ordinary `AgentTimeout`: the two are the
+    same event but a different situation, and only the distinct type tells the
+    caller a descendant may still be editing the tree."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = tmp_path / "slow.py"
+    script.write_text("import sys, time\nsys.stdout.write('go\\n')\nsys.stdout.flush()\ntime.sleep(120)\n", encoding="utf-8")
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        agent_review_loop.run_agent(
+            [sys.executable, str(script)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=1,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_a_round_whose_cleanup_is_unconfirmed_is_not_salvaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Salvage is the working-tree mutation that must not run over live survivors.
+
+    `salvage_commit` `git add -A`s the tree and commits it. If the killed agent's
+    processes were not confirmed gone, one may still be writing, so committing now
+    would capture a half-written tree as the round's work -- the very race salvage
+    exists to avoid, arriving through cleanup that could not finish. The loop must
+    leave the tree exactly as it is and fail, not commit it."""
+    repository = _repository(tmp_path)
+    # The kill still happens; only the confirmation is withheld, so the loop takes
+    # the unconfirmed-cleanup path with a tree that is in fact quiescent -- which
+    # is what lets the test assert on it without racing a real survivor.
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+
+    exit_code = _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    # No salvage commit: HEAD is still the repository's one initial commit.
+    assert _in(repository, "log", "--oneline").strip().count("\n") == 0
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "initial"
+    # The round's work is left in the tree, uncommitted, for an operator to resolve
+    # once the survivors are dealt with -- not swept into a commit underneath them.
+    assert "half-done.py" in _in(repository, "status", "--porcelain")
+
+
 def test_each_agent_gets_a_scratch_directory_no_round_has_used_before(tmp_path: Path) -> None:
     """pytest deletes an existing --basetemp and recreates it, which Windows refuses."""
     first = agent_review_loop.round_scratch(tmp_path, 1, "claude")

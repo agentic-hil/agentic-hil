@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import FAKE_STLINK
+from conftest import FAKE_STLINK, write_config
 
 import agentic_hil.cli
 import agentic_hil.tools
@@ -27,6 +27,7 @@ from agentic_hil.config import (
     load_config,
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
+from agentic_hil.devices import debugger_device
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import project_config_create
 from agentic_hil.types import JsonObject, fold_hardware_id
@@ -762,6 +763,81 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
     # Nothing was said to the board, and nothing was written: the read is what was
     # refused, so there is no file to have written it from.
     assert state["connected"] is False, "a HOTPLUG connect was attempted on a held probe"
+    assert not Path(result["path"]).exists()
+
+
+def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alias case round 1 left open: the holder is a real configured debugger.
+
+    The other workspace does not reach for `probe:<serial>` by hand — it holds an
+    ordinary debugger the way any run does. That debugger names both a
+    `resource_id` and the probe serial, so its primary lock is
+    `physical:<resource_id>`, an alias only its own operator knows. A first `init`
+    here can derive the serial from enumerating the attached ST-Link but never
+    that alias, so it locks `probe:<serial>` and nothing else. The debugger now
+    holds `probe:<serial>` alongside its `resource_id`, which is the whole fix:
+    the two collide on the one name both sides can name (hardci-hq#108). Before it,
+    the first `init` took `probe:<serial>` unopposed and connected to a board the
+    other workspace was holding under `physical:bench-a`."""
+    other_workspace_dir = tmp_path / "other"
+    other_config = load_config(
+        str(
+            write_config(
+                other_workspace_dir,
+                debuggers_yaml='debuggers:\n  bench:\n    type: stlink\n    probe_id: "STLINK123"\n    resource_id: "bench-a"\n',
+            )
+        )
+    )
+    holder = debugger_device(other_config, "bench")
+    # A real run's hold: the primary alias plus the serial, taken as one set.
+    assert holder.lock_key == "physical:bench-a"
+    assert set(holder.lock_keys) == {"physical:bench-a", f"probe:{fold_hardware_id('STLINK123')}"}
+
+    other_bench = BenchMutex(frontend="other-workspace")
+    holder.acquire(other_bench)
+    assert other_bench.holds("physical:bench-a")
+    assert other_bench.holds(f"probe:{fold_hardware_id('STLINK123')}")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    state = {"connected": False}
+
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+        # Enumeration selects the attached ST-Link by its serial, which is all the
+        # bootstrap read can see of it; `before_connect` locks `probe:<serial>`.
+        if before_connect is not None:
+            refusal = before_connect("STLINK123")
+            if refusal is not None:
+                return refusal
+        state["connected"] = True
+        return {
+            "ok": True,
+            "tool": "bootstrap_hardware_discovery",
+            "backend": "stlink",
+            "executable": str(Path(__file__).resolve()),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "available_com_ports": {"ok": True, "ports": []},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        }
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", fake_discovery)
+
+    try:
+        result = init_config()
+    finally:
+        other_bench.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert result["retry_safe"] is True
+    # The board the other workspace holds under its private alias was never
+    # connected to: the serial lock is what caught it.
+    assert state["connected"] is False, "a HOTPLUG connect reached a probe another workspace held by alias"
     assert not Path(result["path"]).exists()
 
 

@@ -114,6 +114,23 @@ class Device:
         raise NotImplementedError
 
     @property
+    def lock_keys(self) -> tuple[str, ...]:
+        """Every machine-wide name that must be held to hold this unit.
+
+        ``lock_key`` is the one canonical identity — what a set dedups on, what a
+        refusal names, what config validation mirrors. This is the set the mutex
+        actually takes, and for most devices it is just that one key. It is more
+        than one only where a single physical unit answers to two names that no
+        other owner can be made to agree on from its own side: a debugger known by
+        both an operator ``resource_id`` and a probe serial, so that a first
+        `init` in another workspace — which can derive the serial from enumeration
+        but not the operator's alias — still collides on the serial, and an
+        executable-identified debugger, which must also hold the legacy
+        ``probe:<path>`` an unupgraded process or a raw caller still takes. See
+        ``DebuggerDevice.lock_keys``."""
+        return (self.lock_key,)
+
+    @property
     def identity_source(self) -> str:
         """Which config field the lock key was derived from."""
         raise NotImplementedError
@@ -138,11 +155,15 @@ class Device:
     # --- the mutex, in one place instead of per backend ------------------
 
     def acquire(self, bench: BenchMutex, *, wait_s: float = 0.0) -> bool:
-        """Take this device machine-wide. True when this call newly took it."""
-        return bool(bench.acquire([self.lock_key], wait_s=wait_s))
+        """Take this device machine-wide. True when this call newly took a key.
+
+        Every name in ``lock_keys`` goes into one all-or-nothing acquire, so a
+        unit with a second exclusion key is taken whole or not at all — the same
+        property ``DeviceSet.acquire`` gives a declared set, here for one device."""
+        return bool(bench.acquire(list(self.lock_keys), wait_s=wait_s))
 
     def release(self, bench: BenchMutex) -> None:
-        bench.release([self.lock_key])
+        bench.release(list(self.lock_keys))
 
     def is_held(self, bench: BenchMutex) -> bool:
         return bench.holds(self.lock_key)
@@ -256,6 +277,33 @@ class DebuggerDevice(Device):
             # probe_id locks on POSIX (hardci-hq#106).
             return f"probe-exe:{fold_device_path(self.debugger.executable)}"
         return f"probe:{fold_hardware_id(self.debugger.type)}"
+
+    @property
+    def lock_keys(self) -> tuple[str, ...]:
+        """The primary key, plus the second name a stranger can still derive.
+
+        ``resource_id`` is the primary key and the one that collapses a probe and
+        its virtual COM port onto one lock; it is an operator's own alias, so a
+        first `init` in another workspace cannot know it. What that workspace
+        *can* derive, from enumerating the attached ST-Link, is the probe serial.
+        A debugger that carries both therefore holds both, so the two workspaces
+        collide on the serial even though only one of them knows the alias —
+        without it a run here holding ``physical:<resource_id>`` and a bootstrap
+        read there taking ``probe:<serial>`` would each believe it had the probe
+        (hardci-hq#108).
+
+        The executable fallback holds, besides its own ``probe-exe:`` key, the
+        legacy ``probe:<path>`` this key was spelled as before it moved to its own
+        prefix. A process still running the old build, or a raw caller handing an
+        already-derived name, takes that legacy key; holding it here means an
+        upgrade in progress cannot let an old owner and a new one both take the
+        one debugger. ``fold_resource_name`` keeps ``probe:<path>`` a host path so
+        the two spellings land on one lock (hardci-hq#106)."""
+        if self.debugger.resource_id and self.debugger.probe_id:
+            return (self.lock_key, f"probe:{fold_hardware_id(self.debugger.probe_id)}")
+        if self.identity_source == "executable" and self.debugger.executable:
+            return (self.lock_key, f"probe:{fold_device_path(self.debugger.executable)}")
+        return (self.lock_key,)
 
     @property
     def identity_source(self) -> str:
@@ -422,9 +470,16 @@ class DeviceSet:
     def of(cls, devices: Iterable[Device]) -> DeviceSet:
         unique: dict[str, Device] = {}
         for device in devices:
-            # First entry wins so the retained device is the one a caller named
-            # first; the key is what the mutex uses, and it is identical anyway.
-            unique.setdefault(device.lock_key, device)
+            # Collapsed on the primary key, which is what the mutex dedups on and
+            # is identical for two entries naming one unit. When both carry that
+            # key the richer identity is retained — a probe and its virtual COM
+            # port share a `resource_id`, but only the probe half also names the
+            # serial, and dropping it would leave the collapsed unit locking one
+            # name where its two entries between them name two (hardci-hq#108). A
+            # tie keeps the one named first.
+            current = unique.get(device.lock_key)
+            if current is None or len(device.lock_keys) > len(current.lock_keys):
+                unique[device.lock_key] = device
         return cls(tuple(unique[key] for key in sorted(unique)))
 
     def __bool__(self) -> bool:
@@ -438,8 +493,13 @@ class DeviceSet:
 
     @property
     def lock_keys(self) -> list[str]:
-        """Sorted and deduplicated, which is the acquisition order."""
-        return [device.lock_key for device in self.devices]
+        """Sorted and deduplicated, which is the acquisition order.
+
+        The union of every member's own ``lock_keys``, not one key per member: a
+        device that names a second physical id contributes it here so the whole
+        set is taken under it too, and two members that share a key (a collapsed
+        composite unit) still produce it once."""
+        return sorted({key for device in self.devices for key in device.lock_keys})
 
     def acquire(self, bench: BenchMutex, *, wait_s: float = 0.0) -> list[str]:
         """Hold every device in this set, or hold none of them.
@@ -628,7 +688,10 @@ def lock_keys(resources: Iterable[object]) -> list[str]:
     keys: list[str] = []
     for item in resources:
         if isinstance(item, Device):
-            keys.append(item.lock_key)
+            # Every exclusion name the device carries, not only its primary key,
+            # so a lease taken on a device holds the same second id a run holding
+            # the same device does (hardci-hq#108).
+            keys.extend(item.lock_keys)
         elif isinstance(item, str):
             keys.append(fold_resource_name(item))
     return keys

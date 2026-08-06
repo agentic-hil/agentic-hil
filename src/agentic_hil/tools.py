@@ -1681,7 +1681,7 @@ def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
 
 
 def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
-    resources = [resource for name in current.debuggers if (resource := configured_probe_resource(current, name)) is not None]
+    resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
         coordinator,

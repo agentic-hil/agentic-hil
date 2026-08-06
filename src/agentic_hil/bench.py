@@ -195,16 +195,29 @@ def fold_resource_name(resource: str) -> str:
     # Opaque hardware ids, folded case on every platform. `com:serial:` is tried
     # before `com:` below because the longer prefix carries an adapter serial
     # while the shorter one carries a host path, and they fold by different
-    # rules. `probe:` belongs here too: it is a probe serial or the `type`
-    # fallback, both hardware ids, and `DebuggerDevice.lock_key` builds them with
-    # `fold_hardware_id`, which casefolds on POSIX as well as on Windows. Folding
-    # it as a path instead left a hand-written `probe:<SERIAL>` uppercase on
-    # POSIX while the configured `probe_id` locked `probe:<serial>`, so two
-    # spellings of one probe bypassed each other (hardci-hq#106). `probe:` never
-    # carries an executable now — that fallback is `probe-exe:` below.
-    for prefix in ("com:serial:", "physical:", "can:", "probe:"):
+    # rules.
+    for prefix in ("com:serial:", "physical:", "can:"):
         if resource.startswith(prefix):
             return prefix + fold_hardware_id(resource[len(prefix) :])
+    # `probe:` is a probe serial or the `type` fallback — both hardware ids that
+    # `DebuggerDevice.lock_key` builds with `fold_hardware_id`, which casefolds on
+    # POSIX as well as on Windows. Folding it as a path instead left a
+    # hand-written `probe:<SERIAL>` uppercase on POSIX while the configured
+    # `probe_id` locked `probe:<serial>`, so two spellings of one probe bypassed
+    # each other (hardci-hq#106). The one exception is the legacy executable
+    # spelling that predates `probe-exe:`: an executable is a host path, and a
+    # debugger identified by one still holds `probe:<path>` beside its
+    # `probe-exe:` key so a pre-upgrade process or a raw caller cannot take the
+    # probe out from under it. A path and a serial are told apart by being an
+    # absolute filesystem path, which a configured executable is (pinning makes it
+    # one) and which a probe serial or a backend type name never is — a stricter
+    # test than "contains a separator", so a serial that happened to carry one is
+    # still a hardware id and the round-1 fix above stands.
+    if resource.startswith("probe:"):
+        value = resource[len("probe:") :]
+        if _is_executable_path(value):
+            return "probe:" + fold_device_path(value)
+        return "probe:" + fold_hardware_id(value)
     # Host paths. `com:<device>` is a serial device name and `probe-exe:` a
     # debugger executable; the path rule leaves an opaque name alone on POSIX and
     # lowercases it on Windows, which is what `fold_device_path` already did to
@@ -216,6 +229,21 @@ def fold_resource_name(resource: str) -> str:
         if resource.startswith(prefix):
             return prefix + fold_device_path(resource[len(prefix) :])
     return resource
+
+
+def _is_executable_path(value: str) -> bool:
+    """Whether a bare `probe:` value is the legacy executable spelling, not an id.
+
+    The legacy `probe:<executable>` key is the only `probe:` name that is a host
+    path, and a configured executable is always absolute — pinning resolves it to
+    an absolute path before it is ever a lock key (`/usr/bin/openocd`,
+    `C:\\Tools\\openocd.exe`). A probe serial and a backend type name are never
+    absolute paths. Testing for an absolute path rather than for a separator is
+    deliberate: a probe serial that happened to contain a `/` would be misread as
+    a path by the looser test and split from the casefolded key its `probe_id`
+    locks — the very hardci-hq#106 split, reintroduced — whereas it is not
+    absolute and so stays a hardware id here."""
+    return os.path.isabs(value)
 
 
 def physical_resources(resources: object) -> list[str]:
