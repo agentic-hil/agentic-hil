@@ -44,16 +44,19 @@ it, and the command a person reopens the file with.
 
 **And there is a gate on the one-way street.** hardci-hq#102: everything above
 answers the reopen question for a file that does not exist yet — a generation
-opens everything — and answered nothing for one that does. `init --force`
-carries the existing grants over by name, so a `false` survives it, and deleting
-the file to get an open one costs the baudrate, the `resource_id`, the
-`state_root` and every artifact root the operator set. ``set_permission`` at the
+opens everything — and answered nothing for one that does. `init --force` does
+reopen it, because it is the full regeneration and writes the open skeleton over
+whatever was there; it costs the baudrate, the `resource_id`, the `state_root`
+and every artifact root the operator set, which is the same bill deleting the
+file comes with. It names the permissions it reopened that way in its result, so
+the reset is loud rather than silent (hardci-hq#113). ``set_permission`` at the
 bottom of this module is ``agentic-hil grant`` and ``agentic-hil revoke``: one
 named permission, written through ``project_config_set`` like every other
 change, from the command line and from nowhere else. It waives the permissions
-grant, because a bench that closed that grant is exactly the bench with no way
-back, and because the same shell already holds ``init --force``, which rewrites
-every permission in the file without consulting anything. Nothing on the MCP
+grant, because a bench that closed that grant is exactly the bench whose only
+way back was the full reset, and because the same shell already holds
+``init --force``, which rewrites every permission in the file without consulting
+anything. Nothing on the MCP
 surface moves: the ratchet there is what it was.
 """
 
@@ -1036,12 +1039,19 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 #
 # hardci-hq#96 inverted the generated default and answered the reopen question
 # for the first run only: a generation opens everything. For a file that already
-# exists there was no answer at all. `project_config_set` writes `false` into a
-# permission and nothing else; a regeneration carries the existing grants over by
-# name, so a `false` survives `init --force`; and deleting the file does come
-# back open, at the price of the baudrate, the `resource_id`, the `state_root`
-# and every artifact root the operator ever set. That is the bill hardci-hq#102
-# was filed over, and it was paid.
+# exists there was no answer that did not cost the rest of the file.
+# `project_config_set` writes `false` into a permission and nothing else; and
+# `init --force` and deleting the file both do come back open, at the price of the
+# baudrate, the `resource_id`, the `state_root` and every artifact root the
+# operator ever set. That is the bill hardci-hq#102 was filed over, and it was
+# paid.
+#
+# `carry_over_permissions` is the regeneration that keeps a narrowing, and it is
+# the MCP path's — `project_config_create`, where the caller is an agent and the
+# grants come from the configuration that server loaded rather than from the
+# request. `init --force` is the operator's reset and deliberately carries
+# nothing (hardci-hq#113); `agentic-hil adopt-hardware` is the command that
+# refreshes the hardware and leaves everything else standing.
 #
 # So this is the gate on the one-way street, and it is deliberately the narrowest
 # thing that opens it: the same closed key set `project_config_set` names, one

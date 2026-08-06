@@ -1055,8 +1055,13 @@ def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str 
     path = absolute_without_symlinks(Path(file_path))
     safe_directory(path.parent)
     # Refuse an existing alias before atomic replacement. Merely replacing a
-    # hardlink would hide that a caller selected the wrong object.
-    secure_optional_read_text(path, encoding=encoding)
+    # hardlink would hide that a caller selected the wrong object. Bytes, because
+    # the refusal is the guarded open and not the decode: reading this as text
+    # made a file that is not UTF-8 unwritable rather than replaceable, so
+    # `agentic-hil init --force` over a truncated or UTF-16 configuration failed
+    # with a decode error on the one command whose job is to replace it
+    # (hardci-hq#113).
+    secure_optional_read_bytes(path)
     atomic_write_text(path, text, encoding=encoding)
     written = secure_optional_read_text(path, encoding=encoding)
     if written is None:

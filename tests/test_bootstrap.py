@@ -6,6 +6,8 @@ import pytest
 import yaml
 from conftest import FAKE_STLINK
 
+import agentic_hil.cli
+import agentic_hil.tools
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
 from agentic_hil.bootstrap import (
@@ -531,3 +533,196 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
         # the same reason it writes the device: it read it off the same board.
         "com_ports.dut_uart.serial_number",
     }
+
+
+# ---------------------------------------------------------------------------
+# hardci-hq#113: `init --force` is the reset, and it names what the reset cost.
+
+# The sentences the issue was filed over. Every one was true of
+# `project_config_create`, which calls `carry_over_permissions`, and false of
+# `agentic-hil init --force`, which never has — and every one shipped.
+RETIRED_CARRY_OVER_CLAIMS = (
+    "carries the existing grants over",
+    "carries every existing grant over",
+    "survives `init --force`",
+    "a `false` survives it",
+    "`init --force` keeps it",
+    "still there afterwards",
+    "`--force` does not clear it",
+    "the `false` survives it",
+)
+
+
+def _narrow_by_hand(target: Path, *closures: str) -> None:
+    """Close permissions in a written configuration the way an operator does.
+
+    In the file, with an editor, which is the state hardci-hq#113 is about: a
+    bench somebody narrowed weeks ago and has not thought about since."""
+    text = target.read_text(encoding="utf-8")
+    for flag in closures:
+        assert f"{flag}: true" in text, f"the generated configuration does not grant {flag}"
+        text = text.replace(f"{flag}: true", f"{flag}: false", 1)
+    target.write_text(text, encoding="utf-8")
+
+
+def test_init_force_names_every_narrowing_it_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dangerous case, and the whole of what the issue asked for.
+
+    Somebody narrows a bench, runs `--force` weeks later for an unrelated reason,
+    and the bench is open again with nothing saying so — the silent reopening the
+    one-way street on `project_config_set` exists to prevent. The behaviour stays
+    what its name says: `--force` already discards the baudrate, the
+    `resource_id`, the `state_root` and the artifact roots, and a version that
+    rescued permissions but not those would be harder to predict rather than
+    easier. What it owes the operator is the list. Against master this fails —
+    both permissions came back open and the result mentioned neither."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    _narrow_by_hand(target, "allow_flash", "allow_upload")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert result["discarded_narrowings"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_flash"]
+    assert "discarded_narrowings_unreadable" not in result
+    # Named where a person actually reads: the sentence and the field, not only
+    # somewhere among the next steps a long result ends with.
+    for key in result["discarded_narrowings"]:
+        assert key in result["summary"], result["summary"]
+    assert "open again" in result["summary"]
+    # And the way back is in the result rather than in a document. `revoke`
+    # closes what the reset reopened; `grant` is named as its inverse, and
+    # `adopt-hardware` as the command this operator may have wanted instead.
+    reset_step = result["next_steps"][0]
+    assert "agentic-hil revoke <key>" in reset_step
+    assert "agentic-hil grant <key>" in reset_step
+    assert "agentic-hil adopt-hardware" in reset_step
+    # The reset itself is unchanged, which is the decision taken on this issue.
+    written = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    assert written["artifacts"]["allow_upload"] is True
+
+
+def test_init_force_over_a_configuration_it_cannot_read_says_that_rather_than_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--force` is the reset, so it has to work on the file most in need of one.
+
+    "Nothing was lost" and "this could not be checked" are different answers and
+    only one of them is safe to act on, so an unreadable predecessor is reported
+    as itself instead of as an empty list — and the regeneration still happens."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    target.write_text("workspace_root: [unclosed\n\tallow_flash: false\n", encoding="utf-8")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "not parseable YAML" in result["discarded_narrowings_unreadable"]
+    assert result["discarded_narrowings_unreadable"] in result["summary"]
+    assert "is not known" in result["summary"]
+    assert "agentic-hil revoke <key>" in result["next_steps"][0]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+
+
+def test_init_force_replaces_a_configuration_that_is_not_utf8_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated write, a UTF-16 save, something binary dropped on the path.
+
+    The alias refusal inside `secure_atomic_write_text` is the guarded open and
+    never the decode, so reading the existing object as text made a file that is
+    not UTF-8 unwritable rather than replaceable — and `init --force`, the one
+    command whose job is to replace it, failed with a decode error instead."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    target.write_bytes(b"\xff\xfe\x00\x00truncated \x80\x81")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "not UTF-8 text" in result["discarded_narrowings_unreadable"]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+
+
+def test_a_first_init_reports_no_discard_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """There was no file, so there was nothing to discard.
+
+    An empty list is not the same as silence: a field reading `[]` beside a
+    sentence about what was lost is a finding an operator has to rule out. Absent
+    means absent."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "discarded_narrowings_unreadable" not in result
+    assert result["summary"].endswith("with every permission granted.")
+    assert not any("replaced a file" in step for step in result["next_steps"])
+
+
+def test_init_force_over_a_file_that_narrowed_nothing_reports_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary reset, where the same silence is the honest answer.
+
+    Everything else in the file is still gone — that is what `--force` is — but no
+    permission moved, so there is no permission to name."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "discarded_narrowings_unreadable" not in result
+    assert result["summary"].endswith("with every permission granted.")
+
+
+def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The claim and the behaviour, asserted in one place, which is the point.
+
+    hardci-hq#113 was not a bug beside a documentation error. It was the two
+    drifting apart with nothing holding them together: three places in the
+    shipped tree promised `init --force` carried a narrowing over, `init_config`
+    never called `carry_over_permissions`, and the whole suite passed either way.
+    So the sentences and the behaviour are pinned to each other here."""
+    root = Path(__file__).resolve().parents[1]
+    # The three the issue named, and `cli.py`, which said it a fourth time in the
+    # docstring of `agentic-hil grant` — fifty lines below the code that reports
+    # the discards, and missed by a sweep that had looked only at the documents.
+    shipped = {
+        "TROUBLESHOOTING.md": root / "TROUBLESHOOTING.md",
+        "src/agentic_hil/configwrite.py": root / "src" / "agentic_hil" / "configwrite.py",
+        "src/agentic_hil/cli.py": root / "src" / "agentic_hil" / "cli.py",
+        "CHANGELOG.md": root / "CHANGELOG.md",
+    }
+    for name, path in shipped.items():
+        text = path.read_text(encoding="utf-8")
+        for claim in RETIRED_CARRY_OVER_CLAIMS:
+            assert claim not in text, f"{name} still claims `init --force` keeps a narrowing: {claim!r}"
+        assert "agentic-hil adopt-hardware" in text, f"{name} does not name the command that does keep the rest"
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    _narrow_by_hand(target, "allow_flash")
+
+    result = init_config(force=True)
+
+    assert result["discarded_narrowings"] == ["debuggers.dut.permissions.allow_flash"]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    # And the carrying regeneration stays `project_config_create`'s alone. A CLI
+    # that starts calling it makes the retired sentences true again by the back
+    # door, which is exactly the drift this test exists to catch — so the pin is
+    # on the binding rather than on the word: to call it, `cli` must hold it.
+    assert not hasattr(agentic_hil.cli, "carry_over_permissions")
+    assert hasattr(agentic_hil.tools, "carry_over_permissions")

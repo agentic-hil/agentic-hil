@@ -3,12 +3,16 @@
 hardci-hq#96 built the ratchet — an agent writes `false` into a permission over
 MCP and never `true` — and answered the other direction for a configuration that
 does not exist yet: a generation opens everything. For one that does exist there
-was no answer at all, and the three routes an operator had were a dead end each:
-`project_config_set` only narrows, `init --force` calls `carry_over_permissions`
-and so copies the `false` forward, and deleting the file does come back open
-while throwing away the baudrate, the `resource_id`, the `state_root` and every
+was no answer that did not cost the rest of the file, and the three routes an
+operator had were one refusal and two resets: `project_config_set` only
+narrows, and `init --force` and deleting the file both do come back open while
+throwing away the baudrate, the `resource_id`, the `state_root` and every
 artifact root somebody set. hardci-hq#102 was filed after its owner took the
 third route and paid exactly that.
+
+(`carry_over_permissions` is the regeneration that keeps a narrowing, and it is
+`project_config_create`'s alone — hardci-hq#113. `init --force` is the operator's
+reset and carries nothing; it now names what it discarded.)
 
 The decisive test here is therefore not "a permission changed". It is
 `test_the_bench_from_the_issue_is_repaired_without_losing_the_file`: the

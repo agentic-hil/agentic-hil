@@ -58,7 +58,13 @@ from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, permission_surface, set_permission
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
-from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
+from agentic_hil.knowledge import (
+    CONFIG_GRANT_COMMAND,
+    CONFIG_REOPEN_COMMAND,
+    CONFIG_REVOKE_COMMAND,
+    RUNNING_SERVER_COMPARISON,
+    remediation_fields,
+)
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -1136,6 +1142,65 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     return None
 
 
+def _existing_config_text(target_path: Path) -> tuple[str | None, str | None]:
+    """The file `--force` is about to overwrite, and why it could not be read.
+
+    `--force` is the operator's reset, so it has to work on exactly the file most
+    in need of one. Bytes that are not UTF-8 — a UTF-16 save, a truncated write,
+    something binary dropped on the path — left this command with an unhandled
+    ``UnicodeDecodeError`` and no way to regenerate at all.
+
+    The price of the answer is that such a file gets no rollback snapshot: if the
+    regenerated configuration then fails its final validation, the path is
+    restored as absent rather than as bytes this command cannot hold. That is the
+    honest reading of a file it could not read, and it is the same double fault
+    the ``rollback_errors`` field already reports.
+
+    The decode and nothing else. A ``ConfigError`` from the guarded open — the
+    path is a symlink, a hardlink, or sits under a directory this user does not
+    solely own — must keep coming out, because it says the object about to be
+    overwritten is not the one that was named. Widening this to swallow it would
+    turn a fail-closed refusal into a silent write over the wrong file."""
+    try:
+        return secure_optional_read_text(target_path), None
+    except UnicodeDecodeError:
+        return None, "the file it replaced is not UTF-8 text, so nothing in it could be read"
+
+
+def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tuple[list[str], str | None]:
+    """Which permissions the replaced file had closed and the new one grants.
+
+    `--force` is the full regeneration and stays that way (hardci-hq#113): it
+    already discards the baudrate, the `resource_id`, the `state_root` and the
+    artifact roots, so a version that rescued permissions and nothing else would
+    be harder to predict rather than easier. `carry_over_permissions` is the MCP
+    path's answer and is deliberately not wired in here; `agentic-hil
+    adopt-hardware` is the command for refreshing hardware and keeping the rest.
+
+    What the reset owes its operator is the list. Somebody narrows a bench, runs
+    `--force` weeks later for an unrelated reason, and without this nothing in
+    the result says the bench is open again — the same silent reopening the
+    one-way street on `project_config_set` exists to prevent.
+
+    Returns ``(paths, unreadable_reason)``. A file that is not there yields
+    neither: there was nothing to discard and an empty list would be noise. A
+    file that cannot be read as a configuration yields the reason instead of an
+    empty list, because "nothing was lost" and "this could not be checked" are
+    different answers and only one of them is safe to act on."""
+    if previous_text is None:
+        return [], None
+    try:
+        previous = yaml.safe_load(previous_text)
+    except yaml.YAMLError as error:
+        detail = getattr(error, "problem", None) or str(error).splitlines()[0]
+        return [], f"the file it replaced was not parseable YAML: {detail}"
+    if not isinstance(previous, dict):
+        return [], "the file it replaced held no YAML mapping, so it named no permissions to compare"
+    granted = permission_surface(written)
+    closed = (path for path, permitted in permission_surface(previous).items() if not permitted)
+    return sorted(path for path in closed if granted.get(path)), None
+
+
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
@@ -1145,7 +1210,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not _locked:
         with secure_user_file_lock(target_path):
             return init_config(config_path, force, _locked=True)
-    existing = secure_optional_read_text(target_path)
+    existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
     # cannot say whether looking is allowed, and gating the read on it (hardci-hq#104)
@@ -1202,8 +1267,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # may set a flag false and that is honoured — an operator who wrote
     # `allow_mass_erase: false` into their profile meant it. A fixed sentence
     # here told them the opposite about their own bench.
-    narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
+    written_document = yaml.safe_load(text) or {}
+    narrowed = [path for path, granted in permission_surface(written_document).items() if not granted]
     granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
+    discarded, unreadable_previous = _discarded_narrowings(existing, written_document)
+    unreadable_previous = unreadable_existing or unreadable_previous
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
@@ -1222,17 +1290,52 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
             "controller and the probe's own COM port without anything being retyped.",
         )
+    # First, and before anything about COM ports or OpenOCD scripts: a bench that
+    # was narrowed and is open again is the one thing here that changes what this
+    # machine may be told to do.
+    if discarded:
+        next_steps.insert(
+            0,
+            f"`{CONFIG_REOPEN_COMMAND}` replaced a file that had {len(discarded)} "
+            f"{'permission' if len(discarded) == 1 else 'permissions'} set to false, and this one grants "
+            f"{'it' if len(discarded) == 1 else 'them'}: {', '.join(discarded)}. Close each one again with "
+            f"`{CONFIG_REVOKE_COMMAND} <key>`, which moves one permission and leaves every other setting in the file "
+            f"alone (`{CONFIG_GRANT_COMMAND} <key>` is the inverse) — or leave them open if the reset is what you "
+            "wanted. The rest of the old file is gone the same way: `--force` starts over, and `agentic-hil "
+            "adopt-hardware` is the command that refreshes the hardware and keeps everything else.",
+        )
+    elif unreadable_previous:
+        next_steps.insert(
+            0,
+            f"`{CONFIG_REOPEN_COMMAND}` replaced a file it could not read as a configuration — {unreadable_previous} — "
+            "so it cannot say which permissions that file had set to false, and this one grants every permission the "
+            "profile did not narrow. Read the `permissions` blocks in the new file and close what this bench should "
+            f"not have with `{CONFIG_REVOKE_COMMAND} <key>`.",
+        )
     return {
         "ok": True,
         "summary": (
-            f"Attached hardware was discovered and configured, {granted_clause}."
-            if discovered
-            else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+            (
+                f"Attached hardware was discovered and configured, {granted_clause}."
+                if discovered
+                else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+            )
+            + (
+                f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "
+                f"set to false that this one grants, so {'it is' if len(discarded) == 1 else 'they are'} open again: "
+                f"{', '.join(discarded)}."
+                if discarded
+                else f" What the file it replaced had narrowed is not known, because {unreadable_previous}."
+                if unreadable_previous
+                else ""
+            )
         ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
         "permissions": permission_summary(written),
         "narrowed_permissions": sorted(narrowed),
+        **({"discarded_narrowings": discarded} if discarded else {}),
+        **({"discarded_narrowings_unreadable": unreadable_previous} if unreadable_previous else {}),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
         "next_steps": next_steps,
@@ -1284,11 +1387,12 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     hardci-hq#96 left an agent able to write `false` into a permission and
     nothing else, and answered the other direction for a file that does not exist
     yet: a generation opens everything. For a bench that has been running a while
-    there was no answer. `init --force` carries the existing grants over by name,
-    so the `false` survives it; deleting the configuration does come back open,
-    at the cost of the baudrate, the `resource_id`, the `state_root` and every
-    artifact root somebody set. hardci-hq#102 is the bill for that, and this is
-    the gate.
+    there was no answer that did not cost the rest of the file: `init --force`
+    does come back open, and so does deleting the configuration, both at the cost
+    of the baudrate, the `resource_id`, the `state_root` and every artifact root
+    somebody set. hardci-hq#102 is the bill for that, and this is the gate.
+    `carry_over_permissions`, the regeneration that does keep a narrowing, is
+    `project_config_create`'s and belongs to no command here (hardci-hq#113).
 
     It is a command and not a tool, and that is the whole security argument: an
     agent holding only the MCP tools cannot reach it, so the ratchet on that

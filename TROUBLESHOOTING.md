@@ -119,12 +119,20 @@ Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.c
 
 Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (hardci-hq#104: it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery` — check that first, because a probe that was attached and refused reads differently from one that was not there.
 
-Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since.
+Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since — every narrowed permission included, which it then lists in its result.
 
 ```bash
 agentic-hil adopt-hardware --dry-run   # what it would fill in
 agentic-hil adopt-hardware
 agentic-hil doctor
+```
+
+Three commands, three rules, and that is the whole model:
+
+```text
+adopt-hardware   refresh the hardware, everything else stays
+grant / revoke   move one permission, everything else stays
+init --force     start over, everything goes
 ```
 
 It fills in the probe serial, the backend's executable, the detected controller and the COM device the probe exposes — only where the file has nothing there. A key that already holds a value comes back under `kept` with what the hardware says beside it, never overwritten, and no permission is touched. With more than one probe attached it refuses and lists the serials; name one with `--probe-id`. With more than one debugger or COM port configured, `--debugger` and `--com-port` say which entry this is about.
@@ -163,11 +171,11 @@ Likely cause: the authoritative config disables that action or does not name the
 
 Fix: stop and ask the human operator to review the authoritative config. Do not work around the result with raw OpenOCD, direct COM-port tools, direct CAN access, or shell commands.
 
-## 8a. A Permission Is `false` And Nothing Turns It Back On
+## 8a. A Permission Is `false` And The Agent Cannot Reopen It
 
-Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and every route out looks shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value. `agentic-hil init --force` regenerates the file and the `false` is still there afterwards.
+Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and the only route out that an agent can reach is shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value.
 
-Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. Regeneration carries every existing grant over by name, which is exactly why `--force` does not clear it.
+Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. `agentic-hil init --force` does clear it — it regenerates the whole file with every permission granted — but it is a reset rather than a repair, and it takes the baudrate, the `resource_id`, the `state_root` and every artifact root with it. It names every permission it reopened this way in its own result, so a `--force` run for some unrelated reason cannot reopen a narrowed bench silently (hardci-hq#113).
 
 Fix, in your own terminal in the project root:
 
@@ -177,7 +185,15 @@ agentic-hil grant can_buses.dut.allow_write
 
 That opens the one permission it names and touches nothing else in the file — the baudrate, the `resource_id`, the `state_root`, the artifact roots and every other setting stay as they were. `agentic-hil revoke <key>` closes one again. Several keys may be named in one command and are applied together or not at all.
 
-* **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file. Removing that trap is what this command is for.
+Three commands, three rules, and that is the whole model:
+
+```text
+adopt-hardware   refresh the hardware, everything else stays
+grant / revoke   move one permission, everything else stays
+init --force     start over, everything goes
+```
+
+* **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file — the same bill `init --force` comes with. Removing that trap is what this command is for.
 * **Which key?** Name anything that is not a permission and the refusal prints every permission key your configuration actually has, entry names included. Both `can_buses.dut.allow_write` and the long `can_buses.dut.permissions.allow_write` are accepted.
 * **Restart the MCP server afterwards.** A running server parses permissions once, at startup, and `project_config_reload_description` re-reads devices and deliberately no permission. Until that restart the agent keeps being refused with the old value — the command's own result says so.
 * **`permission_change_in_open_run`** means something on this machine is holding the bench: a run, a COM or CAN session, another terminal. Permissions do not move under an active hold. `agentic-hil lease-status` names the holder; wait or ask for it to be closed, then repeat the command.
