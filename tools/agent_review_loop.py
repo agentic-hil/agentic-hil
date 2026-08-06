@@ -13,7 +13,7 @@ never land in the tree the implementer is about to commit, and "do not edit the
 code" stops being a promise the prompt has to extract. The one path it may write
 outside that checkout is the review document the next implementer round reads.
 
-Two further properties make it safe to run unattended:
+Four further properties make it safe to run unattended:
 
 * Every round must produce at least one commit. A fix round that changes nothing
   is a stalled loop, not progress, so it stops instead of burning the remaining
@@ -21,6 +21,18 @@ Two further properties make it safe to run unattended:
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
+* A round that cannot finish still commits. An implementer killed at `--timeout`
+  leaves a whole round's work uncommitted, because a round commits once and at
+  the end; that commit is made here instead, marked in its subject as the
+  unfinished thing it is, so the next run starts from it.
+* The loop stops when it stops contributing. `--max-rounds` counts rounds and
+  cannot tell a round that closed four findings from one that moved four around,
+  so `--stop-after-flat-rounds` watches the finding count instead.
+
+The two agents do not have the same reach, either, and the run header says so:
+Claude Code has the network and can read a linked issue, while Codex under
+`--sandbox workspace-write` cannot. A task that points at a URL is complete for
+the agent writing the code and empty for the one checking it against the intent.
 
 Example:
 
@@ -76,6 +88,18 @@ EXIT_CLEAN = 0
 EXIT_ROUNDS_EXHAUSTED = 1
 EXIT_STALLED = 2
 EXIT_FAILED = 3
+EXIT_NO_PROGRESS = 4
+
+# How the salvage commit a cut-short round leaves behind is marked. Nothing
+# downstream should mistake it for finished work, so it says so in the subject.
+SALVAGE_SUBJECT = "wip(review-loop): round {number} was cut short before the implementer committed"
+
+# Codex turns network access on for `workspace-write` through this one setting,
+# so a run that has it does not need to be told the reviewer is offline.
+NETWORK_ENABLED = re.compile(r"^sandbox_workspace_write\.network_access\s*=\s*(true|1)\s*$", re.IGNORECASE)
+# What a task description looks like when it points somewhere instead of saying
+# what it means. The reviewer usually cannot follow either of these.
+POINTS_OUTWARD = re.compile(r"https?://\S+|\bgh\s+(?:issue|pr)\s+view\b")
 
 # Reviewing commits that already exist needs no task description, but both agents
 # still have to be told what to measure the code against.
@@ -118,10 +142,23 @@ class RoundRecord:
     status: str | None = None
     findings: int | None = None
     summary: str | None = None
+    # Set when the round ended in a commit the loop made itself because the
+    # implementer never got that far. A reader of run.json has to be able to tell
+    # that commit from one an agent stood behind.
+    salvaged: str | None = None
 
 
 class AgentError(RuntimeError):
     """An agent invocation failed, timed out, or produced no usable answer."""
+
+
+class AgentTimeout(AgentError):
+    """The agent was still working when --timeout expired and was killed.
+
+    Worth its own type: an agent killed mid-edit has a working tree full of
+    unfinished work, which is a different situation from one that exited on its
+    own and a different sentence in the commit that salvages it.
+    """
 
 
 class _Done(Exception):
@@ -141,7 +178,20 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _pump(stream: IO[str], prefix: str, log_handle: IO[str]) -> None:
+@dataclass
+class Progress:
+    """What the draining thread has seen, for the heartbeat to report."""
+
+    lines: int = 0
+    last: float | None = None  # time.monotonic() of the most recent line
+
+    def describe(self) -> str:
+        if self.last is None:
+            return "no output yet"
+        return f"{self.lines} lines, last {time.monotonic() - self.last:.0f}s ago"
+
+
+def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress) -> None:
     """Drain the agent's output. Never stop draining, whatever a line contains.
 
     This loop is the only thing emptying the child's stdout pipe. An exception
@@ -151,6 +201,8 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str]) -> None:
     UnicodeEncodeError on a cp1252 console and deadlocked a whole round.
     """
     for line in stream:
+        progress.lines += 1
+        progress.last = time.monotonic()
         with contextlib.suppress(OSError, UnicodeError):
             log_handle.write(line)
             log_handle.flush()
@@ -186,12 +238,22 @@ def run_agent(
     timeout: float,
     dry_run: bool,
     env: dict[str, str] | None = None,
+    heartbeat: float = 0.0,
 ) -> None:
     """Run an agent CLI with the prompt on stdin, mirroring output to console and log.
 
     The prompt goes over stdin rather than argv because a review document pasted
     into a prompt outgrows the Windows command-line limit long before it outgrows
     anything else.
+
+    `claude -p` prints nothing at all until it has finished, so an implement round
+    is silent for the thirty-five to fifty minutes it takes. Silence that long is
+    indistinguishable from a hang -- it was read as one twice in a single session
+    -- so `heartbeat` seconds of it produces a line saying how long the agent has
+    been running and whether it has said anything yet. It is deliberately the
+    loop's own line rather than a different `--output-format`: nothing here parses
+    what an agent prints, and a machine-readable stream would change what a
+    transcript is for the sake of a progress indicator.
     """
     printable = " ".join(command)
     print(f"\n{prefix} $ {printable}", flush=True)
@@ -201,6 +263,8 @@ def run_agent(
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    print(f"{prefix} started; limit {timeout:.0f}s (log: {log_path})", flush=True)
+    progress = Progress()
     with log_path.open("w", encoding="utf-8") as log_handle:
         log_handle.write(f"$ {printable}\n\n--- prompt ---\n{prompt}\n--- output ---\n")
         process = subprocess.Popen(
@@ -216,7 +280,7 @@ def run_agent(
             env=env,
         )
         assert process.stdin is not None and process.stdout is not None
-        reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle), daemon=True)
+        reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle, progress), daemon=True)
         reader.start()
         try:
             process.stdin.write(prompt)
@@ -228,18 +292,138 @@ def run_agent(
             reader.join(timeout=10)
             raise AgentError(f"{prefix} refused the prompt: {error}") from error
 
-        try:
-            returncode = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            _terminate_tree(process)
-            reader.join(timeout=10)
-            raise AgentError(f"{prefix} exceeded --timeout of {timeout:.0f}s") from error
+        deadline = started + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_tree(process)
+                reader.join(timeout=10)
+                raise AgentTimeout(f"{prefix} exceeded --timeout of {timeout:.0f}s")
+            try:
+                returncode = process.wait(timeout=min(heartbeat, remaining) if heartbeat > 0 else remaining)
+                break
+            except subprocess.TimeoutExpired:
+                if heartbeat > 0:
+                    elapsed = time.monotonic() - started
+                    print(f"{prefix} ... {elapsed:.0f}s of {timeout:.0f}s, {progress.describe()}", flush=True)
         reader.join(timeout=30)
 
     elapsed = time.monotonic() - started
     print(f"{prefix} exit {returncode} after {elapsed:.0f}s (log: {log_path})", flush=True)
     if returncode != 0:
         raise AgentError(f"{prefix} exited with {returncode}; see {log_path}")
+
+
+def excluding(repo: Path, paths: tuple[Path, ...]) -> list[str]:
+    """Pathspecs adding everything in `repo` except the loop's own directories.
+
+    This repository gitignores `.agentic-loop/`, so `git add -A` leaves the run's
+    review documents and transcripts alone here. Nothing guarantees that
+    elsewhere, and a salvage commit that carries a review of itself is not the
+    round's work. Directories outside the repository are dropped rather than
+    named: git rejects a pathspec that leaves the work tree, and refusing the
+    whole commit over one would defeat the point of making it.
+    """
+    pathspecs = ["--", "."]
+    for path in paths:
+        with contextlib.suppress(ValueError, OSError):
+            relative = path.resolve().relative_to(repo.resolve())
+            if relative != Path("."):
+                pathspecs.append(f":!{relative.as_posix()}")
+    return pathspecs
+
+
+def salvage_commit(repo: Path, number: int, error: AgentError, paperwork: tuple[Path, ...] = ()) -> str | None:
+    """Commit what a round left in the tree when the round is not going to finish.
+
+    A round commits once, at the end. An implementer stopped before it got there
+    -- killed at `--timeout`, or exited non-zero -- therefore leaves the whole
+    round's work uncommitted, and the loop is about to stop and take the record
+    of it with it. This is not a hypothesis: measured rounds ran 2861s, 2621s and
+    2173s against the default hour, the first of them 79% of the way to being
+    killed, and a round that was killed cost work somebody committed by hand
+    afterwards.
+
+    So it is committed instead, marked in the subject as the incomplete thing it
+    is. Nothing here was reviewed and the round's own checks may never have run;
+    an incomplete commit says that plainly and the next run can build on it,
+    where a discarded working tree says nothing and cannot be built on at all.
+
+    Returns the one-line description of the commit, or None when there was
+    nothing to commit or git refused it. A refusal is reported and not raised:
+    this runs while another failure is already on its way out, and replacing that
+    failure with this one loses the reason the run stopped.
+    """
+    try:
+        if not git(repo, "status", "--porcelain"):
+            return None
+        git(repo, "add", "-A", *excluding(repo, paperwork))
+        if not git(repo, "diff", "--cached", "--name-only"):
+            return None  # nothing but ignored files and this run's own paperwork
+        cause = "the agent ran out of time" if isinstance(error, AgentTimeout) else "the agent stopped"
+        git(
+            repo,
+            "commit",
+            "-m",
+            SALVAGE_SUBJECT.format(number=number),
+            "-m",
+            f"{cause}, so this is a round's work part-way through rather than a finished change. "
+            "Nothing in it has been reviewed and the checks the round would have run may never have run. "
+            "It is committed rather than discarded so that the next run starts from it instead of from an "
+            "unexplained working tree.\n\n"
+            f"Stopped by: {error}",
+        )
+    except AgentError as refusal:
+        print(
+            f"warning: could not commit what round {number} left behind ({refusal}). "
+            f"The work is still in {repo}; commit it by hand before starting another run.",
+            file=sys.stderr,
+        )
+        return None
+    line = git(repo, "log", "--oneline", "-1")
+    print(f"\nround {number}: committed the unfinished work as {line}", flush=True)
+    return line
+
+
+def round_scratch(root: Path, number: int, role: str) -> Path:
+    """Create one agent's scratch directory for one round, never reusing one.
+
+    pytest deletes an existing `--basetemp` and immediately recreates it. On
+    Windows a directory whose deletion is still pending -- one handle left open
+    by the previous round is enough -- cannot be recreated, and the round dies
+    with `PermissionError: [WinError 5]`. Left to itself pytest also builds a
+    hardened `pytest-of-<user>` root, whose inheritance is stripped and whose
+    access is granted through OWNER RIGHTS alone, which a differently-tokened
+    process cannot use at all. Both were watched happening, repeatedly, in one
+    session.
+
+    Setting TMP and TEMP for *this* process does not decide it, because the agent
+    writes its own pytest command line. So the directory is made here, handed
+    over in the environment, and named in the prompt -- and it is a new one every
+    round, so there is never a previous round's directory to trip over.
+    """
+    directory = root / f"round-{number:02d}-{role}"
+    attempt = 0
+    while directory.exists():
+        attempt += 1
+        directory = root / f"round-{number:02d}-{role}-{attempt}"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def scratch_block(scratch: Path) -> str:
+    """The paragraph that tells an agent where its temporary files go."""
+    return f"""
+SCRATCH SPACE
+{scratch.as_posix()}
+That directory was created for this round and nothing has used it before. TMP,
+TEMP and TMPDIR already point at it. If you run pytest, give it a subdirectory
+that does not exist yet -- `--basetemp={scratch.as_posix()}/pytest-1`, then
+`pytest-2` for the next run. Do not choose a base temp directory anywhere else
+and never reuse one: pytest deletes an existing `--basetemp` and immediately
+recreates it, which fails on Windows while any handle from the previous run is
+still open.
+"""
 
 
 def create_review_checkout(mode: str, repo: Path, destination: Path) -> Path | None:
@@ -337,6 +521,7 @@ def codex_command(
     last_message_path: Path,
     review_dir: Path,
     workspace: Path,
+    scratch: Path | None = None,
 ) -> list[str]:
     command = [options.codex_bin, "exec", "-"]
     if options.codex_model:
@@ -346,6 +531,12 @@ def codex_command(
     # The review document is the one thing the reviewer writes outside its own
     # workspace, because it is the one thing the implementer has to read next.
     command += ["--add-dir", str(review_dir)]
+    if scratch is not None:
+        # Its scratch directory is outside the workspace too, and a sandbox that
+        # cannot write there is a reviewer that puts its pytest base temp
+        # directory wherever it *can* write -- which was the review directory,
+        # beside the document it was writing.
+        command += ["--add-dir", str(scratch)]
     command += ["--output-schema", str(schema_path), "--output-last-message", str(last_message_path)]
     command += ["--color", "never"]
     command += options.codex_arg
@@ -361,14 +552,14 @@ def codex_command(
     return command
 
 
-def implement_prompt(task: str, review_dir: Path, branch: str) -> str:
+def implement_prompt(task: str, review_dir: Path, branch: str, scratch: Path) -> str:
     return f"""You are the implementer in an automated implement-then-review loop.
 
 Repository branch: {branch}
 
 TASK
 {task}
-
+{scratch_block(scratch)}
 RULES
 1. Implement the task in this repository. Follow the repository's own conventions
    and the instructions in AGENTS.md / CLAUDE.md if present.
@@ -383,7 +574,7 @@ RULES
 """
 
 
-def fix_prompt(task: str, review_path: Path, round_number: int, branch: str) -> str:
+def fix_prompt(task: str, review_path: Path, round_number: int, branch: str, scratch: Path) -> str:
     return f"""You are the implementer in an automated implement-then-review loop.
 This is round {round_number}. An independent reviewer read your previous commits
 and wrote findings to a review document.
@@ -395,7 +586,7 @@ ORIGINAL TASK
 
 REVIEW DOCUMENT
 {review_path.as_posix()}
-
+{scratch_block(scratch)}
 RULES
 1. Read the review document first. Address every finding in it.
 2. If a finding is wrong or not worth acting on, do not silently skip it: say so
@@ -417,6 +608,8 @@ def review_prompt(
     round_number: int,
     previous_review: Path | None,
     isolated: bool,
+    scratch: Path,
+    has_network: bool,
 ) -> str:
     workspace = ""
     if isolated:
@@ -429,12 +622,22 @@ checkout holds committed files only: virtualenvs, build output and anything else
 gitignored are absent. Install what you need here if you want to run something,
 and say so in the review if you could not run it.
 
-You can only write inside this checkout. TMP, TEMP and TMPDIR already point at
-`.agent-tmp` here, so tools needing scratch space have somewhere to put it.
+The places you can write are this checkout, the scratch directory named below,
+and the directory the review document goes in. Nowhere else.
 
 If the project's tests will not run, do not report that as a defect in the code
 unless you have established that the code is why. Say plainly in the review what
 you could not run and what you checked instead.
+"""
+    network = ""
+    if not has_network:
+        network = """
+NO NETWORK
+You have no network access: you cannot open a URL, fetch an issue, or run
+`gh issue view`. The implementer could. If the task above points at something
+rather than stating it, you cannot read what it points at -- judge the code
+against the text you were given and say in the review which part of the intent
+you could not check, rather than assuming it.
 """
     history = ""
     if previous_review is not None:
@@ -450,7 +653,7 @@ never revert, and never run the implementer's task yourself.
 
 ORIGINAL TASK
 {task}
-{workspace}
+{workspace}{network}{scratch_block(scratch)}
 WHAT TO REVIEW
 The commits in `{diff_range}`. Start with `git log --stat {diff_range}` and
 `git diff {diff_range}`. Read the surrounding files when the diff alone is not
@@ -711,6 +914,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("--timeout", type=float, default=3600.0, help="Seconds allowed per agent invocation.")
     parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=60.0,
+        help="Seconds of silence before printing how long the agent has been running. 0 prints nothing.",
+    )
+    parser.add_argument(
+        "--stop-after-flat-rounds",
+        type=int,
+        default=2,
+        # Two, not one: a single round that finds the same number is weak
+        # evidence, because a fix legitimately exposes something new. Two
+        # consecutive is the pattern that was actually observed at the end of a
+        # run (10, 9, 4, 4 and 8, 7, 6), where the closing rounds moved the
+        # remainder around at roughly an hour each. See --help for the rest.
+        help=(
+            "Stop when this many consecutive review rounds fail to get the finding count below the fewest "
+            "seen so far. 0 keeps going until --max-rounds."
+        ),
+    )
+    parser.add_argument(
         "--allow-dirty",
         action="store_true",
         help="Start even if the working tree has uncommitted changes; they will be swept into agent commits.",
@@ -734,27 +957,66 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 parser.error(f"{name} only applies to --start-with review")
     elif options.max_rounds < 0:
         parser.error("--max-rounds cannot be negative")
+    if options.stop_after_flat_rounds < 0:
+        parser.error("--stop-after-flat-rounds cannot be negative")
+    if options.heartbeat < 0:
+        parser.error("--heartbeat cannot be negative")
     return options
 
 
-def reviewer_env(checkout: Path | None, dry_run: bool) -> dict[str, str] | None:
-    """Point the reviewer's temp directory inside its own workspace.
+def reviewer_network(sandbox: str, codex_arguments: list[str]) -> bool:
+    """Whether the reviewer will be able to reach the network, read off its sandbox.
 
-    Scratch space a review creates belongs with the checkout it was created for:
-    the per-round `git clean` then disposes of it, instead of leaving numbered
-    pytest directories to accumulate in the system temp across runs.
+    This is worth answering rather than assuming, because the two agents do not
+    have the same reach and it is the reviewer -- the one checking the work
+    against the intent -- that is cut off. Claude Code runs with the network and
+    can read a linked issue; Codex under `--sandbox workspace-write` reports the
+    call blocked by its proxy. A task that points at a URL is therefore complete
+    for one agent and empty for the other.
 
-    This is hygiene, not a fix for anything. A sandboxed reviewer that cannot run
-    a project's tests usually cannot run them for the project's own reasons --
-    the case that prompted this was a repository whose suite asserts against real
-    Windows ACLs, and it failed identically outside any sandbox.
+    Codex denies the network under `read-only` and `workspace-write` and allows
+    it under `danger-full-access`; the one setting that moves it is read here in
+    every spelling Codex accepts for a config override. Nothing about the host's
+    own connectivity is claimed -- a machine that is offline anyway is offline
+    for both agents, and this cannot see that.
     """
-    if checkout is None or dry_run:
-        return None
-    scratch = checkout / ".agent-tmp"
-    scratch.mkdir(parents=True, exist_ok=True)
+    if sandbox == "danger-full-access":
+        return True
+    if sandbox != "workspace-write":
+        return False
+    expects_setting = False
+    for argument in codex_arguments:
+        setting = None
+        if expects_setting:
+            expects_setting, setting = False, argument
+        elif argument in ("-c", "--config"):
+            expects_setting = True
+        elif argument.startswith("--config="):
+            setting = argument[len("--config=") :]
+        elif argument.startswith("-c") and len(argument) > 2:
+            setting = argument[2:].lstrip("=")
+        if setting is not None and NETWORK_ENABLED.match(setting):
+            return True
+    return False
+
+
+def agent_env(scratch: Path, checkout: Path | None = None) -> dict[str, str]:
+    """The environment one agent runs a round in: its own scratch, its own code.
+
+    The scratch directory is this round's and no other round's, which is what
+    stops the reviewer inheriting a temporary directory a previous round left
+    delete-pending or hardened. Handing it over here is half the job -- an agent
+    that writes its own pytest command line ignores TMP and TEMP when it passes
+    `--basetemp` -- so `scratch_block` names the same directory in the prompt.
+    PYTEST_DEBUG_TEMPROOT is set as well: it is what decides where pytest builds
+    its own `pytest-of-<user>` root when nobody passes `--basetemp` at all, and
+    that root is the one whose permissions are unusable from another process.
+    """
     env = dict(os.environ)
     env.update({key: str(scratch) for key in ("TMP", "TEMP", "TMPDIR")})
+    env["PYTEST_DEBUG_TEMPROOT"] = str(scratch)
+    if checkout is None:
+        return env
     source = checkout / "src"
     if source.is_dir():
         # A review is of one commit, so the reviewer's tests have to import that
@@ -779,6 +1041,8 @@ class ReviewSetup:
     review_dir: Path
     log_dir: Path
     schema_path: Path
+    scratch_root: Path
+    has_network: bool
 
 
 def perform_review(
@@ -796,15 +1060,26 @@ def perform_review(
     if setup.checkout is not None:
         sync_review_checkout(options.review_checkout, setup.repo, setup.checkout, commit)
     workspace = setup.checkout or setup.repo
+    scratch = round_scratch(setup.scratch_root, number, "codex")
     run_agent(
-        codex_command(options, setup.schema_path, last_message_path, setup.review_dir, workspace),
-        review_prompt(setup.task, review_path, diff_range, number, previous_review, setup.checkout is not None),
+        codex_command(options, setup.schema_path, last_message_path, setup.review_dir, workspace, scratch),
+        review_prompt(
+            setup.task,
+            review_path,
+            diff_range,
+            number,
+            previous_review,
+            setup.checkout is not None,
+            scratch,
+            setup.has_network,
+        ),
         workspace,
         f"[codex  r{number}]",
         setup.log_dir / f"round-{number:02d}-codex.log",
         options.timeout,
         options.dry_run,
-        env=reviewer_env(setup.checkout, options.dry_run),
+        env=agent_env(scratch, setup.checkout),
+        heartbeat=options.heartbeat,
     )
     if options.dry_run:
         return None
@@ -906,6 +1181,31 @@ def under(repo: Path, path: Path) -> Path:
     return path if path.is_absolute() else repo / path
 
 
+def rounds_without_progress(findings: list[int]) -> int:
+    """How many of the most recent rounds failed to get below the fewest findings before them.
+
+    Two runs of this loop went 10, 9, 4, 4 and 8, 7, 6. The early rounds close
+    substance; the late ones move the remainder around at roughly an hour each,
+    and `--max-rounds` cannot tell the difference because it only counts. This is
+    the number that can: a run of rounds where the review is no smaller than the
+    smallest it has already been.
+
+    Compared against the fewest seen rather than against the previous round, so
+    4 -> 5 -> 4 counts as two rounds of no progress instead of resetting on the
+    way back down to where it already was. A count of -1 is a verdict read from
+    the REVIEW_STATUS sentinel with no number in it; an unknown quantity is
+    neither progress nor the absence of it, so it is left out entirely.
+    """
+    fewest: int | None = None
+    flat = 0
+    for count in (count for count in findings if count >= 0):
+        if fewest is None or count < fewest:
+            fewest, flat = count, 0
+        else:
+            flat += 1
+    return flat
+
+
 def main(argv: list[str] | None = None) -> int:
     # Agent output is UTF-8; the default Windows console codepage is not. Without
     # this, the first smart quote an agent prints takes the run down.
@@ -927,8 +1227,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         task = NO_TASK
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    review_dir = under(repo, options.review_dir) / run_id
-    log_dir = under(repo, options.log_dir) / run_id
+    review_root = under(repo, options.review_dir)
+    log_root = under(repo, options.log_dir)
+    review_dir = review_root / run_id
+    log_dir = log_root / run_id
     review_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -941,6 +1243,12 @@ def main(argv: list[str] | None = None) -> int:
     checkout_dir = options.review_checkout_dir or (
         Path(tempfile.gettempdir()) / "agentic-loop-review" / f"{repo.name}-{run_id}"
     )
+    # Outside the repository for the same reason, and because everything under it
+    # is a temporary directory an agent's tools created: none of it belongs in a
+    # tree that is about to be committed, and `git add -A` in salvage_commit
+    # would otherwise be the thing that swept it in.
+    scratch_root = Path(tempfile.gettempdir()) / "agentic-loop-scratch" / f"{repo.name}-{run_id}"
+    has_network = reviewer_network(options.codex_sandbox, options.codex_arg)
 
     print(f"repository : {repo}")
     print(f"branch     : {branch}")
@@ -951,8 +1259,27 @@ def main(argv: list[str] | None = None) -> int:
     print(f"reviewer   : codex  model={options.codex_model or default} effort={options.codex_effort or default}")
     print(f"reviews    : {review_dir}")
     print(f"logs       : {log_dir}")
+    print(f"scratch    : {scratch_root} (one directory per agent per round)")
     print(f"max rounds : {options.max_rounds}")
+    if options.stop_after_flat_rounds:
+        print(f"stop early : after {options.stop_after_flat_rounds} rounds that do not reduce the finding count")
     print(f"starts with: {options.start_with}")
+    if has_network:
+        print(f"network    : reviewer has network (codex --sandbox {options.codex_sandbox})")
+    else:
+        print(
+            f"network    : reviewer has no network (codex --sandbox {options.codex_sandbox}); it cannot open a URL "
+            "or run `gh issue view`, so the task has to carry what it means"
+        )
+        if POINTS_OUTWARD.search(task):
+            # The implementer would read it and the reviewer would not, which
+            # makes the description complete for the agent writing the code and
+            # empty for the one checking it against the intent.
+            print(
+                "warning: the task points at something only a networked agent can read, and the reviewer is not "
+                "one. Paste the content into --task/--task-file instead of linking to it.",
+                file=sys.stderr,
+            )
     initial_range = ""
     if options.start_with == "review":
         try:
@@ -975,7 +1302,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not options.dry_run:
             checkout = create_review_checkout(options.review_checkout, repo, checkout_dir)
-        setup = ReviewSetup(options, repo, checkout, task, review_dir, log_dir, schema_path)
+        setup = ReviewSetup(options, repo, checkout, task, review_dir, log_dir, schema_path, scratch_root, has_network)
 
         if options.start_with == "review":
             # Round 0 reviews what is already committed. The implementer has not
@@ -1004,19 +1331,33 @@ def main(argv: list[str] | None = None) -> int:
             rounds.append(record)
             print(f"\n{'=' * 72}\nround {number}/{options.max_rounds}\n{'=' * 72}")
 
+            scratch = round_scratch(scratch_root, number, "claude")
             if previous_review is None:
-                prompt = implement_prompt(task, review_dir, branch)
+                prompt = implement_prompt(task, review_dir, branch, scratch)
             else:
-                prompt = fix_prompt(task, previous_review, number, branch)
-            run_agent(
-                claude_command(options),
-                prompt,
-                repo,
-                f"[claude r{number}]",
-                log_dir / f"round-{number:02d}-claude.log",
-                options.timeout,
-                options.dry_run,
-            )
+                prompt = fix_prompt(task, previous_review, number, branch, scratch)
+            try:
+                run_agent(
+                    claude_command(options),
+                    prompt,
+                    repo,
+                    f"[claude r{number}]",
+                    log_dir / f"round-{number:02d}-claude.log",
+                    options.timeout,
+                    options.dry_run,
+                    env=agent_env(scratch),
+                    heartbeat=options.heartbeat,
+                )
+            except AgentError as error:
+                # This ends the run, and the round's work is uncommitted: a round
+                # commits once, at the end, and the implementer never got there.
+                # Commit it before the run leaves it behind.
+                salvaged = salvage_commit(repo, number, error, (review_root, log_root, checkout_dir))
+                if salvaged is not None:
+                    record.commits = [salvaged]
+                    record.salvaged = salvaged
+                    last_head = git(repo, "rev-parse", "HEAD")
+                raise
 
             head = last_head if options.dry_run else git(repo, "rev-parse", "HEAD")
             new_commits = [] if head == last_head else git(repo, "log", "--oneline", f"{last_head}..{head}").splitlines()
@@ -1047,6 +1388,17 @@ def main(argv: list[str] | None = None) -> int:
                 break
 
             previous_review = review_path
+            counts = [entry.findings for entry in rounds if entry.findings is not None and entry.findings >= 0]
+            flat = rounds_without_progress(counts)
+            if options.stop_after_flat_rounds and flat >= options.stop_after_flat_rounds:
+                print(
+                    f"\n{flat} rounds in a row have not got the review below {min(counts)} findings; stopping "
+                    "rather than spending another round moving the remainder around. Raise "
+                    "--stop-after-flat-rounds, or set it to 0, to keep going.",
+                    file=sys.stderr,
+                )
+                exit_code = EXIT_NO_PROGRESS
+                break
         else:
             print(f"\nreached --max-rounds ({options.max_rounds}) with findings still open.", file=sys.stderr)
     except _Done:
@@ -1063,6 +1415,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"\nreviewer checkout kept at {checkout}")
             else:
                 remove_review_checkout(options.review_checkout, repo, checkout)
+        # Per-round directories only exist so that no round inherits another
+        # round's; a run that left them behind would be the next run's problem.
+        # Errors are ignored on purpose: a scratch directory a tool still holds
+        # open is not a reason to change what this run reports.
+        if scratch_root.is_dir():
+            shutil.rmtree(scratch_root, ignore_errors=True)
 
     summary = {
         "run_id": run_id,
@@ -1079,6 +1437,8 @@ def main(argv: list[str] | None = None) -> int:
         "start_with": options.start_with,
         "initial_range": initial_range or None,
         "max_rounds": options.max_rounds,
+        "stop_after_flat_rounds": options.stop_after_flat_rounds,
+        "reviewer_network": has_network,
         "exit_code": exit_code,
         "rounds": [vars(record) for record in rounds],
     }
