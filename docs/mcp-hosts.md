@@ -89,6 +89,24 @@ Agentic HIL returns one canonical name for each tool in MCP `tools/list`, such a
 
 Documentation, prompts, tests, and cross-host workflows should use the canonical wire name `probe_target`. Do not add aliases or change behavior by host. Use a qualified rendering only where a host's own permission or tool-selection syntax requires it.
 
+## Tool Annotations
+
+Each entry in `tools/list` carries the MCP `annotations` object — `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — as defined in schema revision 2025-06-18, the protocol version this server advertises. Hosts that use those fields to decide which calls need confirmation get an answer per tool instead of one blanket judgement by name.
+
+What they say:
+
+| Class | Tools |
+|---|---|
+| changes nothing (`readOnlyHint: true`) | `debugger_info`, `debugger_probes_list`, `debug_get_session_status`, `debug_list_breakpoints`, `debug_get_stop_reason`, `debug_symbol_info`, `get_last_report`, `classify_last_error`, `com_ports_list`, `com_read`, `can_buses_list`, `can_read`, `bench_run_status`, `project_config_describe`, `project_config_reload_description` |
+| changes something reversible (`destructiveHint: false`) | `probe_target`, `artifact_upload`, `reset_target`, `debug_stop_session`, `debug_set_breakpoint`, `debug_clear_breakpoints`, `debug_continue`, `debug_halt`, `com_session_stop`, `can_session_stop`, `bench_run_start`, `bench_run_stop`, `project_config_adopt_hardware` |
+| may destroy what it replaces (`destructiveHint: true`) | `flash_firmware`, `debug_start_session`, `debug_dump_symbol_ihex`, `com_session_start`, `com_write`, `can_session_start`, `can_send`, `project_config_create`, `project_config_set` |
+
+Two of them are worth reading before configuring a host's permission rules. `probe_target` reads and is still not read-only, because an SWD attach halts the core. `project_config_reload_description` *is* read-only: it re-reads the authoritative file, writes nothing, and touches no hardware — a host that blocks it sends the operator back to reconnecting the server, which is what it exists to avoid.
+
+`openWorldHint` is `false` on every tool: a bench is the closed, named set of devices the authoritative configuration declares, plus that configuration and the workspace artifact store.
+
+These are hints. Agentic HIL decides nothing by them — what a call may do is decided by the permissions in the authoritative configuration and by the machine-wide device locks — and a host is free to prompt for anything regardless.
+
 ## VS Code and GitHub Copilot
 
 Use this server shape in the operator-controlled VS Code user-profile MCP configuration:
