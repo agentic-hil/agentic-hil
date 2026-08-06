@@ -1435,10 +1435,16 @@ def test_release_fault_reraises_keyboard_interrupt(tmp_path: Path, monkeypatch: 
     owner.close()
 
 
+# The backend names its abort point before the target and still cannot account
+# for the call: the board's run state is not in question, only this host's
+# bookkeeping, which is exactly the class a read-only re-read settles. Without
+# `target_contacted` the same result would be the stronger reason instead — see
+# test_quarantine_triggers.
 UNCONFIRMED_PROBE = {
     "ok": False,
     "tool": "probe_target",
     "error_type": "probe_failed",
+    "target_contacted": False,
     "side_effect_status": "unknown",
     "summary": "Probe result unconfirmed.",
 }

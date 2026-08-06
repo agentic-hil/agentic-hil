@@ -163,7 +163,19 @@ def test_doctor_publishes_what_a_running_server_has_to_be_compared_against(tmp_p
 
     assert checked["config_status"]["state"] == STATE_UNCHANGED
     assert checked["config_status"]["loaded_digest"] == config_digest(path.read_bytes())
-    assert "debugger_info" in checked["config_status"]["compare_with_running_server"]
+    note = checked["config_status"]["compare_with_running_server"]
+
+    assert "debugger_info" in note
+    # And it names both ways across. This note ended at "only restarting it
+    # changes that", which stopped being true the moment a description reload
+    # existed: that call is what adopts a changed `debuggers` entry into a
+    # running server, and the restart is what everything else — every permission
+    # included — still waits for. `doctor` is the last caller that made the
+    # restart-only promise, and a digest mismatch is exactly where it is read.
+    assert "only restarting" not in note
+    assert "project_config_reload_description" in note
+    assert "restart" in note
+    assert "permissions" in note
     # The comparison the note asks for, made: two live answers, one file, and the
     # difference is now visible in both of them instead of in neither.
     assert checked["config_status"]["loaded_digest"] == served["config_status"]["current_digest"]

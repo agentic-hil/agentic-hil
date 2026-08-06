@@ -91,12 +91,18 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 CONFIG_RUNNING_SERVER_SCOPE = "running_server"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current — which is exactly why it cannot speak for a server
-# that has been running since before the last edit.
+# that has been running since before the last edit. It names both ways across,
+# because since `project_config_reload_description` a restart is no longer the
+# only one, and this is the last place that said it was.
 RUNNING_SERVER_COMPARISON = (
     "This is the configuration as it is on disk right now; the command line reads it fresh on every invocation. A "
     "running MCP server does not: it keeps serving what it parsed at startup. Compare the `loaded_digest` here with "
     "`config_status.loaded_digest` in that server's `debugger_info`. If they differ, that server is enforcing an older "
-    "configuration and only restarting it changes that."
+    "configuration. Two things change that, and which one depends on what moved: `project_config_reload_description` "
+    "on that server adopts a changed `target`, `debuggers`, `com_ports` or `can_buses` without a restart, and a "
+    "restart adopts everything else — every `permissions:` block included, which that call never re-reads in either "
+    "direction. `agentic-hil config-reload` previews what that call would take from this file and lists the sections "
+    "it would leave for a restart."
 )
 
 
@@ -160,12 +166,15 @@ def _substitutions() -> dict[str, str]:
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
-            "The authoritative configuration on disk is not the one this MCP server parsed, and the server is still "
-            "answering out of the version it loaded at startup. It does not reload while it runs, so the backend it "
-            "names, the devices it knows and the permissions it enforces are the ones from the older file. Nothing "
-            "failed; what an answer says and what the file says have come apart, and the file is the one an operator "
-            "reads. This says the two digests differ and nothing more — not what the file now contains, and not what "
-            "a restart onto it would produce."
+            "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "
+            "names, the devices it knows and the permissions it enforces are the ones from an older document. Which "
+            "document is in `config_status.description_source`: `startup` means all of it came from the version parsed "
+            "at startup, which is the normal case because the server does not reload while it runs; "
+            "`description_reload` means the devices and the backend came from the last explicit "
+            "`project_config_reload_description` (`description_reloaded_at`, and `loaded_digest` is that document's) "
+            "while the permissions still came from startup (`loaded_at`). Nothing failed; what an answer says and what "
+            "the file says have come apart, and the file is the one an operator reads. This says the two digests differ "
+            "and nothing more — not what the file now contains, and not what a restart onto it would produce."
         ),
         remediation=(
             "If what changed is the description of the bench — `target`, a `debuggers`, `com_ports` or `can_buses` "
@@ -293,8 +302,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not edit the configuration with your own file tools. `agentic-hil setup` writes host deny rules "
             "against exactly that, and this refusal is the reason they exist.",
-            "Do not set the grant through `project_config_set` either. It is a permission, so it needs "
-            "`allow_config_permissions_write`, which no configuration hands out to close its own refusal.",
+            "Do not set the grant through `project_config_set` either. It is a permission, and that call writes only "
+            "`false` into a permission — never `true`, whatever `allow_config_permissions_write` says. A generated "
+            "configuration grants that key, so it is very likely open here and still not a way back to this one.",
         ),
     ),
     "permission_denied:allow_config_permissions_write": ErrorRemedy(
@@ -526,6 +536,72 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "See MCP resource " + TARGET_SUPPORT_URI + ".",
             "Confirm the board is powered and the SWD/JTAG wiring is intact.",
             "Release the probe from any other session (OpenOCD, STM32CubeProgrammer, a second pyOCD).",
+        ),
+    ),
+    # The counterpart to the three entries above, and the reason it is a separate
+    # error_type rather than another `target_not_detected`: those say the adapter
+    # was reached and nothing answered behind it, which places the abort point
+    # before the target and is why they refuse retry-safe. A toolchain that exited
+    # without confirming what it did places it nowhere — whether it printed part of
+    # the confirmation or none of it — so the same public error_type would have
+    # published exactly the claim this branch cannot make.
+    "target_state_unconfirmed:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD exited successfully without the tool's own success marker, so its account of this run is "
+            "incomplete rather than negative. Which part is missing is in this result and not in this entry: "
+            "`operation_result.expected_success_text` lists both markers the backend `echo`es — the stage marker after "
+            "`init` and the success marker at the end of the command — and `matched_success_text` names the ones "
+            "OpenOCD printed, which may be neither of them or the stage marker alone. Either way the outcome went "
+            "unreported, and that is the absence of a verdict rather than a verdict that no target answered: `init` "
+            "may have completed, examined the core and halted it. The board's run state is unknown, which is why this "
+            "quarantines the bench instead of refusing."
+        ),
+        remediation=(
+            "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
+            "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
+            "Read `operation_result` in this result: the markers that did print bound how far the run provably got, and "
+            "the stage marker among them means `init` completed and the core was examined.",
+            "Read the debugger log at `log_path`. Both markers are `echo`ed by the command string this backend sends, "
+            "so whatever OpenOCD printed instead of the missing one is the evidence for how far it actually got.",
+            "Confirm `debuggers.<name>.executable` is OpenOCD itself and not a wrapper or launcher script: anything "
+            "that discards the child's stdout and stderr produces this result out of a run that worked.",
+            "If the log does contain the success marker `matched_success_text` reports as missing, this is a defect in "
+            "this backend rather than a fault on the bench — report it with that log.",
+        ),
+        do_not=(
+            "Do not read this as `target_not_detected`. That is OpenOCD's own report that it reached the adapter and "
+            "nothing answered, which places the abort point before the target and is why it is retry-safe; this result "
+            "places it nowhere.",
+            "Do not try to clear the quarantine with another read. A probe that answers attests the board is "
+            "reachable, never that a core this run may have halted is running again.",
+        ),
+    ),
+    "target_state_unconfirmed:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer exited successfully without every line that confirms the operation — for a read, the "
+            "ST-Link serial number and the device name — so its account of this run is incomplete rather than "
+            "negative. Which lines are missing is in this result and not in this entry: "
+            "`operation_result.expected_success_text` lists the ones that were looked for and `matched_success_text` "
+            "the ones the CLI printed, which may be none of them or only some. A confirmation that stops short is not "
+            "a report that no target answered: it leaves the outcome unstated, so this is the absence of a verdict and "
+            "the board's run state is unknown. That is why this quarantines the bench instead of refusing."
+        ),
+        remediation=(
+            "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
+            "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
+            "Read `operation_result` in this result and then the debugger log at `log_path`: `expected_success_text` "
+            "lists the lines that were looked for, `matched_success_text` the ones that arrived, and what the CLI "
+            "printed in place of the rest is the evidence for how far it got.",
+            "Confirm `debuggers.<name>.executable` is STM32_Programmer_CLI itself and not a wrapper that discards its "
+            "output. A CLI version that words its confirmation differently produces the same result, and the log is "
+            "what tells the two apart.",
+        ),
+        do_not=(
+            "Do not read this as `target_not_detected`. `No STM32 target found` is the CLI's own report that the probe "
+            "was opened and nothing answered behind it, which is why that one refuses retry-safe; silence is not that "
+            "report.",
+            "Do not try to clear the quarantine with another read. A probe that answers attests the board is "
+            "reachable, never that a core this run may have halted is running again.",
         ),
     ),
     "adapter_not_found:openocd": ErrorRemedy(
@@ -796,10 +872,16 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "lease_release_report_audit_broken": _audit_guide("A one-shot debugger call released its lease and the final report of that release could not be persisted."),
     # -- Debugger one-shots and sessions ---------------------------------------
     "debugger_readonly_result_unconfirmed": QuarantineReasonGuide(
-        attempted="A read-only probe call (probe discovery or probe_target) returned a result that claims an unknown or partial side effect.",
-        confirmed="These calls send no stimulus by construction; the target keeps the state the last effectful call left.",
-        unknown="Why a read reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
+        attempted="A read-only probe call (probe discovery or probe_target) named an abort point before the target and still returned a result the host could not settle — an unknown or partial side effect, or cleanup left outstanding.",
+        confirmed="The backend's own report says the target was never contacted (`target_contacted: false`), so the board keeps the state the last effectful call left.",
+        unknown="Why a call that never reached the target reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
         physical_check="Normally none — the next hardware call re-reads the probe and clears this itself. If the probe stays unreachable, reseat it, then sign.",
+    ),
+    "debugger_readonly_target_state_unconfirmed": QuarantineReasonGuide(
+        attempted="A read-only probe call (probe discovery or probe_target) failed without naming where it stopped: the backend was killed at its deadline, or it reported a failure that does not place the abort point before the target.",
+        confirmed="The toolchain child process was reaped, so nothing from this call can still act on the board.",
+        unknown="Whether the read reached the target before it stopped. A read on this bench is not passive — an SWD attach halts the core — and a process killed at its deadline never ran the shutdown in its own command string, so the core may be sitting halted with nothing to resume it.",
+        physical_check="Establish the run state rather than the reachability: reset the board by its own controls and confirm the firmware runs, then sign. Under `recovery.auto_recover: reset_halt` the service settles this itself with a verified reset into halt; a bare re-read cannot, and does not clear it.",
     ),
     "debugger_result_unconfirmed": QuarantineReasonGuide(
         attempted="flash_firmware or reset_target reported an outcome the host could not confirm.",
@@ -1871,12 +1953,13 @@ Quarantine answers one question — "is the physical state of the hardware unkno
 | Failure | Outcome |
 |---|---|
 | toolchain executable not found (OpenOCD, pyOCD, STM32CubeProgrammer CLI, the debug server, GDB) | refusal — no process ever existed |
-| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, with the init-stage marker absent | refusal — the adapter was never opened |
-| pyOCD found no probe / could not open it, or refused the configured `target_type` | refusal — no connect sequence began |
-| ST-Link probe absent (`no ST-LINK detected`) | refusal — the transport never existed |
-| `probe_target` / `debugger_probes_list` returned any plain failure | refusal — the call is read-only by construction and its returned result proves the toolchain child was reaped |
+| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
+| pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
+| ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
+| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call (`timeout`), an exit whose output does not carry the confirmation the tool asks for (`target_state_unconfirmed`) | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
 | COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
-| CAN adapter never initialized (python-can `CanInitializationError`) | refusal — the adapter never joined the bus |
+| CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
+| CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **quarantine** — python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same |
 | a direct CAN read failed | refusal — `recv()` transmits nothing |
 | anything whose abort point cannot be proven — an unconfirmed flash or reset, an exception mid-call, an unconfirmed cleanup, an owner that died holding a lease, a broken audit trail | quarantine; that is the feature |
 

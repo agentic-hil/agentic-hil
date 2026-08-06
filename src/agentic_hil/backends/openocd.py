@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    NOT_CONTACTED,
+    READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -36,10 +38,7 @@ OPENOCD_NOT_FOUND: JsonObject = {
     "likely_causes": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],
     # No executable means no process, so this call is not an unconfirmed outcome
     # on the bench: nothing was ever started that could have touched it.
-    "target_contacted": False,
-    "side_effect_committed": False,
-    "side_effect_status": "not_started",
-    "retry_safe": True,
+    **NOT_CONTACTED,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -48,6 +47,16 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "target_config_not_found": "debugger_config_not_found",
     "config_file_not_found": "debugger_config_not_found",
     "command_rejected_before_init": "debugger_command_rejected",
+    # An exit of 0 with the tool's success marker missing from the output. This
+    # branch read nothing out of OpenOCD's words, so it gets a public error_type
+    # of its own rather than the classification the words would have produced:
+    # `target_not_detected` is OpenOCD's report that it reached the adapter and
+    # nothing answered — which the shipped catalogue entry says in as many words
+    # — and publishing that here would make the abort-point claim this branch
+    # exists to withhold. See READ_ONLY_PRE_CONTACT_BACKEND_ERRORS.
+    "probe_unconfirmed": "target_state_unconfirmed",
+    "flash_unconfirmed": "flash_failed",
+    "reset_unconfirmed": "reset_failed",
 }
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
@@ -329,7 +338,28 @@ class OpenOCDBackend:
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected, init_reached=init_reached), audit_error)
             if success_marker is not None and success_marker not in output:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, rejected, init_reached=init_reached), audit_error)
+                # Only the success marker decides this branch, so the init-stage
+                # marker may well be in the output beside it — a run that
+                # completed `init`, examined the core and then lost the second
+                # echo. The result carries which of the two were printed so a
+                # caller reads this run's evidence rather than inferring the
+                # worst case from the error_type, and so the shipped catalogue
+                # entry can describe a partial confirmation without claiming
+                # anything about a particular run.
+                return self._finish_log_audit(
+                    self._failure_result(
+                        tool,
+                        started_at,
+                        finished_at,
+                        elapsed_ms,
+                        self._unconfirmed_backend_error_type(tool),
+                        log_path,
+                        rejected,
+                        init_reached=init_reached,
+                        operation_result=self._marker_evidence(output, success_marker),
+                    ),
+                    audit_error,
+                )
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
@@ -342,12 +372,50 @@ class OpenOCDBackend:
     # opened is the other face of the same boundary. Each of these may be read
     # as "never reached the bench" ONLY together with the absent init-stage
     # marker (see _failure_result) — the classification alone is string
-    # matching, and the marker is what makes it a proof.
+    # matching, and the marker is what makes it a proof. Nothing here covers the
+    # timeout, which is the deadline killing the process before it could say
+    # where it stopped.
     PRE_CONTACT_BACKEND_ERRORS = frozenset(
         {"interface_config_not_found", "target_config_not_found", "config_file_not_found", "adapter_not_found"}
     )
+    # One classification further out, and only for the two tools whose command
+    # string drives nothing: OpenOCD's own report that nothing answered on the
+    # selected transport, which is what the error catalogue's
+    # `target_not_detected:openocd` entry means by it. A target that never
+    # answered was never brought under debug control, and with the init-stage
+    # marker absent `init` is the only thing that could have addressed it at all
+    # — `targets` lists and `shutdown` ends. `flash_firmware` and `reset_target`
+    # are deliberately not here: their command strings drive the target
+    # themselves, so the same words also fit a target that stopped answering
+    # while it was being driven, and the safe reading of an ambiguity is the one
+    # that keeps the bench contained.
+    #
+    # Only a `target_not_detected` the classifier read out of OpenOCD's own
+    # output qualifies. `probe_unconfirmed` — an exit of 0 with the success
+    # marker missing — stays out, because it is the absence of a report rather
+    # than a report that nothing answered: OpenOCD may have completed `init`,
+    # halted the core and then lost the success marker, with or without the
+    # stage marker beside it, and that board's run state is unknown either way. It carries `target_state_unconfirmed` to the caller for the same
+    # reason, so the public error_type and its catalogue entry withhold the
+    # abort-point claim this set is about.
+    READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True) -> JsonObject:
+    def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
+        if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
+            return True
+        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
+
+    def _marker_evidence(self, output: str, success_marker: str) -> JsonObject:
+        """Which of the two echoes this backend asks for reached the output.
+
+        Both are `echo`ed by the command string, so each is evidence about a
+        stage of this run and neither is a verdict from OpenOCD about the
+        target. Reported in the same shape the ST-Link backend uses for its
+        confirmation lines, so a caller reads one field for both."""
+        expected = [OPENOCD_INIT_STAGE_MARKER, success_marker]
+        return {"confirmed": False, "expected_success_text": expected, "matched_success_text": [marker for marker in expected if marker in output]}
+
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
@@ -356,23 +424,26 @@ class OpenOCDBackend:
             backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        if operation_result is not None:
+            result["operation_result"] = operation_result
         if rejected_commands:
             # OpenOCD stopped inside its own interpreter, before it opened the
             # probe: this call never reached the bench. That is a failed call,
             # not an unconfirmed target, so it must not take the bench out of
             # service - the board is exactly as the last call that did reach it
             # left it.
-            result.update({"rejected_commands": rejected_commands, "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
-        elif backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS and not init_reached:
+            result.update({"rejected_commands": rejected_commands, **NOT_CONTACTED})
+        elif self._proves_no_contact(tool, backend_error_type) and not init_reached:
             # Same test as the rejected-commands branch, met by other evidence:
-            # OpenOCD named a failure of the phase before the adapter opens (a
-            # config script it could not load, an adapter it could not open),
-            # and the init-stage marker never printed, so `init` never
-            # completed and adapter_init never had a probe to drive. The board
-            # is exactly as the last call that did reach it left it, and a
+            # OpenOCD named a failure that left the target untouched (a config
+            # script it could not load, an adapter it could not open, a target
+            # that did not answer), and the init-stage marker never printed, so
+            # `init` never completed — adapter_init never had a probe to drive,
+            # or target examine never brought a core under debug control. The
+            # board is exactly as the last call that did reach it left it, and a
             # quarantine here would demand a physical inspection of hardware
             # this run provably never touched.
-            result.update({"target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+            result.update(NOT_CONTACTED)
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
@@ -384,7 +455,7 @@ class OpenOCDBackend:
         return None
 
     def _unconfirmed_backend_error_type(self, tool: str) -> str:
-        return {"probe_target": "target_not_detected", "flash_firmware": "flash_failed", "reset_target": "reset_failed"}.get(tool, "unknown_debugger_error")
+        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, mark_side_effect(result))
@@ -436,6 +507,7 @@ class OpenOCDBackend:
             "debugger_config_not_found": "Debugger configuration file could not be found.",
             "adapter_not_found": "Debugger adapter could not be found or opened.",
             "target_not_detected": "Debugger could not detect the target.",
+            "target_state_unconfirmed": "OpenOCD exited without reporting the outcome, so the target's state is unknown.",
             "flash_failed": "Debugger failed to flash the firmware.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
@@ -447,6 +519,7 @@ class OpenOCDBackend:
     def _likely_causes(self, error_type: str) -> list[str]:
         return {
             "target_not_detected": ["DUT is not powered", "wrong interface configuration", "SWD/JTAG wiring issue", "debug probe already in use"],
+            "target_state_unconfirmed": ["OpenOCD exited successfully without the success marker this backend echoes at the end of the command; operation_result names which markers did print", "debuggers.<name>.executable is a wrapper that discards OpenOCD's output", "OpenOCD's output was redirected away from the process it was started as"],
             "adapter_not_found": ["debug probe is not connected", "debug probe driver is missing", "debug probe is already in use", "Windows USB driver is not bound to the ST-Link adapter"],
             "verify_failed": ["flash write did not persist correctly", "wrong target configuration", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],

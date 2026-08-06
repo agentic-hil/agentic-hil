@@ -17,17 +17,28 @@ from agentic_hil.process import (
 from agentic_hil.types import JsonObject
 
 # The markers a failure carries when it can prove it never reached the bench:
-# no target contact, no side effect, safe to retry. 0.7.1's
-# `debugger_command_rejected` fix introduced this shape for one OpenOCD case;
-# every backend failure that can prove its abort point reuses it, because the
-# alternative — quarantining hardware a call provably never touched — demands a
-# physical inspection nothing justifies (hardci-hq#97).
+# no target contact, no side effect, the board where the last call that did reach
+# it left it, safe to retry. 0.7.1's `debugger_command_rejected` fix introduced
+# this shape for one OpenOCD case; every backend failure that can prove its abort
+# point reuses it, because the alternative — quarantining hardware a call
+# provably never touched — demands a physical inspection nothing justifies
+# (hardci-hq#97). It is the whole of the claim the service layer will act on: a
+# result without these fields is not the opposite claim, it is no claim, and
+# read-only one-shots quarantine on it rather than infer one.
 NOT_CONTACTED: JsonObject = {
     "target_contacted": False,
     "side_effect_committed": False,
     "side_effect_status": "not_started",
+    "hardware_state": "unchanged",
     "retry_safe": True,
 }
+
+# The tools whose command drives nothing of its own: whatever addressed the
+# target did so while the backend was still opening its session. A backend may
+# therefore read "no target answered" as a proven abort point for these, and may
+# not for a flash or a reset, whose own command drives the target and can produce
+# the same words after it has.
+READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
 
 
 @dataclass(frozen=True)

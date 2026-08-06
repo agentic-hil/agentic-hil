@@ -42,7 +42,14 @@ from agentic_hil.configreload import (
     merged_description,
     reload_description,
 )
-from agentic_hil.configstate import STATE_CHANGED, STATE_MISSING, STATE_UNCHANGED, STATE_UNREADABLE
+from agentic_hil.configstate import (
+    DESCRIPTION_FROM_RELOAD,
+    DESCRIPTION_FROM_STARTUP,
+    STATE_CHANGED,
+    STATE_MISSING,
+    STATE_UNCHANGED,
+    STATE_UNREADABLE,
+)
 from agentic_hil.contracts import MCP_TOOL_NAMES, TOOL_SCHEMAS
 from agentic_hil.knowledge import CONFIG_SHAPE_URI, ERROR_CATALOGUE, read_resource
 from agentic_hil.tools import AgenticHILToolService
@@ -619,6 +626,45 @@ def test_a_second_reload_that_agrees_clears_the_divergence(tmp_path: Path, monke
         tools.close()
 
 
+def test_three_reloads_still_name_the_startup_document_as_the_permission_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A → B (same grants) → C (a different grant), which is where a provenance
+    that moves on equality goes wrong.
+
+    B was adopted as the permission source because its grants happened to match,
+    and C then carried B's digest forward — so `permissions_source` named a
+    document the permission objects never came from and paired it with the
+    startup `loaded_at`. The digest has to be A's throughout: A is where the
+    grants in force were parsed, and no comparison against a later file changes
+    that."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        startup_digest = tools.config.config_digest
+        startup_loaded_at = tools.config.loaded_at
+
+        # B: the description moves, the grants are written out identically.
+        rewrite(path, lambda document: document["debuggers"]["dut"].update({"probe_id": "B-PROBE"}))
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        assert "permissions_source" not in tools.call("debugger_info")["config_status"]
+        b_digest = tools.config.config_digest
+        assert b_digest != startup_digest
+        assert tools.config.permissions_digest == startup_digest
+
+        # C: now a grant differs, so the divergence has to be reported — against A.
+        rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_mass_erase": True}))
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+
+        status = tools.call("debugger_info")["config_status"]
+        source = status["permissions_source"]
+        assert source["digest"] == startup_digest
+        assert source["digest"] != b_digest
+        assert source["digest"] != status["current_digest"]
+        assert source["loaded_at"] == startup_loaded_at
+        assert tools.config.debugger.permissions.allow_mass_erase is False
+    finally:
+        tools.close()
+
+
 def test_an_edit_after_a_reload_is_stale_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A reload is not a licence: the next change is reported like any other."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -629,8 +675,38 @@ def test_an_edit_after_a_reload_is_stale_again(tmp_path: Path, monkeypatch: pyte
         rewrite(path, lambda document: document["debuggers"]["dut"].update({"probe_id": "TWO"}))
         after = tools.call("debugger_info")
         assert after["config_stale"] is True
-        assert after["config_status"]["state"] == STATE_CHANGED
+        status = after["config_status"]
+        assert status["state"] == STATE_CHANGED
         assert tools.config.debugger.probe_id == "ONE"
+        # And it says which of two documents each half came from. "Everything
+        # comes from the version loaded at startup" was true while nothing could
+        # re-read the file; here the devices come from the reload above and only
+        # the permissions come from startup, and `loaded_digest` and `loaded_at`
+        # name those two different snapshots.
+        assert status["description_source"] == DESCRIPTION_FROM_RELOAD
+        assert status["description_reloaded_at"] == tools.config.description_reloaded_at
+        assert status["loaded_at"] == tools.config.loaded_at
+        assert status["loaded_digest"] == tools.config.config_digest
+        assert "last explicit description reload" in status["summary"]
+        assert "permissions it enforces come from the version loaded at startup" in status["summary"]
+    finally:
+        tools.close()
+
+
+def test_a_server_that_never_reloaded_still_says_everything_came_from_startup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The unchanged half of the same contract, so the correction above is not a
+    licence to stop making the plain claim where it is true."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        rewrite(path, lambda document: document["debuggers"]["dut"].update({"probe_id": "ONE"}))
+        status = tools.call("debugger_info")["config_status"]
+
+        assert status["state"] == STATE_CHANGED
+        assert status["description_source"] == DESCRIPTION_FROM_STARTUP
+        assert status["description_reloaded_at"] is None
+        assert status["loaded_digest"] == tools.config.config_digest
+        assert "still comes from the version loaded at startup" in status["summary"]
     finally:
         tools.close()
 
@@ -720,9 +796,23 @@ def test_merged_description_takes_nothing_but_the_four_sections(tmp_path: Path, 
 
     merged = merged_description(loaded, disk)
 
-    from_disk = {"target", "debuggers", "com_ports", "can_buses", "debugger", "debugger_id", "config_digest", "permissions_digest", "description_reloaded_at"}
+    # `permissions_digest` is in the exempt set because it is asserted below to
+    # be exactly the *loaded* document's — it is the one field the reload may
+    # neither take from disk nor let drift.
+    decided_by_the_reload = {
+        "target",
+        "debuggers",
+        "com_ports",
+        "can_buses",
+        "debugger",
+        "debugger_id",
+        "config_digest",
+        "permissions_digest",
+        "permissions_match_description",
+        "description_reloaded_at",
+    }
     for field in type(loaded).__dataclass_fields__:
-        if field in from_disk:
+        if field in decided_by_the_reload:
             continue
         assert getattr(merged, field) == getattr(loaded, field), field
     assert merged.target.name == "renamed-target"
@@ -738,3 +828,116 @@ def test_reload_description_needs_a_loaded_configuration() -> None:
     reloaded, result = reload_description(None)
     assert reloaded is None
     assert result["error_type"] == "config_file_not_found"
+
+
+# ---------------------------------------------------------------------------
+# The composition is what gets enforced, so the composition is what is checked.
+
+
+def legacy_openocd_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs) -> tuple[Path, Path]:
+    """One OpenOCD probe under version 1, with probe/flash/reset all granted.
+
+    Version 1 because that is the model where a debugger entry can be made
+    unreachable by its own grants: from version 2 on reading is free, so every
+    entry is reachable and pinning validates every OpenOCD entry's scripts."""
+    workspace = (tmp_path / "workspace").resolve()
+    root = Path(os.environ["APPDATA"]) / "config-reload-v1"
+    path = write_authoritative_config(workspace, monkeypatch, config_root=root, debugger_type="openocd", **kwargs)
+    monkeypatch.chdir(workspace)
+    return workspace, path
+
+
+def close_the_entry_and_relativize_its_scripts(document: dict) -> None:
+    """The file an MCP caller can write: every access grant narrowed to false,
+    and then script paths nothing in that file can run."""
+    entry = document["debuggers"]["dut"]
+    entry["permissions"] = dict.fromkeys(entry["permissions"], False)
+    entry["interface_cfg"] = "interface/stlink.cfg"
+    entry["target_cfg"] = "target/stm32f4x.cfg"
+
+
+def test_a_reload_refuses_a_description_that_was_only_valid_while_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The validation/policy split the reload exists to avoid, from the other side.
+
+    Pinning skips an OpenOCD entry's script check when nothing the file permits
+    can drive it, so a version 1 document whose grants are all `false` loads with
+    relative, unvalidated script names in it. A reload keeps that description and
+    puts this server's startup grants — probe, flash and reset — behind it, and
+    that pairing was validated by neither load. The composition is re-checked, so
+    the reload refuses instead of arming an OpenOCD nothing had looked at."""
+    workspace, path = legacy_openocd_bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        validated = tools.config.debuggers["dut"].interface_cfg
+        assert Path(validated).is_absolute()
+
+        rewrite(path, close_the_entry_and_relativize_its_scripts)
+        # The premise: that file loads on its own terms, because under its own
+        # grants the entry drives nothing and its scripts are never looked at.
+        assert load_authoritative_config(workspace).debuggers["dut"].interface_cfg == "interface/stlink.cfg"
+
+        refused = tools.call(PROJECT_CONFIG_RELOAD)
+
+        assert refused["ok"] is False
+        assert refused["error_type"] == "config_invalid"
+        assert refused["field"] == "debuggers.dut.interface_cfg"
+        assert refused["side_effect_status"] == "not_started"
+        assert refused["retry_safe"] is True
+        # And nothing moved: the server is still driving the validated scripts.
+        assert tools.config.debuggers["dut"].interface_cfg == validated
+        assert tools.config.debuggers["dut"].permissions.allow_flash is True
+    finally:
+        tools.close()
+
+
+def test_a_narrowed_entry_whose_scripts_stay_valid_still_reloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction, so the check above is not just a refusal generator:
+    the same narrowing with the scripts left absolute reloads as before."""
+    workspace, path = legacy_openocd_bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+
+        def narrow_only(document: dict) -> None:
+            entry = document["debuggers"]["dut"]
+            entry["permissions"] = dict.fromkeys(entry["permissions"], False)
+            entry["probe_id"] = "MOVED-0002"
+
+        rewrite(path, narrow_only)
+        result = tools.call(PROJECT_CONFIG_RELOAD)
+
+        assert result["ok"] is True
+        assert tools.config.debugger.probe_id == "MOVED-0002"
+        assert tools.config.debuggers["dut"].permissions.allow_flash is True
+    finally:
+        tools.close()
+
+
+def test_a_version_one_read_grant_that_moves_is_reported_as_a_difference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`allow_probe` and `allow_read` gate a version 1 bench, so a file that
+    moves only one of them has permissions this server is not enforcing. The
+    permission surface used to name only the write grants, so this reported an
+    empty `permission_differences`, moved `permissions_digest` onto the file and
+    dropped `permissions_source` — three separate claims that the two halves
+    agreed when they did not."""
+    workspace, path = legacy_openocd_bench(tmp_path, monkeypatch, com_ports_yaml=COM_PORTS)
+    tools = service(workspace)
+    try:
+        assert permission_summary(tools.config)["debuggers"]["dut"]["allow_probe"] is True
+
+        def close_the_reads(document: dict) -> None:
+            document["debuggers"]["dut"]["permissions"]["allow_probe"] = False
+            document["com_ports"]["dut_uart"]["permissions"]["allow_read"] = False
+
+        rewrite(path, close_the_reads)
+        result = tools.call(PROJECT_CONFIG_RELOAD)
+
+        assert result["ok"] is True
+        assert "debuggers.dut.allow_probe" in result["permission_differences"]
+        assert "com_ports.dut_uart.allow_read" in result["permission_differences"]
+        # Not adopted, and not hidden: the grants in force are still the
+        # startup document's and `config_status` says which document that is.
+        assert tools.config.debuggers["dut"].permissions.allow_probe is True
+        assert tools.config.permissions_digest != tools.config.config_digest
+        assert result["config_status"]["permissions_source"]["digest"] == tools.config.permissions_digest
+    finally:
+        tools.close()

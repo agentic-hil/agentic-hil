@@ -60,10 +60,15 @@ what the attempt recorded and why it failed, and `debugger_info` or
 A failed call and quarantined hardware are two different refusals, and the
 result says which one you have. A failure that proves it never reached the
 board — a toolchain that is not installed, an unplugged probe or adapter, a
-port that would not open, any plain failure of the read-only probe tools —
-carries `retry_safe: true` and no `quarantined: true`: the bench stays in
-service, so report the named cause, fix it or ask for it to be fixed, and
-retry. `quarantined: true` means the physical state is genuinely unknown. Stop
+port that would not open, a read whose backend reports that no target answered
+— carries `target_contacted: false`, `retry_safe: true` and no
+`quarantined: true`: the bench stays in service, so report the named cause, fix
+it or ask for it to be fixed, and retry. Being a read is not the proof; the
+backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
+anything else when the backend named no abort point — a call killed at its
+deadline, an exit without complete confirmation — because an SWD attach halts the core
+and nothing there says whether it got that far. `quarantined: true` means the
+physical state is genuinely unknown. Stop
 effects there and retry the hardware call once: an incident the bench's
 recovery policy can verify clears itself on that retry. A refusal carrying
 `auto_recovery_attempted: true` means that already ran and did not confirm the
@@ -188,8 +193,13 @@ keys and values, so the operator gets one command to run — `agentic-hil
 adopt-hardware` — and not a serial to transcribe.
 
 `config_stale: true` on any result says the authoritative file is no longer the
-one this server parsed, so the backend that result names, the devices it knows
-and the permissions it enforces are all from the version loaded at startup. The
+one this server is enforcing, so the backend that result names, the devices it
+knows and the permissions it enforces are from an older document.
+`config_status.description_source` says which one: `startup` for all of it,
+which is the normal case, or `description_reload` when a
+`project_config_reload_description` has since moved the devices and the backend
+onto a newer document (`description_reloaded_at`, and `loaded_digest` is that
+document's) while the permissions stayed the startup ones (`loaded_at`). The
 `config_status` block names the file and says which of three states it is in:
 
 - `changed` — loaded_digest and current_digest differ. That is the whole of the
@@ -215,8 +225,19 @@ made, so nothing is claimed either way and reload_required is `false`.
 `debugger_info` and
 `project_config_describe` carry the block either way, so a disagreement between
 `agentic-hil doctor` — which reads the file fresh every time — and
-`debugger_info` is this and nothing else. A permission revoked since startup
-already binds; one added since does not.
+`debugger_info` is this and nothing else. A revocation that binds before a
+restart is exactly three grants and two calls: `project_config_describe` and
+`project_config_set` take the narrower of what this server loaded and what the
+file now says for `allow_config_write`, `allow_config_description_write` and
+`allow_config_permissions_write`, so revoking one of those closes that surface
+on the next call and adding one does nothing until a restart. Every other
+permission is the startup object and moves for nobody — `allow_flash`,
+`allow_reset`, `allow_write`, `allow_mass_erase`,
+`allow_raw_debugger_commands` and every per-device grant, plus
+`debug.allow_all_symbols` and `artifacts.allow_upload`, keep enforcing what was
+loaded until the MCP server is restarted, and a description reload re-reads no
+permission in either direction. Narrowing one of those in the file does not
+close it: ask for the restart before you rely on it.
 
 **A board plugged in after this server started does not need a restart.**
 `project_config_reload_description` takes no arguments, needs no permission

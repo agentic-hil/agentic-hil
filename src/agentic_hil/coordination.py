@@ -45,12 +45,21 @@ DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
 # operator or MCP sink.
 _RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace")
 LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
-# A one-shot that only ever reads (probe discovery, probe_target) intends no
-# physical effect, so an unconfirmed result of one leaves the board where it was
-# and a read-only re-read can settle it. flash_firmware and reset_target keep the
-# undifferentiated debugger_result_unconfirmed: either may have left the target
-# running, and nothing on the host can tell that from the outside.
+# A one-shot that only ever reads (probe discovery, probe_target) and whose
+# result *names* its abort point before the target: the board is where the last
+# effectful call left it, so whatever is unconfirmed is host-side and a read-only
+# re-read settles it. flash_firmware and reset_target keep the undifferentiated
+# debugger_result_unconfirmed: either may have left the target running, and
+# nothing on the host can tell that from the outside.
 DEBUGGER_READONLY_RESULT_REASON = "debugger_readonly_result_unconfirmed"
+# The same two tools when the result does *not* name its abort point: the read
+# may have reached the target, and a read on this bench is not passive — an SWD
+# attach halts the core, and a backend killed at its deadline never ran the
+# `shutdown` in its own command string. A re-read attests that the probe answers
+# and the target is detected; it says nothing about whether the core is halted,
+# so it cannot settle this. Only driving the target into a defined state can,
+# which is why this sits in the reset set and not in the retryable one.
+DEBUGGER_READONLY_TARGET_STATE_REASON = "debugger_readonly_target_state_unconfirmed"
 RETRYABLE_CLEANUP_REASONS = frozenset(
     {
         "com_buffer_clear_unconfirmed",
@@ -71,6 +80,7 @@ RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
     {
         "debug_session_start_unconfirmed",
         "debugger_result_unconfirmed",
+        DEBUGGER_READONLY_TARGET_STATE_REASON,
     }
 )
 def _public_record(record: JsonObject | None) -> JsonObject | None:

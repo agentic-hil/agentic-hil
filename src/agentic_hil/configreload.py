@@ -31,6 +31,10 @@ decision put on a reload still holds:
   vocabulary ``config_status`` already uses for those three states.
 * It builds a new configuration object and hands that to the service's
   collaborators at one point. Nothing field-pokes a live one.
+* The object it hands over is validated *as composed*, not only as loaded. A
+  check that a load skipped because the file's own grants reached no hardware
+  applies again once this server's wider grants sit behind that entry, and a
+  composition that cannot pass it is refused rather than enforced.
 
 ## Which half is which
 
@@ -83,6 +87,7 @@ from agentic_hil.config import (
     ConfigError,
     load_authoritative_config,
     permission_summary,
+    revalidate_permission_dependent_pinning,
     utc_now,
 )
 from agentic_hil.configstate import config_status
@@ -221,6 +226,15 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
     being copied field by field — a section added to the configuration later is
     then *not* reloaded by default, which is the safe direction for a decision
     that has to be made deliberately per section.
+
+    Raises ``ConfigError`` when the composition does not pass the validations
+    that depend on which permissions apply. The disk document was validated
+    under the grants *it* carries, and this object pairs its entries with the
+    grants parsed at startup — a pairing no load has seen. Under version 1 the
+    difference is not cosmetic: an entry whose grants on disk are all false
+    reaches no hardware, so pinning skipped its OpenOCD script check, and the
+    startup grants put a real probe behind exactly those unchecked scripts. The
+    check is re-asked here, on the object that would be enforced.
     """
     debuggers = {
         name: replace(entry, permissions=_carried_permissions(loaded.debuggers, name, DebuggerPermissions()))
@@ -243,7 +257,7 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
     debugger_id = loaded.debugger_id if loaded.debugger_id in debuggers else (next(iter(debuggers)) if len(debuggers) == 1 else None)
     debugger = debuggers.get(debugger_id) if debugger_id is not None else None
     target = debugger.target if debugger is not None and debugger.target is not None else disk.target
-    return replace(
+    merged = replace(
         loaded,
         target=target,
         debuggers=debuggers,
@@ -254,14 +268,20 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
         # The description in force now came from these bytes, so this is what
         # `config_status` compares the file against from here on.
         config_digest=disk.config_digest,
-        # The permissions did not move. Whether that is visible depends on
-        # whether the file's grants differ from the ones being enforced: when
-        # they are the same document's, there is nothing to report and both
-        # digests name the file; when they differ, this stays on the document
-        # that was parsed at startup and `config_status` says so.
-        permissions_digest=disk.config_digest if not permission_differences(loaded, disk) else (loaded.permissions_digest or loaded.config_digest),
+        # The permissions did not move, so neither does the digest that names
+        # where they came from: it stays on the document parsed at startup for
+        # the life of this process, however many reloads run over it. Whether
+        # the divergence is worth reporting is a separate, re-answered question
+        # — does this file *state* the grants being enforced — and it is kept in
+        # its own field. Folding the two together by moving the digest onto a
+        # file whose grants happened to match made the next reload that did find
+        # a difference name that intermediate file as the permission source, and
+        # pair it with the startup `loaded_at`.
+        permissions_digest=loaded.permissions_digest or loaded.config_digest,
+        permissions_match_description=not permission_differences(loaded, disk),
         description_reloaded_at=utc_now(),
     )
+    return revalidate_permission_dependent_pinning(merged)
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +331,13 @@ def reload_description(
         # other call them different.
         return None, _relocated_refusal(existing, disk)
 
-    reloaded = merged_description(existing, disk)
+    try:
+        # The composition, not the file, is what gets enforced, and the checks
+        # that depend on which permissions apply have to be met by it. The disk
+        # document passing on its own is not the same statement.
+        reloaded = merged_description(existing, disk)
+    except ConfigError as error:
+        return None, _uncomposable_refusal(existing, error)
     changes = description_changes(existing, disk)
     differences = permission_differences(existing, disk)
     # Taken against the reloaded configuration, so it reports the description
@@ -459,6 +485,44 @@ def _unloadable_refusal(existing: AgenticHILConfig, error: Exception) -> JsonObj
             "Report `backend_error` and `summary`: they are the loader's own message and name what has to be repaired.",
             "`agentic-hil doctor` reads the file fresh and produces the same refusal without stopping anything, so an "
             "operator can repair it and confirm the repair before this call is made again.",
+            "Nothing changed here. This server is enforcing exactly what it was a moment ago, and repeating the call "
+            "after the file is repaired is the whole of the recovery.",
+        ],
+        **NOT_STARTED,
+        "retry_safe": True,
+        "cleanup_required": False,
+    }
+
+
+def _uncomposable_refusal(existing: AgenticHILConfig, error: ConfigError) -> JsonObject:
+    """The file loads, and does not pass under the permissions in force.
+
+    Its own refusal rather than the unloadable one, because the file is not the
+    problem and telling an operator to repair it would send them at a document
+    that is already valid on its own terms. What failed is the pairing: a check
+    the file was exempt from under its own grants applies again once this
+    server's wider grants are put behind its entries — an OpenOCD entry whose
+    scripts were never validated because nothing in that file could drive it.
+    Adopting it would be the split this reload exists to avoid, so nothing was
+    re-read and the policy in force is untouched.
+    """
+    return {
+        "tool": PROJECT_CONFIG_RELOAD,
+        **error.to_dict(),
+        "summary": (
+            f"{error.summary} The file on disk loads on its own, but the description in it does not pass this "
+            "validation under the permissions this server enforces, which are wider than the ones the file states. "
+            "Nothing was re-read: this server is still enforcing the configuration it loaded at startup."
+        ),
+        "config_status": config_status(existing),
+        "permissions_in_force": permission_summary(existing),
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        "next_steps": [
+            "Report `field` and `summary`: they name the exact key in the file that has to be repaired, and the "
+            "repair is the same one a restart onto this file would demand.",
+            "The alternative is a restart of the MCP server. That adopts the file's permissions along with its "
+            "description, and the pair is then the one document's again.",
             "Nothing changed here. This server is enforcing exactly what it was a moment ago, and repeating the call "
             "after the file is repaired is the whole of the recovery.",
         ],

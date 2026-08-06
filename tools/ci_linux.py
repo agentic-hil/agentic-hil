@@ -57,14 +57,23 @@ IMAGE = "python:{version}"
 # The mount is owned by the host user, not the container's root, so git treats
 # /src as unsafe and refuses to read it; `safe.directory` waives that check for
 # the one path we clone from.
+# `"$@"` rather than the arguments interpolated into the text: they arrive as
+# `bash -c <script> <$0> <arg>...` and stay one argument each. Joining them with
+# spaces split `-k "foo and bar"` into three and handed any quote, `$` or `;` in
+# a path or expression to Bash, which is the opposite of "passed to pytest
+# unchanged".
 SCRIPT = """
 set -e
 git config --global --add safe.directory /src
 git clone -q /src /work
 cd /work
 pip install -q -e '.[dev,can]'
-exec python -m pytest {args}
+exec python -m pytest "$@"
 """
+# `bash -c` takes the word after the script as `$0`, not as `$1`. It is only a
+# label for error messages; naming it is what keeps the first real argument in
+# `"$@"`.
+SCRIPT_ARGV0 = "ci_linux"
 
 
 def repository_root() -> Path:
@@ -109,16 +118,34 @@ def main(argv: list[str] | None = None) -> int:
 
     root = repository_root()
     image = options.image or IMAGE.format(version=options.python)
-    # `--` separates our options from pytest's; argparse.REMAINDER keeps it.
-    forwarded = [argument for argument in options.pytest_args if argument != "--"]
-    script = SCRIPT.format(args=" ".join(forwarded) if forwarded else "-q")
+    # `--` separates our options from pytest's, and argparse.REMAINDER keeps it,
+    # so drop the leading one and nothing else: pytest uses a `--` of its own to
+    # end its option parsing, and a filter over the whole list ate that too — so
+    # `ci_linux.py -- tests -- -x` reached pytest as `tests -x`, which is not
+    # "everything after the options, unchanged".
+    forwarded = list(options.pytest_args)
+    if forwarded and forwarded[0] == "--":
+        forwarded.pop(0)
 
     # --init, or `bash -c` is PID 1 and reaps nothing: a SIGKILLed process-group
     # leader then lingers as a zombie that still counts as a live group member,
     # and test_process_cleanup_handles_exited_group_leader fails in the container
     # while passing everywhere an init exists. The CI runners have one; give the
     # container one too so this runs what CI runs.
-    command = ["docker", "run", "--rm", "--init", "-v", f"{docker_mount_source(root)}:/src:ro", image, "bash", "-c", script]
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--init",
+        "-v",
+        f"{docker_mount_source(root)}:/src:ro",
+        image,
+        "bash",
+        "-c",
+        SCRIPT,
+        SCRIPT_ARGV0,
+        *(forwarded or ["-q"]),
+    ]
     print(f"{image}: the committed tree at {root}", flush=True)
     # `check=False` so we forward pytest's exit status instead of raising: a
     # failing suite must leave this process with pytest's code, not a traceback.

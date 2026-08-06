@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
+    READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -43,10 +44,7 @@ PYOCD_NOT_FOUND: JsonObject = {
     ],
     # No executable means no process, so this call is not an unconfirmed outcome
     # on the bench: nothing was ever started that could have touched it.
-    "target_contacted": False,
-    "side_effect_committed": False,
-    "side_effect_status": "not_started",
-    "retry_safe": True,
+    **NOT_CONTACTED,
 }
 
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
@@ -467,9 +465,7 @@ class PyOCDBackend:
             **remediation_fields("adapter_not_found", self.backend_name),
             "configured_probe_id": configured,
             "candidate_probe_ids": candidates,
-            "target_contacted": False,
-            "side_effect_committed": False,
-            "side_effect_status": "not_started",
+            **NOT_CONTACTED,
             # Deliberately not retry_safe: retrying with the same configuration
             # cannot resolve the ambiguity, only a config or bench change can.
             "retry_safe": False,
@@ -477,6 +473,18 @@ class PyOCDBackend:
 
     def _artifact_summary(self, artifact: JsonObject) -> JsonObject:
         return {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
+
+    # Classifications drawn from pyOCD's own output that name where its run
+    # stopped, each of them short of driving the target. The connect failure is
+    # limited to the reads, whose command drives nothing of its own: a flash or a
+    # reset that lost the target part-way through says the same words.
+    PRE_CONTACT_BACKEND_ERRORS = frozenset({"probe_not_found", "target_type_invalid"})
+    READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
+
+    def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
+        if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
+            return True
+        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
@@ -490,14 +498,17 @@ class PyOCDBackend:
             # The refusal carries the command that fixes it, with the configured
             # value already substituted, so nobody has to reconstruct it.
             result["install_commands"] = pack_install_commands(target_type)
-        if backend_error_type in {"probe_not_found", "target_type_invalid"}:
-            # Both name the phase before pyOCD begins a connect sequence: the
-            # probe is the only channel to the target, and pyOCD reporting that
-            # it found no probe or could not open one is the report that the
-            # channel never existed; an unresolvable target type is refused
-            # while the session is being built, before anything is driven. A
-            # failed call over a channel that never opened must refuse, not
-            # quarantine (hardci-hq#97).
+        if self._proves_no_contact(tool, backend_error_type):
+            # Each names a point at which the target was not driven: the probe is
+            # the only channel to it, and pyOCD reporting that it found no probe
+            # or could not open one is the report that the channel never existed;
+            # an unresolvable target type is refused while the session is being
+            # built, before anything is driven; and a connect sequence pyOCD says
+            # failed — no ACK, not responding, unable to connect — never brought
+            # a core under debug control. A failed call over a channel that never
+            # carried anything must refuse, not quarantine (hardci-hq#97). All
+            # three are pyOCD's own words about its own run, which is what makes
+            # them evidence rather than this layer's inference.
             result.update(NOT_CONTACTED)
         return result
 
