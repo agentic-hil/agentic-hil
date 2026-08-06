@@ -484,6 +484,48 @@ def test_every_supported_adapter_declares_how_it_is_held_to_the_flag() -> None:
     assert sorted(LISTEN_ONLY_ENFORCEMENT) == sorted(SUPPORTED_CAN_ADAPTERS)
 
 
+def test_the_reason_the_keyword_is_not_simply_passed_through() -> None:
+    """Against the real python-can, not a fake: the premise of the whole design.
+
+    If a future python-can gives either backend a real `listen_only` argument,
+    this fails and the per-adapter mechanism above should be reconsidered rather
+    than kept out of habit. Until then, passing the keyword would be discarded by
+    `BusABC.__init__(**kwargs: object)` without a word — a silent downgrade, one
+    level below the one #103 reported.
+    """
+    import inspect
+
+    pytest.importorskip("can", reason="python-can is an optional extra")
+    from can import BusState
+    from can.interfaces.pcan.pcan import PcanBus
+    from can.interfaces.socketcan.socketcan import SocketcanBus
+
+    for bus_class in (SocketcanBus, PcanBus):
+        parameters = inspect.signature(bus_class.__init__).parameters
+        assert "listen_only" not in parameters, bus_class
+        assert any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()), bus_class
+    # PCAN's actual spelling, and the one this code uses.
+    assert "state" in inspect.signature(PcanBus.__init__).parameters
+    assert BusState.PASSIVE is not None
+
+
+def test_the_pcan_read_back_constants_travel_with_any_real_pcan_bus() -> None:
+    """The measurement is only worth having if it is available where it is needed.
+
+    `can.interfaces.pcan.pcan` imports the PCANBasic constants at module level,
+    so any process that has constructed a `PcanBus` already has them in
+    `sys.modules` and the read-back cannot fail for want of an import.
+    """
+    pytest.importorskip("can", reason="python-can is an optional extra")
+    import can.interfaces.pcan.pcan  # noqa: F401
+
+    basic = sys.modules["can.interfaces.pcan.basic"]
+
+    assert hasattr(basic, "PCAN_LISTEN_ONLY")
+    assert hasattr(basic, "PCAN_PARAMETER_ON")
+    assert hasattr(basic, "PCAN_ERROR_OK")
+
+
 @pytest.mark.parametrize(
     "key",
     [

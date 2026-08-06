@@ -798,7 +798,7 @@ def socketcan_link_listen_only(channel: str) -> JsonObject:
         return {"listen_only": False, "detail": "SocketCAN interfaces, and the listen-only control mode, exist only on Linux." if os.name == "nt" else f"{unknown}: iproute2 (`ip`) is not installed at any of {', '.join(IP_COMMAND_PATHS)}."}
     command = [executable, "-details", "-json", "link", "show", "dev", channel]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=LINK_QUERY_TIMEOUT_S, check=False)  # noqa: S603
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=LINK_QUERY_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         return {"listen_only": False, "detail": f"{unknown}: `ip link show dev {channel}` could not be run ({type(error).__name__}: {error})."}
     if completed.returncode != 0:
@@ -812,8 +812,9 @@ def socketcan_link_listen_only(channel: str) -> JsonObject:
     link_info = links[0].get("linkinfo")
     kind = link_info.get("info_kind") if isinstance(link_info, dict) else None
     if kind != "can":
-        found = f"a {kind} interface" if isinstance(kind, str) else "no CAN controller"
-        return {"listen_only": False, "detail": f"{channel} is {found}, which has no listen-only mode to be in."}
+        if not isinstance(kind, str):
+            return {"listen_only": False, "detail": f"{unknown}: `ip -json link show dev {channel}` reported no link kind, so nothing says this is a CAN controller."}
+        return {"listen_only": False, "detail": f"{channel} is a {kind} interface, which has no CAN controller and therefore no listen-only mode to be in."}
     info_data = link_info.get("info_data")
     # A CAN link with no ctrlmode flags set omits the key; that is a reading, not
     # a gap. `ctrlmode` is an array in every iproute2 that emits JSON; a scalar
