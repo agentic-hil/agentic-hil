@@ -86,6 +86,17 @@ PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 # work out that it is asking for less rather than more.
 EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
 
+# `can_buses.<name>.listen_only: true` is the one configuration flag whose entire
+# value is that it is a proof rather than a preference, so the two ways it can
+# fail to be one are named separately (hardci-hq#103). `unsupported` is settled
+# before the bus is touched — the adapter has no such mode on this host, so the
+# refusal is clean and `retry_safe`. `unconfirmed` is settled after: the adapter
+# was asked, was already on the bus by the time it could answer, and did not
+# confirm; it is closed again and the exposure named. Silently downgrading either
+# to "listening anyway" is the defect these exist to prevent.
+LISTEN_ONLY_UNSUPPORTED_ERROR = "can_listen_only_unsupported"
+LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
+
 
 def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | None) -> str:
     """Why an action is refused by a permission that is *granted*, and the fix.
@@ -774,6 +785,125 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not reconstruct the pack by downloading .pdsc or .pack files by hand. That is a network fetch nobody "
             "reviewed, of content that then sits outside the cache pyOCD reads, and it is what happened the last time "
             "this was undocumented.",
+        ),
+    ),
+    # -- The one flag whose whole value is that it is never silently degraded ---
+    LISTEN_ONLY_UNSUPPORTED_ERROR: ErrorRemedy(
+        meaning=(
+            "`can_buses.<name>.listen_only: true` is configured and this adapter cannot be held to it, so the session "
+            "was refused before the bus was touched. The flag is not a preference: it is the claim that observing this "
+            "bus sends nothing, and a controller outside listen-only sends dominant ACK bits that decide whether a "
+            "sender considers its frame delivered. A downgrade to listening anyway is the defect this refusal exists "
+            "to prevent."
+        ),
+        remediation=(
+            "Read `link_state` on the result. It says what was found, not only that something was wrong.",
+            "If the bus really must not be disturbed, put the interface into listen-only outside Agentic HIL and start "
+            "the session again. On SocketCAN that is `sudo ip link set <dev> down`, then `sudo ip link set <dev> type "
+            "can bitrate <bitrate> listen-only on`, then `sudo ip link set <dev> up`.",
+            "If the bus may be ACKed — a bench nobody else is driving, a rig where this is the only participant — set "
+            "`listen_only: false` on that entry. That is an honest configuration, and the refusal goes away because "
+            "nothing is being claimed any more.",
+            "`can_buses_list` reports `listen_only` and `listen_only_enforcement` for every configured bus, so which "
+            "adapter can back the claim, and on what evidence, is readable before a session is started.",
+        ),
+        do_not=(
+            "Do not treat this as a reason to drop the flag and carry on reading. The reading would be the one the "
+            "flag was there to prevent, and nothing downstream would say the bus had been ACKed.",
+            "Do not reach past Agentic HIL to `candump` or a python-can script to get the read anyway. The controller "
+            "mode is the same for them; what changes is only that no report says so.",
+        ),
+    ),
+    f"{LISTEN_ONLY_UNSUPPORTED_ERROR}:socketcan": ErrorRemedy(
+        meaning=(
+            "SocketCAN's listen-only is a control mode on the kernel's CAN device, set when the interface is "
+            "configured and owned by the netdev — not by the socket this process opens. python-can's SocketCAN backend "
+            "accepts a `listen_only` keyword and discards it, so there is nothing here that could apply the mode. It "
+            "is read instead, and this interface is not in it — or its control mode could not be read at all, which is "
+            "the same refusal, because the flag exists to be a proof."
+        ),
+        remediation=(
+            "Read `link_state` on the result: it separates `up without listen-only` from `could not be read`, and "
+            "those have different fixes.",
+            "To put a real CAN interface into listen-only: `sudo ip link set <dev> down`, then `sudo ip link set <dev> "
+            "type can bitrate <bitrate> listen-only on`, then `sudo ip link set <dev> up`. Confirm with `ip -details "
+            "link show dev <dev>`, which prints `<LISTEN-ONLY>`.",
+            "If `link_state` says the control mode could not be read, install iproute2. Agentic HIL reads `ip` from "
+            "/sbin, /usr/sbin, /bin or /usr/bin and deliberately not from PATH, because a proof read from a "
+            "PATH-resolved binary is not a proof.",
+            "A `vcan` interface has no CAN controller and therefore no listen-only mode; there is also no physical bus "
+            "to disturb. Set `listen_only: false` there, and let the flag mean something only where a real controller "
+            "can back it.",
+        ),
+        do_not=(
+            "Do not bring the interface up listen-only from inside a test run. The mode holds for everything on that "
+            "netdev, and an interface reconfigured mid-run is itself a change to the bus — which is what was being "
+            "avoided.",
+        ),
+    ),
+    LISTEN_ONLY_UNCONFIRMED_ERROR: ErrorRemedy(
+        meaning=(
+            "`listen_only: true` was requested, the adapter was asked for it, and it did not confirm the mode. The "
+            "adapter was closed again, so the exposure is the open rather than a whole session — but it was on the bus "
+            "for that long, and this result says so instead of implying otherwise. An unconfirmed listen-only is "
+            "treated as no listen-only, because the value of the flag is the proof and not the request."
+        ),
+        remediation=(
+            "Read `driver_state` on the result: it names what came back, which is what has to change.",
+            "Check that the adapter has a listen-only mode at all. Not every CAN interface does; one that does not "
+            "cannot be made to, and such a bus has to be observed with different hardware.",
+            "`can_buses_list` reports `listen_only_enforcement` per adapter — what evidence would back the claim "
+            "there.",
+            "If the bus may be ACKed, set `listen_only: false` on that entry rather than leaving a claim nothing "
+            "supports.",
+        ),
+        do_not=(
+            "Do not retry in the hope of a different answer, and do not read the bus with `listen_only` removed while "
+            "still calling the reading passive. The frames would arrive either way; what would be lost is that the "
+            "reading ACKed them.",
+        ),
+    ),
+    f"{LISTEN_ONLY_UNCONFIRMED_ERROR}:peak": ErrorRemedy(
+        meaning=(
+            "PCAN expresses listen-only as `PCAN_LISTEN_ONLY`, which python-can sets through `BusState.PASSIVE` and "
+            "not through any `listen_only` argument. Agentic HIL sets it, re-asserts it once the channel is "
+            "initialized — python-can applies it before `PCANBasic.Initialize` and discards the `SetValue` return "
+            "code, so the constructor's request alone proves nothing — and then reads the parameter back. This channel "
+            "did not read back as listen-only, so it was closed."
+        ),
+        remediation=(
+            "Read `driver_state`. `reports PCAN_LISTEN_ONLY off` is the driver answering; anything about the parameter "
+            "not being readable means the measurement failed rather than the mode.",
+            "Confirm the PCAN hardware supports listen-only. PCAN-USB and PCAN-USB FD do; some OEM and older channels "
+            "report the parameter as unsupported, and those cannot observe a bus without ACKing.",
+            "Check that the PCANBasic driver and python-can are current — `python -m pip install --upgrade "
+            "\"agentic-hil[can]\"` — since both the mode and the read-back go through PCANBasic.",
+            "If the bench may be ACKed, set `listen_only: false` on that entry. Nothing else about the session "
+            "changes.",
+        ),
+        do_not=(
+            "Do not work around this by dropping `listen_only` and reading anyway on a bus carrying somebody else's "
+            "traffic — a vehicle, a rig, hardware that is not yours. That is the exact case the flag is for.",
+        ),
+    ),
+    f"{LISTEN_ONLY_UNCONFIRMED_ERROR}:process": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge was sent `listen_only: true` in its `open` request and its response did not "
+            "confirm the mode. A bridge is code this project did not write, so being told is not evidence: the "
+            "confirmation has to come back, or the claim is unbacked and the session is refused."
+        ),
+        remediation=(
+            "Make the bridge answer `\"listen_only\": true` in its `open` result once it has actually put its "
+            "controller into listen-only. That field is what turns a forwarded request into a confirmation. The bridge "
+            "protocol version does not change, and a bridge that is never asked for the mode is unaffected.",
+            "If the bridge cannot provide listen-only on its hardware, it should return an error from `open` rather "
+            "than a success without the field — the refusal then names the bridge's own reason instead of this one.",
+            "If the bus may be ACKed, set `listen_only: false` on that entry; the request stops carrying the flag and "
+            "the bridge is not asked to confirm anything.",
+        ),
+        do_not=(
+            "Do not answer `listen_only: true` unconditionally to clear the refusal. That reintroduces the defect one "
+            "process further out, where nothing in this repository can see it.",
         ),
     ),
 }
@@ -1619,7 +1749,13 @@ _SECTION_PURPOSE: dict[str, str] = {
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
-    "can_buses": "The CAN buses. `listen_only` is how a bus is observed without sending ACK bits.",
+    "can_buses": (
+        "The CAN buses. `listen_only: true` is how a bus is observed without sending ACK bits, and it is enforced per "
+        "adapter rather than assumed: `peak` sets the mode and reads it back from the driver, `socketcan` reads the "
+        "kernel's control mode because only `ip link` can set it, and `process` requires the bridge to confirm it. An "
+        "adapter that cannot be held to it refuses the session instead of listening anyway. `can_buses_list` reports "
+        "`listen_only_enforcement` per bus."
+    ),
     "validation": "How strictly a firmware artifact is checked before it is accepted.",
     "reports": "Where structured reports are written, relative to `state_root`.",
     "logs": "Where raw backend output is written, relative to `state_root`.",
@@ -2026,6 +2162,18 @@ The lock is keyed on the hardware, not on the name of the config entry. Two entr
 The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
 
 Reading can still perturb a target — an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
+
+What `listen_only: true` is worth is what the adapter can be held to, and that differs by adapter, so it is enforced rather than assumed (hardci-hq#103).
+
+| adapter | how the mode is obtained | what backs the claim |
+|---|---|---|
+| `peak` | set through PCAN's `BusState.PASSIVE`, re-asserted once the channel is initialized | `PCAN_LISTEN_ONLY` is read back from the driver; a channel that does not read back listen-only is closed and the session refused |
+| `socketcan` | not obtainable from this process: the mode belongs to the kernel's CAN device and only `ip link` sets it | the control mode is read before the socket is created; an interface not already in listen-only refuses the session |
+| `process` | sent to the bridge in its `open` request | the bridge's `open` result must answer `listen_only: true`; forwarding alone confirms nothing |
+
+An adapter that cannot be held to it refuses with `can_listen_only_unsupported` (before the bus is touched, `retry_safe`) or `can_listen_only_unconfirmed` (asked, not confirmed, adapter closed again). Neither downgrades to listening anyway. `can_buses_list` reports `listen_only` and `listen_only_enforcement` per bus, so the scope is readable before a session is started.
+
+What none of this proves is what the silicon does. The claim reaches as far as the driver's or the kernel's own report of its mode; the bench proof is a single sender with no other participant reporting its frame unacknowledged, and that stays with the operator.
 
 ## Lease states
 
