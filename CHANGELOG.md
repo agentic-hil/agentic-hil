@@ -23,6 +23,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - The plugin skill's exact pin stays — it ships guidance for one release, and a package ahead of it answers differently — but now states why it is wanted, that `agentic-hil upgrade` cannot reach past it, and which line does while keeping the extras. README, the quickstart and TROUBLESHOOTING carry the three outcomes and the rule that no install line outside the plugin adds `==`.
 - **Documenting a result field no longer fails the skill test.** It took every backticked underscored identifier in the shipped skill for a tool name, so each documented field cost an entry in an exclusion list that grew with the documentation and that two branches once extended independently; it now reads the tool names out of the routing table's `The tools` column and holds that column against the tool contract in both directions, and the list is gone. Prose is out of scope by construction, which costs no coverage because the table has to name every tool the server serves — the five `project_config_*` tools, named only in prose until now, gained the row that makes it complete. Implements hardci-hq#90.
 
+### Development
+
+- `tools/agent_review_loop.py` survives a round it cannot finish: an implementer killed at `--timeout` — measured rounds reached 79% of the default hour — now has its work committed as a `wip(review-loop)` commit naming the timeout, instead of leaving a whole round uncommitted with the loop gone. Each agent also gets a freshly created per-round scratch directory, named in its prompt and not just in its environment, because the agent writes its own `--basetemp` and kept choosing one Windows would not let pytest recreate.
+- The same tool now says something while it works and stops when it stops helping: a `--heartbeat` line during the 35–50 minutes `claude -p` prints nothing, a run-header line stating that the reviewer has no network (so a task that links to an issue is written out in full instead), and `--stop-after-flat-rounds`, which ends a run whose finding count has stopped falling — observed at 10, 9, 4, 4 and 8, 7, 6. Implements hardci-hq#94.
+
 ## [0.8.0] - 2026-08-06
 
 The entries below add surface — configuration keys, MCP tools, a resource, a changed generated default — so this is a minor under decision 0019, not a patch.

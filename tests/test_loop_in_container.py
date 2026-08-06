@@ -395,14 +395,13 @@ def test_the_reviewer_imports_the_commit_it_is_reviewing(tmp_path: Path, monkeyp
     (checkout / "src").mkdir(parents=True)
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "elsewhere"))
 
-    env = agent_review_loop.reviewer_env(checkout, dry_run=False)
+    env = agent_review_loop.agent_env(tmp_path / "scratch", checkout)
 
-    assert env is not None
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(checkout / "src")
     # A repository without a src directory is left exactly as it was.
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert agent_review_loop.reviewer_env(plain, dry_run=False)["PYTHONPATH"] == str(tmp_path / "elsewhere")
+    assert agent_review_loop.agent_env(tmp_path / "scratch", plain)["PYTHONPATH"] == str(tmp_path / "elsewhere")
 
 
 def test_the_reviewers_clone_falls_back_when_a_hardlink_cannot_cross_filesystems(
@@ -679,3 +678,311 @@ def test_a_clean_run_reports_where_a_custom_review_directory_landed(
     captured = capsys.readouterr()
     assert f"reviews    : {repository / 'notes' / 'reviews'}" in captured.out
     assert f"logs       : {repository / '.agentic-loop' / 'logs'}" in captured.out
+
+
+# --- a round that cannot finish, and the four other things one run cost -------
+
+
+def _repository(tmp_path: Path) -> Path:
+    """A repository with one commit and an identity, ready to be committed into."""
+    repository = tmp_path / "work"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    for name, value in (
+        ("user.name", "A Developer"),
+        ("user.email", "dev@example.invalid"),
+        ("commit.gpgsign", "false"),
+    ):
+        subprocess.run(["git", "-C", str(repository), "config", name, value], check=True)
+    (repository / "README.md").write_text("start\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "initial"], check=True)
+    return repository
+
+
+def _slow_agent(tmp_path: Path) -> Path:
+    """An agent that produces work and then never gets round to committing it."""
+    script = tmp_path / "slow_agent.py"
+    script.write_text(
+        "import pathlib, sys, time\n"
+        "pathlib.Path('half-done.py').write_text('# a round of work\\n', encoding='utf-8')\n"
+        "sys.stdout.write('editing\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _in(repository: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments], capture_output=True, text=True, check=True
+    ).stdout
+
+
+def _cut_short(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
+    return agent_review_loop.main(
+        [
+            "--repo",
+            str(repository),
+            "--task",
+            "x",
+            "--max-rounds",
+            "1",
+            "--timeout",
+            "2",
+            "--heartbeat",
+            "0",
+            "--review-checkout",
+            "none",
+        ]
+    )
+
+
+def test_a_round_the_timeout_cuts_short_is_committed_rather_than_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rounds have run 79% of the way to the limit; the one that reached it cost the work."""
+    repository = _repository(tmp_path)
+
+    exit_code = _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    # The work is in a commit, the commit says it is unfinished, and it names the
+    # timeout as the reason rather than leaving a mystery in the history.
+    assert _in(repository, "log", "-1", "--format=%s").startswith("wip(review-loop): round 1")
+    body = _in(repository, "log", "-1", "--format=%b")
+    assert "ran out of time" in body
+    assert "exceeded --timeout" in body
+    assert "half-done.py" in _in(repository, "show", "--name-only", "--format=", "HEAD").split()
+    # Nothing of the round is left in the tree. What remains untracked is this
+    # run's own paperwork, which is deliberately not part of the commit and is
+    # gitignored in the repository this loop was written for.
+    left = [line for line in _in(repository, "status", "--porcelain").splitlines() if line.strip()]
+    assert left == ["?? .agentic-loop/"]
+
+
+def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repository that does not gitignore .agentic-loop would commit a review of itself."""
+    repository = _repository(tmp_path)
+
+    _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert ".agentic-loop" not in _in(repository, "show", "--name-only", "--format=", "HEAD")
+    # The transcripts are still there to read; they are just not part of the commit.
+    assert list((repository / ".agentic-loop" / "logs").rglob("round-01-claude.log"))
+
+
+def test_a_tree_with_nothing_in_it_produces_no_salvage_commit(tmp_path: Path) -> None:
+    """An agent that failed before touching anything has nothing worth a commit."""
+    repository = _repository(tmp_path)
+    head = _in(repository, "rev-parse", "HEAD")
+
+    assert agent_review_loop.salvage_commit(repository, 1, agent_review_loop.AgentError("did not start")) is None
+    assert _in(repository, "rev-parse", "HEAD") == head
+
+
+def test_an_agent_that_says_nothing_for_minutes_still_reports_that_it_is_running(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`claude -p` prints nothing until it finishes; silence was read as a hang twice."""
+    script = tmp_path / "quiet.py"
+    script.write_text("import time\ntime.sleep(0.9)\n", encoding="utf-8")
+
+    agent_review_loop.run_agent(
+        [sys.executable, str(script)],
+        "prompt",
+        tmp_path,
+        "[claude r1]",
+        tmp_path / "log.txt",
+        timeout=30,
+        dry_run=False,
+        heartbeat=0.2,
+    )
+
+    heartbeats = [line for line in capsys.readouterr().out.splitlines() if " of 30s, " in line]
+    assert heartbeats, "an agent that printed nothing for its whole run printed nothing about itself either"
+    assert all(line.startswith("[claude r1] ... ") for line in heartbeats)
+    assert "no output yet" in heartbeats[0]
+
+
+def test_each_agent_gets_a_scratch_directory_no_round_has_used_before(tmp_path: Path) -> None:
+    """pytest deletes an existing --basetemp and recreates it, which Windows refuses."""
+    first = agent_review_loop.round_scratch(tmp_path, 1, "claude")
+    second = agent_review_loop.round_scratch(tmp_path, 2, "claude")
+    reviewer = agent_review_loop.round_scratch(tmp_path, 1, "codex")
+
+    assert len({first, second, reviewer}) == 3
+    assert all(path.is_dir() and not any(path.iterdir()) for path in (first, second, reviewer))
+    # A directory left over from an interrupted run is not handed out again.
+    again = agent_review_loop.round_scratch(tmp_path, 1, "claude")
+    assert again != first
+    assert again.is_dir()
+
+
+def test_the_scratch_directory_is_named_in_the_prompt_and_not_only_in_the_environment(tmp_path: Path) -> None:
+    """The agent writes its own pytest command line, so TMP and TEMP do not decide this."""
+    scratch = tmp_path / "round-01-claude"
+    prompts = [
+        agent_review_loop.implement_prompt("task", tmp_path / "reviews", "main", scratch),
+        agent_review_loop.fix_prompt("task", tmp_path / "review.md", 2, "main", scratch),
+        agent_review_loop.review_prompt(
+            "task", tmp_path / "review.md", "a..b", 1, None, True, scratch, has_network=False
+        ),
+    ]
+
+    for prompt in prompts:
+        assert f"--basetemp={scratch.as_posix()}/pytest-1" in prompt
+    env = agent_review_loop.agent_env(scratch)
+    assert [env[key] for key in ("TMP", "TEMP", "TMPDIR", "PYTEST_DEBUG_TEMPROOT")] == [str(scratch)] * 4
+
+
+def test_the_reviewers_scratch_is_a_directory_its_sandbox_can_write_to(tmp_path: Path) -> None:
+    """Without this the reviewer put its base temp directory beside the review document."""
+    options = argparse.Namespace(
+        codex_bin="codex", codex_model=None, codex_effort=None, codex_sandbox="workspace-write", codex_arg=[]
+    )
+    scratch = tmp_path / "scratch"
+
+    command = agent_review_loop.codex_command(
+        options, tmp_path / "schema.json", tmp_path / "last.txt", tmp_path / "reviews", tmp_path / "checkout", scratch
+    )
+
+    granted = [value for flag, value in zip(command, command[1:], strict=False) if flag == "--add-dir"]
+    assert str(scratch) in granted
+
+
+@pytest.mark.parametrize(
+    ("sandbox", "codex_arg", "expected"),
+    [
+        ("workspace-write", [], False),
+        ("read-only", [], False),
+        ("danger-full-access", [], True),
+        ("workspace-write", ["-c", "sandbox_workspace_write.network_access=true"], True),
+        ("workspace-write", ["-csandbox_workspace_write.network_access=true"], True),
+        ("workspace-write", ["--config=sandbox_workspace_write.network_access=1"], True),
+        ("workspace-write", ["-c", "model_verbosity=high"], False),
+        # Turning it on for workspace-write says nothing about read-only.
+        ("read-only", ["-c", "sandbox_workspace_write.network_access=true"], False),
+    ],
+)
+def test_whether_the_reviewer_can_reach_the_network_is_read_rather_than_assumed(
+    sandbox: str, codex_arg: list[str], expected: bool
+) -> None:
+    assert agent_review_loop.reviewer_network(sandbox, codex_arg) is expected
+
+
+def test_a_reviewer_without_network_is_told_so_and_the_caller_is_warned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A task that links to an issue is complete for the implementer and empty for the reviewer."""
+    repository = _repository(tmp_path)
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+
+    agent_review_loop.main(
+        [
+            "--repo",
+            str(repository),
+            "--task",
+            "implement https://github.com/agentic-hil/agentic-hil/issues/1",
+            "--max-rounds",
+            "1",
+            "--dry-run",
+            "--review-checkout",
+            "none",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert "network    : reviewer has no network" in captured.out
+    assert "points at something only a networked agent can read" in captured.err
+    # And the reviewer is told in its own prompt, so it does not spend turns trying.
+    offline = agent_review_loop.review_prompt(
+        "t", tmp_path / "r.md", "a..b", 1, None, True, tmp_path / "s", has_network=False
+    )
+    online = agent_review_loop.review_prompt(
+        "t", tmp_path / "r.md", "a..b", 1, None, True, tmp_path / "s", has_network=True
+    )
+    assert "NO NETWORK" in offline
+    assert "NO NETWORK" not in online
+
+
+@pytest.mark.parametrize(
+    ("findings", "flat"),
+    [
+        ([10, 9, 4, 4], 1),
+        ([8, 7, 6], 0),
+        ([4, 4, 4], 2),
+        # Back where it has already been is not progress, so the round that went
+        # up does not reset what the round coming down then repeats.
+        ([4, 5, 4], 2),
+        # A verdict read from the sentinel carries no number; it is neither.
+        ([4, -1, 4], 1),
+        ([], 0),
+    ],
+)
+def test_a_review_that_stops_getting_smaller_is_counted(findings: list[int], flat: int) -> None:
+    """10, 9, 4, 4 and 8, 7, 6 were measured; --max-rounds cannot tell them apart."""
+    assert agent_review_loop.rounds_without_progress(findings) == flat
+
+
+def test_a_run_that_has_stopped_contributing_ends_before_max_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Five rounds were allowed; the third one that found the same four ends it."""
+    repository = _repository(tmp_path)
+    committer = tmp_path / "commit_agent.py"
+    committer.write_text(
+        "import pathlib, subprocess, uuid\n"
+        "name = 'change-%s.py' % uuid.uuid4().hex[:8]\n"
+        "pathlib.Path(name).write_text('x\\n', encoding='utf-8')\n"
+        "subprocess.run(['git', 'add', name], check=True)\n"
+        "subprocess.run(['git', 'commit', '-q', '-m', 'feat: ' + name], check=True)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(committer)])
+
+    def canned(
+        setup: agent_review_loop.ReviewSetup,
+        record: agent_review_loop.RoundRecord,
+        number: int,
+        _range: str,
+        _previous: Path | None,
+        _commit: str,
+    ) -> tuple[agent_review_loop.Verdict, Path]:
+        review = setup.review_dir / f"round-{number:02d}.md"
+        review.write_text("REVIEW_STATUS: CHANGES_REQUESTED\n", encoding="utf-8")
+        record.findings = 4
+        record.status = agent_review_loop.CHANGES_REQUESTED
+        return agent_review_loop.Verdict(agent_review_loop.CHANGES_REQUESTED, 4, str(review), ""), review
+
+    monkeypatch.setattr(agent_review_loop, "perform_review", canned)
+
+    exit_code = agent_review_loop.main(
+        [
+            "--repo",
+            str(repository),
+            "--task",
+            "x",
+            "--max-rounds",
+            "5",
+            "--stop-after-flat-rounds",
+            "2",
+            "--heartbeat",
+            "0",
+            "--review-checkout",
+            "none",
+        ]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_NO_PROGRESS
+    assert "have not got the review below 4 findings" in capsys.readouterr().err
+    # Three rounds, not five: one that set the mark and two that did not beat it.
+    summary = json.loads(next((repository / ".agentic-loop" / "logs").rglob("run.json")).read_text(encoding="utf-8"))
+    assert len(summary["rounds"]) == 3
+    assert summary["stop_after_flat_rounds"] == 2

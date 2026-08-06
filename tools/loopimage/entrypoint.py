@@ -230,7 +230,9 @@ def loop_environment() -> dict[str, str]:
     environment["PYTEST_ADDOPTS"] = f"{addopts} -o cache_dir={PYTEST_CACHE}".strip()
     # The implementer edits this tree, so this is the tree its tests must
     # import. The reviewer's own checkout replaces this in the environment
-    # agent_review_loop.reviewer_env builds for it.
+    # agent_review_loop.agent_env builds for it. That function also replaces
+    # TMPDIR, TMP and TEMP with a directory of its own for each agent in each
+    # round; these values are what everything before the first round uses.
     environment["PYTHONPATH"] = str(REPO / "src")
     return environment
 
