@@ -24,6 +24,7 @@ from agentic_hil.config import (
     safe_read_text,
     safe_write_text,
 )
+from agentic_hil.configstate import config_stale, config_status
 from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -237,9 +238,68 @@ def report_state_directory(config: AgenticHILConfig) -> Path:
     return safe_directory(project_state_directory(config) / "reports")
 
 
+CONFIG_IN_FORCE_KEY = "config_in_force"
+
+
+def config_in_force(config: AgenticHILConfig) -> JsonObject:
+    """Which configuration this action was decided by, and whether disk still agreed.
+
+    A report that names only the path of the authoritative configuration says
+    nothing about the policy that was in force: the path is constant over a
+    project's lifetime and the content is not. "Under which permission did this
+    happen" is the question an audit trail exists to answer, and for a flash or a
+    mass erase it is the only one that matters.
+
+    The digest is ``AgenticHILConfig.config_digest`` — the exact bytes this
+    server parsed and is enforcing — published in the spelling ``config_status``
+    already uses, so the record and a live answer can be compared directly and
+    the fact has one name. It is deliberately *not* the coordinator's
+    ``config_sha256``: that one answers a different question ("is the file the
+    same now as when this lease was taken", which is what ``recover`` compares),
+    it is taken from a second read at coordinator construction rather than from
+    the bytes that were parsed — so under the very race this record exists for it
+    can name a document nobody parsed — and a report is written on paths that
+    never took a lease at all.
+
+    ``file_state`` is the comparison made when the report was written, which is
+    inside the action rather than after it. `changed`, `missing` and `unreadable`
+    each say the loaded version had already come apart from the file at that
+    moment, so whatever is at the path now is not evidence of the policy this
+    action ran under.
+    """
+    status = config_status(config)
+    evidence: JsonObject = {
+        "path": status.get("path"),
+        "digest_algorithm": status.get("digest_algorithm"),
+        "digest": status.get("loaded_digest"),
+        "description_source": status.get("description_source"),
+        "file_state": status.get("state"),
+        "file_digest": status.get("current_digest"),
+        # `configstate`'s own predicate, so "diverged" means here exactly what it
+        # means in a live result. In particular `unknown` is not divergence — it
+        # is a comparison that was never made — and `file_state` says which.
+        "diverged_from_file": config_stale(status),
+        "checked_at": status.get("checked_at"),
+    }
+    permissions_source = status.get("permissions_source")
+    if isinstance(permissions_source, dict):
+        # After a description reload the grants in force are still the startup
+        # document's while `digest` names the reloaded one. The question this
+        # record exists for is about permissions, so that divergence travels with
+        # it rather than being left to a reader to infer.
+        evidence["permissions_source"] = permissions_source
+    return evidence
+
+
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched = dict(report)
     enriched.setdefault("audit_ok", True)
+    # setdefault, not assignment: `recommit_report_with_status` and the adoption
+    # path commit the same report again after a terminal lease transition, and
+    # the version an action ran under must not be restamped by a later check —
+    # that would replace the one fact the record is for with a fact about the
+    # re-commit.
+    enriched.setdefault(CONFIG_IN_FORCE_KEY, config_in_force(config))
     try:
         report_path = last_report_path(config)
         display_report_path = display_path(config, report_path)
