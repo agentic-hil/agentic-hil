@@ -256,10 +256,12 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
     the fact has one name. It is deliberately *not* the coordinator's
     ``config_sha256``: that one answers a different question ("is the file the
     same now as when this lease was taken", which is what ``recover`` compares),
-    it is taken from a second read at coordinator construction rather than from
-    the bytes that were parsed — so under the very race this record exists for it
-    can name a document nobody parsed — and a report is written on paths that
-    never took a lease at all.
+    it is published in a different spelling — the bare hex the lease records on
+    disk carry, not the algorithm-prefixed one ``config_status`` uses — and a
+    report is written on paths that never took a lease at all. It is derived from
+    these same parsed bytes since hardci-hq#109; until then it came from a second
+    read at coordinator construction and could, under the very race this record
+    exists for, name a document nobody parsed.
 
     ``file_state`` is the comparison made when the report was written, which is
     inside the action rather than after it. `changed`, `missing` and `unreadable`
