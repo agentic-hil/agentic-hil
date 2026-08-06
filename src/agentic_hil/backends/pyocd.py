@@ -13,6 +13,7 @@ from agentic_hil.backends.common import (
     contains_any,
     contains_failure_text,
     invocation,
+    reset_init_unsupported,
     spawn_command,
     which,
 )
@@ -205,6 +206,8 @@ class PyOCDBackend:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
+        if mode == "init":
+            return reset_init_unsupported(self.backend_name, "pyOCD's commander has no equivalent")
         commander_command = "reset" if mode == "run" else "reset halt"
         selected = self._resolve_probe_selector("reset_target")
         if not selected["ok"]:

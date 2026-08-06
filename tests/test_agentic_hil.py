@@ -67,6 +67,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 
@@ -2840,6 +2841,108 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
     assert "debuggers.<name>.flash_address" in result["summary"]
+
+
+# What each backend puts on the wire for each mode it supports, which is the
+# only place the three can be compared. `run` and `halt` are two different
+# commands on both; `init` is OpenOCD's alone, and OPENOCD_RESET_COMMANDS above
+# holds the third line neither of these two can write.
+BACKEND_RESET_COMMANDS = {
+    ("stlink", "run"): "-rst",
+    ("stlink", "halt"): "-halt",
+    ("pyocd", "run"): "--command reset",
+    ("pyocd", "halt"): '--command "reset halt"',
+}
+
+
+def reset_probe_id(backend: str) -> str:
+    return "STLINK123" if backend == "stlink" else "PYOCD123"
+
+
+@pytest.mark.parametrize(("backend", "mode"), sorted(BACKEND_RESET_COMMANDS))
+def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_path: Path, backend: str, mode: str) -> None:
+    """One command line per backend per mode, which is the only comparable thing.
+
+    hardci-hq#58 survived three releases because nothing here compared the
+    backends: the OpenOCD parametrization above pinned all three of its command
+    lines, stlink and pyocd had no mode coverage at all, and `init` quietly
+    borrowing the halt argument was invisible from inside either one. Two modes
+    that share a command line within one backend now fail here, whichever pair
+    it is.
+
+    This asserts what went on the wire rather than `ok`, deliberately: mode
+    `halt` on stlink cannot be confirmed today, because STLINK_SUCCESS_CONFIRMATION
+    wants the two lines `-rst` prints and `-halt` prints neither. That is a
+    different defect from this one and is not fixed here - what this test has to
+    hold is that the argument reaching the CLI is the one the mode names."""
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert result["mode"] == mode
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert BACKEND_RESET_COMMANDS[(backend, mode)] in logged
+    other = "halt" if mode == "run" else "run"
+    assert BACKEND_RESET_COMMANDS[(backend, other)] not in logged
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_reset_init_is_refused_where_it_cannot_run_instead_of_halting_quietly(tmp_path: Path, backend: str) -> None:
+    """The effect that changed, not the string that changed (hardci-hq#58).
+
+    Through 0.8.0 this call spawned the backend's CLI with the same plain halt
+    argument mode `halt` sends, so the reset-init script a caller asked for -
+    clock tree, wait states, watchdog - never ran on either of these two, and on
+    pyocd the result said `Target reset with mode 'init'.` over it. The
+    assertion that matters is therefore not the error_type but the empty log
+    directory: no process ran at all, and the board is where the last call that
+    did reach it left it. The `halt` that follows still reaches the CLI, which
+    is what separates a refusal of one mode from a backend that stopped
+    working."""
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
+    service = AgenticHILToolService(config)
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "init"})
+        logs_after_refusal = sorted(Path(logs_directory(config)).glob("*"))
+        still_reaches_the_cli = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "not_supported"
+    assert refused["mode"] == "init"
+    assert refused["supported_modes"] == ["run", "halt"]
+    assert "OpenOCD" in refused["summary"]
+    # Nothing was sent: the refusal precedes the spawn, so it has no log to name.
+    assert "log_path" not in refused, refused
+    assert logs_after_refusal == []
+    # A refusal the caller may act on, not a bench somebody has to go and look at.
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_committed"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["hardware_state"] == "unchanged"
+    assert refused.get("quarantined") is not True, refused
+    assert refused.get("cleanup_required") is not True, refused
+    logged = json.loads((tmp_path / still_reaches_the_cli["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert BACKEND_RESET_COMMANDS[(backend, "halt")] in logged
+
+
+def test_the_reset_mode_schema_tells_a_caller_init_is_openocd_only(tmp_path: Path) -> None:
+    """The schema is where an agent reads the enum, so it is where the caveat goes.
+
+    A backend that refuses `init` and a schema that offers all three values
+    without comment is the same defect one layer up: the caller still has to
+    call to find out."""
+    schema = next(tool for tool in MCP_TOOLS if tool["name"] == "reset_target")["inputSchema"]
+    described = schema["properties"]["mode"]["description"]
+
+    assert schema["properties"]["mode"]["enum"] == ["run", "halt", "init"]
+    assert "OpenOCD-only" in described
+    assert "not_supported" in described
+    assert "reset-init" in described
 
 
 def test_artifact_validation_computes_sha256(tmp_path: Path) -> None:
