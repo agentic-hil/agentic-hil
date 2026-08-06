@@ -242,8 +242,16 @@ def _is_executable_path(value: str) -> bool:
     deliberate: a probe serial that happened to contain a `/` would be misread as
     a path by the looser test and split from the casefolded key its `probe_id`
     locks — the very hardci-hq#106 split, reintroduced — whereas it is not
-    absolute and so stays a hardware id here."""
-    return os.path.isabs(value)
+    absolute and so stays a hardware id here.
+
+    Rooted counts as absolute on purpose. Python 3.13 redefined
+    ``ntpath.isabs`` so a drive-less rooted path (``\\opt\\tools\\openocd``,
+    which is what ``os.path.normcase`` makes of a POSIX-style executable) stopped
+    being absolute on Windows — so the same key folded as a path under 3.12 and
+    as a hardware id under 3.13, and the legacy spelling stopped colliding with
+    the ``probe-exe:`` holder on exactly one interpreter. A rooted value is
+    still never a probe serial, so the wider reading reintroduces nothing."""
+    return os.path.isabs(value) or value[:1] in ("/", "\\")
 
 
 def physical_resources(resources: object) -> list[str]:
