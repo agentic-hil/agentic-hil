@@ -2,9 +2,15 @@
 
 The invariant every test here circles, since hardci-hq#96 turned the generated
 default over: **an agent can only ever reduce its own authority.** A generation
-grants everything — the file it writes is workable from the first call, mass
-erase included — and the direction is what is defended: `project_config_set`
+grants everything it can — the file it writes is workable from the first call,
+flashing included — and the direction is what is defended: `project_config_set`
 writes `false` into a permission and never `true`.
+
+"Everything it can" is the correction hardci-hq#107 made: the two permissions in
+`EXCLUSIVE_FLASH_PERMISSIONS` refuse flashing while they are true and put no tool
+behind that, so a generation writes them false and the file works. They are the
+one exception, they are derived from the constant here rather than spelled out,
+and `test_generated_configurations_can_flash.py` is what holds them to it.
 
 The statement kept from the version of these tests that pinned the opposite is
 that *a generation decides the permission state completely rather than half*. It
@@ -39,7 +45,7 @@ from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
 from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
-from agentic_hil.knowledge import CONFIG_SHAPE_URI, read_resource
+from agentic_hil.knowledge import CONFIG_SHAPE_URI, EXCLUSIVE_FLASH_PERMISSIONS, read_resource
 from agentic_hil.mcp import SERVER_INSTRUCTIONS, handle_mcp_message
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import (
@@ -128,6 +134,18 @@ def declared(document: object, prefix: str = "") -> set[str]:
     return set()
 
 
+def withheld_by_design(document: object) -> set[str]:
+    """Every `allow_*` flag a generation writes false on purpose, by dotted path.
+
+    The `EXCLUSIVE_FLASH_PERMISSIONS` pair on each debugger entry, read off the
+    constant rather than spelled out here, so that widening the pair moves these
+    assertions with it instead of leaving them quietly weaker (hardci-hq#107)."""
+    entries = document.get("debuggers") if isinstance(document, dict) else None
+    if not isinstance(entries, dict):
+        return set()
+    return {f"debuggers.{name}.permissions.{flag}" for name, entry in entries.items() if isinstance(entry, dict) for flag in EXCLUSIVE_FLASH_PERMISSIONS}
+
+
 def written_document(result: dict) -> dict:
     document = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -189,16 +207,18 @@ def test_generated_configuration_grants_everything_at_all(tmp_path: Path, monkey
         assert document["debuggers"]["dut"]["permissions"] == {
             "allow_flash": True,
             "allow_reset": True,
-            "allow_raw_debugger_commands": True,
-            "allow_mass_erase": True,
+            # False, and that is what makes allow_flash above mean anything:
+            # either one true refuses flash_firmware on this probe (hardci-hq#107).
+            "allow_raw_debugger_commands": False,
+            "allow_mass_erase": False,
         }
         assert document["com_ports"]["dut_uart"]["permissions"] == {"allow_write": True}
         assert document["artifacts"]["allow_upload"] is True
         assert document["debug"]["allow_all_symbols"] is True
-        # Everything the file declares is granted, whatever it is called. The
-        # complete decision, stated as one assertion rather than as the list
-        # above, which is the half that survives a key being added.
-        assert granted(document) == declared(document)
+        # Everything the file declares is granted except that pair, whatever it
+        # is called. The complete decision, stated as one assertion rather than
+        # as the list above, which is the half that survives a key being added.
+        assert declared(document) - granted(document) == withheld_by_design(document)
         assert granted(document), "a generated configuration that declares no permission proves nothing"
 
         # And the file it wrote is one this server may write again: the ratchet
@@ -245,7 +265,7 @@ def test_generated_configuration_ignores_permissions_the_workspace_asks_for(tmp_
         result = service.call(PROJECT_CONFIG_CREATE)
 
         document = written_document(result)
-        assert granted(document) == declared(document)
+        assert declared(document) - granted(document) == withheld_by_design(document)
     finally:
         service.close()
 
@@ -273,8 +293,12 @@ def test_generated_configuration_says_an_agent_wrote_it(tmp_path: Path, monkeypa
         # whole file would be describing a rule this project does not have — the
         # owner's clarification on hardci-hq#96 keeps creation out of it.
         assert "project_config_set" in text
-        assert "arrives with everything granted" in text
-        assert "comes back granting everything" in text
+        assert "arrives at the skeleton's defaults" in text
+        assert "comes back at those defaults" in text
+        # And the header states the pair it wrote false, so a reader does not
+        # meet them as an unexplained narrowing further down (hardci-hq#107).
+        assert "allow_raw_debugger_commands and allow_mass_erase" in text
+        assert "false so that\n# flashing works" in text
         # Provenance is a note to a reader, never policy: what decides the next
         # write is the permission beside it, not what the file says wrote it.
         assert load_authoritative_config(workspace).permissions.allow_config_write is True
@@ -302,8 +326,11 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     original = written_document(created)
 
     # A person narrows what their project should not have, then the file is lost.
+    # allow_flash and not allow_mass_erase: the narrowing has to be of a flag a
+    # generation leaves *true*, or the cycle this test measures costs nothing and
+    # the assertion below passes without the file having moved (hardci-hq#107).
     narrowed = deepcopy(original)
-    narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+    narrowed["debuggers"]["dut"]["permissions"]["allow_flash"] = False
     config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
     config_file.unlink()
 
@@ -317,11 +344,11 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     assert again["ok"] is True, again
     assert again["created"] is True
     regenerated = written_document(again)
-    # The second file is the first file: the same fixed skeleton, and the mass
-    # erase the person had taken away is simply back. That is what the cycle
+    # The second file is the first file: the same fixed skeleton, and the flash
+    # grant the person had taken away is simply back. That is what the cycle
     # costs, and it is why the file is not where the direction is enforced.
-    assert granted(regenerated) == declared(regenerated)
-    assert regenerated["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
+    assert declared(regenerated) - granted(regenerated) == withheld_by_design(regenerated)
+    assert regenerated["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert regenerated["permissions"] == {
         "allow_config_write": True,
         "allow_config_description_write": True,
@@ -723,7 +750,8 @@ def test_provisioning_is_reachable_over_mcp(tmp_path: Path, monkeypatch: pytest.
         # The permission summary a host sees is the granted one, so the answer a
         # caller reads over the wire is the answer the file gives.
         assert result["structuredContent"]["permissions"]["allow_config_write"] is True
-        assert result["structuredContent"]["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is True
+        assert result["structuredContent"]["permissions"]["debuggers"]["dut"]["allow_flash"] is True
+        assert result["structuredContent"]["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
 
         again = handle_mcp_message(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": PROJECT_CONFIG_CREATE, "arguments": {}}},
@@ -756,13 +784,14 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
     setting it by hand — the day of work that produced this change. Here nobody
     opens an editor at any point.
 
-    Flashing takes one extra call, and the direction of it is the point. Validated
+    Flashing takes no extra call, and that is what hardci-hq#107 fixed. Validated
     flashing and unrestricted debugger access are mutually exclusive policies
-    (docs/security-design.md), and a generated configuration grants both sides of
-    that exclusion — so `flash_firmware` is refused until somebody decides which
-    of the two this bench keeps. That decision is a *narrowing*, which is the one
-    thing an agent may write, so it happens on the operator's word in the same
-    session. Nothing about it is a widening and nothing about it needs an editor.
+    (docs/security-design.md), and for a while a generated configuration granted
+    both sides of that exclusion — so `flash_firmware` was refused on a file
+    nobody had touched, and the way on was for somebody to know that two
+    permissions being *on* was what blocked it. The generation writes that pair
+    false now, and neither of them was a capability to give up: no MCP tool reads
+    either as permission to do anything.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -780,32 +809,19 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
         assert PROJECT_CONFIG_CREATE in blocked["next_step"]
 
         # 2. One call, no arguments, no editor, and the bench is described and
-        #    granted. The result says both, including the exclusion below.
+        #    granted — including the two the interlock reads, which the
+        #    generation writes false precisely so that step 3 works.
         created = service.call(PROJECT_CONFIG_CREATE)
         assert created["ok"] is True, created
         assert created["permissions"]["debuggers"]["dut"]["allow_flash"] is True
+        assert created["permissions"]["debuggers"]["dut"]["allow_raw_debugger_commands"] is False
+        assert created["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
         assert any("mutually exclusive" in step for step in created["next_steps"]), created["next_steps"]
 
-        # 3. Flashing is past `allow_flash` on the first try — the refusal names
-        #    the exclusion and the key that resolves it, not a missing grant.
-        refused = service.call("flash_firmware", {"image_path": "build/app.hex"})
-        assert refused["error_type"] == "permission_denied"
-        assert "mutually exclusive" in refused["summary"]
-        assert "allow_raw_debugger_commands" in refused["summary"]
-
-        # 4. The operator says which of the two this bench keeps. The agent
-        #    writes it — a narrowing, through the ordinary write door.
-        narrowed = service.call(
-            PROJECT_CONFIG_SET,
-            {
-                "changes": [
-                    {"key": "debuggers.dut.permissions.allow_raw_debugger_commands", "value": False},
-                    {"key": "debuggers.dut.permissions.allow_mass_erase", "value": False},
-                ]
-            },
-        )
-        assert narrowed["ok"] is True, narrowed
-
+        # 3. Flashing works on the first try. There is no narrowing step between
+        #    the generation and the first flash, and that is the whole point of
+        #    this test: until hardci-hq#107 there was one, and an operator who did
+        #    not know to take it could not flash a freshly generated bench at all.
         flashed = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
         try:
             result = flashed.call("flash_firmware", {"image_path": "build/app.hex"})
@@ -819,12 +835,13 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
     # left between an empty directory and a real board is the board.
     assert result["error_type"] not in ("permission_denied", "invalid_argument"), result
     assert result["artifact"]["path"].endswith("app.hex"), result
-    # And the file it all came out of was never touched by hand: an agent wrote
-    # it in one call with every permission granted, and an agent narrowed it on
-    # request. Two documents' worth of change, no editor in either.
+    # And the file it all came out of was never touched by hand, or touched
+    # twice: one call wrote it and nothing edited it afterwards. The pair below
+    # is false because the generation wrote it that way, not because anybody was
+    # asked to fix a bench that would not flash.
     document = written_document(created)
     assert document["provenance"]["created_by"] == "agent"
-    assert document["provenance"]["last_modified_by"] == "agent"
+    assert "last_modified_by" not in document["provenance"]
     assert declared(document) - granted(document) == {
         "debuggers.dut.permissions.allow_raw_debugger_commands",
         "debuggers.dut.permissions.allow_mass_erase",
@@ -851,23 +868,23 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
         # writes it, with a provenance record and no YAML editing.
         narrowed = service.call(
             PROJECT_CONFIG_SET,
-            {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]},
+            {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": False}]},
         )
         assert narrowed["ok"] is True, narrowed
-        assert narrowed["permissions_changed"] == ["debuggers.dut.permissions.allow_mass_erase"]
+        assert narrowed["permissions_changed"] == ["debuggers.dut.permissions.allow_reset"]
         assert "permissions_frozen" not in narrowed
         assert written_document(created)["provenance"]["last_modified_by"] == "agent"
 
         # 1. It cannot put back what it just took away.
         reopened = service.call(
             PROJECT_CONFIG_SET,
-            {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": True}]},
+            {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": True}]},
         )
         assert reopened["error_type"] == "permission_widening_denied"
-        assert reopened["widened_keys"] == ["debuggers.dut.permissions.allow_mass_erase"]
+        assert reopened["widened_keys"] == ["debuggers.dut.permissions.allow_reset"]
         assert reopened["reopened_by"] == "agentic-hil init --force"
         assert reopened["side_effect_committed"] is False
-        assert written_document(created)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+        assert written_document(created)["debuggers"]["dut"]["permissions"]["allow_reset"] is False
 
         # 2. Nor can it slip one through beside a narrowing: a change is applied
         #    whole or not at all, so the narrowing is refused with the widening.
@@ -876,7 +893,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
             {
                 "changes": [
                     {"key": "com_ports.dut_uart.permissions.allow_write", "value": False},
-                    {"key": "debuggers.dut.permissions.allow_mass_erase", "value": True},
+                    {"key": "debuggers.dut.permissions.allow_reset", "value": True},
                 ]
             },
         )
@@ -895,7 +912,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
         assert frozen["reopened_by"] == "agentic-hil init --force"
         # What stands frozen, read out of the file rather than out of the
         # request: the one already taken away and the ones left granted.
-        assert frozen["frozen_permissions"]["debuggers.dut.permissions.allow_mass_erase"] is False
+        assert frozen["frozen_permissions"]["debuggers.dut.permissions.allow_reset"] is False
         assert frozen["frozen_permissions"]["debuggers.dut.permissions.allow_flash"] is True
         assert frozen["frozen_permissions"]["permissions.allow_config_permissions_write"] is False
         # And it is in the result of *that* call, not only in a reference.
@@ -919,8 +936,10 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
     document = written_document(created)
     assert document["debuggers"]["dut"]["permissions"] == {
         "allow_flash": True,
-        "allow_reset": True,
-        "allow_raw_debugger_commands": True,
+        # The narrowing this test made, which no later call could put back.
+        "allow_reset": False,
+        # The generated default, false before anything narrowed anything.
+        "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
     }
     assert document["permissions"]["allow_config_permissions_write"] is False
@@ -1317,13 +1336,15 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
     finally:
         service.close()
 
+    # Nothing was narrowed, and the two flags a generation writes false are not
+    # reported as a narrowing: nobody chose them for this bench (hardci-hq#107).
     assert created["narrowed_permissions"] == []
-    assert "every permission granted" in created["summary"]
+    assert "flash the bench" in created["summary"]
     config_file = Path(created["path"])
     assert "Every permission below is true" in config_file.read_text(encoding="utf-8")
 
     narrowed = written_document(created)
-    narrowed["debuggers"]["dut"]["permissions"]["allow_mass_erase"] = False
+    narrowed["debuggers"]["dut"]["permissions"]["allow_reset"] = False
     narrowed["artifacts"]["allow_upload"] = False
     config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
 
@@ -1335,13 +1356,17 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
         reopened.close()
 
     assert rewritten["ok"] is True, rewritten
-    assert rewritten["narrowed_permissions"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_mass_erase"]
+    assert rewritten["narrowed_permissions"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_reset"]
     assert "carried over as false from the configuration this server loaded at startup" in rewritten["summary"]
     assert "every permission was carried over unchanged" not in rewritten["summary"]
     header = config_file.read_text(encoding="utf-8")
-    assert "Every permission below is true" not in header
-    assert "2 permission(s) below are false" in header
-    assert "#   debuggers.dut.permissions.allow_mass_erase" in header
+    assert "2 further permission(s) below are false" in header
+    assert "#   debuggers.dut.permissions.allow_reset" in header
+    # The two the generation writes false are stated as such and are *not* in
+    # that count, so an operator reading the header is not told the bench came
+    # back narrower than it did.
+    assert "#   debuggers.dut.permissions.allow_mass_erase" not in header
+    assert "false so that\n# flashing works" in header
     # And the next steps do not tell the agent to report a bench that is fully
     # granted when it is not.
     assert any("narrowed_permissions" in step for step in rewritten["next_steps"])
@@ -1353,7 +1378,14 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     They are the only statement about this tool most callers ever see, so a
     sentence left over from the closed default is not stale documentation — it is
     a live instruction telling a connected agent that a bench it just generated
-    grants nothing, at the moment it in fact grants mass erase."""
+    grants nothing, at the moment it in fact grants flashing.
+
+    Since hardci-hq#107 the same applies in the other direction, and it is the
+    sharper case: a contract that still said "every permission is true" would be
+    telling an agent that the two flags the interlock reads are on, and the
+    documented way to make flashing work would be to ask an operator to turn them
+    off — advice for a bench that no longer exists, on a file where following it
+    changes nothing."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
@@ -1361,17 +1393,20 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
         created = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
-    assert set(granted(written_document(created))) == set(declared(written_document(created)))
+    document = written_document(created)
+    assert declared(document) - granted(document) == withheld_by_design(document)
 
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
     for text in (SERVER_INSTRUCTIONS, description):
         assert "every permission in it is true" in text or "Every permission in the generated file is true" in text
-        assert "allow_mass_erase" in text or "mass erase" in text
+        # Both flags named, and named as false: an agent that reads either of
+        # these must not go looking for a narrowing that is already made.
+        assert "allow_raw_debugger_commands and allow_mass_erase, which are false" in text
         assert "every permission in it is false" not in text
         assert "every write permission in the generated file is false" not in text
     # And what the schema says a provenance record means says it too.
     provenance = config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"]
-    assert "every permission true" in provenance
+    assert "every permission true except allow_raw_debugger_commands and allow_mass_erase" in provenance
 
 
 def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back(
@@ -1401,11 +1436,14 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
     path = Path(created["path"])
 
     # One service, one session: narrow, then regenerate, with no restart between.
+    # allow_reset and not allow_mass_erase, because the narrowing has to be of a
+    # flag a generation leaves true, or the regeneration below puts nothing back
+    # and this passes without exercising anything (hardci-hq#107).
     service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
     try:
-        narrowed = service.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]})
+        narrowed = service.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": False}]})
         assert narrowed["ok"] is True, narrowed
-        assert written_document({"path": str(path)})["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
+        assert written_document({"path": str(path)})["debuggers"]["dut"]["permissions"]["allow_reset"] is False
 
         attached_hardware(monkeypatch)
         regenerated = service.call(PROJECT_CONFIG_CREATE)
@@ -1413,7 +1451,7 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
         service.close()
 
     assert regenerated["ok"] is True, regenerated
-    assert written_document(regenerated)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
+    assert written_document(regenerated)["debuggers"]["dut"]["permissions"]["allow_reset"] is True
     assert regenerated["narrowed_permissions"] == []
     # And the result says which state it wrote from, so nobody reads the reopened
     # grant as a promise that was broken.

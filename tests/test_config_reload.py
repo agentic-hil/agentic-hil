@@ -97,8 +97,9 @@ def add_second_board(document: dict) -> None:
         "type": "stlink",
         "executable": FAKE_STLINK.as_posix(),
         "probe_id": "SPARE-0002",
-        # A generated entry grants everything; that is exactly what must not
-        # reach a running server through a reload.
+        # A hand-widened entry, wider than any generation writes: since
+        # hardci-hq#107 the last two are generated false. That is exactly what
+        # must not reach a running server through a reload.
         "permissions": {"allow_flash": True, "allow_reset": True, "allow_raw_debugger_commands": True, "allow_mass_erase": True},
     }
     document["debuggers"]["dut"]["probe_id"] = "DUT-0001"
