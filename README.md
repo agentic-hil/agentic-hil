@@ -361,9 +361,9 @@ Devices are named as `{"kind": "debugger" | "uart" | "can", "id": "<config entry
 
 Write a hardware test as a plan, not a script: one reviewable YAML file describes flash → stimulate → break → dump, and the reactor guarantees it is either executed exactly as written or rejected before the first hardware action. No half-run plans, no leftover breakpoints, no orphaned debug or UART sessions — the same file behaves identically on your bench and in CI, and it diffs like code in a pull request.
 
-The test reactor executes a strict, sequential YAML or JSON test plan against the named devices in the authoritative config. A debugger step names a `debuggers` entry (`debugger: <name>`); a UART step names a `com_ports` entry (`port_id: <name>`). `debugger` may be omitted while the config declares exactly one probe — with several, the plan must name one, because picking a board for the author is how the wrong board gets flashed. Every probe carries its own permissions, so a step is judged by the grants of the board it names. Probes other than the bound one run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
+The test reactor executes a strict, sequential YAML or JSON test plan against the named devices in the authoritative config. A debugger step names a `debuggers` entry (`debugger: <name>`); a UART step names a `com_ports` entry (`port_id: <name>`); a CAN step names a `can_buses` entry (`bus_id: <name>`). Every device kind the config models can take part in a plan, and each kind answers for its own actions, permissions, session order and cleanup. `debugger` may be omitted while the config declares exactly one probe — with several, the plan must name one, because picking a board for the author is how the wrong board gets flashed. Every probe carries its own permissions, so a step is judged by the grants of the board it names. Probes other than the bound one run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
 
-Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
+Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple — validate everything, then execute, then always clean up:
 
@@ -379,12 +379,17 @@ name: capture-state
 steps:
   - {debugger: dut, action: flash, image_path: build/app.elf}
   - {port_id: dut_uart, action: uart_open}
+  - {bus_id: dut_can, action: can_open}
   - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
   - {debugger: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
+  - {bus_id: dut_can, action: can_read, max_frames: 64, wait_timeout_s: 1}
   - {debugger: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
   - {debugger: dut, action: debug_stop}
+  - {bus_id: dut_can, action: can_close}
   - {port_id: dut_uart, action: uart_close}
 ```
+
+`dut_can` above is the `listen_only: true` bus from the configuration example, so the plan only reads it. A `can_send` step belongs on a bus whose entry sets `listen_only: false` and grants `allow_write`.
 
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
