@@ -4,18 +4,21 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import FAKE_STLINK
 
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
 from agentic_hil.bootstrap import (
+    PROJECT_PROFILE,
     apply_discovery_to_template,
     correlate_com_port,
     discover_attached_hardware,
     select_probe_id,
 )
-from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, init_config
+from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
 from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_config
-from agentic_hil.types import fold_hardware_id
+from agentic_hil.tools import project_config_create
+from agentic_hil.types import JsonObject, fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -371,3 +374,160 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
     entry = written.debuggers["dut"]
     assert debugger_is_placeholder(entry)
     assert not debugger_drives_hardware(written, entry)
+
+
+# ---------------------------------------------------------------------------
+# hardci-hq#104: one machine, one bench, and every path that reads it agreeing.
+
+
+def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> None:
+    """One bench on this host, seen through the real discovery path.
+
+    Only the two ST-Link processes and the host port inventory are replaced, so
+    enumeration, selection, the HOTPLUG connect and the COM correlation all run
+    for real — a double for `discover_attached_hardware` itself would let a caller
+    that never calls it pass. It answers by command rather than out of an
+    iterator, because more than one caller reads this host per test, and that is
+    the whole point."""
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        listing = f"ST-LINK SN : {serial}\n"
+        return CompletedCommand(listing if "-l" in command else f"{listing}Device name : {controller}\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: FAKE_STLINK.as_posix())
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [{"device": device, "serial_number": serial}]},
+    )
+
+
+def _bench_facts(path: Path) -> JsonObject:
+    """What a written configuration says about the board in front of it.
+
+    Only the keys discovery decides. Permissions, provenance and the header a
+    generated file carries are each path's own business and differ on purpose."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    debugger = document["debuggers"]["dut"]
+    port = next(iter(document.get("com_ports", {}).values()), {})
+    return {
+        "type": debugger["type"],
+        "executable": debugger["executable"],
+        "probe_id": debugger["probe_id"],
+        "controller": document["target"]["controller"],
+        "com_port_device": port.get("device"),
+        "com_port_baudrate": port.get("baudrate"),
+    }
+
+
+def test_init_looks_for_attached_hardware_without_a_project_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Looking is not what a project profile decides.
+
+    `init` called discovery only when the workspace held an
+    `agentic-hil.config.example.yaml`, so a fresh installation — which has none —
+    got the placeholder skeleton on a machine with the board plugged in, and
+    nothing in the result said that nothing had been looked for. The MCP server
+    reads the same board unconditionally, which is how this arrived as "CLI
+    discovery is broken": it was not broken, it never ran. A profile says how to
+    name and narrow a bench that was found; the fixed default fills in for it when
+    the workspace has none."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert not (workspace / PROJECT_PROFILE).exists()
+    _one_attached_stlink(monkeypatch)
+
+    result = init_config()
+    written = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+
+    assert result["ok"] is True, result
+    assert result["hardware_discovery"]["ok"] is True
+    assert result["summary"].startswith("Attached hardware was discovered and configured")
+    assert written["debuggers"]["dut"]["type"] == "stlink"
+    assert written["debuggers"]["dut"]["probe_id"] == "STLINK123"
+    assert written["debuggers"]["dut"]["executable"] == FAKE_STLINK.as_posix()
+    assert written["target"]["controller"] == "stm32f446re"
+    assert written["com_ports"]["dut_uart"]["device"] == "COM7"
+
+
+def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bench that was looked for and not found is a finding, not a default.
+
+    This is the other half of the report. An operator handed `probe_id: null` and
+    a placeholder target, with no sentence anywhere about the board they can see
+    plugged in, concludes that detection is broken. The result now names what
+    discovery answered and the one command that fills the file in afterwards."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    # Never None: "did not look" and "looked and found nothing" were the two
+    # outcomes this key could not tell apart, and only one of them exists now.
+    assert result["hardware_discovery"]["ok"] is False
+    assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
+    assert result["summary"].startswith("No attached bench was found")
+    assert result["summary"].endswith("with every permission granted.")
+    assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
+    assert "agentic-hil adopt-hardware" in result["next_steps"][0]
+
+
+def test_init_and_the_server_describe_one_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two paths, one machine, one answer — the test that fails if they part.
+
+    `agentic-hil init` at a shell and `project_config_create` over MCP both write
+    a workspace's authoritative configuration out of what is attached, and an
+    operator moves between them within one session: `setup` runs the first, the
+    agent runs the second. hardci-hq#104 is precisely this pair disagreeing about
+    a board that was plugged in the whole time, so what the two files say about the
+    board is pinned here rather than left to two call sites to keep in step. What
+    they may still differ in is stated by omission: permissions, provenance and the
+    generated header are each path's own."""
+    _one_attached_stlink(monkeypatch)
+    shell_workspace = tmp_path / "shell"
+    shell_workspace.mkdir()
+    monkeypatch.chdir(shell_workspace)
+    from_shell = init_config()
+    assert from_shell["ok"] is True, from_shell
+
+    server_workspace = tmp_path / "server"
+    server_workspace.mkdir()
+    from_server = project_config_create(server_workspace, None)
+    assert from_server["ok"] is True, from_server
+
+    assert _bench_facts(Path(from_shell["path"])) == _bench_facts(Path(from_server["path"]))
+    assert _bench_facts(Path(from_shell["path"]))["probe_id"] == "STLINK123"
+
+
+def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reporter's own proof, turned round.
+
+    That `agentic-hil adopt-hardware` repaired the file `init` had just written was
+    how they learned the board had been discoverable all along — one command
+    walking past what the next one found. On a bench that is attached, adoption now
+    has nothing to carry: every key it would fill already holds the value `init`
+    read off the same board through the same function."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+    assert init_config()["ok"] is True
+
+    plan = adopt_hardware(dry_run=True)
+
+    assert plan["ok"] is True, plan
+    assert plan["carried"] == []
+    assert plan["kept"] == []
+    assert plan["unavailable"] == []
+    assert {item["key"] for item in plan["already_current"]} == {
+        "target.controller",
+        "debuggers.dut.probe_id",
+        "debuggers.dut.executable",
+        "com_ports.dut_uart.device",
+        # The port's own identity (hardci-hq#100), which `init` now writes for
+        # the same reason it writes the device: it read it off the same board.
+        "com_ports.dut_uart.serial_number",
+    }
