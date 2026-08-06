@@ -3,7 +3,7 @@ name: agentic-hil
 description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
 metadata:
   origin: Agentic HIL
-  agentic_hil_version: "0.8.0"
+  agentic_hil_version: "0.9.0"
 ---
 
 # Agentic HIL
@@ -314,11 +314,11 @@ user-local executable, so it registers no MCP server command. Install the
 package version matching this plugin first:
 
 ```bash
-uv tool install --upgrade "agentic-hil==0.8.0"
+uv tool install --upgrade "agentic-hil==0.9.0"
 agentic-hil --version
 ```
 
-The version check must report exactly `0.8.0`. If `uv` is unavailable or a
+The version check must report exactly `0.9.0`. If `uv` is unavailable or a
 different `agentic-hil` resolves on `PATH`, stop and ask the operator to
 establish the trusted user-local prerequisite; do not substitute `uvx`, a
 workspace virtual environment, or an unversioned package. `invalid peer

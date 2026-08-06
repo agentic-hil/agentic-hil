@@ -4,7 +4,13 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
-## [Unreleased]
+## [0.9.0] - 2026-08-06
+
+The entries below add surface — two CLI commands, tool annotations, a configuration key, a record in every report, three error types — so this is a minor under decision 0019, not a patch.
+
+Every one of them came from the same place: an interface written from what it was expected to do, never held against what it does. A serial port was identified by a name the kernel hands out in plug order. `listen_only` was read from the configuration, documented as the proof that a reading touched nothing, and dropped before it reached the adapter. `init` looked for hardware only when the project shipped a profile, while every server path looked unconditionally. Tools carried no annotations, so a host blocked a call that writes nothing. A report named the configuration's path, which never changes, and not its version, which does. And a permission an agent closed had no way back short of deleting the file and losing the bench with it.
+
+None of these were found by tests. They were found by using the thing.
 
 ### Added
 
