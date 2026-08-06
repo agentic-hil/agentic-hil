@@ -66,7 +66,7 @@ port that would not open, a read whose backend reports that no target answered
 it or ask for it to be fixed, and retry. Being a read is not the proof; the
 backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
 anything else when the backend named no abort point — a call killed at its
-deadline, an exit that confirms nothing — because an SWD attach halts the core
+deadline, an exit without complete confirmation — because an SWD attach halts the core
 and nothing there says whether it got that far. `quarantined: true` means the
 physical state is genuinely unknown. Stop
 effects there and retry the hardware call once: an incident the bench's
