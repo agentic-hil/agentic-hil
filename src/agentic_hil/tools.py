@@ -34,6 +34,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
+from agentic_hil.configreload import PROJECT_CONFIG_RELOAD, reload_description
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     NOT_STARTED,
@@ -70,6 +71,17 @@ from agentic_hil.report import (
 from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject
 
 
+def _backend_kind(config: AgenticHILConfig | None) -> str | None:
+    """Which backend class a configuration calls for, or None for no probe.
+
+    The one thing `DebuggerBackend.reconfigure` cannot fix. Every backend keeps
+    its own config, so this reads the same answer off an object as off a
+    configuration and the two are compared without a second attribute to keep in
+    step."""
+    debugger = getattr(config, "debugger", None)
+    return debugger.type if debugger is not None else None
+
+
 class AgenticHILToolService:
     def __init__(
         self,
@@ -88,6 +100,14 @@ class AgenticHILToolService:
         # or run its owner-scoped process/handle cleanup on teardown.
         self._owns_coordinator = coordinator is None
         self.backend = backend or create_debugger_backend(self.config)
+        # Which backend class drives this bench is decided by `debuggers.<n>.type`
+        # and by whether a probe is bound at all, so a description reload can
+        # invalidate the *object* and not only its config — a bench that
+        # configured no debugger and now configures one holds an
+        # UnboundDebuggerBackend that no `reconfigure` can turn into an OpenOCD
+        # one. That rebuild is only ours to make when we built the backend: an
+        # injected one belongs to its caller.
+        self._owns_backend = backend is None
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
@@ -398,6 +418,12 @@ class AgenticHILToolService:
             # holds, and a probe held by another process on this machine answers
             # device_busy instead of being connected to behind its owner's back.
             PROJECT_CONFIG_ADOPT: lambda: project_config_adopt_hardware(Path(self.config.work_dir), self.config, args, coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
+            # Reads the file and changes nothing on disk, so no grant gates it —
+            # reading is free here, and this cannot widen anything: it takes the
+            # description and leaves every permission where it was. A bench whose
+            # allow_config_description_write is false must still be able to pick
+            # up a board somebody plugged in.
+            PROJECT_CONFIG_RELOAD: lambda: self.reload_description(),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
@@ -473,6 +499,68 @@ class AgenticHILToolService:
                     return {"tool": name, **error.to_dict()}
                 raise
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
+
+    def reload_description(self) -> JsonObject:
+        """Take the device description on disk, keeping the permissions in force.
+
+        The swap is one statement in the middle of this method, and everything
+        around it is either the decision (in `configreload`, which builds a whole
+        new configuration and hands it back rather than touching this one) or the
+        handover to the collaborators. Nothing here field-pokes a live config:
+        the object every collaborator holds is replaced with the new one, and the
+        collaborators that keep state derived from it — an open COM session, a
+        cached probe uid, a gdb session — are the ones that decide what of it
+        survives.
+
+        It runs on the dispatch path, so it is already under `_lifecycle_lock`
+        and inside the same serialization every other call gets. That, plus the
+        refusal while anything is held, is what makes "at a defined point" true:
+        no call is part-way through reading `self.config` while it changes.
+        """
+        reloaded, result = reload_description(
+            self.config,
+            open_holds=self.open_hardware_holds(),
+            quarantine=self._unresolved_incident(),
+        )
+        if reloaded is None:
+            return result
+        self._swap_config(reloaded)
+        return result
+
+    def _unresolved_incident(self) -> JsonObject | None:
+        """This bench's open incident, or None when there is none.
+
+        Separate from `open_hardware_holds` because it is a different fact: a
+        quarantine can outlive every lease that produced it, and `blocked` is
+        then true with nothing held. A description reload is refused on it all
+        the same — the operator is about to be asked to physically check the
+        devices the incident names, and a name that meant another board by the
+        time they read it is the one thing that check cannot survive."""
+        if not self.coordinator.blocked:
+            return None
+        return {
+            "quarantined": True,
+            "quarantine_id": self.coordinator.quarantine_id,
+            "cleanup_required": True,
+            "cleanup_reasons": sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()}),
+        }
+
+    def _swap_config(self, config: AgenticHILConfig) -> None:
+        self.config = config
+        self.coordinator.reconfigure(config)
+        # `create_debugger_backend` dispatches on the bound probe's type, so a
+        # config whose binding or type moved needs a different object and not a
+        # different field. The old one is closed first: the reload is refused
+        # while anything is held, so there is no session to lose here, and
+        # dropping the object without closing it would leak whatever it opened.
+        if self._owns_backend and _backend_kind(config) != _backend_kind(getattr(self.backend, "config", None)):
+            self.backend.close()
+            self.backend = create_debugger_backend(config)
+        else:
+            self.backend.reconfigure(config)
+        self.artifacts.reconfigure(config)
+        self.com_ports.reconfigure(config)
+        self.can_buses.reconfigure(config)
 
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()

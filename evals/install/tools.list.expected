@@ -32,5 +32,6 @@ probe_target
 project_config_adopt_hardware
 project_config_create
 project_config_describe
+project_config_reload_description
 project_config_set
 reset_target

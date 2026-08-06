@@ -143,7 +143,9 @@ the permission that is missing and is the answer to the request. A write is
 refused while a run or a session holds hardware, the changed file is validated
 before it replaces the working one, and what moved is recorded in `provenance`.
 This server keeps serving the configuration it loaded, so report the result's
-reload_required field and ask the operator to restart it.
+reload_required field: `project_config_reload_description` is what makes a
+changed device description the one it answers out of, and a changed permission
+is what an operator restarts the server for.
 `agentic-hil://reference/config-shape` describes the whole shape, a worked
 example, and what deliberately cannot be done.
 
@@ -186,15 +188,16 @@ keys and values, so the operator gets one command to run — `agentic-hil
 adopt-hardware` — and not a serial to transcribe.
 
 `config_stale: true` on any result says the authoritative file is no longer the
-one this server parsed. Nothing is reloaded while the server runs, so the backend
-that result names, the devices it knows and the permissions it enforces are all
-from the version loaded at startup. The `config_status` block names the file and
-says which of three states it is in:
+one this server parsed, so the backend that result names, the devices it knows
+and the permissions it enforces are all from the version loaded at startup. The
+`config_status` block names the file and says which of three states it is in:
 
 - `changed` — loaded_digest and current_digest differ. That is the whole of the
   claim: the file on disk is not the one this server loaded. It says nothing
   about what the file now contains and does not promise a restart will succeed.
-  Ask for the restart. If the server does not come back, the startup refusal
+  If what moved is the bench's description, call
+  `project_config_reload_description` — see below. Otherwise ask for the
+  restart. If the server does not come back, the startup refusal
   names what is wrong with the file — report that and have it repaired.
   `agentic-hil doctor` produces the same refusal without stopping anything.
 - `missing` — the file is gone and current_digest is `null`, so there is
@@ -208,13 +211,32 @@ says which of three states it is in:
   read failed on. It has to be made readable before it can be compared at all.
 
 `unknown` is not one of these and never sets `config_stale`: no comparison was
-made, so nothing is claimed either way and reload_required is `false`. Report
-what you get, ask the operator once, and do not try to make the server pick the
-file up by editing again or by calling a configuration tool. `debugger_info` and
+made, so nothing is claimed either way and reload_required is `false`.
+`debugger_info` and
 `project_config_describe` carry the block either way, so a disagreement between
 `agentic-hil doctor` — which reads the file fresh every time — and
 `debugger_info` is this and nothing else. A permission revoked since startup
 already binds; one added since does not.
+
+**A board plugged in after this server started does not need a restart.**
+`project_config_reload_description` takes no arguments, needs no permission
+because it writes nothing, and re-reads exactly four sections — `target`,
+`debuggers`, `com_ports`, `can_buses` — minus every `permissions:` block inside
+them. It re-reads **no permission at all**, in either direction, and there is no
+argument that changes that: a device this server has never seen arrives holding
+nothing, so you can probe and read it (from `version: 2` on, reading needs no
+grant) and cannot flash, reset, mass-erase or write to it until an operator
+restarts the server. A renamed entry is the same case. Everything outside those
+four sections — every permission, `version`, `workspace_root`, `state_root`,
+`debug`, `artifacts`, `validation`, `recovery`, `reports`, `logs` — is adopted by
+a restart and by nothing else; the result names them under
+`not_reloaded_sections`, and `permission_differences` lists every grant the file
+states that this server is not enforcing. The call is refused while a run or a
+session holds the bench (`config_reload_in_open_run`), while an incident is
+unresolved (`resource_quarantined`), and on a file that is missing, unreadable
+or will not load — report the refusal and stop. Ask the operator once for the
+restart when a permission is what moved, and do not try to make the server pick
+a change up by editing the file again or by calling a configuration write tool.
 
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through

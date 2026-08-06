@@ -225,6 +225,34 @@ class HardwareCoordinator:
         self._state = "open"
         self._guard = threading.RLock()
 
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        """Bind this coordinator to a re-read description of the same bench.
+
+        ``project_config_reload_description`` is the only caller, and it is
+        refused while anything is held or any incident is open — so this runs
+        with no lease, no run and no quarantine, which is what makes replacing
+        the config safe rather than a change under a live lock.
+
+        ``config_sha256`` moves with it. It is what a lease record carries and
+        what ``recover`` compares to decide whether the operator has to confirm a
+        configuration delta before clearing an incident, and that question is
+        "was the file the same then as it is now" — so it has to name the file
+        this coordinator is now describing, exactly as it would after a restart.
+        It is recomputed from the digest the reload already took rather than by
+        reading the file again: a second read can straddle an edit, and a record
+        stamped with a document nobody parsed would answer that question wrong in
+        both directions.
+
+        ``project_key`` is not recomputed because it cannot move: it is derived
+        from ``config_path`` and ``work_dir``, and a reload that changed either is
+        refused before it gets here.
+        """
+        with self._guard:
+            self.config = config
+            digest = str(config.config_digest or "")
+            _, _, hexdigest = digest.rpartition(":")
+            self.config_sha256 = hexdigest or hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
+
     def _state_directory(self, *parts: str) -> Path:
         """Create coordination state only once hardware coordination is used.
 

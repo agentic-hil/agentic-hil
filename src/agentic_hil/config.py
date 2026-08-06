@@ -337,6 +337,10 @@ def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path
         config_version=document.config_version,
         permissions=project_permissions(permissions_raw),
         config_digest=digest,
+        # One document, parsed once: the description and the permissions in this
+        # object came out of the same bytes, so both digests are that one. They
+        # come apart only later, and only through a description reload.
+        permissions_digest=digest,
         loaded_at=utc_now(),
     )
 

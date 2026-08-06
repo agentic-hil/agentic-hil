@@ -24,6 +24,15 @@ that appeared underneath it may not widen them; the one narrowing that does trac
 the file is ``configwrite.granted_rights``, which takes the narrower of the two
 sides and can therefore only ever take a right away.
 
+One thing does change what this module compares against, and it is not automatic:
+``agentic_hil.configreload`` re-reads the *description* — devices, not grants —
+when it is asked for by name, and moves ``config_digest`` onto the document it
+took. After that, "unchanged" is a claim about the description in force, and the
+permission half of the same configuration may be older. That is not hidden here:
+``_permissions_source`` reports which document the grants came from whenever the
+two have come apart, in every state, so a `unchanged` answer never means more
+than it should.
+
 Nothing here says what a restart would do either. That claim used to be made —
 `changed` meant "a restart loads what is on disk now" — and holding it needed a
 candidate validation that matched startup exactly: two code paths that have to
@@ -135,7 +144,7 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
 
     raw, failure = snapshot if snapshot is not None else read_config_snapshot(path)
     if failure is not None or raw is None:
-        return _unreadable(base, failure or FileNotFoundError(path))
+        return _unreadable(base, config, failure or FileNotFoundError(path))
     # Decoded, deliberately not to produce the digest: the digest is over the
     # exact bytes, because that is what was hashed at load time. The decode is
     # the same one `load_config` performs, and bytes that are not text are a file
@@ -144,16 +153,25 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError as error:
-        return _unreadable(base, error)
+        return _unreadable(base, config, error)
     current = config_digest(raw)
 
+    divergence = _permissions_source(config)
     if current == config.config_digest:
         return {
             **base,
             "state": STATE_UNCHANGED,
             "current_digest": current,
             "reload_required": False,
-            "summary": "The authoritative configuration on disk is byte-for-byte the one this server loaded.",
+            "summary": (
+                (
+                    "The authoritative configuration on disk is byte-for-byte the one whose description this server "
+                    f"is enforcing. {divergence['permissions_source']['summary']}"
+                )
+                if divergence
+                else "The authoritative configuration on disk is byte-for-byte the one this server loaded."
+            ),
+            **divergence,
         }
     return {
         **base,
@@ -168,6 +186,42 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
             "that is there now; if that document does not load, the restart says so with the reason."
         ),
         **remediation_fields(CONFIG_STALE_ERROR),
+        **divergence,
+    }
+
+
+def _permissions_source(config: AgenticHILConfig) -> JsonObject:
+    """Whether the grants in force came from a different document than the description.
+
+    Empty for every configuration that was parsed in one piece, which is every
+    one this process loads from a file — both digests are then the same bytes and
+    there is nothing to distinguish. They come apart only through a description
+    reload (``agentic_hil.configreload``) whose file also carried different
+    permissions, and then the divergence is exactly what must not disappear: the
+    description in force is the file's, so the state above is `unchanged` and
+    `config_stale` is false, and calling it a day there would hide the half that
+    is still the startup document's.
+
+    This says which document the permissions came from and nothing about how the
+    two documents' permissions differ, for the same reason the digest comparison
+    above claims nothing about content: the startup document is no longer on disk
+    to be compared against. What the two files' grants actually differed by was
+    reported by the reload that produced the divergence, at the moment both were
+    in hand.
+    """
+    if not config.permissions_digest or not config.config_digest or config.permissions_digest == config.config_digest:
+        return {}
+    return {
+        "permissions_source": {
+            "digest": config.permissions_digest,
+            "loaded_at": config.loaded_at or None,
+            "description_reloaded_at": config.description_reloaded_at or None,
+            "summary": (
+                "The permissions it enforces are not this file's: they come from the document this server parsed at "
+                "startup, which is what a description reload leaves alone. Restart the MCP server to adopt the "
+                "permissions this file states; nothing short of that adopts them."
+            ),
+        }
     }
 
 
@@ -188,7 +242,7 @@ def _is_missing(error: Exception) -> bool:
     return getattr(error, "errno", None) == errno.ENOENT
 
 
-def _unreadable(base: JsonObject, error: Exception) -> JsonObject:
+def _unreadable(base: JsonObject, config: AgenticHILConfig, error: Exception) -> JsonObject:
     """The file is gone, or it is there and will not open.
 
     Kept apart from "changed" because the remedy is not the same: a changed file
@@ -212,6 +266,10 @@ def _unreadable(base: JsonObject, error: Exception) -> JsonObject:
             "the same cannot be established. The server keeps enforcing the version it loaded at startup."
         ),
         **remediation_fields(error_type, RUNNING_SERVER_SCOPE),
+        # Carried here too: which document the grants came from is a fact about
+        # this process, not about the file, so a file that has gone away or
+        # stopped opening does not make it unanswerable.
+        **_permissions_source(config),
     }
 
 

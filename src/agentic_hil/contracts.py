@@ -203,6 +203,26 @@ MCP_TOOLS: list[JsonObject] = [
             }
         ),
     },
+    # No arguments, and that is the contract twice over. There is nothing to
+    # select — this server is bound to one configuration and re-reads that one —
+    # and there is no flag, because a flag is where "also take the permissions"
+    # would eventually be asked for, and the answer to that is that no such flag
+    # exists on this surface at all.
+    {
+        "name": "project_config_reload_description",
+        "description": (
+            "Re-read this bench's device description from the authoritative configuration without restarting the "
+            "server: target, debuggers, com_ports and can_buses, minus every permissions: block. Call this when a "
+            "board was plugged in and written into the file after this server started, instead of asking the operator "
+            "for a restart. Permissions are not re-read at all, in either direction — a device this server has never "
+            "seen arrives with no grant, so it can be probed and read and cannot be flashed, reset, mass-erased or "
+            "written to until an operator restarts the server. Everything outside those four sections (version, "
+            "workspace_root, state_root, debug, artifacts, validation, recovery, reports, logs, and the project "
+            "permissions) still needs a restart, and the result names them. Refused while a run, a session or an "
+            "unresolved incident holds this bench, and when the file is missing, unreadable or does not load."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
 ]
 
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]

@@ -47,6 +47,7 @@ from agentic_hil.config import (
     user_file_lock_path,
     user_state_root,
 )
+from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import ACTOR_HUMAN, permission_surface
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
@@ -155,6 +156,12 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
+    config_reload_parser = subparsers.add_parser(
+        "config-reload",
+        help="check what a running MCP server's project_config_reload_description would take from this file: which device description it adopts and what still needs a restart",
+    )
+    config_reload_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+
     subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
 
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
@@ -222,6 +229,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return adopt_hardware(debugger_id=args.debugger, com_port_id=args.com_port, probe_id=args.probe_id, dry_run=args.dry_run)
     if args.command == "doctor":
         return doctor(args.config)
+    if args.command == "config-reload":
+        return config_reload(args.config)
     if args.command == "debugger-probes":
         return debugger_probes()
     if args.command == "com-ports":
@@ -1754,6 +1763,59 @@ def _doctor_target_support(service: AgenticHILToolService) -> JsonObject:
     except Exception as error:
         return {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": f"the target-support check raised {type(error).__name__}: {error}"}
     return support if isinstance(support, dict) else {"ok": True, "tool": "debugger_target_support", "status": "undetermined", "undetermined_reason": "the backend returned no target-support report."}
+
+
+def config_reload(config_path: str | None = None) -> JsonObject:
+    """What a running MCP server's description reload would take from this file.
+
+    The operator's half of `project_config_reload_description`, and it is a
+    check rather than an act, because there is nothing here to act on: a command
+    line loads this file fresh every time it runs and has never had a stale
+    description to replace. The server that has one is the agent host's, in
+    another process, and no command can reach into it.
+
+    What it is for is the moment before that call. An operator who has just
+    written a board into the file wants to know that the file loads, that the
+    entry is where the reload will look for it, and which of their edits the
+    reload will *not* take — and every one of those questions is answered by
+    running the real merge here, against the same load the server performs. The
+    same refusals come out of it too: a file that will not load is refused here
+    with the message the server would give, before an agent is asked to make a
+    call that cannot succeed.
+    """
+    try:
+        config = load_cli_authoritative_config(config_path)
+    except ConfigError as error:
+        return {"tool": PROJECT_CONFIG_RELOAD, **error.to_dict(), "scope": "preview"}
+    # Both sides of the merge are this file, because that is what a command line
+    # has: the reload runs, finds the description it already holds, and reports
+    # the split. It is the split that is being asked for.
+    _, result = reload_description(config)
+    if result.get("ok") is not True:
+        return {**result, "scope": "preview"}
+    return {
+        **result,
+        "scope": "preview",
+        "summary": (
+            "This configuration loads. A running MCP server calling `project_config_reload_description` would take the "
+            f"{len(RELOADED_SECTIONS)} device sections below from it and would leave every other section, and every "
+            "permission in it, for a restart. Nothing was changed here: a command line reads this file fresh on every "
+            "run and has no loaded description to replace."
+        ),
+        "would_reload": {section: _section_preview(config, section) for section in RELOADED_SECTIONS},
+        "next_steps": [
+            "Ask the agent to call `project_config_reload_description` if a device below is the one you just wrote.",
+            "A permission you changed is not in that call's scope. Restart the MCP server for it — the agent host's "
+            "server for this workspace, not this command line.",
+            f"Sections a reload leaves alone: {', '.join(section for section, _ in NOT_RELOADED_SECTIONS)}.",
+        ],
+    }
+
+
+def _section_preview(config: AgenticHILConfig, section: str) -> object:
+    if section == "target":
+        return asdict(config.target)
+    return sorted(getattr(config, section))
 
 
 def doctor(config_path: str | None = None) -> JsonObject:

@@ -88,7 +88,13 @@ class OpenOCDBackend:
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
-        debug_permission_revoked = not config.probe_allowed() or config.debugger.permissions.allow_raw_debugger_commands
+        # `allow_raw_debugger_commands` is read the way `_debug_permission_failure`
+        # reads it: a debug session is refused *while* raw commands are allowed,
+        # so a config that turns that grant on is one an open session may not
+        # outlive. An unbound config has no session to authorize at all — the
+        # service replaces this object rather than reconfiguring it in that case,
+        # and reading a permission off `None` here would raise before it could.
+        debug_permission_revoked = not config.probe_allowed() or config.debugger is None or config.debugger.permissions.allow_raw_debugger_commands
         if debugger_changed or debug_permission_revoked:
             self._debug.close()
         self.config = config
