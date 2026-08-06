@@ -8,6 +8,7 @@ from conftest import FAKE_STLINK
 
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
+from agentic_hil.bench import BenchMutex
 from agentic_hil.bootstrap import (
     PROJECT_PROFILE,
     apply_discovery_to_template,
@@ -16,7 +17,8 @@ from agentic_hil.bootstrap import (
     select_probe_id,
 )
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
-from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_config
+from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_authoritative_config, load_config
+from agentic_hil.report import read_last_report
 from agentic_hil.tools import project_config_create
 from agentic_hil.types import JsonObject, fold_hardware_id
 
@@ -251,7 +253,7 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     )
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
-        "agentic_hil.cli.discover_attached_hardware",
+        "agentic_hil.tools.discover_attached_hardware",
         lambda: {
             "ok": True,
             "executable": str(executable),
@@ -319,7 +321,7 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     )
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
-        "agentic_hil.cli.discover_attached_hardware",
+        "agentic_hil.tools.discover_attached_hardware",
         lambda: {
             "ok": True,
             "executable": str(executable),
@@ -380,7 +382,7 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
 # hardci-hq#104: one machine, one bench, and every path that reads it agreeing.
 
 
-def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> None:
+def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> list[list[str]]:
     """One bench on this host, seen through the real discovery path.
 
     Only the two ST-Link processes and the host port inventory are replaced, so
@@ -388,9 +390,15 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLI
     for real — a double for `discover_attached_hardware` itself would let a caller
     that never calls it pass. It answers by command rather than out of an
     iterator, because more than one caller reads this host per test, and that is
-    the whole point."""
+    the whole point.
+
+    Returns the commands this host was given, in order, so a test can say that
+    the HOTPLUG connect did not happen rather than only that the caller was
+    refused."""
+    commands: list[list[str]] = []
 
     def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(list(command))
         listing = f"ST-LINK SN : {serial}\n"
         return CompletedCommand(listing if "-l" in command else f"{listing}Device name : {controller}\n", "", 0, False, False)
 
@@ -400,6 +408,7 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLI
         "agentic_hil.bootstrap.list_available_com_ports",
         lambda tool: {"ok": True, "tool": tool, "ports": [{"device": device, "serial_number": serial}]},
     )
+    return commands
 
 
 def _bench_facts(path: Path) -> JsonObject:
@@ -530,4 +539,113 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
         # The port's own identity (hardci-hq#100), which `init` now writes for
         # the same reason it writes the device: it read it off the same board.
         "com_ports.dut_uart.serial_number",
+    }
+
+
+# ---------------------------------------------------------------------------
+# hardci-hq#108: `init` reads a board, so `init` is held to what a board read is
+# held to.
+#
+# Enumerating probes and connecting in HOTPLUG mode is a hardware read whichever
+# command does it — an SWD attach halts the core. `init` did it directly: no
+# `before_connect`, no coordinator, no record, while `project_config_create`
+# writes the same file from the same read under a lease. That the CLI is the
+# operator's authority does not carry the exception; `adopt-hardware` makes the
+# same argument about the grant, waives that, and leases anyway.
+
+
+def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agentic-hil init --force` gets `device_busy`, not the board.
+
+    The holder is a stranger — an MCP server, another project's run, a test
+    reactor. It has the physical probe, which is the lock the read takes between
+    enumerating and connecting, so the HOTPLUG connect never happens. Rewriting
+    this workspace's whole policy in the middle of somebody else's run is not
+    something an operator wants either, so nothing is written."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands = _one_attached_stlink(monkeypatch)
+    first = init_config()
+    assert first["ok"] is True, first
+    path = Path(first["path"])
+    before = path.read_bytes()
+    commands.clear()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"probe:{fold_hardware_id('STLINK123')}"])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["holder"]["label"] == "other-bench-session"
+    # The record and the refusal name the command that ran, not the MCP tool
+    # that writes the same file — an incident has to say which one left it.
+    assert refused["tool"] == "cli_init"
+    assert not any("mode=HOTPLUG" in argument for command in commands for argument in command), commands
+    assert path.read_bytes() == before
+
+
+def test_the_board_init_reads_is_written_into_the_audit_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading a board is reading a board, whichever command did it.
+
+    `init` left nothing behind at all, so a bench could be connected to with the
+    audit trail showing no access. The record says which probe, which locks were
+    held for it and the state those leases actually ended in — the same record
+    `project_config_create` leaves for the same read."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+    first = init_config()
+    assert first["ok"] is True, first
+
+    regenerated = init_config(force=True)
+
+    assert regenerated["ok"] is True, regenerated
+    report = read_last_report(load_authoritative_config(workspace))
+    assert report["tool"] == "cli_init"
+    assert report["probe_id"] == "STLINK123"
+    assert report["resources"] == ["debugger-discovery:all", f"probe:{fold_hardware_id('STLINK123')}"]
+    # Written while the board was held and re-committed once the leases reached
+    # their terminal state, so the record and the result agree about the bench.
+    assert report["lease_state"] == "released"
+    assert report["cleanup_required"] is False
+    assert report["quarantined"] is False
+
+
+def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one case that cannot be leased, handled rather than refused.
+
+    A workspace with no loadable configuration has no `state_root` to record a
+    lease under and no policy to audit against — the machinery does not exist
+    rather than being skipped — and it is also the one case where nothing on this
+    machine can be holding a board on this project's behalf. Refusing it would
+    make a first `init` impossible, which is worse than the defect. What it must
+    not be is silent: the result names the unleased read and the reason, so the
+    operator is not left inferring it from a record that is not there."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+
+    first = init_config()
+
+    assert first["ok"] is True, first
+    assert first["hardware_discovery"]["ok"] is True
+    assert first["hardware_lease"] == {
+        "leased": False,
+        "reason": "config_file_not_found",
+        "summary": first["hardware_lease"]["summary"],
+    }
+    assert "no loadable configuration" in first["hardware_lease"]["summary"]
+    # And the very next one is leased, because by then there is something to
+    # lease against. The unleased read is the first and only the first.
+    assert init_config(force=True)["hardware_lease"] == {
+        "leased": True,
+        "tool": "cli_init",
+        "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
     }

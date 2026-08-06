@@ -22,7 +22,6 @@ from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
-    discover_attached_hardware,
     load_project_profile,
 )
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
@@ -64,10 +63,20 @@ from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
-from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService, unbound_debugger_error
+from agentic_hil.tools import (
+    AgenticHILToolService,
+    UnprovisionedToolService,
+    discover_for_generation,
+    unbound_debugger_error,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SKILL_NAME = "agentic-hil"
+# What `agentic-hil init`'s read of the board is called in the audit record it
+# leaves and in any incident it files. Deliberately not `project_config_create`,
+# though the two write the same file from the same read: a record that could not
+# say which of them touched the bench is the wrong record to hand an operator.
+CLI_INIT = "cli_init"
 # How far up the process tree the upgrade guard follows launchers before it
 # stops looking, and how many holding processes a refusal names before the
 # count carries the rest.
@@ -1136,6 +1145,73 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     return None
 
 
+def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None]:
+    """Read the attached board for `init`, holding what a probe read holds.
+
+    `init` called `discover_attached_hardware` directly: no `before_connect`, no
+    coordinator, no record. Enumerating probes and connecting in HOTPLUG mode is
+    a hardware read either way, so that reached a board another run was holding —
+    where `project_config_create`, which writes the same file out of the same
+    read, answers `device_busy` — and it did so leaving nothing in the audit
+    trail (hardci-hq#108). Since agentic-hil/agentic-hil#112 made `init` look
+    unconditionally that applied to every `init` rather than only to a workspace
+    carrying a profile.
+
+    That the CLI is the operator's authority does not carry the exception, and
+    `adopt_hardware` is the proof: it makes the same argument about the *grant*,
+    waives that, and leases anyway. Authority over your own configuration is not
+    authority over somebody else's running bench — and `--force` rewriting the
+    file in the middle of a stranger's run is not something the operator wants
+    either. So this goes through `discover_for_generation`, which is the function
+    `project_config_create` uses, under this command's own coordinator.
+
+    Returns the discovery, the refusal that is the whole answer when the read did
+    not happen or did not end cleanly, and — when the board was read without a
+    lease — the reason it could not be leased.
+    """
+    try:
+        current: AgenticHILConfig | None = load_authoritative_config(workspace)
+    except ConfigError as error:
+        # No configuration to lease against, so no `state_root` to record a lease
+        # under and no policy to audit against — the machinery does not exist
+        # rather than being skipped. Both cases that reach here are that: the
+        # first `init` of a workspace, and an `init --force` over a file that
+        # cannot be loaded, which is the one command that repairs it. Refusing
+        # either would leave no way to reach a configured bench at all, which is
+        # worse than what this fixes. Named in the result instead of inferred
+        # from a record that is not there.
+        current, unleased = None, error.error_type
+    else:
+        unleased = None
+    discovery, refusal = discover_for_generation(
+        current,
+        None,
+        tool=CLI_INIT,
+        reason_prefix=CLI_INIT,
+        frontend="operator-cli",
+    )
+    return discovery, refusal, unleased
+
+
+def _init_lease_note(unleased: str | None) -> JsonObject:
+    """Whether the board `init` read was read under a lease, and if not, why not."""
+    if unleased is None:
+        return {
+            "leased": True,
+            "tool": CLI_INIT,
+            "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
+        }
+    return {
+        "leased": False,
+        "reason": unleased,
+        "summary": (
+            "This workspace had no loadable configuration to lease or audit against, so the attached probe was read "
+            "directly. That is the one case where nothing on this machine can be holding a board on this project's "
+            "behalf; every read after this one goes through the lease."
+        ),
+    }
+
+
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
@@ -1157,7 +1233,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery = discover_attached_hardware()
+    discovery, refusal, unleased = _init_bench_read(workspace)
+    if refusal is not None:
+        # The read is what was refused, so there is nothing to write a file from
+        # and nothing was written. The refusal is the whole answer.
+        return {**refusal, "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
@@ -1235,6 +1315,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "narrowed_permissions": sorted(narrowed),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
+        "hardware_lease": _init_lease_note(unleased),
         "next_steps": next_steps,
     }
 

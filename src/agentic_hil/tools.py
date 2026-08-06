@@ -1345,7 +1345,7 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal = _discover_for_generation(current, coordinator)
+        discovery, refusal = discover_for_generation(current, coordinator)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -1474,8 +1474,23 @@ def _create_in_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObje
     }
 
 
-def _discover_for_generation(current: AgenticHILConfig | None, coordinator: HardwareCoordinator | None) -> tuple[JsonObject, JsonObject | None]:
+def discover_for_generation(
+    current: AgenticHILConfig | None,
+    coordinator: HardwareCoordinator | None,
+    *,
+    tool: str = PROJECT_CONFIG_CREATE,
+    reason_prefix: str = "config_create",
+    frontend: str = "mcp",
+) -> tuple[JsonObject, JsonObject | None]:
     """Read what is attached, holding everything a probe read holds.
+
+    Public because `agentic-hil init` writes the same file out of the same read
+    and so is held to the same lifecycle (hardci-hq#108). ``tool``,
+    ``reason_prefix`` and ``frontend`` are the whole of what a caller varies:
+    which name the audit record and every refusal carry, which name an incident
+    is filed under, and which frontend an owned coordinator announces itself as.
+    What is read, what is locked and what happens when any of it fails are not
+    a caller's to vary — that was the defect.
 
     Not a partial copy of the adoption path any more but the same function:
     `discover_under_hardware_lease` proves the audit trail writable before the
@@ -1498,7 +1513,10 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
     policy to audit against, no `state_root` under which a lease could be
     recorded — and it is also the one case where nothing on this machine can be
     holding a board on this project's behalf. That call reads directly, as it
-    always has.
+    always has. It is the first `init` and the first `project_config_create` of a
+    workspace, so refusing it would leave no way to reach a configured one at
+    all; the caller says so in its own result rather than letting an unleased
+    read pass unremarked.
 
     ``current`` decides that, and ``coordinator`` never does. An unprovisioned
     server has no coordinator and hands None, and the in-lock reread is exactly
@@ -1513,9 +1531,9 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
     if current is None:
         return discover_attached_hardware(), None
     if coordinator is None:
-        owned = HardwareCoordinator(current, frontend="mcp")
+        owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -1525,9 +1543,9 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
             # than an exception out of an MCP call.
             cleanup_error = _closed_cleanly(owned)
         if refusal is None and cleanup_error is not None:
-            return {}, _lock_cleanup_refusal(cleanup_error)
+            return {}, _lock_cleanup_refusal(cleanup_error, tool)
         return discovery, refusal
-    return _discover_under_lease(current, coordinator)
+    return _discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix)
 
 
 def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
@@ -1538,10 +1556,10 @@ def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
     return None
 
 
-def _lock_cleanup_refusal(error: Exception) -> JsonObject:
+def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     return {
         "ok": False,
-        "tool": PROJECT_CONFIG_CREATE,
+        "tool": tool,
         "error_type": "resource_quarantined",
         "summary": (
             "The attached probe was read and the coordination locks taken for that read could not all be given back, so "
@@ -1556,13 +1574,13 @@ def _lock_cleanup_refusal(error: Exception) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator) -> tuple[JsonObject, JsonObject | None]:
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
     resources = [resource for name in current.debuggers if (resource := configured_probe_resource(current, name)) is not None]
     return discover_under_hardware_lease(
         current,
         coordinator,
-        tool=PROJECT_CONFIG_CREATE,
-        reason_prefix="config_create",
+        tool=tool,
+        reason_prefix=reason_prefix,
         resources=resources,
     )
 
