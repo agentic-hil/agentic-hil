@@ -33,7 +33,10 @@ from conftest import FAKE_PYOCD, FAKE_STLINK, write_authoritative_config
 from agentic_hil import configwrite
 from agentic_hil.cli import doctor
 from agentic_hil.config import ConfigError, config_digest, load_authoritative_config
+from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
 from agentic_hil.configstate import (
+    DESCRIPTION_FROM_RELOAD,
+    DESCRIPTION_FROM_STARTUP,
     STATE_CHANGED,
     STATE_MISSING,
     STATE_UNCHANGED,
@@ -50,6 +53,7 @@ from agentic_hil.knowledge import (
     ERRORS_URI,
     read_resource,
 )
+from agentic_hil.report import recommit_report_with_status, write_report
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 COM_PORTS = 'com_ports:\n  dut_uart:\n    device: "COM9"\n    baudrate: 115200\n'
@@ -887,3 +891,110 @@ def test_a_write_to_a_configuration_that_will_not_parse_is_refused_in_words(tmp_
     assert refused["error_type"] == "config_invalid"
     assert refused["config_status"]["state"] == STATE_CHANGED
     assert "line" in refused, "the parser's own position, so the file can be repaired"
+
+
+# ---------------------------------------------------------------------------
+# What the audit trail keeps, once the file it was decided by has moved on.
+
+
+def test_the_report_records_the_version_that_was_in_force_not_the_one_on_disk_afterwards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case the record exists for, and the only one where the two differ.
+
+    A report naming just the path answers nothing: the path is the same for the
+    life of the project and the content is not, so an auditor holding the file
+    that is there now has no way to tell whether it is the document the action
+    was permitted by. Here it provably is not — the server is enforcing `stlink`
+    and the file says `pyocd` — and the report has to say the first, plus the
+    fact that the two had already come apart when this ran."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    in_force = config_digest(path.read_bytes())
+    tools = service(workspace)
+    try:
+        switch_to_pyocd(path)
+        on_disk = config_digest(path.read_bytes())
+        answered = tools.call("probe_target")
+    finally:
+        tools.close()
+
+    assert answered["ok"] is True
+    assert in_force != on_disk
+    written = json.loads((workspace / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
+    recorded = written["config_in_force"]
+    # The version the action ran under, not the one lying beside the report.
+    assert recorded["digest"] == in_force
+    assert recorded["file_digest"] == on_disk
+    assert recorded["file_state"] == STATE_CHANGED
+    assert recorded["diverged_from_file"] is True
+    assert Path(recorded["path"]).resolve() == path.resolve()
+    # And the returned result carries the same record the disk does.
+    assert answered["config_in_force"] == recorded
+
+
+def test_a_report_written_while_the_file_still_agrees_says_so_positively(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`unchanged` is a claim worth writing down, not an absence.
+
+    The block is carried in every state, unlike the live `config_status` that is
+    dropped when there is nothing to warn about: a report is read months later by
+    someone who does not have the file that was in force, so "these two agreed at
+    the time" is exactly the sentence that cannot be reconstructed afterwards.
+    Read back through `get_last_report`, which is the reader agents use."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        tools.call("probe_target")
+        read_back = tools.call("get_last_report")
+    finally:
+        tools.close()
+
+    assert read_back["ok"] is True
+    recorded = read_back["report"]["config_in_force"]
+    assert recorded["digest"] == config_digest(path.read_bytes())
+    assert recorded["file_state"] == STATE_UNCHANGED
+    assert recorded["diverged_from_file"] is False
+    assert recorded["description_source"] == DESCRIPTION_FROM_STARTUP
+
+
+def test_recommitting_a_report_does_not_restamp_the_version_it_ran_under(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal lease transition writes the same report a second time.
+
+    That second write happens after the action, so a fresh check there would
+    replace the one fact this record is for with a fact about the re-commit — and
+    it would do so precisely when the file moved during the call, which is the
+    case that matters."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        first = write_report(tools.config, {"ok": True, "tool": "probe_target"})
+        switch_to_pyocd(path)
+        again = recommit_report_with_status(tools.config, first, {"lease_state": "released"})
+    finally:
+        tools.close()
+
+    assert first["config_in_force"]["file_state"] == STATE_UNCHANGED
+    assert again["config_in_force"] == first["config_in_force"]
+
+
+def test_the_report_names_the_document_the_grants_came_from_after_a_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one case where the digest alone answers the wrong question.
+
+    A description reload moves `config_digest` onto the file it took and leaves
+    every grant on the startup document. The record's own state is then
+    `unchanged` — truthfully, about the description — while the permissions this
+    action was allowed by are a document that is no longer anywhere. Naming only
+    the digest there would point an auditor at the wrong file for precisely the
+    half the record exists for."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_mass_erase": True}))
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        answered = tools.call("probe_target")
+    finally:
+        tools.close()
+
+    recorded = answered["config_in_force"]
+    assert recorded["file_state"] == STATE_UNCHANGED
+    assert recorded["digest"] == config_digest(path.read_bytes())
+    # And the grants in force are not that document's, which the record says.
+    assert recorded["permissions_source"]["digest"] != recorded["digest"]
+    assert recorded["description_source"] == DESCRIPTION_FROM_RELOAD
