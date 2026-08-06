@@ -54,7 +54,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, permission_surface, set_permission
+from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, set_permission
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
@@ -67,6 +67,7 @@ from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
     discover_for_generation,
+    narrowed_permissions,
     unbound_debugger_error,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -155,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted, and verify it with doctor")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
     init_parser.add_argument("--force", action="store_true")
@@ -1278,12 +1279,21 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         return result
     available_com_ports = list_available_com_ports()
     # Read off the file that was written rather than asserted. The skeleton path
-    # grants everything, but a project's own `agentic-hil.config.example.yaml`
-    # may set a flag false and that is honoured — an operator who wrote
-    # `allow_mass_erase: false` into their profile meant it. A fixed sentence
-    # here told them the opposite about their own bench.
-    narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
-    granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
+    # grants everything it can, but a project's own
+    # `agentic-hil.config.example.yaml` may set a flag false and that is honoured
+    # — an operator who wrote `allow_mass_erase: false` into their profile meant
+    # it. A fixed sentence here told them the opposite about their own bench.
+    #
+    # `narrowed_permissions` rather than a walk of the whole surface, so that the
+    # two flags the skeleton itself writes false are not reported as the
+    # profile's doing (hardci-hq#107). They are the same two on every bench,
+    # profile or no profile, and are stated once here instead.
+    narrowed = narrowed_permissions(yaml.safe_load(text) or {})
+    granted_clause = (
+        "with every permission granted except the two that are false so that flashing works"
+        if not narrowed
+        else f"with every permission granted except the two that are false so that flashing works, and {len(narrowed)} the project profile set to false"
+    )
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
@@ -1337,7 +1347,7 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     enforces from the document rather than from the request. Nothing here needs
     to be argued as the lesser evil either: the same shell already has
     `agentic-hil init --force`, which since hardci-hq#96 rewrites the whole file
-    with every permission granted. Whoever has that shell has the operator's
+    at the generated defaults. Whoever has that shell has the operator's
     authority over this configuration outright, and the ratchet was never a
     promise about them — it holds on the MCP write path, which is where an agent
     that has only the MCP tools lives.
@@ -1364,7 +1374,7 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
 
     hardci-hq#96 left an agent able to write `false` into a permission and
     nothing else, and answered the other direction for a file that does not exist
-    yet: a generation opens everything. For a bench that has been running a while
+    yet: a generation opens everything it can. For a bench that has been running a while
     there was no answer. `init --force` carries the existing grants over by name,
     so the `false` survives it; deleting the configuration does come back open,
     at the cost of the baudrate, the `resource_id`, the `state_root` and every
@@ -1583,14 +1593,14 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
     granted_step = (
-        "Every permission in this file is true: probing, flashing, resetting, raw debugger commands, mass erase, and "
-        "serial and CAN writes. Read the permissions blocks and decide which of them this bench should not have — "
-        "allow_mass_erase in particular cannot be undone once it has run."
+        "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
+        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works. Read the "
+        "permissions blocks and decide which of the rest this bench should not have."
         if not narrowed
-        else "Every permission in this file is true except the ones your project profile set to false ("
-        + ", ".join(narrowed)
-        + "). Read the permissions blocks and decide which of the rest this bench should not have — allow_mass_erase in "
-        "particular cannot be undone once it has run."
+        else "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
+        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works, and the ones your "
+        "project profile set to false (" + ", ".join(narrowed) + "). Read the permissions blocks and decide which of "
+        "the rest this bench should not have."
     )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
@@ -1613,10 +1623,11 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
     next_steps.extend([
         "You can also just tell the agent: over MCP it may write false into any permission here and can write no other "
         f"value, so nothing it does through `project_config_set` widens this file. `{CONFIG_REOPEN_COMMAND}` is yours "
-        "and regenerates the file with everything open again.",
-        "Flashing needs one of those decisions before it works: validated flashing and unrestricted debugger access are "
-        "mutually exclusive policies, so while allow_raw_debugger_commands or allow_mass_erase is true on a probe, "
-        "flash_firmware on that probe is refused. Set whichever of the two this bench does not need to false.",
+        "and regenerates the file with the same defaults again.",
+        "Leave allow_raw_debugger_commands and allow_mass_erase alone unless something outside these tools needs the "
+        "probe that way: validated flashing and unrestricted debugger access are mutually exclusive policies, so while "
+        "either is true on a probe, flash_firmware on that probe is refused. Neither has a tool behind it here, so "
+        "turning one on costs you flashing and buys nothing.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
     if available_com_ports.get("ok"):
@@ -2228,7 +2239,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken

@@ -147,19 +147,24 @@ prints its path; ask the operator to review any permission change.
 When a project has none, every tool answers `config_file_not_found` and
 `project_config_create` is the way out. It takes no arguments and generates the
 file from the hardware attached to this machine, with every permission `true` —
-flashing, reset, raw debugger commands, mass erase, COM and CAN writes, and all
-three `permissions.allow_config_*` grants. The bench is workable from that file
-as it stands: nobody has to open an editor between an empty project and the
-first hardware action. Report where the file is, that an agent generated it, and
-what it granted — name `allow_mass_erase`, because a mass erase cannot be taken
-back — then ask the operator which permissions this bench should not have.
+flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*`
+grants — except `allow_raw_debugger_commands` and `allow_mass_erase`, which it
+writes `false`. Neither of those is a capability you are missing: there is no
+tool here for either, and while either is true `flash_firmware` on that probe is
+refused. The bench is workable from that file as it stands, flashing included:
+nobody has to open an editor between an empty project and the first hardware
+action. Report where the file is, that an agent generated it, and what it
+granted, then ask the operator which permissions this bench should not have.
+Never ask for those two to be turned on — that is the one change that stops
+flashing working.
 Never edit the file with your own tools, and never delete or move one to get a
 different one. Regenerating carries over the permissions of the configuration
 this server loaded at startup for the entries already in it — not the file as it
 stands now, so a permission you narrowed with `project_config_set` in this
 session comes back granted — while a configuration deleted first comes back as
-the open skeleton with every narrowing the operator asked for gone, and anything
-a regeneration discovers for the first time arrives open. Regenerating is the
+the skeleton at its generated defaults with every narrowing the operator asked
+for gone, and anything a regeneration discovers for the first time arrives at
+those defaults. Regenerating is the
 operator's call, not yours.
 
 Changing an existing configuration goes through MCP too, never through your own
@@ -352,7 +357,8 @@ agentic-hil setup --agent claude
 
 `setup` installs the packaged copy of this skill, registers the MCP server with
 the verified absolute persistent console-script path, and creates the project
-configuration, with every permission granted. The first two are available alone as
+configuration, with every permission granted except the two flashing is
+interlocked against. The first two are available alone as
 `agentic-hil agent-install --agent claude` (user scope), the last as
 `agentic-hil init` (project scope).
 
