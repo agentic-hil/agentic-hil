@@ -43,6 +43,21 @@ PCAN_LISTEN_ONLY = 8
 PCAN_PARAMETER_ON = 1
 PCAN_PARAMETER_OFF = 0
 
+# Verbatim from `ip -details -json link show dev vcan0` on iproute2 6.1.0
+# (Debian bookworm), recorded in a container with NET_ADMIN. It is a literal on
+# purpose: what the parser reads is an envelope nobody here can reproduce from
+# the documentation, and the one thing worth noticing is that `link_type` says
+# `can` for a *virtual* interface. Keying the check on it instead of on
+# `linkinfo.info_kind` would accept a vcan as a CAN controller, which is the
+# mistake this fixture exists to keep fixed. Note also that a vcan carries no
+# `info_data` at all.
+IP_VCAN0 = (
+    '[{"ifindex":3,"ifname":"vcan0","flags":["NOARP","UP","LOWER_UP"],"mtu":2060,"qdisc":"noqueue",'
+    '"operstate":"UNKNOWN","linkmode":"DEFAULT","group":"default","txqlen":1000,"link_type":"can",'
+    '"promiscuity":0,"allmulti":0,"min_mtu":0,"max_mtu":0,"linkinfo":{"info_kind":"vcan"},'
+    '"inet6_addr_gen_mode":"eui64","num_tx_queues":1,"num_rx_queues":1,"gso_max_size":65536}]'
+)
+
 
 def can_config(tmp_path: Path, adapter: str, channel: str, *, listen_only: bool, executable: str | None = None) -> object:
     lines = [
@@ -121,6 +136,14 @@ def install_ip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runner) -> list[
 
 
 def ip_json(ctrlmode: list[str] | None, *, kind: str = "can") -> str:
+    """A `can` link's reading, modelled on iproute2's `iplink_can.c`.
+
+    Constructed rather than recorded, and said so: a real `can` link needs a CAN
+    controller, and there is no software one — `vcan` is a different link kind
+    (see IP_VCAN0, which is recorded). What is modelled is the one thing the
+    parser reads, `linkinfo.info_data.ctrlmode`, which iproute2 emits as a JSON
+    array of flag names with `listen-only` among them.
+    """
     info_data = {"state": "ERROR-ACTIVE"}
     if ctrlmode is not None:
         info_data["ctrlmode"] = ctrlmode
@@ -183,9 +206,14 @@ def test_socketcan_refuses_when_ctrlmode_is_absent(tmp_path: Path, monkeypatch: 
 
 
 def test_socketcan_refuses_on_a_virtual_interface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A vcan has no controller, so it has no mode to be in and cannot back the claim."""
+    """A vcan has no controller, so it has no mode to be in and cannot back the claim.
+
+    Driven from recorded iproute2 output rather than a hand-built shape, because
+    the trap here is a real field: that output says `"link_type":"can"` for a
+    virtual interface.
+    """
     config = can_config(tmp_path, "socketcan", "vcan0", listen_only=True)
-    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json(None, kind="vcan")))
+    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(IP_VCAN0))
     monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: pytest.fail("the bus must not be opened")))
 
     result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
