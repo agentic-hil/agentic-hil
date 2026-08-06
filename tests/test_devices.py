@@ -30,6 +30,7 @@ from agentic_hil.devices import (
     config_devices,
     debugger_device,
     is_device_lock_key,
+    lock_keys,
     resolve_devices,
     uart_device,
 )
@@ -328,6 +329,47 @@ def test_a_path_like_device_value_folds_the_way_its_own_host_does(tmp_path: Path
 
     assert as_written.identity_source == "executable"
     assert (as_written.lock_key == as_lowercased.lock_key) is one_name_on_this_host
+
+
+def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_path: Path) -> None:
+    """The folding above belongs to the lock, not to `Device`.
+
+    `HardwareCoordinator.acquire` takes devices *or* resource names, and only
+    the device went through `lock_key`. An unfolded name is a second lock file
+    for one board: the run holds `physical:board-a`, a caller asking for
+    `physical:BOARD-A` is told it is free, and both then believe they have the
+    board. A `resource_id` is an opaque hardware id, so this one has no platform
+    branch — the two spellings are one board on every host."""
+    config = config_for(tmp_path, com_ports_yaml=FOUR_PORTS)
+    device = uart_device(config, "port_a")
+    assert device.lock_key == "physical:board-a"
+
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        coordinator.begin_run(DeviceSet.of([device]), label="one-board")
+        # Declared as a device and reached under a name somebody spelled: the run
+        # has to recognise its own board rather than refuse it as undeclared.
+        lease = coordinator.acquire("physical:BOARD-A")
+        try:
+            assert lease.resources == [device.lock_key]
+        finally:
+            lease.release()
+        # And the machine-wide hold answers to either spelling. This is the lock
+        # file that two keys would have split in two.
+        stranger = BenchMutex(frontend="stranger")
+        with pytest.raises(DeviceBusyError):
+            stranger.acquire(["physical:BOARD-A"])
+    finally:
+        coordinator.end_run()
+        coordinator.close()
+
+    # The issue's own example. A serial device name is a host path rather than an
+    # opaque id, so whether two spellings are one port stays the host's rule (see
+    # the test above); what changed is that a hand-written name now follows that
+    # rule instead of keeping a spelling of its own.
+    ports = config_for(tmp_path / "com9", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "com9"\n')
+    assert uart_device(ports, "dut_uart").lock_key == "com:com9"
+    assert (lock_keys(["com:COM9"]) == ["com:com9"]) is (os.name == "nt")
 
 
 def test_config_load_refuses_one_resource_id_spelled_in_two_cases(tmp_path: Path) -> None:
