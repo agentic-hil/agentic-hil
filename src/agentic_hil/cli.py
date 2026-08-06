@@ -18,7 +18,12 @@ import yaml
 
 from agentic_hil import __version__
 from agentic_hil.adopt import project_config_adopt_hardware
-from agentic_hil.bootstrap import apply_discovery_to_template, discover_attached_hardware, load_project_profile
+from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    apply_discovery_to_template,
+    discover_attached_hardware,
+    load_project_profile,
+)
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
@@ -1110,12 +1115,23 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         with secure_user_file_lock(target_path):
             return init_config(config_path, force, _locked=True)
     existing = secure_optional_read_text(target_path)
+    # Look first, and let the profile decide only what is written down. A
+    # workspace profile says how to name and narrow a bench that was found; it
+    # cannot say whether looking is allowed, and gating the read on it (hardci-hq#104)
+    # meant a fresh installation with no `agentic-hil.config.example.yaml` got a
+    # file full of placeholders on a machine with the board plugged in — while the
+    # MCP server, which reads unconditionally, found that same board. The two
+    # answers differed in the one thing neither of them decides: what is attached.
+    # Without a profile the fixed default fills the template, which is the profile
+    # `project_config_create` has always used, so both paths now write one file for
+    # one machine.
     profile = load_project_profile(workspace)
-    discovery = discover_attached_hardware() if profile is not None else None
-    if profile is not None and discovery is not None and overall_success(discovery):
+    discovery = discover_attached_hardware()
+    discovered = overall_success(discovery)
+    if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
         assert isinstance(template, dict)
-        configured = apply_discovery_to_template(template, profile, discovery)
+        configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
         document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
@@ -1157,12 +1173,30 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # here told them the opposite about their own bench.
     narrowed = [path for path, granted in permission_surface(yaml.safe_load(text) or {}).items() if not granted]
     granted_clause = "with every permission granted" if not narrowed else f"with every permission granted except {len(narrowed)} the project profile set to false"
+    next_steps = init_next_steps(
+        available_com_ports,
+        target_path,
+        narrowed=sorted(narrowed),
+        drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
+    )
+    if not discovered:
+        # The placeholders are a finding, not a default. An operator who is not
+        # told that discovery ran and came back empty reads the same file as
+        # "detection is broken" — which is what hardci-hq#104 was reported as.
+        next_steps.insert(
+            0,
+            "This file describes no board yet, because hardware discovery ran and found none: "
+            f"{discovery.get('summary') or 'no attached bench was identified'} "
+            "(the whole result is under `hardware_discovery`). Attach the bench and run "
+            "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
+            "controller and the probe's own COM port without anything being retyped.",
+        )
     return {
         "ok": True,
         "summary": (
             f"Attached hardware was discovered and configured, {granted_clause}."
-            if discovery is not None and overall_success(discovery)
-            else f"Agentic HIL project configuration written, {granted_clause}."
+            if discovered
+            else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
         ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
@@ -1170,12 +1204,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "narrowed_permissions": sorted(narrowed),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
-        "next_steps": init_next_steps(
-            available_com_ports,
-            target_path,
-            narrowed=sorted(narrowed),
-            drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
-        ),
+        "next_steps": next_steps,
     }
 
 

@@ -117,7 +117,7 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
 
-Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments.
+Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (hardci-hq#104: it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery` — check that first, because a probe that was attached and refused reads differently from one that was not there.
 
 Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since.
 
