@@ -1974,6 +1974,15 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
         "can_buses",
         "workspace_root",
         "state_root",
+        # The refusal that says a configured port now leads to another board,
+        # the two configuration keys that identify a port, and the result fields
+        # the skill tells the caller to read off that refusal.
+        "com_port_identity_mismatch",
+        "serial_number",
+        "resource_id",
+        "expected_serial_number",
+        "found_serial_number",
+        "expected_device",
         # `config_status` fields the skill names when it says which document a
         # stale answer's description came from and which document its
         # permissions came from.

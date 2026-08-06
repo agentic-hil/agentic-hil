@@ -182,7 +182,17 @@ artifacts:
 
 com_ports:
   dut_uart:
-    device: "/dev/ttyACM0"  # Windows example: "COM5"
+    # How the port is opened. On Linux prefer the /dev/serial/by-id/... symlink:
+    # udev builds it from the vendor, the product and the serial, so it follows
+    # the board. /dev/ttyACM0 and COM5 are an enumeration order and can come to
+    # mean a different board once a second adapter is attached.
+    device: "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_0669FF303435-if02"
+    # Which board it is: the adapter's own USB serial, which on a Nucleo is the
+    # serial `probe_id` also carries. This is the machine-wide lock identity, and
+    # it is compared against the attached hardware when the port is opened.
+    # `adopt-hardware` fills both in; on Windows `device` stays "COM5" and this
+    # is what carries the identity.
+    serial_number: "0669FF303435"
     baudrate: 115200
     assert_dtr: false        # opening the port must not reset this board
     assert_rts: false
@@ -225,7 +235,7 @@ permissions:
   allow_config_permissions_write: true      # take back what the bench MAY do
 ```
 
-`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
 
 #### Permissions move one way
 

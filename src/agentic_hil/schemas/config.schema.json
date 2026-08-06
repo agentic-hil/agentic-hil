@@ -356,12 +356,22 @@
         ],
         "properties": {
           "device": {
-            "type": "string"
+            "type": "string",
+            "description": "How the port is opened. On Linux prefer the stable /dev/serial/by-id/... symlink, which names the vendor, the product and the device's own serial number: /dev/ttyACM0 is an enumeration order, so attaching a second adapter can hand one board the name the other had. Windows has no openable stable name — COMn is all there is — so name the port there and let serial_number carry the identity."
           },
           "baudrate": {
             "type": "integer",
             "minimum": 1,
             "default": 115200
+          },
+          "serial_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "default": null,
+            "description": "The USB serial number of the adapter behind this port, which on a Nucleo is the ST-Link serial that probe_id also carries. This is the port's identity; device is only the way in. Set, it becomes the machine-wide lock key, and it is compared against the attached hardware when the port is opened so an entry that has come to name a different board is refused rather than used. Unset, the entry is identified by its kernel name alone. `agentic-hil adopt-hardware` fills it in from the attached probe."
           },
           "timeout_s": {
             "type": "number",

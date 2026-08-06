@@ -194,6 +194,20 @@ def correlate_com_port(probe_id: str, available: JsonObject) -> JsonObject | Non
     return dict(matches[0]) if len(matches) == 1 else None
 
 
+def port_device_name(matched_port: JsonObject) -> str:
+    """How a discovered port should be written down: stably, where that exists.
+
+    Linux publishes ``/dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN``,
+    which names the board rather than the order it was enumerated in; the
+    inventory already resolved it. Windows publishes no openable equivalent, so
+    there the kernel name is written and ``serial_number`` carries the identity
+    instead — see ``comports.serial_by_id_links``."""
+    stable = matched_port.get("stable_device")
+    if isinstance(stable, str) and stable:
+        return stable
+    return str(matched_port["device"])
+
+
 def apply_discovery_to_template(template: JsonObject, profile: JsonObject, discovery: JsonObject) -> JsonObject:
     target_profile = profile.get("target") if isinstance(profile.get("target"), dict) else {}
     detected_target = discovery.get("target") if isinstance(discovery.get("target"), dict) else {}
@@ -244,8 +258,13 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
         requested_io = profile_port.get("permissions") if isinstance(profile_port.get("permissions"), dict) else {}
         template["com_ports"] = {
             "dut_uart": {
-                "device": str(matched_port["device"]),
+                "device": port_device_name(matched_port),
                 "baudrate": int(profile_port.get("baudrate", 115200)),
+                # The port was correlated by this serial in the first place, so
+                # recording it costs nothing and is what makes the entry survive
+                # a replug: `device` is how the port is opened, this is which
+                # board it is (hardci-hq#100).
+                "serial_number": str(matched_port.get("serial_number") or discovery["probe_id"]),
                 # `allow_read` went the same way as `allow_probe`: reading a
                 # port needs no grant at version 2, and the key is refused there.
                 "permissions": {

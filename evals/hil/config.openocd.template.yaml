@@ -45,6 +45,10 @@ artifacts:
 
 com_ports:
   dut_uart:
+    # A kernel name, and this bench has one board. On a bench with two, prefer
+    # the durable spelling -- /dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN,
+    # which udev builds from the device's own serial -- and set serial_number to
+    # the ST-Link serial, so the entry cannot come to name the other board.
     device: "/dev/ttyACM0"
     baudrate: 115200
     permissions:
