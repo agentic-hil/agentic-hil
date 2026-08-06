@@ -89,7 +89,13 @@ extra without stopping the host.
 
 To upgrade later, run `agentic-hil upgrade`: it upgrades through the manager
 that owns the installation running it, keeps the extras, and refuses before it
-removes anything if the MCP server is still running.
+removes anything if the MCP server is still running. It reports success only
+when the version actually moved, and names both numbers when it did. An
+installation that is already current and one the package manager holds at an
+exact version pin are two separate refusals, and neither asks for a restart —
+there would be nothing new to load. Installing without an exact pin, as the
+lines above do, keeps the second one from arising at all; the Claude Code plugin
+pins on purpose and states the consequence where it does.
 
 To check a version without installing anything, `uvx --from agentic-hil
 agentic-hil --version` is a diagnostic only.

@@ -284,8 +284,25 @@ establish the trusted user-local prerequisite; do not substitute `uvx`, a
 workspace virtual environment, or an unversioned package. `invalid peer
 certificate: UnknownIssuer` is not `uv` being unavailable: it is a
 TLS-intercepting proxy, and the same command with `--system-certs` reads the
-operating system's trust store instead of uv's bundled roots. Then, from the
-firmware project directory:
+operating system's trust store instead of uv's bundled roots.
+
+**Why `==` here, and what it costs.** This is the one install command in the
+project that pins exactly, because this file *is* the plugin's copy of the
+guidance for this release: a package a release ahead of the plugin answers
+differently from what you are reading. The cost is that `uv` records that exact
+pin, and `uv tool upgrade` — what `agentic-hil upgrade` runs underneath — cannot
+move an installation off one. It exits successfully and prints the reason
+instead of upgrading, so `agentic-hil upgrade` reports it as
+`upgrade_blocked_by_pin`, changes nothing, and asks for no restart. **Move to a
+newer release by rerunning the line above from the newer plugin**, not by
+expecting `agentic-hil upgrade` to reach past the pin; that reinstall replaces
+the recorded requirement. Name any extras on that line as well —
+`uv tool install --upgrade "agentic-hil[can]==<that version>"` — because `uv`
+records the requirement literally and uninstalls what it was not told about. An
+installation the operator wants upgraded on its own from now on takes the
+unpinned `uv tool install --upgrade agentic-hil` instead, at the price of the
+plugin and the package drifting apart. Then, from the firmware project
+directory:
 
 ```bash
 agentic-hil setup --agent claude

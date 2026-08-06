@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **An upgrade that moved nothing reported success.** `uv tool upgrade` exits 0 both when it upgraded and when there was nothing it could do, and `agentic-hil upgrade` read that code instead of the two version numbers it already held — so an installation created with an exact pin (which the Claude Code plugin's skill documents, and which `uv tool upgrade` can never move) came back `ok: true` with `previous_version` and `version` identical, `restart_required: true`, and uv's plain-text reason passed through unread. The operator restarted onto the same release and went on believing they had upgraded. The three outcomes are now three answers: a real change is `ok: true` naming both numbers, an already-current installation is `ok: true` with `already_current: true`, and one held at a pin is `ok: false` `upgrade_blocked_by_pin`. Only the pin is a refusal — a machine that is already newest has nothing wrong with it, and refusing there would make the command exit non-zero on every up-to-date host and break the provisioning scripts that run it unconditionally. Both unchanged outcomes set `restart_required: false`, because there is nothing new to load. The pinned refusal carries `pinned_version`, `installed_extras` read off the installed distribution, and `reinstall_command`, which keeps those extras where uv's own `agentic-hil@latest` hint drops `[can]` and silently takes CAN support off a bench that has it. Agentic HIL names that command and never runs it: which version a machine runs is the operator's decision, and a pin can be deliberate. Implements hardci-hq#99.
+- The plugin skill's exact pin stays — it ships guidance for one release, and a package ahead of it answers differently — but now states why it is wanted, that `agentic-hil upgrade` cannot reach past it, and which line does while keeping the extras. README, the quickstart and TROUBLESHOOTING carry the three outcomes and the rule that no install line outside the plugin adds `==`.
+
 ## [0.8.0] - 2026-08-06
 
 The entries below add surface — configuration keys, MCP tools, a resource, a changed generated default — so this is a minor under decision 0019, not a patch.
