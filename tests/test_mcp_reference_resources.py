@@ -19,9 +19,11 @@ from pathlib import Path
 import pytest
 from conftest import (
     FAKE_OPENOCD_NO_TARGET,
+    FAKE_OPENOCD_POST_INIT_UNCONFIRMED,
     FAKE_OPENOCD_UNCONFIRMED,
     FAKE_STLINK_NO_PROBE,
     FAKE_STLINK_NO_TARGET,
+    FAKE_STLINK_PARTIAL_CONFIRMATION,
     FAKE_STLINK_UNCONFIRMED,
     write_config,
 )
@@ -340,6 +342,59 @@ def test_a_toolchain_that_confirmed_nothing_publishes_no_abort_point_to_the_refe
     assert adapter_claim not in entry["meaning"]
     assert any("target_not_detected" in step for step in entry["do_not"])
     assert adapter_claim in detected["meaning"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "executable", "present", "absent"),
+    [
+        ("openocd", FAKE_OPENOCD_POST_INIT_UNCONFIRMED, "AGENTIC_HIL_STAGE:init:ok", "AGENTIC_HIL_RESULT:probe_target:ok"),
+        ("stlink", FAKE_STLINK_PARTIAL_CONFIRMATION, "ST-LINK SN", "Device name"),
+    ],
+)
+def test_a_partial_confirmation_is_not_described_as_an_absent_one(
+    tmp_path: Path, backend: str, executable: Path, present: str, absent: str
+) -> None:
+    """The catalogue entry has to hold for the whole branch it documents.
+
+    Neither backend needs *every* confirming line to be missing to reach this
+    result: OpenOCD decides it on the success marker alone, so the stage marker
+    may be in the same output, and ST-Link requires all of its expected lines,
+    so one of two is enough. The entry used to describe both as having reported
+    nothing at all, which a caller reading it against a log that does carry a
+    marker would have found false — in the one channel it is told to trust. The
+    marker that did arrive is now in the result instead of being asserted away
+    by the resource.
+    """
+    tools = AgenticHILToolService(
+        load_config(str(write_config(tmp_path, debugger_type=backend, debugger_executable=executable)))
+    )
+    try:
+        result = tools.call("probe_target")
+        entry = json.loads(read_text(tools, ERROR_URI_PREFIX + f"target_state_unconfirmed:{backend}"))
+        log = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))
+    finally:
+        tools.close()
+
+    # Same branch as the markerless fixtures: still no abort point, still
+    # quarantined. Only the evidence published alongside it differs.
+    assert result["backend_error_type"] == "probe_unconfirmed"
+    assert result["error_type"] == "target_state_unconfirmed"
+    assert result["quarantined"] is True
+
+    assert present in f"{log['stdout']}{log['stderr']}"
+    assert result["operation_result"]["confirmed"] is False
+    assert result["operation_result"]["matched_success_text"] == [present]
+    assert absent in result["operation_result"]["expected_success_text"]
+    assert absent not in result["operation_result"]["matched_success_text"]
+
+    # The served entry must not contradict that result. It says the confirmation
+    # is incomplete and points at the fields, rather than naming which lines were
+    # missing on a run it cannot see.
+    assert result["remediation"] == entry["remediation"]
+    assert "operation_result" in entry["meaning"]
+    assert "unknown" in entry["meaning"]
+    for phrase in ("printed neither", "does not carry the lines", "reported nothing"):
+        assert phrase not in entry["meaning"], entry["meaning"]
 
 
 def test_an_ambiguous_pyocd_probe_selector_carries_the_substring_rule(tmp_path: Path) -> None:

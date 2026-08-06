@@ -153,7 +153,7 @@ Likely cause: target power is missing, SWD is disabled by firmware, jumpers are 
 
 Fix: confirm board power, keep `target/stm32f4x.cfg` for Nucleo-F446RE, disconnect other debug tools, power-cycle the board, and probe again before flashing.
 
-Not the same as `target_state_unconfirmed`, which is what a toolchain that exited without reporting anything produces. This one is the backend's own report that it reached the adapter and nothing answered, so it refuses retry-safe and the bench stays in service; that one places the abort point nowhere, quarantines, and is settled by the physical check in its `quarantine_guidance` rather than by another probe.
+Not the same as `target_state_unconfirmed`, which is what a toolchain that exited without confirming what it did produces — `operation_result` in that result names which confirmation lines arrived and which did not. This one is the backend's own report that it reached the adapter and nothing answered, so it refuses retry-safe and the bench stays in service; that one places the abort point nowhere, quarantines, and is settled by the physical check in its `quarantine_guidance` rather than by another probe.
 
 ## 8. `permission_denied`
 

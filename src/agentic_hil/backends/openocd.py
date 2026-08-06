@@ -338,7 +338,28 @@ class OpenOCDBackend:
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected, init_reached=init_reached), audit_error)
             if success_marker is not None and success_marker not in output:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, rejected, init_reached=init_reached), audit_error)
+                # Only the success marker decides this branch, so the init-stage
+                # marker may well be in the output beside it — a run that
+                # completed `init`, examined the core and then lost the second
+                # echo. The result carries which of the two were printed so a
+                # caller reads this run's evidence rather than inferring the
+                # worst case from the error_type, and so the shipped catalogue
+                # entry can describe a partial confirmation without claiming
+                # anything about a particular run.
+                return self._finish_log_audit(
+                    self._failure_result(
+                        tool,
+                        started_at,
+                        finished_at,
+                        elapsed_ms,
+                        self._unconfirmed_backend_error_type(tool),
+                        log_path,
+                        rejected,
+                        init_reached=init_reached,
+                        operation_result=self._marker_evidence(output, success_marker),
+                    ),
+                    audit_error,
+                )
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
@@ -373,8 +394,8 @@ class OpenOCDBackend:
     # output qualifies. `probe_unconfirmed` — an exit of 0 with the success
     # marker missing — stays out, because it is the absence of a report rather
     # than a report that nothing answered: OpenOCD may have completed `init`,
-    # halted the core and then lost both markers, and that board's run state is
-    # unknown. It carries `target_state_unconfirmed` to the caller for the same
+    # halted the core and then lost the success marker, with or without the
+    # stage marker beside it, and that board's run state is unknown either way. It carries `target_state_unconfirmed` to the caller for the same
     # reason, so the public error_type and its catalogue entry withhold the
     # abort-point claim this set is about.
     READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
@@ -384,7 +405,17 @@ class OpenOCDBackend:
             return True
         return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True) -> JsonObject:
+    def _marker_evidence(self, output: str, success_marker: str) -> JsonObject:
+        """Which of the two echoes this backend asks for reached the output.
+
+        Both are `echo`ed by the command string, so each is evidence about a
+        stage of this run and neither is a verdict from OpenOCD about the
+        target. Reported in the same shape the ST-Link backend uses for its
+        confirmation lines, so a caller reads one field for both."""
+        expected = [OPENOCD_INIT_STAGE_MARKER, success_marker]
+        return {"confirmed": False, "expected_success_text": expected, "matched_success_text": [marker for marker in expected if marker in output]}
+
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
@@ -393,6 +424,8 @@ class OpenOCDBackend:
             backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        if operation_result is not None:
+            result["operation_result"] = operation_result
         if rejected_commands:
             # OpenOCD stopped inside its own interpreter, before it opened the
             # probe: this call never reached the bench. That is a failed call,
@@ -486,7 +519,7 @@ class OpenOCDBackend:
     def _likely_causes(self, error_type: str) -> list[str]:
         return {
             "target_not_detected": ["DUT is not powered", "wrong interface configuration", "SWD/JTAG wiring issue", "debug probe already in use"],
-            "target_state_unconfirmed": ["OpenOCD exited successfully without printing either of the markers this backend echoes", "debuggers.<name>.executable is a wrapper that discards OpenOCD's output", "OpenOCD's output was redirected away from the process it was started as"],
+            "target_state_unconfirmed": ["OpenOCD exited successfully without the success marker this backend echoes at the end of the command; operation_result names which markers did print", "debuggers.<name>.executable is a wrapper that discards OpenOCD's output", "OpenOCD's output was redirected away from the process it was started as"],
             "adapter_not_found": ["debug probe is not connected", "debug probe driver is missing", "debug probe is already in use", "Windows USB driver is not bound to the ST-Link adapter"],
             "verify_failed": ["flash write did not persist correctly", "wrong target configuration", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],

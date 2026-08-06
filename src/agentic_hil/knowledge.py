@@ -542,24 +542,31 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     # error_type rather than another `target_not_detected`: those say the adapter
     # was reached and nothing answered behind it, which places the abort point
     # before the target and is why they refuse retry-safe. A toolchain that exited
-    # without reporting anything places it nowhere, so the same public error_type
-    # would have published exactly the claim this branch cannot make.
+    # without confirming what it did places it nowhere — whether it printed part of
+    # the confirmation or none of it — so the same public error_type would have
+    # published exactly the claim this branch cannot make.
     "target_state_unconfirmed:openocd": ErrorRemedy(
         meaning=(
-            "OpenOCD exited successfully and printed neither the stage marker this backend echoes after `init` nor the "
-            "tool's own success marker, so it reported nothing about how far the run got. That is the absence of a "
-            "verdict, not a verdict that no target answered: `init` may have completed, examined the core and halted "
-            "it. The board's run state is unknown, which is why this quarantines the bench instead of refusing."
+            "OpenOCD exited successfully without the tool's own success marker, so its account of this run is "
+            "incomplete rather than negative. Which part is missing is in this result and not in this entry: "
+            "`operation_result.expected_success_text` lists both markers the backend `echo`es — the stage marker after "
+            "`init` and the success marker at the end of the command — and `matched_success_text` names the ones "
+            "OpenOCD printed, which may be neither of them or the stage marker alone. Either way the outcome went "
+            "unreported, and that is the absence of a verdict rather than a verdict that no target answered: `init` "
+            "may have completed, examined the core and halted it. The board's run state is unknown, which is why this "
+            "quarantines the bench instead of refusing."
         ),
         remediation=(
             "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
             "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
+            "Read `operation_result` in this result: the markers that did print bound how far the run provably got, and "
+            "the stage marker among them means `init` completed and the core was examined.",
             "Read the debugger log at `log_path`. Both markers are `echo`ed by the command string this backend sends, "
-            "so whatever OpenOCD printed instead is the evidence for how far it actually got.",
+            "so whatever OpenOCD printed instead of the missing one is the evidence for how far it actually got.",
             "Confirm `debuggers.<name>.executable` is OpenOCD itself and not a wrapper or launcher script: anything "
             "that discards the child's stdout and stderr produces this result out of a run that worked.",
-            "If the log does contain both markers, this is a defect in this backend rather than a fault on the bench — "
-            "report it with that log.",
+            "If the log does contain the success marker `matched_success_text` reports as missing, this is a defect in "
+            "this backend rather than a fault on the bench — report it with that log.",
         ),
         do_not=(
             "Do not read this as `target_not_detected`. That is OpenOCD's own report that it reached the adapter and "
@@ -571,16 +578,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "target_state_unconfirmed:stlink": ErrorRemedy(
         meaning=(
-            "STM32CubeProgrammer exited successfully and its output does not carry the lines that confirm the "
-            "operation — for a read, the ST-Link serial number and the device name. It said nothing about whether it "
-            "attached to the target, so this is the absence of a verdict rather than a report that no target answered, "
-            "and the board's run state is unknown. That is why this quarantines the bench instead of refusing."
+            "STM32CubeProgrammer exited successfully without every line that confirms the operation — for a read, the "
+            "ST-Link serial number and the device name — so its account of this run is incomplete rather than "
+            "negative. Which lines are missing is in this result and not in this entry: "
+            "`operation_result.expected_success_text` lists the ones that were looked for and `matched_success_text` "
+            "the ones the CLI printed, which may be none of them or only some. A confirmation that stops short is not "
+            "a report that no target answered: it leaves the outcome unstated, so this is the absence of a verdict and "
+            "the board's run state is unknown. That is why this quarantines the bench instead of refusing."
         ),
         remediation=(
             "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
             "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
-            "Read the debugger log at `log_path`; `operation_result.expected_success_text` in this result lists the "
-            "lines that were looked for, and what the CLI printed instead is the evidence for how far it got.",
+            "Read `operation_result` in this result and then the debugger log at `log_path`: `expected_success_text` "
+            "lists the lines that were looked for, `matched_success_text` the ones that arrived, and what the CLI "
+            "printed in place of the rest is the evidence for how far it got.",
             "Confirm `debuggers.<name>.executable` is STM32_Programmer_CLI itself and not a wrapper that discards its "
             "output. A CLI version that words its confirmation differently produces the same result, and the log is "
             "what tells the two apart.",
@@ -1945,7 +1956,7 @@ Quarantine answers one question — "is the physical state of the hardware unkno
 | OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
 | pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
 | ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
-| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call (`timeout`), an exit that confirms nothing (`target_state_unconfirmed`) | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
+| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call (`timeout`), an exit whose output does not carry the confirmation the tool asks for (`target_state_unconfirmed`) | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
 | COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
 | CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
 | CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **quarantine** — python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same |

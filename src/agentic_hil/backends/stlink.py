@@ -45,8 +45,8 @@ STLINK_NOT_FOUND: JsonObject = {
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "stm32_programmer_cli_not_found": "debugger_not_found",
     "probe_not_found": "adapter_not_found",
-    # An exit of 0 whose output carries none of the lines that confirm the
-    # operation. Its own public error_type, for the reason the OpenOCD table
+    # An exit of 0 whose output is missing at least one of the lines that
+    # confirm the operation. Its own public error_type, for the reason the OpenOCD table
     # gives: `target_not_detected` is the CLI's positive report that a probe was
     # opened and nothing answered behind it, and the shipped catalogue entry for
     # it says so, so publishing it here would claim an abort point this branch
@@ -267,7 +267,13 @@ class STLinkBackend:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
             confirmation = self._confirm_operation_success(output, tool)
             if not confirmation["confirmed"]:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]}), audit_error)
+                # Confirmation is all-or-nothing here, so this branch is also
+                # reached with some of the expected lines present — a read that
+                # printed the ST-Link serial and no device name. The lines that
+                # did match travel with the ones that were looked for, so the
+                # result says how far the CLI got rather than leaving a caller
+                # to read the worst case out of the error_type.
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"], "matched_success_text": confirmation["matched"]}), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
@@ -308,8 +314,9 @@ class STLinkBackend:
             # that never carried anything must refuse, not quarantine
             # (hardci-hq#97). Both are the CLI's own words, read out of its
             # output by `_classify_output`; `probe_unconfirmed` — an exit status
-            # of 0 with nothing in the output that confirms the connection —
-            # deliberately is not, because it names no abort point at all.
+            # of 0 whose output is missing at least one line that confirms the
+            # connection — deliberately is not, because it names no abort point
+            # at all, whether it printed some of them or none.
             result.update(NOT_CONTACTED)
         return result
 
@@ -378,7 +385,7 @@ class STLinkBackend:
         return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing the lines that confirm the operation", "debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
 
 
 def version_line(output: str) -> str:
