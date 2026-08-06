@@ -163,6 +163,26 @@ Likely cause: the authoritative config disables that action or does not name the
 
 Fix: stop and ask the human operator to review the authoritative config. Do not work around the result with raw OpenOCD, direct COM-port tools, direct CAN access, or shell commands.
 
+## 8a. A Permission Is `false` And Nothing Turns It Back On
+
+Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and every route out looks shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value. `agentic-hil init --force` regenerates the file and the `false` is still there afterwards.
+
+Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. Regeneration carries every existing grant over by name, which is exactly why `--force` does not clear it.
+
+Fix, in your own terminal in the project root:
+
+```bash
+agentic-hil grant can_buses.dut.allow_write
+```
+
+That opens the one permission it names and touches nothing else in the file — the baudrate, the `resource_id`, the `state_root`, the artifact roots and every other setting stay as they were. `agentic-hil revoke <key>` closes one again. Several keys may be named in one command and are applied together or not at all.
+
+* **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file. Removing that trap is what this command is for.
+* **Which key?** Name anything that is not a permission and the refusal prints every permission key your configuration actually has, entry names included. Both `can_buses.dut.allow_write` and the long `can_buses.dut.permissions.allow_write` are accepted.
+* **Restart the MCP server afterwards.** A running server parses permissions once, at startup, and `project_config_reload_description` re-reads devices and deliberately no permission. Until that restart the agent keeps being refused with the old value — the command's own result says so.
+* **`permission_change_in_open_run`** means something on this machine is holding the bench: a run, a COM or CAN session, another terminal. Permissions do not move under an active hold. `agentic-hil lease-status` names the holder; wait or ask for it to be closed, then repeat the command.
+* **It is a command, not a tool.** An agent cannot run it and will not find it in any tool list. When an agent reports that a permission is missing, it is asking you for this line.
+
 ## 9. Artifact Not Found Or Fails Validation
 
 Symptom: `flash_firmware` returns `artifact_not_found` or `artifact_validation_failed` with fields such as `allowed_root: false`, `allowed_extension: false`, `elf_header: false`, `hex_parseable: false`, or `bin_size_plausible: false`.

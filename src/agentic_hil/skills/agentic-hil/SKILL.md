@@ -175,19 +175,30 @@ permission you never touched and not `true` for one you set to `false` a moment
 ago. Such a call is refused as `permission_widening_denied`, whichever key it
 named: the value you sent is checked, and the file's own permissions are
 compared before and after the write as well. A person reopens a configuration
-with `agentic-hil init --force` in the project root — say that and stop.
+and no tool does — say that and stop.
+
+**Say which command, and name the key.** `agentic-hil grant <key>` in the project
+root opens one named permission and changes nothing else in the file:
+`agentic-hil grant can_buses.dut.allow_write`, several keys in one command when
+several are needed, and `agentic-hil revoke <key>` to close one again. It takes
+effect once the operator restarts this server, because permissions are read at
+startup and `project_config_reload_description` re-reads none of them.
+`agentic-hil init --force` is the other command and is much larger — it
+regenerates the whole file from attached hardware — so ask for that one only when
+the bench itself has to be rebuilt. Neither is in any tool list; there is nothing
+to call.
 
 Setting `permissions.allow_config_permissions_write: false` is the last
 permission change **that call** can make: after it, `project_config_set` cannot
 move any permission in that file again. The result of that call says so itself,
 under `permissions_frozen` — what stands frozen, that you cannot undo it, and the
-command a person reopens it with. Make it when that is what was asked for, never
+commands a person reopens it with. Make it when that is what was asked for, never
 in passing.
 
 Regenerating is not covered by that rule and is not a way around it.
 `project_config_create` is creation rather than a permissions write, and
-`agentic-hil init --force` is the operator's own command; both may write open
-permissions. Ask for one, do not engineer one.
+`agentic-hil init --force` and `agentic-hil grant` are the operator's own
+commands; all three may write open permissions. Ask for one, do not engineer one.
 
 A configuration written before the board was plugged in holds placeholders:
 `probe_id: null`, `executable: null`, `controller: "unknown-controller"`. Do not
