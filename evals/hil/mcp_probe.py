@@ -88,11 +88,16 @@ def main() -> int:
 
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         listed = recv()
-        names = {t["name"] for t in dig(listed, "result", "tools") or []}
+        tools = dig(listed, "result", "tools") or []
+        names = {t["name"] for t in tools}
         expected = {x.strip() for x in (HARNESS / "tools.list.expected").read_text().split() if x.strip()}
         missing, added = expected - names, names - expected
         checks.append({"name": "tool surface matches snapshot", "ok": not missing and not added,
                        "detail": f"count={len(names)} missing={sorted(missing)} added={sorted(added)}"})
+        # A host decides from these which calls pass without a prompt; a build
+        # that ships the table bare is the failure hardci-hq#101 reported.
+        bare = sorted(t["name"] for t in tools if not isinstance(t.get("annotations"), dict) or not str(t["annotations"].get("title", "")).strip())
+        checks.append({"name": "every tool carries annotations", "ok": not bare, "detail": f"without annotations={bare}"})
     finally:
         with contextlib.suppress(Exception):
             proc.stdin.close()

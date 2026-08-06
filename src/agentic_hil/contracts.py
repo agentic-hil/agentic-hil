@@ -225,6 +225,259 @@ MCP_TOOLS: list[JsonObject] = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# Tool annotations.
+#
+# `ToolAnnotations` as defined in the MCP schema for revision 2025-06-18 — the
+# version this server advertises in `initialize` — and unchanged word for word
+# in the current 2026-07-28 revision: `title`, `readOnlyHint`,
+# `destructiveHint`, `idempotentHint`, `openWorldHint`.
+#
+# The title goes in `annotations.title` and not in the tool's own top-level
+# `title`, deliberately. Both exist and the top-level one wins where a host
+# supports it, but it only arrives with 2025-06-18 while `annotations.title`
+# has been understood since 2025-03-26 — and this server still negotiates down
+# to 2024-11-05. One string, in the field the widest set of revisions reads.
+#
+# Without them a host has the tool's name and nothing else, and it judges by
+# appearance: `project_config_reload_description` sits beside
+# `project_config_set` and `project_config_create`, which do write, so a host
+# blocked the one call that re-reads the file and the operator reconnected twice
+# instead (hardci-hq#101). The description says the reload writes nothing — in
+# prose, in the middle of a paragraph, not in the field a machine reads.
+#
+# Three rules govern what may be written here, and two definitions decide the
+# hard cases.
+#
+# **They are claims about behaviour, so they have to be true.** Each entry
+# below follows what the implementation demonstrably does, not what the name
+# suggests; where the answer is arguable the argument is in the comment above
+# the entry. The by-name test in tests/test_tool_annotations.py is the gate.
+#
+# **Silence is a claim, because two of the defaults are not `false`.** Per the
+# schema, `destructiveHint` defaults to **true** and `openWorldHint` defaults to
+# **true**; only `readOnlyHint` and `idempotentHint` default to false. So a tool
+# that does not say `destructiveHint: false` has said it may destroy, and every
+# tool has to state `openWorldHint: false` outright. Conversely
+# `destructiveHint` and `idempotentHint` are, in the schema's own words,
+# "meaningful only when `readOnlyHint == false`", so a read-only tool declares
+# neither — a `destructiveHint` beside `readOnlyHint: true` is a contradiction,
+# not a belt-and-braces.
+#
+# **They are hints, and this server enforces nothing by them.** The schema says
+# so ("all properties in ToolAnnotations are hints ... clients should never make
+# tool use decisions based on ToolAnnotations received from untrusted servers"),
+# and nothing in this package reads this table to decide anything. What decides
+# is the authoritative configuration's permissions and the machine-wide device
+# locks, exactly as before.
+#
+# What `readOnlyHint` is measured against here: the bench — the target and its
+# probe, the configured COM ports and CAN buses, the workspace and the
+# authoritative configuration. It is *not* measured against this server's own
+# record that a call happened. Every hardware tool writes a report, most take a
+# device lease, and several append to the audit ledger; if that counted as
+# modifying the environment then no tool here could ever be read-only and the
+# distinction the host needs would not exist. The carve-out is for the trail
+# only, and it is the sole carve-out.
+#
+# `openWorldHint` is `false` on every tool, which is the one answer this surface
+# can give for all of them. A bench is a closed, named set: the target and the
+# probe, the COM ports and CAN buses the authoritative configuration declares,
+# the artifact store under the workspace, and that configuration itself. Nothing
+# here reaches the network or an unbounded set of entities. The four tools that
+# read what is physically attached rather than what is configured —
+# `debugger_probes_list`, `com_ports_list`, `project_config_adopt_hardware` and
+# `project_config_create` — are bounded by one machine's hardware, which is
+# still a closed domain and not the open world the schema contrasts a web search
+# against.
+TOOL_ANNOTATIONS: dict[str, JsonObject] = {
+    # Runs `<backend executable> --version` and reads the configuration. No
+    # probe is opened and no board is contacted.
+    "debugger_info": {"title": "Debugger backend availability", "readOnlyHint": True, "openWorldHint": False},
+    # Enumerates USB probes and stops there: `pyocd json --probes --no-config`
+    # and `STM32_Programmer_CLI -l st-link-only`, both of which the backends
+    # document as never connecting to a target (pyocd.py, stlink.py). OpenOCD
+    # cannot enumerate at all and refuses. Nothing on the board is touched.
+    "debugger_probes_list": {"title": "List connected debug probes", "readOnlyHint": True, "openWorldHint": False},
+    # The arguable one, and it is deliberately *not* read-only.
+    #
+    # It reads, and it connects without resetting — OpenOCD `init; targets`,
+    # pyOCD `status`, ST-Link `-HOTPLUG` — which is exactly why recovery is
+    # allowed to use it as a predicate (docs/security-design.md). But connecting
+    # is not nothing, and this repository has already said so twice, in the
+    # quarantine inventory (hardci-hq#97, knowledge.py) and in
+    # docs/security-design.md: "being read-only is not being passive: an SWD
+    # attach halts the core". Bringing a running core under debug control is a
+    # change to the target's execution state, and the failure path treats it as
+    # one — a probe that names no abort point leaves the physical state unknown
+    # and is settled by a verified reset-into-halt, never by re-reading, which
+    # is not what one does about a call that changed nothing. The repository's
+    # own classification agrees: `probe_target` is in `debugger_effect_tools()`.
+    #
+    # So: it acts on the board, reversibly (destructiveHint false — nothing is
+    # erased and a reset restores execution) and repeatably (idempotentHint true
+    # — it connects, reads, disconnects, and leaves the target where the first
+    # call left it).
+    "probe_target": {"title": "Probe the target", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # Content-addressed: the artifact id is `sha256(bytes) + suffix` and the
+    # stored path is that id, so the only file a second upload of the same bytes
+    # can overwrite is the byte-identical one already there, and a symlink
+    # destination is refused outright. Additive, and idempotent by construction.
+    "artifact_upload": {"title": "Upload a firmware artifact", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # The irreversible one. Erases and programs the target's flash: what was on
+    # the device before the call cannot be recovered from anything this server
+    # holds. Not idempotent — a second flash of the same image erases and writes
+    # the same sectors again, and with `reset_after_flash` resets the board
+    # again; the end state matches but the call is not free.
+    "flash_firmware": {"title": "Flash firmware", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Resets the running target. Nothing stored is lost, so this is not
+    # destructive; it is also not idempotent, because a second reset throws away
+    # whatever the firmware did since the first one.
+    "reset_target": {"title": "Reset the target", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    # Destructive because of one mode: `mode: "load"` programs the ELF into
+    # flash, which is why the gate demands `allow_flash` for it (tools.py) — the
+    # same irreversible write as flash_firmware, reached through a different
+    # tool. `reset_halt` additionally resets. Only `attach` is passive, and a
+    # hint cannot be conditional on an argument, so the tool is annotated for
+    # what it may do.
+    "debug_start_session": {"title": "Start a debug session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Containment: tears the session down and releases what it held. Calling it
+    # with no session open answers `ok` with `active: false` rather than
+    # failing, so repeating it is genuinely free.
+    "debug_stop_session": {"title": "Stop the debug session", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    "debug_get_session_status": {"title": "Debug session status", "readOnlyHint": True, "openWorldHint": False},
+    # Sets a breakpoint in the live session. Not idempotent: GDB numbers
+    # breakpoints, so setting the same location twice yields two of them.
+    "debug_set_breakpoint": {"title": "Set a breakpoint", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    "debug_list_breakpoints": {"title": "List breakpoints", "readOnlyHint": True, "openWorldHint": False},
+    # Reconciles against GDB's own list and deletes only what GDB reports, so a
+    # second call finds nothing left and clears nothing; the backend states
+    # outright that clearing breakpoints does not change target execution state.
+    "debug_clear_breakpoints": {"title": "Clear all breakpoints", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # Resumes the target, which then runs. Not idempotent — a second continue
+    # runs further from wherever the first one stopped.
+    "debug_continue": {"title": "Continue the target", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    # Interrupts the target and waits for the stop to be confirmed. The stop is
+    # an effect, so not read-only; nothing is lost by it, so not destructive.
+    "debug_halt": {"title": "Halt the target", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    "debug_get_stop_reason": {"title": "Last stop reason", "readOnlyHint": True, "openWorldHint": False},
+    # Two GDB expression evaluations — `(unsigned long)&symbol` and
+    # `sizeof(symbol)` — both answered out of the ELF's debug information. No
+    # target memory is read and nothing is written, so this is a read even
+    # though it needs a live session to ask through.
+    "debug_symbol_info": {"title": "Resolve a debug symbol", "readOnlyHint": True, "openWorldHint": False},
+    # Reads target memory, which changes nothing, and then writes the Intel HEX
+    # file at `output_path` — an atomic replace of whatever was at that path
+    # inside the workspace. That replacement is the destructive part, and it is
+    # in the workspace rather than on the board. Not idempotent: the bytes come
+    # from live memory, so a second call writes a different snapshot.
+    "debug_dump_symbol_ihex": {"title": "Dump a symbol as Intel HEX", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    "get_last_report": {"title": "Last structured report", "readOnlyHint": True, "openWorldHint": False},
+    "classify_last_error": {"title": "Classify the last failure", "readOnlyHint": True, "openWorldHint": False},
+    # `serial.tools.list_ports.comports()` plus the configuration and this
+    # server's own session state. No port is opened.
+    "com_ports_list": {"title": "List COM ports", "readOnlyHint": True, "openWorldHint": False},
+    # Destructive on two counts, both of them in the code. The open sets the
+    # modem lines, and `assert_dtr`/`assert_rts` default to true — on a board
+    # that wires DTR to reset, opening the port to listen restarts the target,
+    # which comports.py says in as many words. And `clear_buffer` defaults to
+    # true, so a call against an already-open session purges the driver's input
+    # buffer and the session's own: received bytes that no read returned are
+    # gone. That purge is also why it is not idempotent.
+    "com_session_start": {"title": "Open a COM session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Containment. Closing with no session open answers `ok` with
+    # `was_active: false`.
+    "com_session_stop": {"title": "Close a COM session", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # The bytes themselves are additive — a stream is appended to — but what the
+    # target does with them is the firmware's business and not knowable from
+    # here, and stimulus cannot be taken back off the wire. This is the tool
+    # `allow_write` exists to gate, and the hint should not read safer than the
+    # permission does.
+    "com_write": {"title": "Write to a COM port", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Read-only, with one thing worth stating plainly: it *consumes*. The bytes
+    # it returns are deleted from the session buffer, so two calls do not return
+    # the same data. What it does not do is touch the port, the target, or the
+    # configuration — it never reaches the serial handle at all, only the buffer
+    # a background reader fills. `readOnlyHint` asks about the environment, and
+    # the environment is unchanged.
+    "com_read": {"title": "Read from a COM port", "readOnlyHint": True, "openWorldHint": False},
+    # The configuration plus each adapter's own `status()`. No adapter is opened
+    # and no frame is exchanged.
+    "can_buses_list": {"title": "List CAN buses", "readOnlyHint": True, "openWorldHint": False},
+    # Opening a CAN channel puts a node on a shared bus: on PCAN the channel is
+    # initialized and ACKs, and at a wrong bitrate emits error frames — can.py
+    # says exactly that, and it is why the failure path quarantines. Nothing
+    # this server does afterwards takes those ACKs back off the bus. The default
+    # `clear_rx_queue` additionally drains queued frames on a repeat call, which
+    # is the second reason it is not idempotent.
+    "can_session_start": {"title": "Open a CAN session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Containment. Stopping with no session open answers `ok` with
+    # `was_active: false`.
+    "can_session_stop": {"title": "Close a CAN session", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # Same reasoning as com_write: one frame on a shared bus, gated by a
+    # permission, and not recallable.
+    "can_send": {"title": "Send a CAN frame", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # `recv()` transmits nothing — can.py relies on exactly that to prove a
+    # failed read sent no frame — so the bus is untouched. Like com_read it
+    # consumes: the frames it returns are off the queue.
+    "can_read": {"title": "Read CAN frames", "readOnlyHint": True, "openWorldHint": False},
+    # Takes the machine-wide locks for every declared device and holds them
+    # until bench_run_stop. It destroys nothing. It is not idempotent either: a
+    # second call while a run is open is refused with `run_already_active`
+    # rather than being absorbed, so a host must not treat repeating it as free.
+    "bench_run_start": {"title": "Declare a bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    # Releases the run's devices, and closing a run that is not open is how an
+    # agent recovers from losing track of its own state — it answers `ok` with
+    # `run_was_active: false` and writes nothing.
+    "bench_run_stop": {"title": "End the bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # In-memory only; it does not even read the holder files.
+    "bench_run_status": {"title": "Bench run status", "readOnlyHint": True, "openWorldHint": False},
+    # Rewrites the authoritative configuration with no backup on disk, and
+    # carries over the permissions of the document *this server loaded at
+    # startup* — so a narrowing made with project_config_set in this session is
+    # put back wider, and nothing here can undo that. It also re-reads the board
+    # on every call and a newly discovered entry arrives fully granted, so two
+    # calls are equal only if the bench did not move between them, which is not
+    # a property this tool can promise.
+    "project_config_create": {"title": "Generate the project configuration", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Reads the file and the loaded configuration and classifies keys. The only
+    # writes anywhere in configwrite.py are on the `set` path.
+    "project_config_describe": {"title": "Describe the configuration", "readOnlyHint": True, "openWorldHint": False},
+    # Replaces named values in the authoritative file; the previous value is
+    # kept in memory for a rollback and nowhere else. Not idempotent, and for a
+    # concrete reason rather than a cautious one: every accepted call stamps
+    # provenance and increments `modification_count`, so setting a key to the
+    # value it already holds still rewrites the file.
+    "project_config_set": {"title": "Change configuration keys", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Not read-only: it reads the attached probe on every call, and with
+    # `apply: true` it writes the configuration. Not destructive: it fills only
+    # keys that are unset or still hold the skeleton's placeholder, and reports
+    # a key somebody set rather than replacing it. Idempotent: after the first
+    # apply every key matches, so the second call proposes nothing, never
+    # reaches the write, and answers "Nothing was written."
+    "project_config_adopt_hardware": {"title": "Adopt attached hardware", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # The tool hardci-hq#101 is about, and the claim holds: it writes nothing.
+    # No configuration write, no report, no audit record — configreload.py
+    # contains no write call of any kind and the tool is not in
+    # `audited_hardware_tools()`. It contacts no hardware. What it changes is
+    # this process's own view: it re-reads the authoritative file and swaps in
+    # the device description, leaving every permission byte-for-byte as parsed
+    # at startup. A second call against the same file reports that nothing
+    # moved.
+    "project_config_reload_description": {"title": "Reload the bench description", "readOnlyHint": True, "openWorldHint": False},
+}
+
+# Attached here rather than written into each literal above so that the
+# reasoning can sit next to the decision instead of at the end of a long line.
+# A name missing from the table ships without annotations rather than raising at
+# import: an unannotated tool is a degraded tool, not a broken server, and the
+# by-name test in tests/test_tool_annotations.py is what refuses to let one
+# through.
+for _tool in MCP_TOOLS:
+    _tool_annotations = TOOL_ANNOTATIONS.get(str(_tool["name"]))
+    if _tool_annotations is not None:
+        _tool["annotations"] = _tool_annotations
+
 MCP_TOOL_NAMES = [str(tool["name"]) for tool in MCP_TOOLS]
 TOOL_SCHEMAS = {str(tool["name"]): tool["inputSchema"] for tool in MCP_TOOLS}
 TOOL_VALIDATORS = {name: Draft202012Validator(schema) for name, schema in TOOL_SCHEMAS.items()}
