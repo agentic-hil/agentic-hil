@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import threading
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.config import ConfigError, display_path, safe_append_text
@@ -14,7 +16,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
 )
-from agentic_hil.devices import uart_device
+from agentic_hil.devices import VOLATILE_SERIAL_DEVICE_WARNING, uart_device
 from agentic_hil.provisional import (
     cleanup_provisional_handles,
     discharge_provisional_handle,
@@ -34,7 +36,15 @@ from agentic_hil.report import (
     utc_now_iso,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, ComPortConfig, JsonObject
+from agentic_hil.types import (
+    SERIAL_BY_ID_DIRECTORY,
+    AgenticHILConfig,
+    ComPortConfig,
+    JsonObject,
+    fold_device_path,
+    fold_hardware_id,
+    is_stable_device_name,
+)
 
 
 def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
@@ -49,7 +59,10 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
             "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"],
         }
     try:
-        ports = [available_port_info(port) for port in list_ports.comports()]
+        # Read once for the whole enumeration rather than per port: it is a
+        # directory listing whose answer is the same for every port in it.
+        stable_names = serial_by_id_links()
+        ports = [available_port_info(port, stable_names) for port in list_ports.comports()]
         return {"ok": True, "tool": tool, "ports": ports, "summary": f"{len(ports)} available COM port(s)."}
     except OSError as error:
         return {
@@ -60,6 +73,202 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
             "backend_error": str(error),
             "likely_causes": ["serial backend reported an OS error", "USB serial driver state changed during discovery"],
         }
+
+
+# ---------------------------------------------------------------------------
+# Which board is behind this entry.
+#
+# `device` says how to reach a port, not which one it is. On both platforms that
+# name is an enumeration order — plug a second ST-Link into a Linux host and the
+# UART that was ttyACM0 can come up as ttyACM1, and the board that takes the
+# vacated name is opened in its place with nothing in the result saying so
+# (hardci-hq#100). The entry is therefore asked what hardware it means, and the
+# answer is compared against what is actually behind that name before the port is
+# opened.
+
+COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
+
+
+@dataclass(frozen=True)
+class PortIdentity:
+    """The hardware a configured COM port claims, and the field that claims it."""
+
+    expected: str
+    field: str
+
+
+def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdentity | None:
+    """The USB serial this entry says its port belongs to, if it says one.
+
+    Two sources, and no third. ``serial_number`` is the entry stating its own
+    hardware. A ``resource_id`` shared with a configured debugger is the operator
+    stating that this port and that probe are one unit — which they are on any
+    Nucleo — so the probe's serial is the port's serial.
+
+    What is deliberately absent is a guess. A project with one debugger and one
+    COM port is *probably* one board, and probably is exactly what must not
+    decide which hardware a write reaches: a bench with a separate USB-serial
+    adapter has the same shape and a different answer. An entry that names
+    neither gets no expectation, no check, and the behaviour it has today —
+    together with the warning that says why (``UartDevice.identity_warning``).
+
+    Ambiguity is the same answer as silence: two debuggers sharing one
+    ``resource_id`` under different probe serials say nothing about which of them
+    this port is."""
+    port = config.com_ports.get(port_id)
+    if port is None:  # pragma: no cover - callers resolve the entry first
+        return None
+    if port.serial_number:
+        return PortIdentity(port.serial_number, f"com_ports.{port_id}.serial_number")
+    if not port.resource_id:
+        return None
+    shared = fold_hardware_id(port.resource_id)
+    named = sorted(
+        (name, debugger.probe_id)
+        for name, debugger in config.debuggers.items()
+        if debugger.probe_id and debugger.resource_id and fold_hardware_id(debugger.resource_id) == shared
+    )
+    if len(named) != 1:
+        return None
+    debugger_id, probe_id = named[0]
+    return PortIdentity(str(probe_id), f"debuggers.{debugger_id}.probe_id")
+
+
+def port_identity_fields(config: AgenticHILConfig, port_id: str) -> JsonObject:
+    """How one configured entry is identified, without asking the hardware.
+
+    A pure read of the configuration, so it answers on a host with nothing
+    attached — which is where `doctor` and `com_ports_list` are usually run."""
+    device = uart_device(config, port_id)
+    fields: JsonObject = {"identity_source": device.identity_source}
+    if device.port.serial_number:
+        fields["serial_number"] = device.port.serial_number
+    if device.port.resource_id:
+        fields["resource_id"] = device.port.resource_id
+    expectation = expected_port_identity(config, port_id)
+    if expectation is not None:
+        fields["expected_serial_number"] = expectation.expected
+        fields["expected_from"] = expectation.field
+    warning = device.identity_warning
+    if warning:
+        fields["identity_warning"] = warning
+    return fields
+
+
+def port_names_device(host_port: JsonObject, configured_device: str) -> bool:
+    """Whether one enumerated host port is the device a configuration names.
+
+    Either spelling counts, because both name it: a configuration written by
+    adoption on Linux holds ``/dev/serial/by-id/...`` while the enumerator
+    reports ``/dev/ttyACM0``, and the link between the two was already resolved
+    when the inventory was taken. Case folds as a path, which is the host's rule
+    and not ours — see ``types.fold_device_path``."""
+    wanted = fold_device_path(configured_device)
+    candidates = (str(host_port.get("device") or ""), str(host_port.get("stable_device") or ""))
+    return any(name and fold_device_path(name) == wanted for name in candidates)
+
+
+def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> JsonObject:
+    """Refuse a configured port that is currently a different board.
+
+    ``{"ok": True, "identity": ...}`` when the port may be opened, and the
+    identity block says on what grounds — confirmed against the attached
+    hardware, or unchecked and why. ``{"ok": False, ...}`` is the refusal, and it
+    is returned before anything is opened: a mismatch means the name in the file
+    now leads somewhere else, and connecting to find out is the failure.
+
+    An entry that declares no hardware costs nothing here — the host is not
+    enumerated at all, so a configuration written before any of this existed
+    behaves exactly as it did."""
+    port = config.com_ports[port_id]
+    expectation = expected_port_identity(config, port_id)
+    identity: JsonObject = {"device": port.device}
+    if expectation is None:
+        identity["status"] = "not_declared"
+        identity["summary"] = "This entry names no hardware, so which board it reaches was not verified."
+        if not is_stable_device_name(port.device):
+            identity["warning"] = VOLATILE_SERIAL_DEVICE_WARNING
+        return {"ok": True, "identity": identity}
+
+    identity.update({"expected_serial_number": expectation.expected, "expected_from": expectation.field})
+    available = list_available_com_ports("com_ports_available")
+    if not available.get("ok"):
+        # The inventory is how this question is answered at all. Refusing a port
+        # because pyserial is missing would take a working bench off the air over
+        # a check that cannot run; the open proceeds and the result says the
+        # check did not happen.
+        identity["status"] = "backend_unavailable"
+        identity["summary"] = "Host serial ports could not be enumerated, so this port's identity was not verified."
+        identity["backend_error"] = str(available.get("summary", ""))
+        return {"ok": True, "identity": identity}
+
+    ports = [entry for entry in available.get("ports", []) if isinstance(entry, dict)]
+    matches = [entry for entry in ports if port_names_device(entry, port.device)]
+    if len(matches) != 1:
+        identity["status"] = "port_not_enumerated"
+        identity["summary"] = (
+            "The host's serial port inventory does not name this device exactly once, so its identity was not "
+            "verified. A pseudo-terminal, a URL handler and a port that has gone away all look like this."
+        )
+        return {"ok": True, "identity": identity}
+
+    found = str(matches[0].get("serial_number") or "")
+    stable = matches[0].get("stable_device")
+    if stable:
+        identity["stable_device"] = stable
+    if not found:
+        identity["status"] = "serial_unknown"
+        identity["summary"] = "This host port reports no serial number, so it could not be compared with the hardware this entry names."
+        return {"ok": True, "identity": identity}
+
+    identity["found_serial_number"] = found
+    if fold_hardware_id(found) == fold_hardware_id(expectation.expected):
+        identity["status"] = "confirmed"
+        identity["summary"] = "The port behind this entry is the hardware it names."
+        return {"ok": True, "identity": identity}
+
+    elsewhere = next((entry for entry in ports if fold_hardware_id(str(entry.get("serial_number") or "")) == fold_hardware_id(expectation.expected)), None)
+    identity["status"] = "mismatch"
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "port_id": port_id,
+        "error_type": COM_PORT_IDENTITY_MISMATCH,
+        "summary": (
+            f"'{port.device}' currently belongs to hardware '{found}', but this entry names '{expectation.expected}'. "
+            "The port was not opened: a device name is an enumeration order, so this is another board under the "
+            "name this entry used to have."
+        ),
+        "identity": identity,
+        "configured_device": port.device,
+        "expected_serial_number": expectation.expected,
+        "expected_from": expectation.field,
+        "found_serial_number": found,
+        "likely_causes": [
+            "another serial adapter was attached, so the kernel handed this name to a different device",
+            "the boards were replugged in a different order, or the host was rebooted with both attached",
+            "this entry was written for a board that is no longer the one behind this name",
+            (
+                "this entry shares a resource_id with a probe whose virtual COM port it is not, so it is being "
+                "compared against that probe's serial; give the port its own serial_number if the two really are "
+                "separate devices"
+            ),
+        ],
+        # Nothing was reached, so the bench stays in service and this is not an
+        # incident: fix the named cause — plug the board in, or let
+        # `adopt-hardware` rewrite the entry — and call again.
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": True,
+    }
+    if isinstance(elsewhere, dict):
+        # The board this entry means is still attached, under another name. Say
+        # where, because that is the whole repair.
+        moved = str(elsewhere.get("stable_device") or elsewhere.get("device") or "")
+        result["expected_device"] = moved
+        result["summary"] += f" The hardware it names is attached as '{moved}'."
+    return result
 
 
 class ComPortSession:
@@ -150,7 +359,7 @@ class ComPortService:
     def list_ports(self) -> JsonObject:
         ports: JsonObject = {}
         for port_id, port_config in self.config.com_ports.items():
-            ports[port_id] = self._port_status(port_config, self.sessions.get(port_id))
+            ports[port_id] = self._port_status(port_id, port_config, self.sessions.get(port_id))
         # Host discovery is not scoped to one configured port, so it needs at
         # least one port the operator allowed reading from.
         if any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
@@ -187,13 +396,24 @@ class ComPortService:
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
 
+        # Before the log file, before the lease, before the handle: a mismatch
+        # means this name leads to a board nobody meant, and every one of those
+        # steps is already a step taken on its behalf. Enumerating the host to
+        # ask which board a configured entry reaches is part of opening it
+        # safely, not a read of the target, so it is not gated on a permission —
+        # and it names only the port being opened, never the inventory.
+        identity = verify_port_identity(self.config, port_id, "com_session_start")
+        if not identity["ok"]:
+            return self._write_report(identity)
+        identity_status = identity["identity"]
+
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
             if clear_buffer:
                 cleared = self._clear_buffers(existing)
                 if not cleared["ok"]:
                     return self._write_report(cleared)
-            return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "summary": "COM port session is already active."})
+            return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "identity": identity_status, "summary": "COM port session is already active."})
         if existing:
             try:
                 self._stop_session(existing, "replaced")
@@ -227,7 +447,7 @@ class ComPortService:
             session.audit_broken = True
             with suppress(BaseException):
                 self._stop_session(session, "audit_failed")
-            result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "cleanup_required": True, "summary": "COM port opened, but audit initialization failed; resource is quarantined."}
+            result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "identity": identity_status, "cleanup_required": True, "summary": "COM port opened, but audit initialization failed; resource is quarantined."}
             return self._write_report(mark_audit_failure(result, audit_error))
         if clear_buffer:
             cleared = self._clear_buffers(session)
@@ -269,7 +489,7 @@ class ComPortService:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise error
             return recommit_report_with_status(self.config, written, session.lease.status())
-        result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "summary": "COM port session started."}
+        result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "identity": identity_status, "summary": "COM port session started."}
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def session_stop(self, port_id: str) -> JsonObject:
@@ -514,11 +734,14 @@ class ComPortService:
             return result
         return {"ok": True, "session": session}
 
-    def _port_status(self, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
+    def _port_status(self, port_id: str, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
         # assert_dtr/assert_rts are reported because they decide whether merely
         # opening this port touches the target; a reader judging whether an
         # observation was passive needs to see them without opening the config.
         result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "assert_dtr": port_config.assert_dtr, "assert_rts": port_config.assert_rts, "session_active": False}
+        # Which hardware this entry names, next to the name it is reached by. A
+        # reader deciding whether a port is safely addressed needs both.
+        result.update(port_identity_fields(self.config, port_id))
         if session is not None:
             result.update(self._session_status(session))
         return result
@@ -675,7 +898,46 @@ def decode_bytes(data: bytes, encoding: str) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-def available_port_info(port_info: object) -> JsonObject:
+def serial_by_id_links(directory: str = SERIAL_BY_ID_DIRECTORY) -> dict[str, str]:
+    """Every stable serial-port name this host publishes, keyed by what it resolves to.
+
+    Linux's udev maintains ``/dev/serial/by-id/`` — one symlink per port, named
+    after the vendor, the product and the device's own serial number, and
+    therefore unmoved by the enumeration order that decides ``ttyACM0`` from
+    ``ttyACM1``. That name is what a configuration should hold.
+
+    Windows publishes no counterpart that can be *opened*. It knows the identity
+    perfectly well — the device instance path carries the same USB serial — but
+    the only openable name is ``COMn``, and ``COMn`` moves. There the stable half
+    of this fix is ``com_ports.<name>.serial_number`` plus the check at open
+    time, and this returns nothing rather than pretending otherwise.
+
+    Never raises: an unreadable ``/dev`` is a host without stable names, which is
+    the same answer as a host that has none. Windows is short-circuited rather
+    than left to fail the listing, because there a POSIX path is resolved against
+    the current drive and probing ``C:\\dev`` once per enumeration would be a
+    filesystem call whose answer is known."""
+    if os.name == "nt":
+        return {}
+    links: dict[str, str] = {}
+    try:
+        entries = sorted(Path(directory).iterdir())
+    except OSError:
+        return {}
+    for entry in entries:
+        try:
+            resolved = os.path.realpath(str(entry))
+        except OSError:  # pragma: no cover - realpath does not raise for a plain string on POSIX
+            continue
+        # First spelling wins, and the listing above is sorted, so a port that
+        # udev gave two links keeps the same one across runs. Both name one
+        # device, so there is no wrong answer here — only an unstable one, and an
+        # unstable answer would make adoption rewrite the file on every call.
+        links.setdefault(resolved, str(entry))
+    return links
+
+
+def available_port_info(port_info: object, stable_names: dict[str, str] | None = None) -> JsonObject:
     result: JsonObject = {"device": str(getattr(port_info, "device", "") or getattr(port_info, "name", ""))}
     for attr, output_name in [("name", "name"), ("description", "description"), ("hwid", "hwid"), ("manufacturer", "manufacturer"), ("product", "product"), ("interface", "interface"), ("location", "location"), ("serial_number", "serial_number")]:
         value = getattr(port_info, attr, None)
@@ -685,7 +947,36 @@ def available_port_info(port_info: object) -> JsonObject:
         value = getattr(port_info, attr, None)
         if value is not None:
             result[output_name] = value
+    stable = stable_device_name(result["device"], stable_names or {})
+    if stable is not None:
+        result["stable_device"] = stable
     return result
+
+
+def stable_device_name(device: str, stable_names: dict[str, str]) -> str | None:
+    """The replug-proof name for one enumerated port, if this host publishes one.
+
+    A device that already *is* a stable name is returned unchanged, so a caller
+    that hands this an entry read out of a configuration gets the same answer as
+    one that hands it a kernel name.
+
+    The listing is keyed by what udev's symlinks resolve to, which for the
+    ordinary ``/dev/ttyACM0`` is that name itself — so the direct lookup answers
+    the common case without a syscall, and ``realpath`` is the fallback for a
+    device node that is itself a link."""
+    if not device:
+        return None
+    if is_stable_device_name(device):
+        return device
+    if not stable_names:
+        return None
+    direct = stable_names.get(device)
+    if direct is not None:
+        return direct
+    try:
+        return stable_names.get(os.path.realpath(device))
+    except OSError:  # pragma: no cover - realpath does not raise for a plain string on POSIX
+        return None
 
 
 def likely_causes(error_type: str) -> list[str]:
