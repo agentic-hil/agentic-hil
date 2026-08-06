@@ -527,4 +527,7 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
         "debuggers.dut.probe_id",
         "debuggers.dut.executable",
         "com_ports.dut_uart.device",
+        # The port's own identity (hardci-hq#100), which `init` now writes for
+        # the same reason it writes the device: it read it off the same board.
+        "com_ports.dut_uart.serial_number",
     }
