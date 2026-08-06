@@ -1928,79 +1928,84 @@ def test_gateway_tool_descriptions_name_what_they_replace() -> None:
         assert raw_command in descriptions[name], name
 
 
+SKILL_TOOL_COLUMN = "The tools"
+
+
+def _skill_routing_table(text: str) -> list[str]:
+    """The tools the skill declares, read out of the routing table's tool column.
+
+    The skill names tools in one defined place — that column — and names error
+    types, result fields, permissions and configuration sections in prose, in
+    the same backticks, because that is how all of them are written. A scan of
+    the whole document cannot tell the two apart, so it took every underscored
+    identifier for a tool and every documented field had to be excluded by
+    hand before the suite went green. That list grew with the documentation,
+    and on one merge two branches extended it independently: hardci-hq#90.
+    Reading the column reads the document's own structure instead of guessing
+    at its prose.
+    """
+    names: list[str] = []
+    column: int | None = None
+    for line in text.splitlines():
+        row = line.strip()
+        if not row.startswith("|"):
+            column = None  # A table ends where its rows do; the next one names its own column.
+            continue
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if column is None:
+            if SKILL_TOOL_COLUMN in cells:
+                column = cells.index(SKILL_TOOL_COLUMN)
+            continue
+        if column < len(cells) and set(cells[column]) - set("-: "):
+            names.extend(re.findall(r"`([a-z][a-z0-9_]*)`", cells[column]))
+    return names
+
+
 def test_skill_only_names_tools_the_server_exposes() -> None:
+    """The routing table is the skill's tool inventory, and it has to hold the contract.
+
+    Checked in both directions on purpose. Prose is out of scope by
+    construction, and that costs no coverage only while the table names every
+    tool there is — so a tool this server gains without a row here fails as
+    loudly as a row naming one it does not serve.
+    """
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
     exposed = set(contract.read_text(encoding="utf-8").split())
-    # Underscored identifiers in backticks are tool names; these are the import
-    # name, the error types the skill names, and the result fields any tool can
-    # carry. The list grows with every documented field: hardci-hq#90.
-    not_a_tool = {
-        "agentic_hil",
-        "permission_denied",
-        "permission_widening_denied",
-        "config_file_not_found",
-        "device_busy",
-        "hardware_mismatch",
-        "config_status",
-        "config_stale",
-        "permissions_frozen",
-        # Permissions, named where the skill says which of them a revocation on
-        # disk reaches before a restart and which of them it does not.
-        "allow_mass_erase",
-        "allow_flash",
-        "allow_reset",
-        "allow_write",
-        "allow_raw_debugger_commands",
-        "allow_config_write",
-        "allow_config_description_write",
-        "allow_config_permissions_write",
-        "quarantine_guidance",
-        "physical_check",
-        # The two CAN listen-only refusals and the result fields carrying their
-        # reason, named where the skill says a passive-mode refusal is not an
-        # obstacle to be removed.
-        "can_listen_only_unsupported",
-        "can_listen_only_unconfirmed",
-        "link_state",
-        "driver_state",
-        "listen_only",
-        "config_reload_in_open_run",
-        "resource_quarantined",
-        "not_reloaded_sections",
-        "permission_differences",
-        # Configuration sections the skill names when it says which of them a
-        # description reload covers and which still need a restart.
-        "com_ports",
-        "can_buses",
-        "workspace_root",
-        "state_root",
-        # The refusal that says a configured port now leads to another board,
-        # the two configuration keys that identify a port, and the result fields
-        # the skill tells the caller to read off that refusal.
-        "com_port_identity_mismatch",
-        "serial_number",
-        "resource_id",
-        "expected_serial_number",
-        "found_serial_number",
-        "expected_device",
-        # `config_status` fields the skill names when it says which document a
-        # stale answer's description came from and which document its
-        # permissions came from.
-        "description_source",
-        "description_reload",
-        "description_reloaded_at",
-        "loaded_digest",
-        "loaded_at",
-    }
+    declared = _skill_routing_table(_packaged_skill_text())
 
-    referenced = {
-        token
-        for token in re.findall(r"`([a-z][a-z0-9_]*)`", _packaged_skill_text())
-        if "_" in token
-    } - not_a_tool
+    assert declared, f"the skill has no `{SKILL_TOOL_COLUMN}` column to read"
+    assert len(set(declared)) == len(declared), "the routing table names a tool twice"
+    assert set(declared) == exposed, (
+        f"routed but not exposed: {sorted(set(declared) - exposed)}; "
+        f"exposed but not routed: {sorted(exposed - set(declared))}"
+    )
 
-    assert referenced, "the skill names no tools at all"
-    assert referenced <= exposed, sorted(referenced - exposed)
+
+def test_the_skill_tool_check_reads_the_table_and_not_the_prose() -> None:
+    """Both directions of hardci-hq#90, against the shipped document.
+
+    Prose is out of scope whatever an identifier there is called — a result
+    field, and equally a name shaped like a tool, which is the deliberate half
+    of the trade the test above pays for by holding the whole table. A name in
+    the tool column is caught even when it reads like one of ours.
+    """
+    contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
+    exposed = set(contract.read_text(encoding="utf-8").split())
+    text = _packaged_skill_text()
+    declared = _skill_routing_table(text)
+
+    documented = text + "\nA refusal carries `some_new_result_field`, and `reset_target_hard` is prose.\n"
+
+    assert declared
+    assert _skill_routing_table(documented) == declared
+
+    lines = text.splitlines()
+    lines.insert(
+        max(index for index, line in enumerate(lines) if line.startswith("|")) + 1,
+        "| A request no tool serves | `flash_firmware_v2` |",
+    )
+
+    assert set(_skill_routing_table("\n".join(lines))) - exposed == {"flash_firmware_v2"}
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "opencode"])
