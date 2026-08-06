@@ -47,7 +47,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.redact import filesystem_error_detail
-from agentic_hil.types import JsonObject
+from agentic_hil.types import JsonObject, fold_device_path, fold_hardware_id
 
 HOLDER_RECORD_VERSION = 1
 BENCH_ROOT_NAME = ".agentic-hil"
@@ -169,12 +169,54 @@ def is_physical_resource(resource: str) -> bool:
     return resource.startswith(PHYSICAL_RESOURCE_PREFIXES)
 
 
+def fold_resource_name(resource: str) -> str:
+    """Fold a resource name the way the device it names already folded it.
+
+    ``Device.lock_key`` is where a lock key is built, and it folds the config
+    field it was built from: an opaque hardware id one way and a host path the
+    other (``types.fold_hardware_id``, ``types.fold_device_path``). A name that
+    reaches the mutex without a device behind it never met that step, so
+    ``com:COM9`` and ``com:com9`` became two lock files for one port and a
+    caller that spelled its own key locked something no configured device ever
+    locks. This is that same rule expressed over the finished name, applied
+    where the lock is created rather than only where a key happens to be
+    derived.
+
+    Idempotent on every key ``Device.lock_key`` can produce, on Windows and on
+    POSIX alike. That is the property being bought: folding a derived key
+    changes nothing, so a hand-written spelling lands *on* the derived key
+    instead of beside it.
+
+    Names that are not device keys are returned untouched, deliberately.
+    ``project:<digest>`` is a hex digest of a configuration and
+    ``debugger-discovery:all`` names a host-wide enumeration; neither is a
+    board, neither is reachable under a second spelling, and folding them would
+    only suggest they were hardware."""
+    # Opaque hardware ids. `com:serial:` is tried before `com:` below because
+    # the longer prefix carries an adapter serial while the shorter one carries
+    # a host path, and they fold by different rules.
+    for prefix in ("com:serial:", "physical:", "can:"):
+        if resource.startswith(prefix):
+            return prefix + fold_hardware_id(resource[len(prefix) :])
+    # Host paths. `probe:` is a probe serial *or* a debugger executable, and the
+    # path rule is the one that is safe for both: it leaves an opaque serial
+    # alone on POSIX and lowercases it on Windows, which is what
+    # `fold_hardware_id` has already done to it by the time it is a name.
+    # Folding case into a POSIX path instead would rewrite `probe:/usr/bin/Foo`
+    # to a name no configured debugger ever locks — this same bug, facing the
+    # other way.
+    for prefix in ("com:", "probe:"):
+        if resource.startswith(prefix):
+            return prefix + fold_device_path(resource[len(prefix) :])
+    return resource
+
+
 def physical_resources(resources: object) -> list[str]:
     if isinstance(resources, str):
         candidates: list[str] = [resources]
     else:
         candidates = [item for item in (resources or []) if isinstance(item, str)]
-    return sorted({item for item in candidates if is_physical_resource(item)})
+    return sorted({fold_resource_name(item) for item in candidates if is_physical_resource(item)})
 
 
 def device_lock_root() -> Path:

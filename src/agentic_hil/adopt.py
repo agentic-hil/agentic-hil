@@ -818,8 +818,9 @@ def discover_under_hardware_lease(
       hardware call until an operator resolves it.
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
-    names it in a quarantine reason — the two callers are `project_config_adopt_hardware`
-    and `project_config_create`, and an incident has to say which one left it.
+    names it in a quarantine reason — the callers are `project_config_adopt_hardware`,
+    `project_config_create` and `agentic-hil init` (hardci-hq#108), and an incident
+    has to say which one left it.
 
     Returns the discovery result and, when the read never got that far or did not
     end cleanly, the refusal that is the whole answer.
