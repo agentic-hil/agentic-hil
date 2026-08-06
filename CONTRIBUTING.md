@@ -64,8 +64,13 @@ from the committed tree it works in and rebuilt when that tree's
 against the commit that changed it rather than against the one the run started
 from. It also refuses a repository that would carry your profile into the
 read-write mount, and it exits non-zero when the container's home outlives the
-run, since that home is the one place a copy of a login can be. Nothing is
-pushed and no pull request is opened.
+run, since that home is the one place a copy of a login can be. Its own failures
+— no Docker, a refused pre-flight, an interrupted run, a container or volume it
+could not remove — all exit `20`, and anything below that is the loop's own code
+passed through unchanged. Because a leaked home volume takes the exit status
+whatever the review found, the review's own result is also written to stderr as
+`review loop exit code: N` whenever the loop ran. Nothing is pushed and no pull
+request is opened.
 
 ## Pull Requests
 
