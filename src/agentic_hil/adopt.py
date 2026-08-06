@@ -55,7 +55,7 @@ from typing import Any
 
 import yaml
 
-from agentic_hil.bootstrap import discover_attached_hardware
+from agentic_hil.bootstrap import discover_attached_hardware, port_device_name
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
@@ -86,7 +86,7 @@ from agentic_hil.report import (
     recommit_report_with_status,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, JsonObject, fold_hardware_id
+from agentic_hil.types import AgenticHILConfig, JsonObject, fold_device_path, fold_hardware_id, is_stable_device_name
 
 PROJECT_CONFIG_ADOPT = "project_config_adopt_hardware"
 
@@ -187,18 +187,64 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
     )
 
 
-def _choose_com_port(document: JsonObject, requested: str | None, device: str | None) -> tuple[str | None, JsonObject | None]:
+def discovered_port_names(matched_port: JsonObject | None) -> tuple[str, ...]:
+    """Every name the discovered port answers to, stable spelling first.
+
+    A port has two on Linux — ``/dev/serial/by-id/usb-..._0669FF...-if02`` and
+    ``/dev/ttyACM0`` — and one on Windows. Both name one device, so an entry
+    holding either of them is this port, and recognising that is what lets a
+    configuration written before stable names existed be *re-spelled* rather than
+    treated as somebody's deliberate choice of another device."""
+    if not isinstance(matched_port, dict):
+        return ()
+    names = [str(matched_port.get("stable_device") or ""), str(matched_port.get("device") or "")]
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
+def _names_discovered_port(value: object, port_names: tuple[str, ...]) -> bool:
+    """Whether a configured `device` is one of the discovered port's spellings.
+
+    A path question, so case folds the way the host's own filesystem folds it —
+    `COM7` and `com7` are one port on Windows and `/dev/ttyACM0` and
+    `/dev/ttyacm0` are two on Linux."""
+    if not isinstance(value, str) or not value:
+        return False
+    folded = fold_device_path(value)
+    return any(folded == fold_device_path(name) for name in port_names)
+
+
+def _stabilises_device(current: object, device: str, port_names: tuple[str, ...]) -> bool:
+    """Whether writing `device` over `current` only makes one port's name durable.
+
+    True in exactly one situation: the entry already names this very port, by a
+    spelling the host can reassign, and the discovered spelling is one it cannot.
+    Deliberately that narrow. It is not a licence to normalise the case of a name
+    somebody wrote, and it can never repoint an entry at a different device —
+    both would be adoption overruling an operator, which is the thing this whole
+    path does not do.
+
+    It therefore never fires on Windows, where no device name is durable: there
+    `device` stays exactly as written and `serial_number` carries the identity by
+    itself."""
+    if not isinstance(current, str) or current == device:
+        return False
+    return is_stable_device_name(device) and not is_stable_device_name(current) and _names_discovered_port(current, port_names)
+
+
+def _choose_com_port(document: JsonObject, requested: str | None, port_names: tuple[str, ...]) -> tuple[str | None, JsonObject | None]:
     """Which COM port entry receives the discovered device, if any.
 
     An entry that already names this device wins, so running this twice on a
-    bench with several ports is idempotent instead of ambiguous. Otherwise: the
+    bench with several ports is idempotent instead of ambiguous — and "names this
+    device" means any of the port's spellings, so the entry is still recognised
+    on the run that upgrades its kernel name to the stable one. Otherwise: the
     named one, the only one, or a new one when there is none. Several ports and
     no name is not resolved here — the caller is told to choose."""
     entries = _entries(document, "com_ports")
     if requested is not None:
         return requested, entries.get(requested)
-    if device is not None:
-        matched = [name for name, entry in entries.items() if entry.get("device") == device]
+    if port_names:
+        matched = [name for name, entry in entries.items() if _names_discovered_port(entry.get("device"), port_names)]
         if len(matched) == 1:
             return matched[0], entries[matched[0]]
     if len(entries) == 1:
@@ -402,9 +448,14 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     elif controller:
         _propose(carried, already, kept, key="target.controller", section="target", field="controller", current=_mapping(document, "target").get("controller"), value=controller)
 
-    matched_port = discovery.get("com_port")
-    device = str(matched_port["device"]) if isinstance(matched_port, dict) and matched_port.get("device") else None
-    port_name, port_entry = _choose_com_port(document, com_port_id, device)
+    matched_port = discovery.get("com_port") if isinstance(discovery.get("com_port"), dict) else None
+    device = port_device_name(matched_port) if matched_port and matched_port.get("device") else None
+    port_names = discovered_port_names(matched_port)
+    # The port was correlated *by* this serial, so it is known whenever a port is.
+    # Falling back to the probe's own spelling would be inventing an identity;
+    # the enumerator's spelling is the one a later open compares against.
+    port_serial = str((matched_port or {}).get("serial_number") or "") if device is not None else ""
+    port_name, port_entry = _choose_com_port(document, com_port_id, port_names)
     if device is None:
         available = discovery.get("available_com_ports")
         ports = available.get("ports") if isinstance(available, dict) else None
@@ -430,16 +481,47 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
             }
         )
     else:
-        _propose(
-            carried,
-            already,
-            kept,
-            key=f"com_ports.{port_name}.device",
-            section="com_ports",
-            field="device",
-            current=(port_entry or {}).get("device"),
-            value=device,
-        )
+        current_device = (port_entry or {}).get("device")
+        if _stabilises_device(current_device, device, port_names):
+            # The entry already names this very port, by its other spelling.
+            # Rewriting it is not replacing a value somebody chose — it is the
+            # same device, written down so it survives the next replug — so it
+            # goes to `carried` rather than to `kept`, which is where the "keeps
+            # working, and gets fixed on the next adopt-hardware" half of
+            # hardci-hq#100 is actually implemented.
+            carried.append(
+                {
+                    "key": f"com_ports.{port_name}.device",
+                    "value": device,
+                    "previous_value": current_device,
+                    "reason": (
+                        f"`{current_device}` and `{device}` are the same port. The kernel name depends on the order "
+                        "devices were enumerated in, so it can come to mean another board; the stable name cannot."
+                    ),
+                }
+            )
+        else:
+            _propose(
+                carried,
+                already,
+                kept,
+                key=f"com_ports.{port_name}.device",
+                section="com_ports",
+                field="device",
+                current=current_device,
+                value=device,
+            )
+        if port_serial:
+            _propose(
+                carried,
+                already,
+                kept,
+                key=f"com_ports.{port_name}.serial_number",
+                section="com_ports",
+                field="serial_number",
+                current=(port_entry or {}).get("serial_number"),
+                value=port_serial,
+            )
 
     return {
         "ok": True,
