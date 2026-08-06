@@ -246,10 +246,30 @@ Generation              every permission true
 project_config_set may  write false into a permission
              may not    write anything else into one — ever, not even into one it just closed
 Last move               permissions.allow_config_permissions_write: false
-After that              only you, with `agentic-hil init --force`
+After that              only you, with `agentic-hil grant` or `agentic-hil init --force`
 ```
 
-So "the agent may set permissions" does not mean "the agent may set itself anything". It means you can say *narrow this bench* in prose and have it done, with a `provenance` record, and no editor. Closing `allow_config_permissions_write` is terminal for that call: it cannot move a permission in the file again, and the call that does it says so in its own result — which permissions stand frozen, that the agent cannot undo it, and that `agentic-hil init --force` is what reopens it.
+So "the agent may set permissions" does not mean "the agent may set itself anything". It means you can say *narrow this bench* in prose and have it done, with a `provenance` record, and no editor. Closing `allow_config_permissions_write` is terminal for that call: it cannot move a permission in the file again, and the call that does it says so in its own result — which permissions stand frozen, that the agent cannot undo it, and which command reopens it.
+
+#### Opening one again: `agentic-hil grant`
+
+The other direction is yours, and it no longer costs you the file:
+
+```bash
+agentic-hil grant can_buses.dut.allow_write          # open one permission
+agentic-hil revoke debuggers.dut.allow_mass_erase    # and close one again
+```
+
+One named permission moves and nothing else in the configuration is touched — the baudrate, the `resource_id`, the `state_root`, the artifact roots and everything else you ever set stay exactly as they are. That is the whole point of it. Before this, a bench whose `can_buses.<n>.allow_write` was `false` could be reopened only by regenerating the file from attached hardware or by deleting it, and both rewrite far more than the one flag you meant.
+
+Both directions ship together, so this command line is not a one-way street either. What is worth knowing:
+
+* **Single keys, several per command, no wildcard and no whole-entry form.** `agentic-hil grant debuggers.dut.allow_flash debuggers.dut.allow_reset` opens exactly those two, together or not at all. There is deliberately no `debuggers.dut` form: it would mean whatever permissions that entry's schema happens to have *at the moment you type it*, so a flag added in a later release would silently join a command you learned years ago.
+* **Both spellings work.** `can_buses.dut.allow_write` and the long `can_buses.dut.permissions.allow_write` name the same key. A name that is neither is refused with a list of every permission key your configuration actually has, entry names and all — that is how you find one, and why there is no wildcard to need.
+* **It says what it changed**, including the value it replaced, and names anything already in the asked-for state as a no-op rather than as a change. A pure no-op writes nothing at all: no `provenance` entry, no change marker in the header.
+* **A restart is what makes it bind.** A running MCP server parses permissions once, at startup, and `project_config_reload_description` deliberately re-reads none of them. The result says so rather than leaving you to wonder why a granted permission is still refused.
+* **It is refused while anything holds the bench** — a run, a COM or CAN session, another terminal. Those holds were taken under the permissions in this file. `agentic-hil lease-status` names the holder.
+* **It is not an MCP tool and never will be.** It appears in no tool list, so an agent cannot call it, and the ratchet over MCP is exactly what it was. This is your shell, which already has `agentic-hil init --force`.
 
 **Regenerating is yours, and is not covered by that rule.** `project_config_create` refreshes the hardware facts and carries the permissions of the configuration **that server loaded at startup** over for the entries that are still there — but a workspace whose configuration is gone gets the open skeleton, anything a regeneration discovers for the first time arrives open, and `agentic-hil init --force` in your own terminal rewrites the whole file open. A server does not reload, so a permission narrowed with `project_config_set` in the same session is on disk and not in what that server holds, and a regeneration before it restarts writes the wider loaded value back. Regeneration is creation rather than a permissions write, and it belongs to you and your command line.
 

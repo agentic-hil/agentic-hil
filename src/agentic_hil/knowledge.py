@@ -61,6 +61,21 @@ CONFIG_WIDENING_ERROR = "permission_widening_denied"
 # It regenerates from attached hardware, so it is also the command that repairs a
 # configuration nobody can change any more.
 CONFIG_REOPEN_COMMAND = "agentic-hil init --force"
+# And the surgical one beside it (hardci-hq#102). `init --force` reopens
+# everything by rewriting the whole file from hardware discovery, which on a
+# bench somebody grew is not a repair but a loss: baudrate, `resource_id`,
+# `state_root` and the artifact roots go with it. These two name one permission
+# and move that one. Both directions ship together on purpose — a command that
+# only opened would be the next one-way street, in the other direction.
+CONFIG_GRANT_COMMAND = "agentic-hil grant"
+CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
+# The refusal the two above raise while somebody on this machine holds this
+# bench. Its own error_type rather than `config_write_in_open_run`, for the
+# reason `config_reload_in_open_run` is its own: the rule is the same and the
+# remedy is not. That one is a server refusing itself and can name
+# `bench_run_stop`; this is a command line refusing because *another* process
+# holds the bench, and what an operator does about that is find out whose it is.
+PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 
 # Validated flashing and unrestricted debugger access are mutually exclusive
 # policies (docs/security-design.md), and hardci-hq#96 made that exclusion the
@@ -167,6 +182,7 @@ def _substitutions() -> dict[str, str]:
         "safe_state_root": safe_state_root_suggestion(),
         "safe_user_config": safe_user_config_suggestion(),
         "reopen_command": CONFIG_REOPEN_COMMAND,
+        "grant_command": CONFIG_GRANT_COMMAND,
     }
 
 
@@ -393,8 +409,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "If the intent was to narrow the bench, re-send the call with `false` values only; a call that mixes the "
             "two is refused for the widening and loses the narrowing with it.",
             "If a permission really has to come back, that is a person's decision at the command line: "
-            "`{reopen_command}` regenerates the configuration from attached hardware with every permission granted "
-            "again. Report which permission is needed and why, and stop.",
+            "`{grant_command} <key>` opens that one permission in the file as it stands, and `{reopen_command}` "
+            "regenerates the configuration from attached hardware with every permission granted again. Report which "
+            "permission is needed and why, name the key, and stop.",
             "`project_config_describe` says what this configuration grants right now, so the report names the actual "
             "gap rather than a guess at one.",
         ),
@@ -444,6 +461,31 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not end a run early only to get the write through. The run is holding a board for a reason, and a "
             "configuration change is never urgent enough to abandon hardware in an unconfirmed state.",
+        ),
+    ),
+    PERMISSION_CHANGE_IN_OPEN_RUN: ErrorRemedy(
+        meaning=(
+            "`{grant_command}` or `agentic-hil revoke` was run while something on this machine holds this bench: an MCP "
+            "server with a declared run, an open COM or CAN session, a debug session, or another terminal. Those holds "
+            "were taken under the permissions this file states, so opening or closing one underneath them would move "
+            "the rules during the run they govern. Nothing was written and the holder was not disturbed. The same rule "
+            "as `config_write_in_open_run`; a separate error type because the holder is another process, so the remedy "
+            "is to find out whose it is rather than to close a run this caller has."
+        ),
+        remediation=(
+            "`agentic-hil lease-status` names the holder — which devices are held, which frontend took them and under "
+            "which process — and `open_holds` in this refusal carries the same.",
+            "Let the run finish, or ask whoever holds it to close it: `bench_run_stop` for a declared run, "
+            "`com_session_stop` / `can_session_stop` for a session, `debug_stop_session` for a debug session. Then "
+            "repeat the command.",
+            "Nothing was lost by the refusal. The file is unchanged and the permission is exactly as changeable after "
+            "the run as it was before it.",
+        ),
+        do_not=(
+            "Do not stop somebody else's run only to get the permission change through. A board mid-flash left in an "
+            "unconfirmed state costs more than waiting, and no permission change is urgent enough to buy it.",
+            "Do not edit the configuration by hand instead. That is the same write without the lock check, the "
+            "provenance record or the validation, and it is what these commands exist to replace.",
         ),
     ),
     "config_reload_in_open_run": ErrorRemedy(
@@ -1475,9 +1517,12 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
             "which of them were left granted — `frozen_permissions` is that list, read out of the file as written.",
             f"You cannot undo it with `{PROJECT_CONFIG_SET_TOOL}` and there is no permission that would let you. Do not "
             "call it on a permission again.",
-            f"A person reopens the file with `{CONFIG_REOPEN_COMMAND}` in the project root, which regenerates it from "
-            "attached hardware with every permission granted again. Ask for that rather than looking for a way around "
-            "this; regenerating a configuration is the operator's call, not yours.",
+            f"A person opens one permission again with `{CONFIG_GRANT_COMMAND} <key>` in the project root — including "
+            f"`{CONFIG_GRANT_COMMAND} permissions.{CONFIG_PERMISSIONS_RIGHT}`, which is what unfreezes this — and it "
+            f"changes that key and nothing else in the file. `{CONFIG_REOPEN_COMMAND}` is the other way and a much "
+            "larger one: it regenerates the whole file from attached hardware, so everything else in it is rewritten "
+            "too. Ask for whichever fits rather than looking for a way around this; both are the operator's call, not "
+            "yours.",
         ],
     }
 
@@ -1905,17 +1950,19 @@ Through project_config_set  write false into a permission
                             never true — not even into one you set to false yourself
 Last move there             permissions.{CONFIG_PERMISSIONS_RIGHT}: false
 After that                  no permission changes through project_config_set at all
+Reopened by a person        `{CONFIG_GRANT_COMMAND} <key>` — one named permission, nothing else in the file
 ```
 
 A change that would turn any permission on is refused as `{CONFIG_WIDENING_ERROR}`, and the check reads the permissions present in the document before and after the write rather than the keys the request named — so there is no spelling of it that gets through. Report the refusal and stop; granting is the operator's.
 
-Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the command a person reopens it with. Do not make that call in passing.
+Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the commands a person reopens it with. Do not make that call in passing.
 
 ### What the ratchet does not cover
 
-Regeneration is a separate door, and it is honest to say so rather than to promise more than holds:
+The two commands a person has are a separate door, and it is honest to say so rather than to promise more than holds:
 
-* `{CONFIG_REOPEN_COMMAND}` at a person's shell rewrites this file from attached hardware with every permission granted. That is the reopen path and it is the operator's.
+* `{CONFIG_GRANT_COMMAND} <key>` at a person's shell opens one named permission in the file as it stands and changes nothing else in it; `{CONFIG_REVOKE_COMMAND} <key>` closes one again. That is the surgical reopen path, it is the operator's, and it is the one to name when a permission is what is missing — with the key. Neither is an MCP tool.
+* `{CONFIG_REOPEN_COMMAND}` at the same shell rewrites this whole file from attached hardware with every permission granted. That is the wide reopen path and it is also the operator's; ask for it only when the bench itself has to be rebuilt.
 * `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives with everything granted; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back grants everything. Its result names what it wrote.
 * **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file — the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
 * Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
@@ -1936,7 +1983,7 @@ The split is the point. Somebody who opens the file so an agent can enter a prob
 |---|---|---|
 {keys}
 
-`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server. A generation grants; a write only ever takes away, and adding an entry is a write, so a device named this way arrives closed and `{CONFIG_REOPEN_COMMAND}` is what opens it.
+`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server. A generation grants; a write only ever takes away, and adding an entry is a write, so a device named this way arrives closed and `{CONFIG_GRANT_COMMAND} <key>` at a person's shell is what opens it, one permission at a time.
 
 Entry names may contain dots. Keys are therefore read from the right: the field name is the last component, so `debuggers.a.b.probe_id` is the entry named `a.b`.
 
