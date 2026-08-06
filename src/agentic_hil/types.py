@@ -205,6 +205,11 @@ class CanBusConfig:
     timeout_s: float
     poll_interval_ms: int
     receive_own_messages: bool
+    # A controller outside listen-only sends dominant ACK bits, so this is not a
+    # preference but the claim that observing this bus sends nothing. It is
+    # enforced per adapter in `can.LISTEN_ONLY_ENFORCEMENT` — the three obtain
+    # the mode three different ways — and an adapter that cannot be held to it
+    # refuses the session rather than listening anyway (hardci-hq#103).
     listen_only: bool
     max_buffer_frames: int
     max_frame_data_bytes: int

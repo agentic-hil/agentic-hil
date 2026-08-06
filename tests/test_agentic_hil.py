@@ -1956,6 +1956,14 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
         "allow_config_permissions_write",
         "quarantine_guidance",
         "physical_check",
+        # The two CAN listen-only refusals and the result fields carrying their
+        # reason, named where the skill says a passive-mode refusal is not an
+        # obstacle to be removed.
+        "can_listen_only_unsupported",
+        "can_listen_only_unconfirmed",
+        "link_state",
+        "driver_state",
+        "listen_only",
         "config_reload_in_open_run",
         "resource_quarantined",
         "not_reloaded_sections",

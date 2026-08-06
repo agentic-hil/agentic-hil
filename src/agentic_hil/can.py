@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import json
 import math
 import os
 import re
@@ -20,6 +22,11 @@ from agentic_hil.coordination import (
     HardwareLease,
 )
 from agentic_hil.devices import can_device
+from agentic_hil.knowledge import (
+    LISTEN_ONLY_UNCONFIRMED_ERROR,
+    LISTEN_ONLY_UNSUPPORTED_ERROR,
+    remediation_fields,
+)
 from agentic_hil.process import (
     cleanup_registered_processes,
     current_process_owner,
@@ -50,6 +57,38 @@ from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
 CAN_DRAIN_BATCH_LIMIT = 16
 CAN_DRAIN_TIMEOUT_S = 1.0
+
+# How far each adapter can be held to `listen_only: true`, and by what evidence.
+# Read as data by `can_buses_list`, so a caller can see the scope of the
+# guarantee before it starts a session rather than after a refusal.
+#
+# The three are genuinely different mechanisms, not one mechanism with three
+# names. python-can 4.6.1 accepts a `listen_only=` keyword on exactly three
+# backends — slcan, vector and nixnet — and none of them is reachable from here.
+# Neither `pcan` nor `socketcan` takes that keyword, and neither rejects it: it
+# lands in `**kwargs`, is forwarded to `BusABC.__init__(**kwargs: object)`, and
+# is discarded without a word. That is why passing it through was never going to
+# be the fix.
+LISTEN_ONLY_ENFORCEMENT: dict[str, str] = {
+    # PcanBus expresses listen-only as `state=BusState.PASSIVE`, which sets
+    # PCAN_LISTEN_ONLY through PCANBasic. Set, re-asserted after the channel is
+    # initialized, and read back from the driver before the session opens.
+    "peak": "driver_verified",
+    # SocketCAN's listen-only is a controller ctrlmode owned by the kernel and
+    # set out of band with `ip link`. A raw CAN socket cannot change it, so here
+    # the flag is a precondition that is measured, never a setting that is
+    # applied.
+    "socketcan": "link_verified",
+    # A bridge is code this project did not write. It is told, and its `open`
+    # response must say it complied; forwarding alone proves nothing.
+    "process": "bridge_confirmed",
+}
+
+# `ip` is read for a *proof*, so it is not resolved off PATH: a PATH entry an
+# unprivileged process can write is a PATH entry that can answer "listen-only"
+# for an interface that is ACKing. These are the locations iproute2 installs to.
+IP_COMMAND_PATHS = ("/sbin/ip", "/usr/sbin/ip", "/bin/ip", "/usr/bin/ip")
+LINK_QUERY_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -344,7 +383,11 @@ class CanBusService:
         return {"ok": True, "session": session}
 
     def _bus_status(self, bus_config: CanBusConfig, session: CanBusSession | None) -> JsonObject:
-        result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
+        # `listen_only` is reported here, and with it the evidence that would
+        # back it on this adapter, so the scope of the guarantee is readable
+        # before a session is started rather than only in the refusal that
+        # follows one.
+        result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "listen_only": bus_config.listen_only, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter], "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
         if session is not None:
             result.update(self._session_status(session))
         return result
@@ -515,6 +558,17 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
 
     interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
+    bus_kwargs: JsonObject = {
+        "interface": interface,
+        "channel": bus_config.channel,
+        "bitrate": bus_config.bitrate,
+        "fd": bus_config.fd,
+        "receive_own_messages": bus_config.receive_own_messages,
+    }
+    if bus_config.listen_only:
+        refused = listen_only_precondition(can, interface, bus_id, bus_config, bus_kwargs)
+        if refused is not None:
+            return refused
     # Which backend can prove, from the exception class alone, that it never
     # joined the bus. SocketCAN can: the controller is brought up out of band
     # with `ip link`, and `SocketcanBus()` only creates and binds a raw socket,
@@ -537,7 +591,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     proves_no_contact = getattr(can, "CanInitializationError", None) if interface == "socketcan" else None
     initialization_errors = (proves_no_contact,) if isinstance(proves_no_contact, type) else ()
     try:
-        bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
+        bus = can.Bus(**bus_kwargs)
     except Exception as error:
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
@@ -584,8 +638,200 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         # The adapter was confirmed shut down, so the bus ends where a normal
         # open/shutdown cycle ends it.
         return {**open_failure(primary_error), "cleanup_confirmed": True}
+    unconfirmed = listen_only_unconfirmed(can, interface, bus, bus_id, bus_config)
+    if unconfirmed is not None:
+        # An initialized PCAN channel is already on the bus, so unlike the
+        # SocketCAN precondition above this cannot refuse before contact. What
+        # it bounds is the exposure: an unconfirmed listen-only is closed at the
+        # open instead of being carried, silently, for the length of a session.
+        try:
+            session.close()
+        except BaseException as cleanup_error:
+            # Keep the bus registered for a retried service.close() and stay
+            # markerless, so the lease quarantines over the unconfirmed adapter.
+            if not isinstance(cleanup_error, Exception):
+                raise
+            return {**unconfirmed, "cleanup_error": str(cleanup_error)}
+        discharge_provisional_handle(provisional)
+        return {**unconfirmed, "cleanup_confirmed": True}
     discharge_provisional_handle(provisional)
-    return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
+    result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
+    if bus_config.listen_only:
+        result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter]})
+    return result
+
+
+def listen_only_precondition(can_module: object, interface: str, bus_id: str, bus_config: CanBusConfig, bus_kwargs: JsonObject) -> JsonObject | None:
+    """Settle `listen_only: true` before anything is opened, where that is possible.
+
+    Returns a refusal, or ``None`` and the mutated ``bus_kwargs`` the mode is
+    requested through. Two backends, two different answers, and the asymmetry is
+    the whole point of this function existing.
+    """
+    if interface == "socketcan":
+        link = socketcan_link_listen_only(bus_config.channel)
+        if link["listen_only"] is True:
+            return None
+        return {
+            "ok": False,
+            "tool": "can_session_start",
+            "bus_id": bus_id,
+            "adapter": bus_config.adapter,
+            "error_type": LISTEN_ONLY_UNSUPPORTED_ERROR,
+            "field": f"can_buses.{bus_id}.listen_only",
+            "listen_only_requested": True,
+            "listen_only_confirmed": False,
+            "link_state": link["detail"],
+            "summary": (
+                f"`listen_only: true` cannot be honoured on SocketCAN interface {bus_config.channel}: the mode belongs to the "
+                f"kernel's CAN controller, not to the socket this process opens, and it is not in force. {link['detail']}"
+            ),
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": True,
+            **remediation_fields(LISTEN_ONLY_UNSUPPORTED_ERROR, bus_config.adapter),
+        }
+    # PCAN. python-can takes no `listen_only` keyword; the mode is
+    # `state=BusState.PASSIVE`, which sets PCAN_LISTEN_ONLY through PCANBasic.
+    passive = getattr(getattr(can_module, "BusState", None), "PASSIVE", None)
+    if passive is None:
+        return {
+            "ok": False,
+            "tool": "can_session_start",
+            "bus_id": bus_id,
+            "adapter": bus_config.adapter,
+            "error_type": LISTEN_ONLY_UNSUPPORTED_ERROR,
+            "field": f"can_buses.{bus_id}.listen_only",
+            "listen_only_requested": True,
+            "listen_only_confirmed": False,
+            "summary": (
+                "`listen_only: true` cannot be honoured: this python-can installation exposes no `can.BusState.PASSIVE`, which is "
+                "the only way the PCAN backend expresses listen-only. Install python-can 4.x."
+            ),
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": True,
+            **remediation_fields(LISTEN_ONLY_UNSUPPORTED_ERROR, bus_config.adapter),
+        }
+    bus_kwargs["state"] = passive
+    return None
+
+
+def listen_only_unconfirmed(can_module: object, interface: str, bus: object, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
+    """Whether an opened adapter failed to confirm the listen-only it was asked for.
+
+    Returns ``None`` when there is nothing to answer for — the flag is off, or
+    the backend settled it before the bus existed.
+    """
+    if not bus_config.listen_only or interface != "pcan":
+        return None
+    state = pcan_listen_only_state(can_module, bus)
+    if state["listen_only"] is True:
+        return None
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "error_type": LISTEN_ONLY_UNCONFIRMED_ERROR,
+        "field": f"can_buses.{bus_id}.listen_only",
+        "listen_only_requested": True,
+        "listen_only_confirmed": False,
+        "driver_state": state["detail"],
+        "summary": (
+            f"`listen_only: true` was requested on PCAN channel {bus_config.channel} and the driver did not confirm it, so the "
+            f"channel was closed rather than used to observe a bus it would have ACKed on. {state['detail']}"
+        ),
+        **remediation_fields(LISTEN_ONLY_UNCONFIRMED_ERROR, bus_config.adapter),
+    }
+
+
+def pcan_listen_only_state(can_module: object, bus: object) -> JsonObject:
+    """Re-assert PCAN's listen-only parameter after initialization, then measure it.
+
+    Both halves are needed. python-can 4.6.1 applies `state` from the
+    constructor *before* `PCANBasic.Initialize` and discards the `SetValue`
+    return code, so the constructor's request may never have reached an
+    initialized channel and nothing would have said so. Assigning the property
+    again runs the same `SetValue` against a channel that exists; reading
+    PCAN_LISTEN_ONLY back turns the result from a promise into a measurement.
+    """
+    passive = getattr(getattr(can_module, "BusState", None), "PASSIVE", None)
+    if passive is not None:
+        try:
+            bus.state = passive
+        except Exception as error:
+            return {"listen_only": False, "detail": f"PCAN refused the listen-only mode: {type(error).__name__}: {error}."}
+    basic = _optional_module("can.interfaces.pcan.basic")
+    parameter = getattr(basic, "PCAN_LISTEN_ONLY", None)
+    expected = getattr(basic, "PCAN_PARAMETER_ON", None)
+    error_ok = getattr(basic, "PCAN_ERROR_OK", None)
+    get_value = getattr(getattr(bus, "m_objPCANBasic", None), "GetValue", None)
+    handle = getattr(bus, "m_PcanHandle", None)
+    if parameter is None or expected is None or error_ok is None or not callable(get_value) or handle is None:
+        return {"listen_only": False, "detail": "The PCANBasic listen-only parameter could not be read back from this python-can build, so the mode is unverifiable here."}
+    try:
+        status, value = get_value(handle, parameter)
+    except Exception as error:
+        return {"listen_only": False, "detail": f"Reading PCAN_LISTEN_ONLY back from the driver failed: {type(error).__name__}: {error}."}
+    if status != error_ok:
+        return {"listen_only": False, "detail": f"The driver refused to report PCAN_LISTEN_ONLY (status {status})."}
+    if value != expected:
+        return {"listen_only": False, "detail": "The driver reports PCAN_LISTEN_ONLY off: this channel would send dominant ACK bits."}
+    return {"listen_only": True, "detail": "The driver reports PCAN_LISTEN_ONLY on."}
+
+
+def socketcan_link_listen_only(channel: str) -> JsonObject:
+    """Whether the kernel has this CAN interface in listen-only mode.
+
+    Nothing here sets anything: SocketCAN's listen-only is a controller ctrlmode
+    carried on the netdev, and a raw CAN socket cannot change it. Every answer
+    that is not a positive reading is reported as *not* in listen-only, because
+    the flag exists to be a proof and an unread ctrlmode proves nothing.
+    """
+    unknown = "The interface's control mode could not be read"
+    executable = next((path for path in IP_COMMAND_PATHS if Path(path).is_file()), None)
+    if executable is None:
+        # The platform answer is the more useful one where it applies, and it is
+        # decided by what was found rather than before looking, so that the whole
+        # path stays reachable from a test on either operating system.
+        return {"listen_only": False, "detail": "SocketCAN interfaces, and the listen-only control mode, exist only on Linux." if os.name == "nt" else f"{unknown}: iproute2 (`ip`) is not installed at any of {', '.join(IP_COMMAND_PATHS)}."}
+    command = [executable, "-details", "-json", "link", "show", "dev", channel]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=LINK_QUERY_TIMEOUT_S, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"listen_only": False, "detail": f"{unknown}: `ip link show dev {channel}` could not be run ({type(error).__name__}: {error})."}
+    if completed.returncode != 0:
+        return {"listen_only": False, "detail": f"{unknown}: `ip link show dev {channel}` exited {completed.returncode} ({completed.stderr.strip()[:200] or 'no output'})."}
+    try:
+        links = json.loads(completed.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"listen_only": False, "detail": f"{unknown}: `ip -json link show` returned no JSON; iproute2 4.15 or newer reports the control mode this way."}
+    if not isinstance(links, list) or len(links) != 1 or not isinstance(links[0], dict):
+        return {"listen_only": False, "detail": f"{unknown}: `ip -json link show dev {channel}` did not describe exactly one interface."}
+    link_info = links[0].get("linkinfo")
+    kind = link_info.get("info_kind") if isinstance(link_info, dict) else None
+    if kind != "can":
+        found = f"a {kind} interface" if isinstance(kind, str) else "no CAN controller"
+        return {"listen_only": False, "detail": f"{channel} is {found}, which has no listen-only mode to be in."}
+    info_data = link_info.get("info_data")
+    # A CAN link with no ctrlmode flags set omits the key; that is a reading, not
+    # a gap. `ctrlmode` is an array in every iproute2 that emits JSON; a scalar
+    # is accepted defensively rather than read as an absence.
+    raw_modes = info_data.get("ctrlmode", []) if isinstance(info_data, dict) else None
+    modes = raw_modes if isinstance(raw_modes, list) else [raw_modes]
+    if raw_modes is None or not all(isinstance(mode, str) for mode in modes):
+        return {"listen_only": False, "detail": f"{unknown}: `ip -json link show dev {channel}` reported no readable ctrlmode."}
+    if not any(mode.strip().lower() == "listen-only" for mode in modes):
+        return {"listen_only": False, "detail": f"{channel} is up without listen-only, so its controller sends dominant ACK bits."}
+    return {"listen_only": True, "detail": f"The kernel reports {channel} in listen-only mode."}
+
+
+def _optional_module(name: str) -> object | None:
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        return None
 
 
 class ProcessCanAdapterSession(ProcessBridgeSession):
@@ -634,18 +880,50 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     valid_open = (
         opened.get("ok") is True
         and opened.get("protocol_version") == BRIDGE_PROTOCOL_VERSION
-        and not set(opened) - {"ok", "protocol_version", "backend", "summary"}
+        and not set(opened) - {"ok", "protocol_version", "backend", "summary", "listen_only"}
         and _optional_strings(opened, "backend", "summary")
+        and ("listen_only" not in opened or isinstance(opened["listen_only"], bool))
     )
-    if not valid_open:
+    # Being told is not the same as complying. The request has always carried
+    # `listen_only`; a bridge that dropped it answered `ok` all the same, and the
+    # caller was told a bus was being observed passively by a node that ACKed.
+    # So the confirmation is required from the response, and only where the
+    # guarantee was actually asked for — a bridge that never sees
+    # `listen_only: true` is unaffected.
+    listen_only_confirmed = not bus_config.listen_only or opened.get("listen_only") is True
+    if not valid_open or not listen_only_confirmed:
         if opened.get("ok") is True:
-            opened = {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response."}
+            opened = (
+                {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response."}
+                if not valid_open
+                else {
+                    "ok": False,
+                    "error_type": LISTEN_ONLY_UNCONFIRMED_ERROR,
+                    "field": f"can_buses.{bus_id}.listen_only",
+                    "listen_only_requested": True,
+                    "listen_only_confirmed": False,
+                    "summary": (
+                        "`listen_only: true` was sent to this CAN bridge in the open request and its response did not confirm it, so the "
+                        "session was refused rather than opened on an unproven promise. A bridge that honours the mode answers "
+                        "`listen_only: true` in its open result."
+                    ),
+                    **remediation_fields(LISTEN_ONLY_UNCONFIRMED_ERROR, "process"),
+                }
+            )
         try:
             session.close()
         except BridgeCleanupError as cleanup_error:
             return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_required": True, "cleanup_error": cleanup_error.result, "session": session}
-        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, "side_effect_committed": False}
-    return {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
+        # A bridge that answered `ok` to `open` put something on the bus, so the
+        # one refusal that is *about* bus contact does not also claim there was
+        # none. `cleanup_confirmed` still releases the lease; what is withheld is
+        # the "not started" marker, and the result carries the unknown instead.
+        contact: JsonObject = {} if not listen_only_confirmed and valid_open else {"side_effect_committed": False}
+        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, **contact}
+    result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
+    if bus_config.listen_only:
+        result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT["process"]})
+    return result
 
 
 def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:

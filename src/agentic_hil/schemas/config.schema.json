@@ -484,7 +484,8 @@
           },
           "listen_only": {
             "type": "boolean",
-            "default": false
+            "default": false,
+            "description": "Whether this bus is observed without sending dominant ACK bits. Enforced per adapter rather than assumed: peak sets PCAN's passive state and reads the parameter back from the driver, socketcan reads the kernel's control mode because only `ip link` can set it, and a process bridge must confirm the mode in its open response. An adapter that cannot be held to it refuses the session with can_listen_only_unsupported or can_listen_only_unconfirmed instead of listening anyway."
           },
           "max_buffer_frames": {
             "type": "integer",
