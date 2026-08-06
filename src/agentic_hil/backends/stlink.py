@@ -14,6 +14,7 @@ from agentic_hil.backends.common import (
     contains_failure_text,
     find_stm32_programmer_cli,
     invocation,
+    reset_init_unsupported,
     spawn_command,
     which,
 )
@@ -165,7 +166,9 @@ class STLinkBackend:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
-        mode_args = {"run": ["-rst"], "halt": ["-halt"], "init": ["-halt"]}
+        if mode == "init":
+            return reset_init_unsupported(self.backend_name, "STM32CubeProgrammer's CLI has no equivalent")
+        mode_args = {"run": ["-rst"], "halt": ["-halt"]}
         result = self._run_stlink("reset_target", [*self._connection_args("NORMAL"), *mode_args[mode]])
         result["mode"] = mode
         if result.get("ok"):

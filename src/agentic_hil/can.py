@@ -858,6 +858,16 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
         return result
 
 
+# The `open` failures the bridge transport synthesizes *after* the request was
+# handed to the child: nothing came back (`timeout`), or something came back that
+# this protocol cannot read (`invalid_response`). The bridge may have acted on the
+# request in either case, and nothing that arrived says whether it did. The two
+# raised before the write — `can_adapter_process_exited`,
+# `can_adapter_invalid_request` — are deliberately absent: they prove the bridge
+# was never asked, which is what lets a refusal say the bus was not touched.
+BRIDGE_OPEN_UNANSWERED = frozenset({"can_adapter_timeout", "can_adapter_invalid_response"})
+
+
 def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
     if not bus_config.executable:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "config_invalid", "field": f"can_buses.{bus_id}.executable", "summary": "adapter: process requires executable.", "side_effect_committed": False}
@@ -893,6 +903,18 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     # `listen_only: true` is unaffected.
     listen_only_confirmed = not bus_config.listen_only or opened.get("listen_only") is True
     if not valid_open or not listen_only_confirmed:
+        # `side_effect_committed: False` is a claim that the bridge is not on the
+        # bus, and this path makes it only where something backs it: the bridge's
+        # own `ok: false`, or a failure raised before its open request was sent.
+        # A bridge that answered `ok: true` has opened, whatever disqualified the
+        # response afterwards — its shape, or a listen-only it did not confirm —
+        # and a request that was delivered and then not answered leaves the far
+        # side's state to the far side. Those withhold the marker rather than
+        # assume the reading that looks better, and `mark_side_effect` renders
+        # the absence as `side_effect_status: unknown`. `cleanup_confirmed` still
+        # releases the lease, so what changes is what the report claims and not
+        # whether a bench goes into recovery (hardci-hq#112).
+        bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED
         if opened.get("ok") is True:
             opened = (
                 {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response."}
@@ -915,11 +937,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
             session.close()
         except BridgeCleanupError as cleanup_error:
             return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_required": True, "cleanup_error": cleanup_error.result, "session": session}
-        # A bridge that answered `ok` to `open` put something on the bus, so the
-        # one refusal that is *about* bus contact does not also claim there was
-        # none. `cleanup_confirmed` still releases the lease; what is withheld is
-        # the "not started" marker, and the result carries the unknown instead.
-        contact: JsonObject = {} if not listen_only_confirmed and valid_open else {"side_effect_committed": False}
+        contact: JsonObject = {} if bus_contact_unknown else {"side_effect_committed": False}
         return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, **contact}
     result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
     if bus_config.listen_only:

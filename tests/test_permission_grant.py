@@ -2,7 +2,7 @@
 
 hardci-hq#96 built the ratchet — an agent writes `false` into a permission over
 MCP and never `true` — and answered the other direction for a configuration that
-does not exist yet: a generation opens everything. For one that does exist there
+does not exist yet: a generation opens everything it can. For one that does exist there
 was no answer that did not cost the rest of the file, and the three routes an
 operator had were one refusal and two resets: `project_config_set` only
 narrows, and `init --force` and deleting the file both do come back open while

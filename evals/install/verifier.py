@@ -52,6 +52,12 @@ PROBE_DIAGNOSTIC_CHARS = 800
 # imported: the verifier checks an installed distribution and must not read its
 # expectations out of the thing it is verifying.
 PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+# The two debugger permissions an install must write *false*, listed here for the
+# same reason and mattering more: while either is true the flash interlock refuses
+# flash_firmware on that probe, so an install that granted them shipped a bench
+# that cannot flash (hardci-hq#107). Spelled out rather than imported, so that a
+# release which reopened them could not also move this expectation.
+EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
 VERIFIER_PYTHON = Path("/opt/install-eval-verifier/bin/python")
 TRUSTED_PACKAGE_ROOT = Path("/tmp/install-eval-trusted-package")
 LAUNCHER_PYTHON_ALLOWLIST = (Path("/usr/bin/python3"),)
@@ -885,9 +891,19 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
             # IS declared has to be on, whichever model the file uses. What this
             # still catches is the thing it always caught — an install that left
             # some flags to a template's memory and some to chance.
-            withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and value is not True)
+            #
+            # The exception is the pair the flash interlock refuses on. An
+            # install that granted those wrote a bench that cannot flash, so
+            # `true` there is the failure and `false` is the requirement
+            # (hardci-hq#107) — checked in both directions, because an install
+            # silently reopening them is exactly what this eval exists to catch.
+            expected_false = set(EXCLUSIVE_FLASH_PERMISSIONS) & set(permissions)
+            withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and flag not in expected_false and value is not True)
             if withheld:
                 return False, f"{section}.{name}.permissions were not all granted by the install: {withheld}"
+            granted_exclusive = sorted(flag for flag in expected_false if permissions[flag] is not False)
+            if granted_exclusive:
+                return False, f"{section}.{name}.permissions grant what the flash interlock refuses on, so the install cannot flash: {granted_exclusive}"
     debug = data.get("debug")
     if not isinstance(debug, dict) or debug.get("allow_all_symbols") is not True or debug.get("allowed_symbols") != []:
         return False, "debug access was not granted by the install"

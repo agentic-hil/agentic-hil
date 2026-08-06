@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from agentic_hil.knowledge import remediation_fields, safe_state_root_suggestion
+from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
@@ -801,7 +801,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     # Every named debugger MUST be pinned and validated: a named entry could
     # otherwise point a backend at an unvalidated executable. An entry whose
     # toolchain does not resolve is not a load failure — a generated
-    # configuration grants everything (hardci-hq#96), so that would refuse to
+    # configuration grants everything it can (hardci-hq#96), so that would refuse to
     # load on any host that has not installed the backend yet. It becomes the
     # placeholder instead: `doctor` says the check was skipped and names why, and
     # the entry drives nothing until it has a toolchain.
@@ -1127,7 +1127,8 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
 # second set of defaults, and defaults are the thing this file exists to keep
 # honest.
 #
-# Every permission in it is true (hardci-hq#96). The previous skeleton granted
+# Every permission in it is true but the two that refuse flashing while they are
+# true (hardci-hq#96, hardci-hq#107). The previous skeleton granted
 # nothing and left opening it as hand work on YAML, which cost this project's
 # owner a working day; the property that survives is not the closed start but the
 # direction of travel: an agent may write `false` into a permission and never
@@ -1152,7 +1153,7 @@ version: 2
 # false and none of them back through that call.
 # allow_config_permissions_write is therefore the last one it can close: after
 # that it cannot change any permission again. Regenerating is yours —
-# `agentic-hil init --force` writes this file again with everything open.
+# `agentic-hil init --force` writes this file again at the defaults below.
 permissions:
   allow_config_write: true
   allow_config_description_write: true
@@ -1180,12 +1181,21 @@ debuggers:
     permissions:
       allow_flash: true
       allow_reset: true
-      allow_raw_debugger_commands: true
-      # A mass erase cannot be taken back: whatever was on the board is gone and
-      # no later setting returns it. It starts true anyway, because the person
-      # running these benches owns them. Set it false — or ask an agent to — on
-      # any bench where a foreign board can end up in the socket.
-      allow_mass_erase: true
+      # These two are the exception to the open default above, and they are false
+      # so that flashing works. Validated flashing and unrestricted debugger
+      # access are mutually exclusive policies: while either of these is true,
+      # flash_firmware on this probe is refused and so is a debug session. When
+      # they shipped true the two rules collided and a freshly generated bench
+      # could not flash at all (hardci-hq#107).
+      #
+      # Nothing is withheld by this. Neither flag grants a tool — there is no MCP
+      # call for raw debugger commands and none for mass erase — so turning
+      # either on subtracts flashing and adds nothing. A mass erase also cannot
+      # be taken back: whatever was on the board is gone and no later setting
+      # returns it. Set one true only if something outside these tools needs the
+      # probe for that, and expect to give up flashing through them while it is.
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
 
 debug:
   gdb_executable: null
@@ -1245,7 +1255,8 @@ recovery:
 # One-time agent provisioning of a project configuration.
 #
 # An agent that finds no configuration may generate one, and the file it
-# generates is workable: every permission true (hardci-hq#96). The ratchet did
+# generates is workable: every permission true but the two that refuse flashing
+# while they are true (hardci-hq#96, hardci-hq#107). The ratchet did
 # not disappear with the closed start, it turned around. It used to be "an agent
 # enables itself up to observation and never up to modification"; it is now "an
 # agent can only ever reduce its own authority", because nothing on this surface
@@ -1276,14 +1287,29 @@ recovery:
 # operator reads and blocked an operator who deliberately deletes a
 # configuration to start over.
 # Every permission a generated configuration decides, per section. The write
-# class of decision 0018, plus the project-scoped grants below. A generation
-# writes every one of them true; the list has to be complete in either direction,
-# because a flag missing from it is one the skeleton alone decides.
+# class of decision 0018, plus the project-scoped grants below. The list has to
+# be complete in either direction, because a flag missing from it is one the
+# skeleton alone decides.
 GENERATED_WRITE_PERMISSIONS = {
     "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
+
+
+def generated_permissions(section: str) -> dict[str, bool]:
+    """What a generation writes for one section's permissions, by name.
+
+    Open for everything that can actually do something, and false for the
+    `EXCLUSIVE_FLASH_PERMISSIONS` pair, which cannot: neither has an MCP tool
+    behind it, so every read of either is a deny site, and leaving them true only
+    withheld flashing (hardci-hq#107).
+
+    Every generation path goes through here — the skeleton above states the same
+    values in YAML, and `bootstrap` and `grant_every_permission` ask this rather
+    than each deciding for itself. That is deliberate: the defect this closes was
+    three paths that agreed by coincidence until one of them was edited."""
+    return {flag: flag not in EXCLUSIVE_FLASH_PERMISSIONS for flag in GENERATED_WRITE_PERMISSIONS.get(section, ())}
 # The project-scoped grants, all three of them. A generated configuration writes
 # every one true and a regenerated one carries every one over: whichever list is
 # short is the one that hands out a grant nobody set or drops one somebody did.
@@ -1388,27 +1414,33 @@ def provisionable_state_root(workspace: Path) -> Path:
 
 
 def grant_every_permission(document: JsonObject) -> JsonObject:
-    """Set every permission in a generated document to true.
+    """Set every permission in a generated document to its generated value.
 
-    The generated skeleton already says so; this makes it hold regardless of what
-    filled it in, and that is the part worth keeping from the version of this
-    function that wrote `false` everywhere: a generation decides the permission
-    state *completely* rather than half. Whatever a workspace profile asked for,
-    whatever a template edit forgot, the answer here is the same one, and it is
-    the same one for `agentic-hil init` and for `project_config_create`.
+    Which is true for all but the `EXCLUSIVE_FLASH_PERMISSIONS` pair — see
+    `generated_permissions`, which is where that is decided for every path that
+    generates. This function used to write `True` across the board and so had its
+    own opinion; that is what let the skeleton be corrected without the two paths
+    that bypass it changing at all (hardci-hq#107).
 
-    Nothing about it hands an agent something it can keep widening. Every
-    permission is open the moment the file exists, so there is nothing left to
-    gain by calling this again; the direction that still holds is the other one,
+    The name is kept, and so is the property it is named for: a generation decides
+    the permission state *completely* rather than half. Whatever a workspace
+    profile asked for, whatever a template edit forgot, the answer here is the
+    same one, and it is the same one for `agentic-hil init` and for
+    `project_config_create`.
+
+    Nothing about it hands an agent something it can keep widening. This writes
+    one fixed answer that no caller supplies any part of, so calling it again
+    yields the same document; the direction that still holds is the other one,
     enforced in `configwrite.project_config_set`, where an agent may write
-    `false` into a permission and never `true`."""
-    for section, flags in GENERATED_WRITE_PERMISSIONS.items():
+    `false` into a permission and never `true`. The pair it now writes false is
+    the one an agent could not have set true through that path either."""
+    for section in GENERATED_WRITE_PERMISSIONS:
         entries = document.get(section)
         if not isinstance(entries, dict):
             continue
         for entry in entries.values():
             if isinstance(entry, dict):
-                entry["permissions"] = dict.fromkeys(flags, True)
+                entry["permissions"] = generated_permissions(section)
     for section, grants in GENERATED_SECTION_PERMISSIONS.items():
         node = document.get(section)
         if isinstance(node, dict):
@@ -2330,7 +2362,7 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
         interface_cfg=str(raw.get("interface_cfg", "interface/stlink.cfg")),
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),
         flash_address=optional_string(raw.get("flash_address")),
-        timeout_s=float(raw.get("timeout_s", 60)),
+        timeout_s=positive_timeout_config(raw.get("timeout_s"), 60.0, f"{field}.timeout_s"),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
         target=target,
@@ -2423,7 +2455,7 @@ def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
     under the configuration directory that deliberately does not exist.
 
     It has to be asked because hardci-hq#96 made every permission true by
-    default. Two rules key on "this bench is meant to drive hardware": config
+    default, bar the two the flash interlock refuses on. Two rules key on "this bench is meant to drive hardware": config
     load insists such an entry's toolchain resolves and, for OpenOCD, that its
     scripts are absolute files outside the workspace, and `doctor` probes it. A
     granted permission used to be a deliberate human edit and so a good signal
@@ -2803,3 +2835,22 @@ def positive_integer_config(value: Any, default_value: int, field: str) -> int:
     if parsed < 1:
         raise ConfigError("config_invalid", f"{field} must be a finite integer >= 1.", {"field": field, "value": value})
     return parsed
+
+
+def positive_timeout_config(value: Any, default_value: float, field: str) -> float:
+    """A timeout the loader itself refuses at zero, not only the schema.
+
+    The shipped schema says `exclusiveMinimum: 0`, and every documented load
+    path validates against it — but the bound has to hold where the value is
+    turned into the number a backend waits on, or it is a bound on the file
+    rather than on the configuration. Zero is the case worth naming: it passes
+    a `>= 0` check, reaches `communicate(timeout=...)` already expired, and
+    reports hardware that never answered as a timeout."""
+    parsed = float(value if value is not None else default_value)
+    if math.isfinite(parsed) and parsed > 0:
+        return parsed
+    details: JsonObject = {"field": field}
+    # Non-finite is echoed as a string, because this travels into a report that
+    # is serialized with allow_nan=False.
+    add_scalar_schema_value(details, value)
+    raise ConfigError("config_invalid", f"{field} must be a number greater than 0.", details)

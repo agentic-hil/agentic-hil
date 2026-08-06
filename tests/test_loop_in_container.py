@@ -202,7 +202,7 @@ def test_the_image_tag_follows_the_recipe(tmp_path: Path, monkeypatch: pytest.Mo
 def test_a_machine_without_docker_is_told_rather_than_traced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(loop_in_container.shutil, "which", lambda _command: None)
 
-    assert loop_in_container.main(["--task", "anything"]) == loop_in_container.EXIT_NO_DOCKER
+    assert loop_in_container.main(["--task", "anything"]) == loop_in_container.EXIT_WRAPPER_FAILED
 
 
 def test_the_inner_loop_runs_codex_without_a_second_sandbox() -> None:
@@ -640,7 +640,7 @@ def test_a_home_volume_that_survives_the_run_fails_it(
 
     monkeypatch.setattr(loop_in_container, "remove_volume", stuck)
 
-    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_CLEANUP_FAILED
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
     captured = capsys.readouterr()
     assert "still exists after removal" in captured.err
     assert "-home" in captured.err
@@ -662,8 +662,76 @@ def test_an_interrupted_run_that_cannot_clean_up_says_so(
         lambda _docker, name: (_ for _ in ()).throw(RuntimeError(f"could not remove {name}")),
     )
 
-    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_CLEANUP_FAILED
-    assert "could not remove" in capsys.readouterr().err
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+    captured = capsys.readouterr()
+    assert "could not remove" in captured.err
+    # The loop never returned a code, so there is none to report.
+    assert "review loop exit code" not in captured.err
+
+
+def test_no_failure_of_the_wrapper_can_be_read_as_a_result_of_the_review() -> None:
+    """The collision this replaces: EXIT_NO_DOCKER=2 sat on EXIT_STALLED, EXIT_REFUSED=3 on EXIT_FAILED."""
+    loop_codes = {
+        agent_review_loop.EXIT_CLEAN,
+        agent_review_loop.EXIT_ROUNDS_EXHAUSTED,
+        agent_review_loop.EXIT_STALLED,
+        agent_review_loop.EXIT_FAILED,
+        agent_review_loop.EXIT_NO_PROGRESS,
+    }
+
+    assert loop_in_container.EXIT_WRAPPER_FAILED not in loop_codes
+    assert max(loop_codes) < loop_in_container.EXIT_WRAPPER_FAILED
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        agent_review_loop.EXIT_CLEAN,
+        agent_review_loop.EXIT_ROUNDS_EXHAUSTED,
+        agent_review_loop.EXIT_STALLED,
+        agent_review_loop.EXIT_FAILED,
+        agent_review_loop.EXIT_NO_PROGRESS,
+    ],
+)
+def test_every_code_the_loop_returns_reaches_the_caller_unchanged(
+    inner: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Transparency is the point of the wrapper; the container is not supposed to be visible in the code."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (inner, {}, None))
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == inner
+    assert loop_in_container.INNER_EXIT.format(code=inner) in capsys.readouterr().err
+
+
+def test_a_review_that_plateaued_and_a_container_that_leaked_are_told_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both used to arrive as a bare 2 or 4, and a caller had nothing else to read."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        loop_in_container, "stream", lambda _command, _repository: (agent_review_loop.EXIT_STALLED, {}, None)
+    )
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+
+    plateaued = loop_in_container.main(["--image", "loop:test", "--task", "x"])
+    capsys.readouterr()
+
+    def stuck(_docker: str, name: str) -> None:
+        raise RuntimeError(f"Docker volume {name} still exists after removal")
+
+    monkeypatch.setattr(loop_in_container, "remove_volume", stuck)
+    leaked = loop_in_container.main(["--image", "loop:test", "--task", "x"])
+    captured = capsys.readouterr()
+
+    assert plateaued == agent_review_loop.EXIT_STALLED
+    assert leaked == loop_in_container.EXIT_WRAPPER_FAILED
+    assert plateaued != leaked
+    # The volume has to take the exit status -- it is where a copy of a login can
+    # be -- but the review still plateaued, and that is still readable.
+    assert loop_in_container.INNER_EXIT.format(code=agent_review_loop.EXIT_STALLED) in captured.err
+    assert "still exists after removal" in captured.err
 
 
 def test_a_clean_run_reports_where_a_custom_review_directory_landed(
@@ -757,11 +825,11 @@ def test_a_round_the_timeout_cuts_short_is_committed_rather_than_discarded(
     assert "ran out of time" in body
     assert "exceeded --timeout" in body
     assert "half-done.py" in _in(repository, "show", "--name-only", "--format=", "HEAD").split()
-    # Nothing of the round is left in the tree. What remains untracked is this
-    # run's own paperwork, which is deliberately not part of the commit and is
-    # gitignored in the repository this loop was written for.
+    # Nothing of the round is left in the tree, and this run's own paperwork is
+    # not left in it either: the loop's directory carries a .gitignore of its
+    # own, so it is invisible here as it is in a repository that ignores it.
     left = [line for line in _in(repository, "status", "--porcelain").splitlines() if line.strip()]
-    assert left == ["?? .agentic-loop/"]
+    assert left == []
 
 
 def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
@@ -775,6 +843,130 @@ def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
     assert ".agentic-loop" not in _in(repository, "show", "--name-only", "--format=", "HEAD")
     # The transcripts are still there to read; they are just not part of the commit.
     assert list((repository / ".agentic-loop" / "logs").rglob("round-01-claude.log"))
+
+
+def test_the_loops_own_directory_ignores_itself_where_the_repository_ignores_nothing(tmp_path: Path) -> None:
+    """`*` covers the directory holding it, that .gitignore included, so nothing is left to report."""
+    repository = _repository(tmp_path)
+    root = repository / ".agentic-loop" / "reviews"
+
+    directory = agent_review_loop.paperwork_dir(repository, root, "20260101-000000")
+    (directory / "round-01.md").write_text("four findings\n", encoding="utf-8")
+
+    assert (root / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
+    # Neither of the two ways the paperwork used to escape: a status the next
+    # run's preflight refuses, and an agent's `git add -A`.
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    assert _in(repository, "diff", "--cached", "--name-only").strip() == ""
+
+
+def test_a_repository_that_already_ignores_the_path_is_not_disturbed(tmp_path: Path) -> None:
+    """Git does not descend into an ignored directory, so its own rule keeps answering."""
+    repository = _repository(tmp_path)
+    (repository / ".gitignore").write_text(".agentic-loop/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "ignore the loop"], check=True)
+    before = _in(repository, "ls-files")
+
+    agent_review_loop.paperwork_dir(repository, repository / ".agentic-loop" / "reviews", "20260101-000000")
+
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    assert _in(repository, "ls-files") == before
+    rule = _in(repository, "check-ignore", "-v", ".agentic-loop/reviews/20260101-000000")
+    assert rule.startswith(".gitignore:1:.agentic-loop/")
+
+
+def test_a_paperwork_directory_an_earlier_run_left_behind_is_ignored_from_now_on(tmp_path: Path) -> None:
+    """Every repository the loop has already visited has one of these sitting in it, un-ignored."""
+    repository = _repository(tmp_path)
+    root = repository / ".agentic-loop" / "reviews"
+    (root / "20251231-235959").mkdir(parents=True)
+    (root / "20251231-235959" / "round-01.md").write_text("a run from before this existed\n", encoding="utf-8")
+
+    agent_review_loop.paperwork_dir(repository, root, "20260101-000000")
+
+    assert (root / ".gitignore").is_file()
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+
+def test_a_paperwork_directory_the_operator_tracks_is_left_alone(tmp_path: Path) -> None:
+    """`*` in a directory somebody committed would hide their files rather than the loop's."""
+    repository = _repository(tmp_path)
+    notes = repository / "notes"
+    notes.mkdir()
+    (notes / "index.md").write_text("mine\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "notes/index.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "notes"], check=True)
+
+    directory = agent_review_loop.paperwork_dir(repository, notes, "20260101-000000")
+
+    assert directory.is_dir()
+    assert not (notes / ".gitignore").exists()
+
+
+def _sweeping_agent(tmp_path: Path) -> Path:
+    """An agent that commits the way agents do: everything the tree happens to hold."""
+    script = tmp_path / "sweeping_agent.py"
+    script.write_text(
+        "import pathlib, subprocess, uuid\n"
+        "name = 'change-%s.py' % uuid.uuid4().hex[:8]\n"
+        "pathlib.Path(name).write_text('x\\n', encoding='utf-8')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-q', '-m', 'feat: ' + name], check=True)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _clean_verdict(
+    setup: agent_review_loop.ReviewSetup,
+    record: agent_review_loop.RoundRecord,
+    number: int,
+    _range: str,
+    _previous: Path | None,
+    _commit: str,
+) -> tuple[agent_review_loop.Verdict, Path]:
+    review = setup.review_dir / f"round-{number:02d}.md"
+    review.write_text("REVIEW_STATUS: CLEAN\n", encoding="utf-8")
+    record.findings = 0
+    record.status = agent_review_loop.CLEAN
+    return agent_review_loop.Verdict(agent_review_loop.CLEAN, 0, str(review), ""), review
+
+
+def test_a_repository_that_ignores_nothing_stays_clean_across_two_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second run is the one that used to be impossible: preflight refused the tree the first left."""
+    repository = _repository(tmp_path)  # no .gitignore at all, unlike this repository
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(
+        agent_review_loop, "claude_command", lambda _options: [sys.executable, str(_sweeping_agent(tmp_path))]
+    )
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+
+    def run() -> int:
+        return agent_review_loop.main(
+            # No --allow-dirty: a tree the last run dirtied stops this outright.
+            ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"]
+            + ["--review-checkout", "none"]
+        )
+
+    first = run()
+    assert first == agent_review_loop.EXIT_CLEAN
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+    second = run()
+
+    assert second == agent_review_loop.EXIT_CLEAN
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    # Both rounds committed, and neither commit carries a line of the loop's own
+    # paperwork -- which is what the agent's `git add -A` swept in before.
+    assert _in(repository, "rev-list", "--count", "HEAD").strip() == "3"
+    assert ".agentic-loop" not in _in(repository, "log", "--name-only", "--format=")
+    # Ignored, not withheld: the reviews are on disk for a human to read.
+    assert list((repository / ".agentic-loop" / "reviews").rglob("round-01.md"))
+    assert (repository / ".agentic-loop" / "logs" / ".gitignore").is_file()
 
 
 def test_a_tree_with_nothing_in_it_produces_no_salvage_commit(tmp_path: Path) -> None:

@@ -28,7 +28,8 @@ because a detour is known to exist, but because a boundary defended only by a
 path parser is a boundary defended only as well as the parser is right.
 
 **And it only goes one way.** hardci-hq#96 turned the generated default over:
-a configuration is now created with every permission true, because the closed
+a configuration is now created with every permission true bar the two that
+refuse flashing while they are true (hardci-hq#107), because the closed
 one cost this project's owner a working day of hand-edited YAML and bought
 nothing an agent with a shell could not already reach. What replaces it is the
 direction. ``permission_widening`` refuses any write that turns a permission on
@@ -196,11 +197,11 @@ def permission_widening(before: dict[str, Any], after: dict[str, Any]) -> list[s
     """Which permission paths a change opens rather than closes.
 
     The whole of hardci-hq#96 rests on this list being empty for every write an
-    agent makes over MCP. A generated configuration now grants everything, so the
+    agent makes over MCP. A generated configuration now grants everything it can, so the
     property left to defend is the direction: an agent writes ``false`` into a
     permission and never ``true``, which means it can only ever reduce its own
-    authority. It says nothing about creation — a regeneration writes the open
-    skeleton and is the operator's call, not a permissions write — and nothing
+    authority. It says nothing about creation — a regeneration writes the
+    skeleton at its defaults and is the operator's call, not a permissions write — and nothing
     about what a person does at the command line.
 
     Read off ``permission_delta``, so the two answers cannot disagree about what
@@ -468,9 +469,9 @@ def _only_false_allowed(requested: list[str], path: Path) -> JsonObject:
         "error_type": CONFIG_WIDENING_ERROR,
         "summary": (
             f"{len(requested)} permission change(s) in this call carried a value other than false, and false is the only "
-            "value this surface writes into a permission. A configuration is generated with every permission granted, so "
-            "an agent can narrow one and never open one — including one that is already open, which this call would not "
-            "have changed. Nothing was written."
+            "value this surface writes into a permission. A configuration is generated with every permission granted but "
+            "the two that refuse flashing while they are true, so an agent can narrow one and never open one — "
+            "including one that is already open, which this call would not have changed. Nothing was written."
         ),
         "widened_keys": sorted(requested),
         "path": str(path),
@@ -499,9 +500,9 @@ def _widening_denied(widened: list[str], path: Path) -> JsonObject:
         "error_type": CONFIG_WIDENING_ERROR,
         "summary": (
             f"{len(widened)} permission(s) in this configuration would have been turned on by this change, and nothing "
-            "on this surface turns a permission on. A configuration is generated with every permission granted and can "
-            "only be narrowed from here, so an agent writes false into a permission and never true. Nothing was "
-            "written."
+            "on this surface turns a permission on. A configuration is generated with every permission granted but the "
+            "two that refuse flashing while they are true, and can only be narrowed from here, so an agent writes "
+            "false into a permission and never true. Nothing was written."
         ),
         "widened_keys": sorted(widened),
         "path": str(path),
@@ -1038,7 +1039,7 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 # agentic-hil grant / agentic-hil revoke.
 #
 # hardci-hq#96 inverted the generated default and answered the reopen question
-# for the first run only: a generation opens everything. For a file that already
+# for the first run only: a generation opens everything it can. For a file that already
 # exists there was no answer that did not cost the rest of the file.
 # `project_config_set` writes `false` into a permission and nothing else; and
 # `init --force` and deleting the file both do come back open, at the price of the
@@ -1194,8 +1195,9 @@ def set_permission(
       command are applied together or not at all, so opening a whole entry is
       still one line — one that names what it opened, and whose result lists
       exactly those keys.
-    * The whole-file form already exists. `agentic-hil init --force` reopens
-      everything, and the gap hardci-hq#102 describes is the surgical one. A
+    * The whole-file form already exists. `agentic-hil init --force` returns the
+      whole file to the generated defaults, and the gap hardci-hq#102 describes
+      is the surgical one. A
       section form sits between the two and is the shape that reads narrow and
       behaves broad.
     * What a wildcard is really for is not typing but finding out. That is

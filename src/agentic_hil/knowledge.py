@@ -56,13 +56,13 @@ CONFIG_STALE_ERROR = "config_stale"
 # there: what is refused is the direction, and a caller told "permission denied"
 # would go looking for the permission that opens it. There is none.
 CONFIG_WIDENING_ERROR = "permission_widening_denied"
-# The one command that puts every permission back, named wherever a narrowing is
-# reported so that "only a human can undo this" is never left as an abstraction.
+# The one command that puts a narrowed permission back, named wherever a narrowing
+# is reported so that "only a human can undo this" is never left as an abstraction.
 # It regenerates from attached hardware, so it is also the command that repairs a
 # configuration nobody can change any more.
 CONFIG_REOPEN_COMMAND = "agentic-hil init --force"
-# And the surgical one beside it (hardci-hq#102). `init --force` reopens
-# everything by rewriting the whole file from hardware discovery, which on a
+# And the surgical one beside it (hardci-hq#102). `init --force` returns the whole
+# file to the generated defaults by rewriting it from hardware discovery, which on a
 # bench somebody grew is not a repair but a loss: baudrate, `resource_id`,
 # `state_root` and the artifact roots go with it. These two name one permission
 # and move that one. Both directions ship together on purpose — a command that
@@ -78,12 +78,29 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 
 # Validated flashing and unrestricted debugger access are mutually exclusive
-# policies (docs/security-design.md), and hardci-hq#96 made that exclusion the
-# ordinary first state of a bench rather than a rare one: a generated
-# configuration grants both sides of it, so the first `flash_firmware` on a fresh
-# file is refused. The way out is a *narrowing*, which is the one direction this
-# surface still moves in, so the refusal names it rather than leaving a caller to
-# work out that it is asking for less rather than more.
+# policies (docs/security-design.md): while either of these is true on a probe,
+# `flash_firmware` on that probe is refused, and so is a debug session.
+#
+# They are therefore the two exceptions to the allow-by-default generation of
+# hardci-hq#96, and a generated configuration writes both false. For a while it
+# did not, and the two rules met for the first time on the bench: #96 opened
+# every permission, this interlock reads both of these as a reason to refuse, and
+# the result was that a freshly generated configuration could not flash at all
+# (hardci-hq#107). The interlock was written when the pair defaulted to false, so
+# "both on" meant somebody had chosen it; the inversion made it the shipped
+# state without either rule changing.
+#
+# What settles which side gives way is that neither flag grants anything. There
+# is no MCP tool for raw debugger commands and none for mass erase, so every read
+# of either is a deny site: turning one on subtracts flashing and adds no
+# capability in exchange. Allow-by-default is for permissions that can do
+# something, and a permission whose only reachable effect is to switch another
+# one off does not belong in "everything open".
+#
+# This tuple is the single source of truth for that. `config.py` derives the
+# generated value of every debugger permission from it, so the template, the
+# hardware-discovery path and `project_config_create` cannot drift apart again —
+# which is exactly how they came to disagree in the first place.
 EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
 
 # `can_buses.<name>.listen_only: true` is the one configuration flag whose entire
@@ -107,9 +124,10 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
     entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
     return (
         f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: validated flashing and "
-        f"unrestricted debugger access are mutually exclusive policies, and a generated configuration grants both. Set "
-        f"`{entry}` to false — with `project_config_set`, or by asking the operator — and this works. Nothing here can "
-        "set it back to true afterwards."
+        f"unrestricted debugger access are mutually exclusive policies, which is why a generated configuration leaves "
+        f"both false. Something on this bench set `{entry}` to true since. Set it back to false — with "
+        "`project_config_set`, or by asking the operator — and this works. Nothing here can set it back to true "
+        "afterwards."
     )
 # The scope that separates "this project has no configuration", which
 # `project_config_create` answers, from "the configuration this running server
@@ -332,12 +350,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
-            "the hardware attached to this machine, and writes every permission true, so the bench is workable from "
-            "the file it produces without anyone editing YAML.",
+            "the hardware attached to this machine, and writes every permission true except "
+            "`allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, so "
+            "the bench is workable from the file it produces without anyone editing YAML.",
             "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
-            "Then report what it granted — flashing, resetting, raw debugger commands and mass erase among them — and "
-            "ask the operator which of those this bench should not have. You can write `false` into any of them with "
-            "`project_config_set`; you can never write `true`.",
+            "Then report what it granted — flashing and resetting among them — and ask the operator which of those "
+            "this bench should not have. You can write `false` into any of them with `project_config_set`; you can "
+            "never write `true`. Raw debugger commands and mass erase are already false and no tool here reads "
+            "either as permission to do anything, so do not report them as missing.",
         ),
         do_not=(
             "Do not write the configuration by hand, and do not drive the hardware another way while the project has "
@@ -395,7 +415,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     CONFIG_WIDENING_ERROR: ErrorRemedy(
         meaning=(
             "A field-wise configuration change tried to write something other than a narrowing into a permission. A "
-            "generated configuration starts with every permission granted, and the one direction `project_config_set` "
+            "generated configuration starts with every permission granted but the two that refuse flashing while they "
+            "are true, and the one direction `project_config_set` "
             "leaves is narrowing, so an agent writes `false` into a permission and never `true`. Two cases share this "
             "error because for a caller they are one fact — nothing here turns a permission on. Either the request "
             "carried a permission value that was not `false`, and `widened_keys` names those keys as the request spelled "
@@ -410,7 +431,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "two is refused for the widening and loses the narrowing with it.",
             "If a permission really has to come back, that is a person's decision at the command line: "
             "`{grant_command} <key>` opens that one permission in the file as it stands, and `{reopen_command}` "
-            "regenerates the configuration from attached hardware with every permission granted again. Report which "
+            "regenerates the configuration from attached hardware at the generated defaults again. Report which "
             "permission is needed and why, name the key, and stop.",
             "`project_config_describe` says what this configuration grants right now, so the report names the actual "
             "gap rather than a guess at one.",
@@ -1795,8 +1816,8 @@ debuggers:
     permissions:
       allow_flash: true
       allow_reset: true
-      # Both generated true and both taken back, on the operator's say-so:
-      # this socket sees customer boards.
+      # Both generated false: while either is true, flashing on this probe is
+      # refused, and there is no tool here that either one enables.
       allow_raw_debugger_commands: false
       allow_mass_erase: false
 
@@ -1836,7 +1857,7 @@ def _schema_type_label(node: JsonObject) -> str:
     pattern = node.get("pattern")
     if isinstance(pattern, str):
         label += f", matching `{pattern}`"
-    for bound in ("minimum", "maximum", "minLength"):
+    for bound in ("minimum", "exclusiveMinimum", "maximum", "minLength"):
         if bound in node:
             label += f", {bound} {node[bound]}"
     return label
@@ -1919,7 +1940,7 @@ One authoritative file per project, **outside** the workspace, so repository con
 
 ## A worked example
 
-A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. It was generated with every permission true; what you see is what the operator asked an agent to take back afterwards — no mass erase and no raw debugger commands on a socket that sees customer boards, and no regeneration of this file from hardware discovery:
+A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. It was generated with every permission true but the two that refuse flashing while they are true; what you see beyond those is what the operator asked an agent to take back afterwards — no regeneration of this file from hardware discovery:
 
 ```yaml
 {CONFIG_WORKED_EXAMPLE}```
@@ -1940,12 +1961,12 @@ These calls are the only door. The file itself is protected by deny rules `agent
 
 ### Permissions move one way — through `project_config_set`
 
-A configuration is **generated with every permission true** — flashing, reset, raw debugger commands, mass erase, COM and CAN writes, and all three `permissions.allow_config_*` grants. The bench is workable from the moment the file exists, and nobody has to open an editor to make it so.
+A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Validated flashing and unrestricted debugger access are mutually exclusive, so while either of those is true `flash_firmware` on that probe is refused; neither has a tool behind it here, so leaving them false costs nothing and is what makes the bench flashable (hardci-hq#107). The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
 
 What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 
 ```text
-Generation                  every permission true
+Generation                  every permission true, but the two flashing is interlocked against
 Through project_config_set  write false into a permission
                             never true — not even into one you set to false yourself
 Last move there             permissions.{CONFIG_PERMISSIONS_RIGHT}: false
@@ -1962,8 +1983,8 @@ Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for thi
 The two commands a person has are a separate door, and it is honest to say so rather than to promise more than holds:
 
 * `{CONFIG_GRANT_COMMAND} <key>` at a person's shell opens one named permission in the file as it stands and changes nothing else in it; `{CONFIG_REVOKE_COMMAND} <key>` closes one again. That is the surgical reopen path, it is the operator's, and it is the one to name when a permission is what is missing — with the key. Neither is an MCP tool.
-* `{CONFIG_REOPEN_COMMAND}` at the same shell rewrites this whole file from attached hardware with every permission granted. That is the wide reopen path and it is also the operator's; ask for it only when the bench itself has to be rebuilt.
-* `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives with everything granted; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back grants everything. Its result names what it wrote.
+* `{CONFIG_REOPEN_COMMAND}` at the same shell rewrites this whole file from attached hardware at the generated defaults. That is the wide reopen path and it is also the operator's; ask for it only when the bench itself has to be rebuilt.
+* `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives at the generated defaults; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back is at those same defaults. Its result names what it wrote.
 * **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file — the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
 * Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
 
@@ -2349,7 +2370,7 @@ Rules that hold on both platforms:
 - `AGENTIC_HIL_CONFIG` is optional and must be an absolute path to the configuration file.
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
-- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, with every permission granted, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, at the generated defaults, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.
 """
 
 

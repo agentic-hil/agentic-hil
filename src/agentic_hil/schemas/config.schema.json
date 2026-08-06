@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-hil.local/schemas/config.schema.json",
   "title": "Agentic HIL configuration",
-  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written. A generated configuration sets every one of them true so the bench is workable without hand-edited YAML. What an agent may write into a permission through project_config_set is false and nothing else, so that call can only ever narrow this file; regenerating it is a separate door with a separate grant (allow_config_write, or agentic-hil init --force at a person's shell) and it writes permissions again from the skeleton and the file it replaces.",
+  "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written. A generated configuration sets every one of them true, except allow_raw_debugger_commands and allow_mass_erase which it sets false because either one being true refuses flashing on that probe, so the bench is workable without hand-edited YAML. What an agent may write into a permission through project_config_set is false and nothing else, so that call can only ever narrow this file; regenerating it is a separate door with a separate grant (allow_config_write, or agentic-hil init --force at a person's shell) and it writes permissions again from the skeleton and the file it replaces.",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
     "debugger_permissions": {
       "type": "object",
-      "description": "What this debug probe may do beyond reading it. Scoped to this debugger alone, so narrowing one board leaves a second board in the same file untouched. A generated configuration sets every flag true; a flag a file does not name is false, because absence must not widen a configuration written before this default changed. allow_probe is a version 1 field and is refused in a version 2 file.",
+      "description": "What this debug probe may do beyond reading it. Scoped to this debugger alone, so narrowing one board leaves a second board in the same file untouched. A generated configuration sets allow_flash and allow_reset true and sets allow_raw_debugger_commands and allow_mass_erase false: validated flashing and unrestricted debugger access are mutually exclusive, so either of the latter two being true refuses flash_firmware on this probe, and neither has a tool behind it to trade for that. A flag a file does not name is false, because absence must not widen a configuration written before this default changed. allow_probe is a version 1 field and is refused in a version 2 file.",
       "additionalProperties": false,
       "properties": {
         "allow_probe": {
@@ -81,7 +81,7 @@
     },
     "permissions": {
       "type": "object",
-      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. project_config_set writes false into a permission and no other value, so through that call each of these can go from true to false and none of them back. The one MCP call that writes permissions any other way is project_config_create, which regenerates the whole file from hardware discovery under allow_config_write: it carries the permissions of the configuration this server loaded onto the entries that are already there — not the ones on disk, so a narrowing made through project_config_set closes the regeneration path only once the server has been restarted onto it — grants everything to an entry it discovers for the first time, and generates a fully open file when there is none. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
+      "description": "Project-scoped permissions: what may be done to this configuration itself. A generated configuration sets all three true. project_config_set writes false into a permission and no other value, so through that call each of these can go from true to false and none of them back. The one MCP call that writes permissions any other way is project_config_create, which regenerates the whole file from hardware discovery under allow_config_write: it carries the permissions of the configuration this server loaded onto the entries that are already there — not the ones on disk, so a narrowing made through project_config_set closes the regeneration path only once the server has been restarted onto it — gives an entry it discovers for the first time the same generated defaults, and generates a file at those defaults when there is none. Three grants rather than one, so that opening the file far enough for an agent to enter a probe serial does not also hand over the permissions block.",
       "additionalProperties": false,
       "properties": {
         "allow_config_write": {
@@ -113,7 +113,7 @@
             "agent",
             "human"
           ],
-          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission true; a regeneration carries over the permissions of the configuration that server had loaded instead."
+          "description": "\"agent\" means an agent generated this file over MCP out of hardware discovery, with every permission true except allow_raw_debugger_commands and allow_mass_erase, which a generation writes false so that flashing works; a regeneration carries over the permissions of the configuration that server had loaded instead."
         },
         "created_via": {
           "type": "string",
@@ -246,8 +246,9 @@
           },
           "timeout_s": {
             "type": "number",
-            "minimum": 0,
-            "default": 60.0
+            "exclusiveMinimum": 0,
+            "default": 60.0,
+            "description": "Seconds one debugger operation may take before it is abandoned. Greater than zero, not merely non-negative: the value reaches the backend as the subprocess wait, and at zero it has already expired when the probe is asked for, so every probe, flash and reset fails as a timeout against hardware that was never given a chance to answer."
           },
           "permissions": {
             "$ref": "#/$defs/debugger_permissions"
