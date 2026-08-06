@@ -32,6 +32,7 @@ from agentic_hil.devices import (
     DeviceError,
     DeviceSet,
     UartDevice,
+    config_devices,
     lock_keys,
 )
 from agentic_hil.knowledge import attach_quarantine_guidance
@@ -89,6 +90,17 @@ def _public_record(record: JsonObject | None) -> JsonObject | None:
     redacted = redact_sensitive(record)
     assert isinstance(redacted, dict)
     return {key: value for key, value in redacted.items() if key not in _RECORD_OUTPUT_HIDDEN_KEYS}
+
+
+# What a held device is reported with. `error_class` and `errno` are carried
+# because `BenchMutex` answers a lock it could not even open the same way as one
+# somebody holds — fail-closed, which is right — and without them an unwritable
+# lock directory would read as "another run has the bench" forever.
+DEVICE_HOLD_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
+
+
+def _hold_detail(result: JsonObject) -> JsonObject:
+    return {field: result[field] for field in DEVICE_HOLD_FIELDS if result.get(field) is not None}
 
 
 def _record_cleanup_reasons(record: JsonObject | None) -> list[str]:
@@ -744,11 +756,24 @@ class HardwareCoordinator:
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
             blocked = self.blocked or blocked_state
             reasons = _record_cleanup_reasons(record)
+            # Asked after the project block, never inside it: the probe lock above
+            # is released by then, so no device is taken while a project lock is.
+            holds = self.device_holds()
             result: JsonObject = {
                 "ok": True,
                 "tool": "hardware_lease_status",
                 "project_resource": self.project_key,
+                # Unchanged in meaning: a live owner holds the project lock, which
+                # is a lease's and nothing else's. A caller asking whether a
+                # session is open still reads this and still gets that answer.
                 "owner_active": owner_active,
+                # The wider question, and the one an operator asking "is the bench
+                # free" is actually asking. hardci-hq#105: a declared run takes the
+                # device locks and leaves the project lock alone, so deriving a
+                # free bench from `owner_active` called a run's held bench free.
+                "bench_held": bool(owner_active or holds),
+                "held_devices": sorted({str(item["resource"]) for item in holds if isinstance(item.get("resource"), str)}),
+                "device_holds": holds,
                 "snapshot_atomic": snapshot_atomic,
                 "blocked": blocked,
                 # Lifted out of the record so an operator can decide between
@@ -775,6 +800,48 @@ class HardwareCoordinator:
 
     def _project_probe_lock(self) -> _LifetimeLock:
         return _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
+
+    def device_holds(self) -> list[JsonObject]:
+        """Every configured device that is held right now, this owner's included.
+
+        The project lock answers for a lease and nothing else. `begin_run` takes
+        the machine-wide device locks and leaves the project lock alone, so
+        between two calls of a declared run there is no project lock to find and
+        the bench still has every declared board. This is the second question,
+        and `status` needs both of them to say whether the bench is free.
+
+        Asked of the locks, never of the holder records beside them. The OS lock
+        is what makes a hold true; a record is only what the last owner wrote,
+        and an owner that died leaves it saying `held` forever. A check that
+        believed the record would report a held bench for good after one crash —
+        a new dead end inside the answer that exists to remove one.
+
+        A device this owner already holds is read from its own mutex instead of
+        probed: that answer is exact and costs nothing, and re-taking a lock we
+        are holding would only exercise the bookkeeping. The rest are taken and
+        given back one at a time, through a mutex of their own so this owner's
+        holds are never disturbed — holding a set to find out whether one of them
+        is free is how a question turns into a collision.
+        """
+        keys = config_devices(self.config).lock_keys
+        if not keys:
+            # Before touching `self.bench.root`, which creates the machine-wide
+            # lock directory: a configuration with no devices must be able to
+            # answer this without writing anything.
+            return []
+        probe = BenchMutex(frontend=self.frontend, root=self.bench.root)
+        holds: list[JsonObject] = []
+        for key in keys:
+            if self.bench.holds(key):
+                holds.append({**_hold_detail(self.bench.busy_result(key)), "resource": key, "holder_is_this_owner": True})
+                continue
+            try:
+                probe.acquire([key], wait_s=0.0)
+            except DeviceBusyError as error:
+                holds.append(_hold_detail(error.result))
+            else:
+                probe.release([key])
+        return holds
 
     def recover(self, *, safe_state_confirmed: bool, quarantine_id: str | None = None, accept_config_change: bool = False) -> JsonObject:
         if not safe_state_confirmed:

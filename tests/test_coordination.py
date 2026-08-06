@@ -27,6 +27,7 @@ from agentic_hil.coordination import (
     _LifetimeLock,
     resource_digest,
 )
+from agentic_hil.devices import config_devices
 from agentic_hil.mcp import call_tool
 from agentic_hil.process import (
     cleanup_registered_processes,
@@ -1240,6 +1241,49 @@ def test_status_flags_non_atomic_snapshot_while_foreign_owner_holds_lock(tmp_pat
         assert status["blocked"] is False
     finally:
         lease.release()
+        owner.close()
+        observer.close()
+
+
+def test_status_reports_a_held_bench_while_a_declared_run_holds_the_devices(tmp_path: Path) -> None:
+    """hardci-hq#105: the project lock is a lease's, and a run does not take it.
+
+    `begin_run` locks every declared device and leaves the project lock alone, so
+    between two calls of a live run there is genuinely no project lock to find —
+    and every declared board is genuinely held. A status read derived from that
+    lock alone answered "free" at exactly the moment the bench was busiest.
+
+    Asked from a second coordinator with no call in flight, because that is where
+    the wrong answer was read: `agentic-hil lease-status` in another terminal."""
+    config = config_for(tmp_path)
+    device = config_devices(config).lock_keys[0]
+    owner = HardwareCoordinator(config, "owner")
+    observer = HardwareCoordinator(config, "observer")
+    try:
+        assert owner.begin_run([device])["ok"] is True
+
+        status = observer.status()
+        # No lease is open, so the lock this used to be derived from really is
+        # free. That answer is kept, and it is no longer the whole answer.
+        assert status["owner_active"] is False
+        assert status["bench_held"] is True
+        assert status["held_devices"] == [device]
+        assert [item["resource"] for item in status["device_holds"]] == [device]
+        assert status["device_holds"][0]["holder"]["frontend"] == "owner"
+        assert status["device_holds"][0]["holder"]["pid"] == os.getpid()
+
+        # And the owner's own read says held too, without probing a lock it is
+        # holding: reporting a free bench to the process holding it would be the
+        # same bug wearing the other hat.
+        own = owner.status()
+        assert own["bench_held"] is True
+        assert own["device_holds"][0]["holder_is_this_owner"] is True
+
+        assert owner.end_run()["ok"] is True
+        released = observer.status()
+        assert released["bench_held"] is False
+        assert released["held_devices"] == []
+    finally:
         owner.close()
         observer.close()
 

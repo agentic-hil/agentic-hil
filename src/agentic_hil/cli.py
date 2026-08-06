@@ -18,7 +18,6 @@ import yaml
 
 from agentic_hil import __version__
 from agentic_hil.adopt import project_config_adopt_hardware
-from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
@@ -1306,23 +1305,22 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
 
     The MCP service asks its own coordinator and gets an exact answer, because
     the holder is itself. A command line is a different process and has to ask
-    the two locks instead, which is why both are asked:
+    the locks, and both of them have to be asked: a lease takes the project lock
+    and holds it for as long as the session lives, while a declared run takes the
+    machine-wide device locks and *not* the project lock, so a run between two of
+    its own calls is invisible to the first question.
 
-    * The **project lock**, through `HardwareCoordinator.status()`. A lease takes
-      it — a COM or CAN session, a debug session, any single hardware call — and
-      holds it for as long as the session lives.
-    * The **device locks**, through the machine-wide mutex. A declared run takes
-      those and *not* the project lock, so a run between two of its own calls is
-      invisible to the first check. Asked by taking each device lock and giving
-      it straight back rather than by reading the holder records beside them: the
-      OS lock is what makes a hold true, a record is only what the last owner
-      wrote, and an owner that died leaves the record saying `held` forever. A
-      check that believed the record would refuse every permission change on a
-      bench whose last run crashed — a new dead end inside the change that exists
-      to remove one.
+    Asking is `HardwareCoordinator.status()`'s job, not this one's. Until
+    hardci-hq#105 the device half lived here and helped no other caller — the
+    same status read a second terminal makes still reported a run's held bench as
+    free. This reshapes the one answer for the refusal; it does not go back to
+    the locks a second time. Why the holder records are not that answer, and why
+    each device is taken and released on its own, is in `device_holds`.
 
-    One device at a time and released immediately, so this never holds a set
-    somebody else is midway through taking.
+    `held_devices` here is deliberately wider than the field of that name in
+    `status()`: the locks say which devices are held, and the project record
+    additionally names what the live owner declared. A refusal that says what a
+    permission change would move underneath wants both.
 
     From out here a declared run and a session that outlived one are the same
     fact, so neither is claimed: what is reported is that the bench is held and
@@ -1335,13 +1333,13 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         status = coordinator.status()
     finally:
         coordinator.close()
-    busy = busy_devices(config)
-    if not status.get("owner_active") and not busy:
+    if not status.get("bench_held"):
         return None
     record = status.get("record") or {}
+    busy = list(status.get("device_holds") or [])
     holds: JsonObject = {
         "owner_active": bool(status.get("owner_active")),
-        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item["resource"]) for item in busy)}),
+        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item) for item in (status.get("held_devices") or []) if isinstance(item, str))}),
         "busy_devices": busy,
         # The project record is advisory while somebody holds the lock, so say so
         # rather than presenting a read that could have straddled their write.
@@ -1351,32 +1349,6 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         if record.get(field) is not None:
             holds[field] = record[field]
     return holds
-
-
-# What a busy device is reported with. `error_class` and `errno` are carried
-# because `BenchMutex` answers a lock it could not even open the same way as one
-# somebody holds — fail-closed, which is right — and without them an unwritable
-# lock directory would read as "another run has the bench" forever.
-_HOLDER_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
-
-
-def busy_devices(config: AgenticHILConfig) -> list[JsonObject]:
-    """Every device of this configuration another owner is holding right now.
-
-    Each lock is taken and released on its own. Taking the whole set at once
-    would be the acquisition a run makes, and this is a question rather than a
-    run: holding six devices to find out whether one of them is free is how a
-    question turns into a collision."""
-    mutex = BenchMutex(frontend="operator-cli")
-    busy: list[JsonObject] = []
-    for key in config_devices(config).lock_keys:
-        try:
-            mutex.acquire([key], wait_s=0.0)
-        except DeviceBusyError as error:
-            busy.append({field: error.result[field] for field in _HOLDER_FIELDS if error.result.get(field) is not None})
-        else:
-            mutex.release([key])
-    return busy
 
 
 def initialized_config_path(workspace: Path) -> Path:
