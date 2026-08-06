@@ -264,6 +264,62 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "an installation destroyed around a live process is the outcome being refused.",
         ),
     ),
+    "upgrade_blocked_by_pin": ErrorRemedy(
+        meaning=(
+            "The package manager holds this installation at one exact version, so the upgrade command it was given "
+            "cannot move it and did not. `uv tool upgrade` reports that as success — exit code 0 with the reason on "
+            "stderr — because for it, nothing to do is not a failure. The version this installation runs is unchanged; "
+            "`previous_version` and `version` on this result are the same number, and that is what makes this a "
+            "refusal rather than an upgrade. The pin comes from the requirement the installation was created with: "
+            "`uv tool install \"agentic-hil==X.Y.Z\"` records `==X.Y.Z` and every later `uv tool upgrade` honours it."
+        ),
+        remediation=(
+            "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
+            "it, and that delete fails while the MCP server the host started is still running out of it — the failure "
+            "`installation_in_use` exists to prevent, and this command has no such check of its own.",
+            "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
+            "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
+            "removes what they installed — on a bench with `can`, that silently takes CAN support away. The hint `uv` "
+            "prints names the bare distribution and would do exactly that, so use ours and not that one.",
+            "Then run `agentic-hil --version` to confirm the number moved, and start the agent host, which loads the "
+            "new server. Nothing was restarted or reloaded by this attempt; there is nothing new to load yet.",
+            "Later upgrades work normally: the reinstall records an unpinned requirement, so `agentic-hil upgrade` "
+            "moves the installation from then on.",
+        ),
+        do_not=(
+            "Do not report this as an upgrade, and do not ask the operator to restart anything on the strength of it. "
+            "The installation still runs the version it ran before, with that version's behaviour and its refusals.",
+            "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution without "
+            "extras, and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` "
+            "brought in.",
+            "Do not have Agentic HIL rewrite the installation on the operator's behalf, and do not reach for "
+            "`--force` to make the pinned upgrade take. Which version a machine runs is the operator's decision; a "
+            "pin can be deliberate, and an upgrade that replaces an installation nobody asked it to replace is a "
+            "bigger surprise than the one being reported here.",
+        ),
+    ),
+    "upgrade_did_not_change_version": ErrorRemedy(
+        meaning=(
+            "The package manager ran and reported no failure, and the installed version is the one that was already "
+            "there. Nothing was replaced, so there is nothing new to load and no restart is owed. This is the ordinary "
+            "answer on an installation that is already at the newest release the configured index offers — it is "
+            "reported as a refusal rather than a success only because no upgrade happened, which is what was asked for."
+        ),
+        remediation=(
+            "If this installation was expected to be current, stop here. `version` on this result is what it runs, and "
+            "no agent host needs restarting.",
+            "If a newer release was expected, check what the manager records for this tool — `uv tool list`, "
+            "`pipx list` — and compare it against the index. A requirement recorded with an exact version, or a "
+            "restrictive one, makes every upgrade a no-op in exactly this shape; `install.stderr` on this result "
+            "carries whatever the manager said about it.",
+            "A private or mirrored package index that has not yet carried the release forward produces the same "
+            "answer. That is the operator's index to check, not something this command can work around.",
+        ),
+        do_not=(
+            "Do not tell the operator the upgrade succeeded or ask for a restart to pick up new behaviour. Both "
+            "version fields on this result say the installation did not move.",
+        ),
+    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "

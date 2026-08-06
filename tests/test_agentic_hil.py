@@ -304,6 +304,10 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
     assert result["ok"] is True
     assert result["version"] == "9.9.9"
     assert result["restart_required"] is True
+    # The one outcome that may claim an upgrade, and it says which two numbers
+    # it moved between rather than asserting movement in the abstract.
+    assert result["summary"] == f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server."
+    assert "error_type" not in result
     assert calls[0][0][:3] == [sys.executable, "-m", "pip"]
     assert calls[1] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
     assert calls[2][0] == [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", "opencode"]
@@ -326,6 +330,140 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
     assert result["ok"] is False
     assert result["error_type"] == "upgrade_failed"
     assert result["install"]["stderr"] == "network failed"
+
+
+# The line `uv tool upgrade` wrote on the reporter's Linux box, beside the exit
+# code 0 that was read as success while the installation stayed on 0.7.1
+# (hardci-hq#99).
+_UV_EXACT_PIN_HINT = (
+    "hint: `agentic-hil` is pinned to `0.7.1` (installed with an exact version pin); "
+    "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version."
+)
+
+
+def _upgrade_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manager: str,
+    command: list[str],
+    installed: subprocess.CompletedProcess[str],
+    version_after: str,
+) -> list[list[str]]:
+    """Drive one upgrade with a fixed manager outcome and a fixed resulting version."""
+    calls: list[list[str]] = []
+
+    def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(invoked)
+        if invoked[-1] == "--version":
+            return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")
+        if "skill-install" in invoked:
+            return subprocess.CompletedProcess(invoked, 0, '{"ok": true}\n', "")
+        return installed
+
+    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: (manager, command))
+    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
+    return calls
+
+
+def test_upgrade_blocked_by_an_exact_pin_names_the_pin_and_keeps_the_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uv tool upgrade` cannot move an exact pin and exits 0 saying so on stderr.
+
+    The reported defect in one result: `previous_version` and `version` both
+    0.7.1, `ok: true`, `restart_required: true`, and uv's plain-text reason
+    passed through unread. The operator restarted onto the same release and
+    carried on believing they were on 0.8.0.
+
+    The suggested command has to carry the extras, because uv's own hint does
+    not: `agentic-hil@latest` re-resolves the bare distribution and uninstalls
+    what `[can]` brought in, which takes CAN support off a bench that has it.
+    """
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["restart_required"] is False
+    assert result["previous_version"] == __version__
+    assert result["version"] == __version__
+    assert result["pinned_version"] == "0.7.1"
+    assert result["installed_extras"] == ["can"]
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert result["install"]["stderr"] == _UV_EXACT_PIN_HINT
+    # Nothing was replaced, so refreshing the skills out of it would be work
+    # with no effect reported under a result whose content is that nothing moved.
+    assert not any("skill-install" in call for call in calls)
+    assert any("reinstall_command" in step for step in result["remediation"])
+    assert any("agentic-hil@latest" in step for step in result["do_not"])
+
+
+def test_upgrade_that_finds_nothing_newer_reports_neither_success_nor_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already current is its own answer, and its next step is to do nothing.
+
+    Told apart from the pinned case by what the manager said, not by the exit
+    code, which is 0 for both -- and both are `ok: false`, because the upgrade
+    that was asked for did not happen either way.
+    """
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_did_not_change_version"
+    assert result["restart_required"] is False
+    assert result["previous_version"] == __version__
+    assert result["version"] == __version__
+    assert "reinstall_command" not in result
+    assert "pinned_version" not in result
+    assert not any("skill-install" in call for call in calls)
+    assert any("`uv tool list`" in step for step in result["remediation"])
+
+
+@pytest.mark.parametrize(
+    ("manager", "command", "expected"),
+    [
+        ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"], 'uv tool install "agentic-hil[can]@latest"'),
+        ("pipx", ["pipx.exe", "upgrade", "agentic-hil"], 'pipx install --force "agentic-hil[can]"'),
+        ("uv", ["uv.exe", "pip", "install", "--python", "PYTHON", "--upgrade", "agentic-hil[can]"], None),
+        ("pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "agentic-hil[can]"], None),
+    ],
+)
+def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(
+    manager: str,
+    command: list[str],
+    expected: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only `uv tool` and `pipx` reinstall from a requirement of their own.
+
+    The `uv pip` and `pip` paths take the requirement from the command line this
+    program builds, which never pins, so there is no pin for a command to clear
+    and none is invented. A pin nobody can name a fix for is reported as the
+    plain unchanged outcome, never as advice that does not exist.
+    """
+    from agentic_hil.cli import _unpinned_reinstall_command
+
+    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can",))
+
+    assert _unpinned_reinstall_command(manager, command) == expected
 
 
 def test_upgrade_rejects_unknown_agent_before_mutating_installation(

@@ -337,6 +337,56 @@ def _upgrade_requirement() -> str:
     return f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
 
 
+# `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
+# version pin in the requirement it recorded is one of the ways there is nothing
+# to do. It writes the reason on stderr in prose, so the pin is read out of the
+# text and never out of the return code. Measured on the reporter's box
+# (hardci-hq#99): "hint: `agentic-hil` is pinned to `0.7.1` (installed with an
+# exact version pin); reinstall with `uv tool install agentic-hil@latest` to
+# upgrade to a new version." A future wording that matches neither phrase falls
+# through to `upgrade_did_not_change_version`, which is still a refusal rather
+# than a false success.
+_EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
+_PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
+
+
+def _manager_output(install_result: JsonObject) -> str:
+    return " ".join(str(install_result.get(stream, "")) for stream in ("stdout", "stderr"))
+
+
+def _manager_reports_exact_pin(install_result: JsonObject) -> bool:
+    text = _manager_output(install_result).lower()
+    return any(marker in text for marker in _EXACT_PIN_MARKERS)
+
+
+def _pinned_version(install_result: JsonObject) -> str | None:
+    match = _PINNED_AT.search(_manager_output(install_result))
+    return match.group(1) if match else None
+
+
+def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
+    """The command that clears a recorded exact pin and keeps the installed extras.
+
+    Only a manager that reinstalls from a requirement of its own can hold an
+    installation at one version, which is `uv tool` and `pipx`; the `uv pip` and
+    `pip` paths take the requirement from the command line this program builds,
+    and that one never pins. None for those, and a pin nobody can name a fix for
+    is reported as the plain unchanged outcome instead.
+
+    The extras come from `_installed_extras`, read off the distribution that is
+    actually installed. `uv`'s own hint names the bare distribution, and `uv`
+    records a requirement literally, so a reader who follows that hint loses
+    whatever `[can]` or `[pyocd]` brought in -- on a bench with a CAN adapter,
+    silently.
+    """
+    requirement = _upgrade_requirement()
+    if manager == "pipx":
+        return f'pipx install --force "{requirement}"'
+    if command[1:3] == ["tool", "upgrade"]:
+        return f'uv tool install "{requirement}@latest"'
+    return None
+
+
 def _upgrade_command() -> tuple[str, list[str]]:
     """Select the manager that owns the running installation, never another PATH copy."""
     prefix = _normalized_location(sys.prefix)
@@ -457,6 +507,64 @@ def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
     return result
 
 
+def _upgrade_changed_nothing(
+    manager: str,
+    command: list[str],
+    previous_version: str,
+    current_version: str,
+    install_result: JsonObject,
+) -> JsonObject:
+    """The two outcomes a package manager reports with the same exit code as success.
+
+    `uv tool upgrade` returns 0 for "upgraded" and for "nothing to do" alike, so
+    the return code cannot tell them apart and the version can: this is reached
+    only when the installation still runs the version it ran before. Both
+    answers here are `ok: false` with `restart_required: false`, because there is
+    nothing new to load -- the reported defect was the opposite pair, which sent
+    an operator to a restart that reloaded the same release and left them
+    believing they had moved (hardci-hq#99).
+
+    Which of the two it is matters, because the next step differs: an
+    installation that is already current needs nothing, while one held at an
+    exact pin needs a reinstall the operator has to decide on and run.
+    """
+    base: JsonObject = {
+        "ok": False,
+        "tool": "agentic_hil_upgrade",
+        "manager": manager,
+        "command": command,
+        "python": sys.executable,
+        "previous_version": previous_version,
+        "version": current_version,
+        "install": install_result,
+        "restart_required": False,
+    }
+    reinstall_command = _unpinned_reinstall_command(manager, command)
+    if reinstall_command is not None and _manager_reports_exact_pin(install_result):
+        return {
+            **base,
+            "error_type": "upgrade_blocked_by_pin",
+            "summary": (
+                f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
+                f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
+                f"and keeps the installed extras; running it is the operator's decision."
+            ),
+            "pinned_version": _pinned_version(install_result) or current_version,
+            "installed_extras": list(_installed_extras()),
+            "reinstall_command": reinstall_command,
+            **remediation_fields("upgrade_blocked_by_pin"),
+        }
+    return {
+        **base,
+        "error_type": "upgrade_did_not_change_version",
+        "summary": (
+            f"Agentic HIL was not upgraded: {manager} reported no failure and the installation is still "
+            f"{current_version}. Nothing was replaced, so there is nothing to restart for."
+        ),
+        **remediation_fields("upgrade_did_not_change_version"),
+    }
+
+
 def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     """Upgrade the package owning this process, then run maintenance from new code."""
     requested_agents = agents or []
@@ -495,6 +603,13 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     if verified.returncode != 0 or not current_version:
         return {"ok": False, "error_type": "upgrade_verification_failed", "summary": "Package manager completed, but updated Agentic HIL could not be loaded by this installation's Python.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result, "verification": verification}
 
+    if current_version == previous_version:
+        # Before the skills are refreshed, because refreshing them out of a
+        # package that did not move is work with no effect, and reporting it
+        # would put a list of things that happened under a result whose whole
+        # content is that nothing did.
+        return _upgrade_changed_nothing(manager, command, previous_version, current_version, install_result)
+
     skill_results: JsonObject = {}
     with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
         for agent in requested_agents:
@@ -510,7 +625,11 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     return {
         "ok": skills_ok,
         "tool": "agentic_hil_upgrade",
-        "summary": "Agentic HIL upgraded; restart agent hosts to load the new MCP server." if skills_ok else "Agentic HIL package upgraded, but one or more agent skills could not be refreshed.",
+        "summary": (
+            f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
+            if skills_ok
+            else f"Agentic HIL package upgraded from {previous_version} to {current_version}, but one or more agent skills could not be refreshed."
+        ),
         "manager": manager,
         "command": command,
         "python": sys.executable,
