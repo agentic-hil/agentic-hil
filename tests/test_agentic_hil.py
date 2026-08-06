@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
 from agentic_hil.cli import (
     _posix_filesystem_path,
+    _smooth_user_permissions,
     build_parser,
     debugger_probes,
     doctor,
@@ -1796,7 +1798,16 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
         "config_status",
         "config_stale",
         "permissions_frozen",
+        # Permissions, named where the skill says which of them a revocation on
+        # disk reaches before a restart and which of them it does not.
         "allow_mass_erase",
+        "allow_flash",
+        "allow_reset",
+        "allow_write",
+        "allow_raw_debugger_commands",
+        "allow_config_write",
+        "allow_config_description_write",
+        "allow_config_permissions_write",
         "quarantine_guidance",
         "physical_check",
         "config_reload_in_open_run",
@@ -2090,11 +2101,50 @@ def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
-def test_setup_smooths_group_writable_home_and_succeeds(
+def test_smoothing_covers_the_launcher_chain_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One validator walks modes, so one chain is smoothed.
+
+    `trusted_persistent_executable` refuses an MCP launcher whose ancestors
+    group or other may write, and it is the last check that reads a POSIX mode
+    at all. Smoothing exists to keep a umask-002 / private-group home from
+    failing it; anything beyond that chain is a chmod with no refusal behind
+    it."""
+    launcher = tmp_path / "profile" / ".local" / "bin" / "agentic-hil"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o775)
+    for directory in (tmp_path / "profile", tmp_path / "profile" / ".local", launcher.parent):
+        directory.chmod(0o775)
+    elsewhere = tmp_path / "profile" / ".config" / "agentic-hil"
+    elsewhere.mkdir(parents=True)
+    elsewhere.chmod(0o775)
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(launcher)])
+
+    actions = _smooth_user_permissions()
+
+    assert actions, "the launcher chain is still smoothed"
+    assert not (launcher.stat().st_mode & 0o022)
+    assert not (launcher.parent.stat().st_mode & 0o022)
+    # A sibling of the chain, of the shape the removed configured-path check
+    # used to reach for: off the walk, so untouched.
+    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o775
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_setup_leaves_configured_path_modes_exactly_as_it_found_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     isolated_config_environment: Path,
 ) -> None:
+    """An operator's group-writable tree survives `setup`.
+
+    `init`/`setup` used to chmod group/other write off every user-owned ancestor
+    of `state_root`, the authoritative config and the agent's policy file,
+    because the configured-path trust check refused those directories for their
+    mode. That check was removed whole (hardci-hq#95) and the mutation outlived
+    it — invisible on Windows, where the tightening is a no-op, and a real loss
+    of access on POSIX for a validator that no longer exists. Setup succeeds on
+    the same tree it used to rewrite, and rewrites none of it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -2108,15 +2158,16 @@ def test_setup_smooths_group_writable_home_and_succeeds(
     writable = [home, config_home, state_parent]
     for directory in writable:
         directory.chmod(0o775)
-    assert all(directory.stat().st_mode & 0o020 for directory in writable)
+    before = {directory: stat.S_IMODE(directory.stat().st_mode) for directory in writable}
+    assert all(mode & 0o020 for mode in before.values())
 
     result = setup_project(agent="codex")
 
     assert result["ok"] is True, result
     assert result["steps"]["mcp_config"]["ok"] is True
-    assert result["permission_changes"], "setup should report the tightened directories"
-    for directory in writable:
-        assert not (directory.stat().st_mode & 0o022), f"{directory} still group/other-writable"
+    assert result["permission_changes"] == []
+    for directory, mode in before.items():
+        assert stat.S_IMODE(directory.stat().st_mode) == mode, f"{directory} was chmod-ed by setup"
     # The registration landed in the user-level config, never the repo.
     assert (home / ".codex" / "config.toml").is_file()
     assert not (workspace / ".mcp.json").exists()

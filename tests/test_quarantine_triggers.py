@@ -29,6 +29,7 @@ from conftest import (
     FAKE_OPENOCD,
     FAKE_OPENOCD_MISSING_CFG,
     FAKE_OPENOCD_NO_TARGET,
+    FAKE_OPENOCD_UNCONFIRMED,
     FAKE_STLINK_NO_PROBE,
     FAKE_STLINK_UNCONFIRMED,
     write_config,
@@ -741,6 +742,48 @@ def test_an_stlink_probe_that_confirms_nothing_quarantines(tmp_path: Path) -> No
         assert result["quarantined"] is True
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same case on the default backend, which is where it was missed.
+
+    OpenOCD exits 0 with neither its init-stage marker nor the tool's success
+    marker in the output. That is the absence of a report, not a report that no
+    target answered: `init` may have completed, examined the core and halted it,
+    and then lost both echoes. The backend used to answer this branch with the
+    classification `target_not_detected`, which is exactly the string the
+    read-only pre-contact rule accepts — so a run that confirmed nothing was
+    released with `hardware_state: unchanged` on the strength of a verdict
+    OpenOCD never gave. It now answers `probe_unconfirmed`, which no evidence
+    rule accepts, and the reason is one a re-read may not settle."""
+    config = config_for(tmp_path, debugger_executable=FAKE_OPENOCD_UNCONFIRMED, auto_recover="readonly")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+
+        assert result["backend_error_type"] == "probe_unconfirmed"
+        # The public error_type and its remediation are unchanged for a caller;
+        # only the evidence claim is, and it is absent here.
+        assert result["error_type"] == "target_not_detected"
+        assert result.get("target_contacted") is not False
+        assert result.get("hardware_state") != "unchanged"
+        assert result["quarantined"] is True
+        assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is True
+        assert service.coordinator.status()["auto_recoverable"] is False
+
+        # And a read-only re-probe that succeeds does not clear it: it attests
+        # the board is reachable, never that a core this run may have halted is
+        # running again.
+        monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+        second = service.call("probe_target")
+
+        assert second["error_type"] == "resource_quarantined"
+        assert second["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is True
+        assert service._attempt_machine_recovery() is None
     finally:
         service.close()
 

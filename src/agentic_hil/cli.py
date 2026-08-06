@@ -652,7 +652,7 @@ def _skipped_setup_step(summary: str) -> JsonObject:
 
 def _smooth_permissions(targets: list[Path]) -> list[str]:
     """Silently tighten the current user's own group/other-writable directories
-    along these chains so the fail-closed trust validators accept a umask-002 /
+    along these chains so the fail-closed trust validator accepts a umask-002 /
     private-group home without the operator hand-fixing permissions. Only
     user-owned components are ever changed. POSIX only; on Windows this is a
     no-op."""
@@ -667,23 +667,25 @@ def _smooth_permissions(targets: list[Path]) -> list[str]:
     return actions
 
 
-def _smooth_user_permissions(mutation_paths: list[Path]) -> list[str]:
-    """Smooth only what the user-wide half needs: the agent skill, the
-    user-level MCP config, and the launcher chains the executable trust check
-    walks. It never touches the authoritative config or the state root, so a
-    profile that refuses those is not this half's problem."""
-    targets: list[Path] = [*mutation_paths]
+def _smooth_user_permissions() -> list[str]:
+    """Smooth the one chain a fail-closed validator still walks: the launcher
+    the MCP command will be registered as.
+
+    ``trusted_persistent_executable`` is the last check that refuses a path for
+    its POSIX mode, and it looks at the executable and its ancestors and nothing
+    else. Smoothing was once wider because configured paths were mode-checked
+    too; that check was removed whole (hardci-hq#95), and chmod-ing a tree
+    nothing validates any more would be this policy's remnant mutating an
+    operator's filesystem for no refusal it can prevent. The skill and the
+    user-level MCP config are therefore no longer touched, and neither is
+    anything project-side.
+    """
+    targets: list[Path] = []
     for candidate in _mcp_command_candidates():
         targets.append(Path(candidate))
         with suppress(OSError):
             targets.append(Path(os.path.realpath(candidate)))
     return _smooth_permissions(targets)
-
-
-def _smooth_project_permissions(config_path: Path, mutation_paths: list[Path]) -> list[str]:
-    """Smooth only what the project half needs: the state root, this workspace's
-    authoritative config, and the agent's permission file."""
-    return _smooth_permissions([user_state_root(), config_path, *mutation_paths])
 
 
 def _unsupported_agent(agent: str, summary: str) -> JsonObject:
@@ -712,9 +714,11 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
         return _unsupported_agent(agent, "Agentic HIL does not know this agent's setup paths.")
 
     mutation_paths = _user_mutation_paths(resolved_agent)
-    # Smooth the common umask-002 friction before the fail-closed validators run,
-    # tightening only the operator's own writable dirs.
-    permission_changes = _smooth_user_permissions(mutation_paths)
+    # Smooth the common umask-002 friction on the launcher chain before the
+    # executable trust check reads it, tightening only the operator's own
+    # writable dirs. Nothing else here is mode-checked, so nothing else is
+    # touched.
+    permission_changes = _smooth_user_permissions()
     command = mcp_server_command()
     skill_result = _skipped_setup_step("Skill installation was not reached.")
     mcp_result = _skipped_setup_step("MCP registration was not reached.")
@@ -778,7 +782,12 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     validate_legacy_config_selector(config_path, workspace, target_path)
     config_exists = _path_entry_exists(target_path)
     mutation_paths = _project_mutation_paths(resolved_agent, target_path)
-    permission_changes = _smooth_project_permissions(target_path, mutation_paths)
+    # Nothing project-side is smoothed. `state_root`, the authoritative config
+    # and the agent's policy file were chmod-ed here to satisfy the configured
+    # path trust check, which is gone (hardci-hq#95); nothing left refuses any
+    # of them for its mode, so an operator's group-writable tree keeps the modes
+    # it was given. The field stays because callers read it.
+    permission_changes: list[str] = []
     state_actions = ensure_safe_state_root()
     config_result: JsonObject
     doctor_result = _skipped_setup_step("Doctor was not reached.")

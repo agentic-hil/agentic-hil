@@ -225,8 +225,19 @@ made, so nothing is claimed either way and reload_required is `false`.
 `debugger_info` and
 `project_config_describe` carry the block either way, so a disagreement between
 `agentic-hil doctor` — which reads the file fresh every time — and
-`debugger_info` is this and nothing else. A permission revoked since startup
-already binds; one added since does not.
+`debugger_info` is this and nothing else. A revocation that binds before a
+restart is exactly three grants and two calls: `project_config_describe` and
+`project_config_set` take the narrower of what this server loaded and what the
+file now says for `allow_config_write`, `allow_config_description_write` and
+`allow_config_permissions_write`, so revoking one of those closes that surface
+on the next call and adding one does nothing until a restart. Every other
+permission is the startup object and moves for nobody — `allow_flash`,
+`allow_reset`, `allow_write`, `allow_mass_erase`,
+`allow_raw_debugger_commands` and every per-device grant, plus
+`debug.allow_all_symbols` and `artifacts.allow_upload`, keep enforcing what was
+loaded until the MCP server is restarted, and a description reload re-reads no
+permission in either direction. Narrowing one of those in the file does not
+close it: ask for the restart before you rely on it.
 
 **A board plugged in after this server started does not need a restart.**
 `project_config_reload_description` takes no arguments, needs no permission

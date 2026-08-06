@@ -47,6 +47,15 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "target_config_not_found": "debugger_config_not_found",
     "config_file_not_found": "debugger_config_not_found",
     "command_rejected_before_init": "debugger_command_rejected",
+    # An exit of 0 with the tool's success marker missing from the output. The
+    # public error_type is the one the classifier would reach for the matching
+    # failure, so remediation and likely_causes are unchanged for a caller; the
+    # backend_error_type deliberately is not, because this branch read nothing
+    # out of OpenOCD's words and must never be mistaken for a classification
+    # that did — see READ_ONLY_PRE_CONTACT_BACKEND_ERRORS.
+    "probe_unconfirmed": "target_not_detected",
+    "flash_unconfirmed": "flash_failed",
+    "reset_unconfirmed": "reset_failed",
 }
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
@@ -358,6 +367,14 @@ class OpenOCDBackend:
     # themselves, so the same words also fit a target that stopped answering
     # while it was being driven, and the safe reading of an ambiguity is the one
     # that keeps the bench contained.
+    #
+    # Only a `target_not_detected` the classifier read out of OpenOCD's own
+    # output qualifies. `probe_unconfirmed` — an exit of 0 with the success
+    # marker missing — reaches the same public error_type down a different
+    # branch and stays out, because it is the absence of a report rather than a
+    # report that nothing answered: OpenOCD may have completed `init`, halted
+    # the core and then lost both markers, and that board's run state is
+    # unknown.
     READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
 
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
@@ -403,7 +420,7 @@ class OpenOCDBackend:
         return None
 
     def _unconfirmed_backend_error_type(self, tool: str) -> str:
-        return {"probe_target": "target_not_detected", "flash_firmware": "flash_failed", "reset_target": "reset_failed"}.get(tool, "unknown_debugger_error")
+        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, mark_side_effect(result))
