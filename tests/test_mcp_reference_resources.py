@@ -17,7 +17,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_OPENOCD_NO_TARGET, FAKE_STLINK_NO_PROBE, FAKE_STLINK_NO_TARGET, write_config
+from conftest import (
+    FAKE_OPENOCD_NO_TARGET,
+    FAKE_OPENOCD_UNCONFIRMED,
+    FAKE_STLINK_NO_PROBE,
+    FAKE_STLINK_NO_TARGET,
+    FAKE_STLINK_UNCONFIRMED,
+    write_config,
+)
 
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import (
@@ -291,6 +298,48 @@ def test_an_stlink_that_enumerates_no_probe_carries_that_backends_next_checks(tm
     # Each backend passes the probe selector under its own name: `sn=` here,
     # `adapter serial` for openocd, `--uid` for pyocd.
     assert any("`sn=`" in step for step in result["remediation"])
+
+
+@pytest.mark.parametrize(
+    ("backend", "executable", "adapter_claim"),
+    [("openocd", FAKE_OPENOCD_UNCONFIRMED, "reached the debug adapter"), ("stlink", FAKE_STLINK_UNCONFIRMED, "reached the ST-Link")],
+)
+def test_a_toolchain_that_confirmed_nothing_publishes_no_abort_point_to_the_reference(
+    tmp_path: Path, backend: str, executable: Path, adapter_claim: str
+) -> None:
+    """The public half of the markerless-read rule, which the backend field alone did not hold.
+
+    A caller follows `error_type` and the resource behind it; only a reader of
+    this project's source knows `backend_error_type` exists. Both of these
+    branches used to publish `target_not_detected`, whose shipped entry says the
+    adapter was reached and no target answered — the one claim the branch has no
+    evidence for, made in the channel a caller is told to read.
+    """
+    tools = AgenticHILToolService(
+        load_config(str(write_config(tmp_path, debugger_type=backend, debugger_executable=executable)))
+    )
+    try:
+        result = tools.call("probe_target")
+        entry = json.loads(read_text(tools, ERROR_URI_PREFIX + f"target_state_unconfirmed:{backend}"))
+        # The entry it no longer borrows, read over the same connection, so the
+        # two are different answers rather than one text serving both.
+        detected = json.loads(read_text(tools, ERROR_URI_PREFIX + f"target_not_detected:{backend}"))
+    finally:
+        tools.close()
+
+    assert result["ok"] is False
+    assert result["backend_error_type"] == "probe_unconfirmed"
+    assert result["error_type"] == "target_state_unconfirmed"
+    assert result["quarantined"] is True
+
+    assert result["remediation"] == entry["remediation"]
+    assert entry["meaning"] == catalogue_entry(f"target_state_unconfirmed:{backend}")["meaning"]
+    # The resource says what is unknown, and says the word: no abort point, so
+    # nothing here may read as "the target was reached" or as "it was not".
+    assert "unknown" in entry["meaning"]
+    assert adapter_claim not in entry["meaning"]
+    assert any("target_not_detected" in step for step in entry["do_not"])
+    assert adapter_claim in detected["meaning"]
 
 
 def test_an_ambiguous_pyocd_probe_selector_carries_the_substring_rule(tmp_path: Path) -> None:

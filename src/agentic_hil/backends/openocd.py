@@ -47,13 +47,14 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "target_config_not_found": "debugger_config_not_found",
     "config_file_not_found": "debugger_config_not_found",
     "command_rejected_before_init": "debugger_command_rejected",
-    # An exit of 0 with the tool's success marker missing from the output. The
-    # public error_type is the one the classifier would reach for the matching
-    # failure, so remediation and likely_causes are unchanged for a caller; the
-    # backend_error_type deliberately is not, because this branch read nothing
-    # out of OpenOCD's words and must never be mistaken for a classification
-    # that did — see READ_ONLY_PRE_CONTACT_BACKEND_ERRORS.
-    "probe_unconfirmed": "target_not_detected",
+    # An exit of 0 with the tool's success marker missing from the output. This
+    # branch read nothing out of OpenOCD's words, so it gets a public error_type
+    # of its own rather than the classification the words would have produced:
+    # `target_not_detected` is OpenOCD's report that it reached the adapter and
+    # nothing answered — which the shipped catalogue entry says in as many words
+    # — and publishing that here would make the abort-point claim this branch
+    # exists to withhold. See READ_ONLY_PRE_CONTACT_BACKEND_ERRORS.
+    "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
 }
@@ -370,11 +371,12 @@ class OpenOCDBackend:
     #
     # Only a `target_not_detected` the classifier read out of OpenOCD's own
     # output qualifies. `probe_unconfirmed` — an exit of 0 with the success
-    # marker missing — reaches the same public error_type down a different
-    # branch and stays out, because it is the absence of a report rather than a
-    # report that nothing answered: OpenOCD may have completed `init`, halted
-    # the core and then lost both markers, and that board's run state is
-    # unknown.
+    # marker missing — stays out, because it is the absence of a report rather
+    # than a report that nothing answered: OpenOCD may have completed `init`,
+    # halted the core and then lost both markers, and that board's run state is
+    # unknown. It carries `target_state_unconfirmed` to the caller for the same
+    # reason, so the public error_type and its catalogue entry withhold the
+    # abort-point claim this set is about.
     READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
 
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
@@ -472,6 +474,7 @@ class OpenOCDBackend:
             "debugger_config_not_found": "Debugger configuration file could not be found.",
             "adapter_not_found": "Debugger adapter could not be found or opened.",
             "target_not_detected": "Debugger could not detect the target.",
+            "target_state_unconfirmed": "OpenOCD exited without reporting the outcome, so the target's state is unknown.",
             "flash_failed": "Debugger failed to flash the firmware.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
@@ -483,6 +486,7 @@ class OpenOCDBackend:
     def _likely_causes(self, error_type: str) -> list[str]:
         return {
             "target_not_detected": ["DUT is not powered", "wrong interface configuration", "SWD/JTAG wiring issue", "debug probe already in use"],
+            "target_state_unconfirmed": ["OpenOCD exited successfully without printing either of the markers this backend echoes", "debuggers.<name>.executable is a wrapper that discards OpenOCD's output", "OpenOCD's output was redirected away from the process it was started as"],
             "adapter_not_found": ["debug probe is not connected", "debug probe driver is missing", "debug probe is already in use", "Windows USB driver is not bound to the ST-Link adapter"],
             "verify_failed": ["flash write did not persist correctly", "wrong target configuration", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],

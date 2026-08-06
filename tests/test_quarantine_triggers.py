@@ -739,6 +739,7 @@ def test_an_stlink_probe_that_confirms_nothing_quarantines(tmp_path: Path) -> No
         result = service.call("probe_target")
 
         assert result["backend_error_type"] == "probe_unconfirmed"
+        assert result["error_type"] == "target_state_unconfirmed"
         assert result["quarantined"] is True
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
@@ -764,9 +765,12 @@ def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monk
         result = service.call("probe_target")
 
         assert result["backend_error_type"] == "probe_unconfirmed"
-        # The public error_type and its remediation are unchanged for a caller;
-        # only the evidence claim is, and it is absent here.
-        assert result["error_type"] == "target_not_detected"
+        # And the public error_type withholds the claim too. `target_not_detected`
+        # is OpenOCD's report that it reached the adapter and nothing answered —
+        # its catalogue entry says exactly that — so a caller reading only the
+        # public field off this branch would have been handed the abort point the
+        # backend field refuses to give it.
+        assert result["error_type"] == "target_state_unconfirmed"
         assert result.get("target_contacted") is not False
         assert result.get("hardware_state") != "unchanged"
         assert result["quarantined"] is True

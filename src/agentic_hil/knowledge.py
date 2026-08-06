@@ -91,12 +91,18 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 CONFIG_RUNNING_SERVER_SCOPE = "running_server"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current — which is exactly why it cannot speak for a server
-# that has been running since before the last edit.
+# that has been running since before the last edit. It names both ways across,
+# because since `project_config_reload_description` a restart is no longer the
+# only one, and this is the last place that said it was.
 RUNNING_SERVER_COMPARISON = (
     "This is the configuration as it is on disk right now; the command line reads it fresh on every invocation. A "
     "running MCP server does not: it keeps serving what it parsed at startup. Compare the `loaded_digest` here with "
     "`config_status.loaded_digest` in that server's `debugger_info`. If they differ, that server is enforcing an older "
-    "configuration and only restarting it changes that."
+    "configuration. Two things change that, and which one depends on what moved: `project_config_reload_description` "
+    "on that server adopts a changed `target`, `debuggers`, `com_ports` or `can_buses` without a restart, and a "
+    "restart adopts everything else — every `permissions:` block included, which that call never re-reads in either "
+    "direction. `agentic-hil config-reload` previews what that call would take from this file and lists the sections "
+    "it would leave for a restart."
 )
 
 
@@ -530,6 +536,61 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "See MCP resource " + TARGET_SUPPORT_URI + ".",
             "Confirm the board is powered and the SWD/JTAG wiring is intact.",
             "Release the probe from any other session (OpenOCD, STM32CubeProgrammer, a second pyOCD).",
+        ),
+    ),
+    # The counterpart to the three entries above, and the reason it is a separate
+    # error_type rather than another `target_not_detected`: those say the adapter
+    # was reached and nothing answered behind it, which places the abort point
+    # before the target and is why they refuse retry-safe. A toolchain that exited
+    # without reporting anything places it nowhere, so the same public error_type
+    # would have published exactly the claim this branch cannot make.
+    "target_state_unconfirmed:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD exited successfully and printed neither the stage marker this backend echoes after `init` nor the "
+            "tool's own success marker, so it reported nothing about how far the run got. That is the absence of a "
+            "verdict, not a verdict that no target answered: `init` may have completed, examined the core and halted "
+            "it. The board's run state is unknown, which is why this quarantines the bench instead of refusing."
+        ),
+        remediation=(
+            "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
+            "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
+            "Read the debugger log at `log_path`. Both markers are `echo`ed by the command string this backend sends, "
+            "so whatever OpenOCD printed instead is the evidence for how far it actually got.",
+            "Confirm `debuggers.<name>.executable` is OpenOCD itself and not a wrapper or launcher script: anything "
+            "that discards the child's stdout and stderr produces this result out of a run that worked.",
+            "If the log does contain both markers, this is a defect in this backend rather than a fault on the bench — "
+            "report it with that log.",
+        ),
+        do_not=(
+            "Do not read this as `target_not_detected`. That is OpenOCD's own report that it reached the adapter and "
+            "nothing answered, which places the abort point before the target and is why it is retry-safe; this result "
+            "places it nowhere.",
+            "Do not try to clear the quarantine with another read. A probe that answers attests the board is "
+            "reachable, never that a core this run may have halted is running again.",
+        ),
+    ),
+    "target_state_unconfirmed:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer exited successfully and its output does not carry the lines that confirm the "
+            "operation — for a read, the ST-Link serial number and the device name. It said nothing about whether it "
+            "attached to the target, so this is the absence of a verdict rather than a report that no target answered, "
+            "and the board's run state is unknown. That is why this quarantines the bench instead of refusing."
+        ),
+        remediation=(
+            "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
+            "check to make on the board before anyone signs `agentic-hil recover --confirm-safe-state`.",
+            "Read the debugger log at `log_path`; `operation_result.expected_success_text` in this result lists the "
+            "lines that were looked for, and what the CLI printed instead is the evidence for how far it got.",
+            "Confirm `debuggers.<name>.executable` is STM32_Programmer_CLI itself and not a wrapper that discards its "
+            "output. A CLI version that words its confirmation differently produces the same result, and the log is "
+            "what tells the two apart.",
+        ),
+        do_not=(
+            "Do not read this as `target_not_detected`. `No STM32 target found` is the CLI's own report that the probe "
+            "was opened and nothing answered behind it, which is why that one refuses retry-safe; silence is not that "
+            "report.",
+            "Do not try to clear the quarantine with another read. A probe that answers attests the board is "
+            "reachable, never that a core this run may have halted is running again.",
         ),
     ),
     "adapter_not_found:openocd": ErrorRemedy(
@@ -1884,7 +1945,7 @@ Quarantine answers one question — "is the physical state of the hardware unkno
 | OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
 | pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
 | ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
-| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call, an exit that confirms nothing | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read |
+| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call (`timeout`), an exit that confirms nothing (`target_state_unconfirmed`) | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
 | COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
 | CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
 | CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **quarantine** — python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same |
