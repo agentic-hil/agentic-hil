@@ -90,6 +90,17 @@ EXIT_STALLED = 2
 EXIT_FAILED = 3
 EXIT_NO_PROGRESS = 4
 
+# Written into each directory the loop keeps its own paperwork in. `*` covers
+# everything in the directory that holds it, this file included.
+PAPERWORK_IGNORE = """\
+# Written by tools/agent_review_loop.py. Everything here belongs to the review
+# loop rather than to this repository: review documents, agent transcripts and
+# run summaries. Ignoring it keeps the next run's preflight from refusing a tree
+# this run dirtied, and keeps an agent's `git add -A` from committing the last
+# run's paperwork along with its work.
+*
+"""
+
 # How the salvage commit a cut-short round leaves behind is marked. Nothing
 # downstream should mistake it for finished work, so it says so in the subject.
 SALVAGE_SUBJECT = "wip(review-loop): round {number} was cut short before the implementer committed"
@@ -331,6 +342,68 @@ def excluding(repo: Path, paths: tuple[Path, ...]) -> list[str]:
             if relative != Path("."):
                 pathspecs.append(f":!{relative.as_posix()}")
     return pathspecs
+
+
+def in_work_tree(repo: Path, path: Path) -> str | None:
+    """`path` as a pathspec relative to the work tree, or None when it is outside it.
+
+    Outside the work tree git cannot see the path at all, and the repository root
+    itself is not a directory this may treat as the loop's own.
+    """
+    with contextlib.suppress(ValueError, OSError):
+        relative = path.resolve().relative_to(repo.resolve()).as_posix()
+        return None if relative == "." else relative
+    return None
+
+
+def tracked(repo: Path, relative: str) -> bool:
+    """Whether the repository has anything of its own committed under `relative`.
+
+    A directory the operator tracks is the operator's. When git cannot answer,
+    the safe reading is that it is theirs.
+    """
+    try:
+        return bool(git(repo, "ls-files", "--", relative))
+    except AgentError:
+        return True
+
+
+def paperwork_dir(repo: Path, root: Path, run_id: str) -> Path:
+    """Create this run's review or log directory, invisible to the repository it reviews.
+
+    The loop's paperwork lives inside `--repo`, and in a repository that does not
+    ignore the path that breaks the loop twice over: the next run's `preflight`
+    refuses to start on the tree the last run dirtied, and under `--allow-dirty`
+    an agent's own `git add -A` commits the last run's review documents along
+    with its work. This repository ignores `.agentic-loop/` and so never showed
+    it; the tool exists to be pointed at repositories that do not.
+
+    So the root carries a `.gitignore` of `*`, which git applies to the directory
+    holding it -- including that `.gitignore` itself, so there is nothing left to
+    report -- and nothing is asked of the repository under review. A repository
+    that already ignores the path is undisturbed: git does not descend into an
+    ignored directory, so its own rule keeps answering and this file is never
+    even read.
+
+    A root with tracked files under it is skipped. `--review-dir` pointed at a
+    directory the operator committed is theirs, and `*` there would hide their
+    files from git rather than the loop's. Everything else gets one, including a
+    root left behind by a run from before this existed, which is the shape every
+    repository the loop has already visited is in.
+
+    This does not replace the `excluding()` pathspecs in `salvage_commit`. They
+    guard different things: this covers every `git add -A` an agent runs and the
+    preflight of the next run, and stands down on a tracked directory; those are
+    the loop's own commit, and hold for the reviewer checkout too, which is
+    outside the repository by default and never gets a file written into it.
+    """
+    directory = root / run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    ignore = root / ".gitignore"
+    relative = in_work_tree(repo, root)
+    if not ignore.exists() and relative is not None and not tracked(repo, relative):
+        ignore.write_text(PAPERWORK_IGNORE, encoding="utf-8")
+    return directory
 
 
 def salvage_commit(repo: Path, number: int, error: AgentError, paperwork: tuple[Path, ...] = ()) -> str | None:
@@ -1229,10 +1302,8 @@ def main(argv: list[str] | None = None) -> int:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     review_root = under(repo, options.review_dir)
     log_root = under(repo, options.log_dir)
-    review_dir = review_root / run_id
-    log_dir = log_root / run_id
-    review_dir.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = paperwork_dir(repo, review_root, run_id)
+    log_dir = paperwork_dir(repo, log_root, run_id)
 
     schema_path = log_dir / "verdict-schema.json"
     schema_path.write_text(json.dumps(VERDICT_SCHEMA, indent=2), encoding="utf-8")

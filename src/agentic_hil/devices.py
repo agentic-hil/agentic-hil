@@ -32,7 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
-from agentic_hil.bench import BenchMutex, is_physical_resource
+from agentic_hil.bench import BenchMutex, fold_resource_name, is_physical_resource
 from agentic_hil.types import (
     AgenticHILConfig,
     CanBusConfig,
@@ -609,13 +609,21 @@ def resolve_devices(config: AgenticHILConfig, selectors: object) -> DeviceSet:
 
 
 def lock_keys(resources: Iterable[object]) -> list[str]:
-    """Lock keys from a mix of devices and already-derived resource names."""
+    """Lock keys from a mix of devices and already-derived resource names.
+
+    A name is folded on the way through. A device's key arrives normalised
+    because ``lock_key`` built it that way; a name arrives however its caller
+    spelled it, and the two have to be the same key or they are two locks on one
+    board. Folding here rather than only in ``BenchMutex`` is deliberate: the
+    coordinator's own per-resource lock files, its lease records and its
+    declared-device check are all built from this list, and a run that declared
+    a device under one spelling must recognise it under the other."""
     keys: list[str] = []
     for item in resources:
         if isinstance(item, Device):
             keys.append(item.lock_key)
         elif isinstance(item, str):
-            keys.append(item)
+            keys.append(fold_resource_name(item))
     return keys
 
 
