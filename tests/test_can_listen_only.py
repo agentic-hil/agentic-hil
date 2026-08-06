@@ -256,17 +256,36 @@ def test_a_missing_ip_binary_refuses_rather_than_assuming_the_mode(tmp_path: Pat
 
 
 def test_the_link_probe_never_resolves_ip_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A proof read from a PATH-resolved binary is not a proof."""
+    """A proof read from a PATH-resolved binary is not a proof.
+
+    What is asserted is the argv, not that nothing ran: a host with iproute2
+    installed — which every Linux runner is — *does* run `ip`, and running it
+    from `/sbin` is the whole point. Asserting that nothing ran would only hold
+    on a machine without it, which is a statement about the machine rather than
+    about PATH.
+    """
     from agentic_hil.can import IP_COMMAND_PATHS
 
     assert all(path.startswith("/") for path in IP_COMMAND_PATHS)
     fake_dir = tmp_path / "poisoned"
     fake_dir.mkdir()
-    (fake_dir / "ip").write_text("", encoding="utf-8")
+    poisoned = fake_dir / "ip"
+    poisoned.write_text("", encoding="utf-8")
     monkeypatch.setenv("PATH", str(fake_dir))
-    monkeypatch.setattr("agentic_hil.can.subprocess", SimpleNamespace(run=lambda *args, **kwargs: pytest.fail("nothing off PATH may answer this")))
+    invoked: list[list[str]] = []
+
+    def never_answers(command: list[str], **kwargs: object) -> None:
+        invoked.append(list(command))
+        raise OSError("this stand-in never answers; the argv is what is under test")
+
+    # `SubprocessError` travels with the stand-in because the probe's own except
+    # clause names it — a stand-in missing it turns any raise into an
+    # AttributeError from the handler instead of the answer under test.
+    monkeypatch.setattr("agentic_hil.can.subprocess", SimpleNamespace(run=never_answers, SubprocessError=subprocess.SubprocessError))
 
     assert socketcan_link_listen_only("can0")["listen_only"] is False
+    assert all(command[0] in IP_COMMAND_PATHS for command in invoked), invoked
+    assert str(poisoned) not in [command[0] for command in invoked]
 
 
 def test_socketcan_without_listen_only_never_probes_the_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
