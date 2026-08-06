@@ -6,7 +6,13 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-06
+
 The entries below add surface — configuration keys, MCP tools, a resource, a changed generated default — so this is a minor under decision 0019, not a patch.
+
+Three of them change what the tool refuses, and all three came from one working day of using it: the path trust check refused the standard Windows user folders and is gone, a generated configuration granted nothing and now grants everything, and quarantine fired where the failure could prove it never reached the board. What replaced the first is detection rather than prevention; what replaced the other two is a narrower rule that holds. A fourth came from the same day and adds rather than removes: a board written into the configuration is picked up without restarting the server.
+
+All four then went through an adversarial review of the whole range, which found eight defects — three of them in the refusal changes themselves, including two failures wrongly classified as proving they never reached the hardware. Those are fixed here too. A reader deciding whether to upgrade should know that the refusal boundaries moved twice: once by design, once because the first attempt claimed more than it could prove.
 
 ### Added
 
