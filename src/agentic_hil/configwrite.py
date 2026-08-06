@@ -1220,10 +1220,13 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
     elif config_stale(status):
         steps.append(
             "The file has moved since this server loaded it, so the two halves of this answer come from two "
-            "documents: the keys and values below are read from disk, and every grant is the narrower of what this "
-            "server loaded and what the file now says. A grant revoked since startup is already in force; a grant "
-            "added since startup is not, and will not be until the MCP server is restarted — a server bound to a "
-            "policy does not widen itself from a file that changed underneath it."
+            "documents: the keys and values below are read from disk, and the three configuration-write grants "
+            "under `rights` are the narrower of what this server loaded and what the file now says. One of those "
+            "revoked since startup is already in force here; one added since startup is not, and will not be until "
+            "the MCP server is restarted — a server bound to a policy does not widen itself from a file that "
+            "changed underneath it. `permissions_in_force` is the whole loaded policy and is not intersected with "
+            "the file: every hardware and per-device grant, and the section-level `debug.allow_all_symbols` and "
+            "`artifacts.allow_upload`, keeps enforcing what startup parsed in either direction until a restart."
         )
     if open_holds:
         steps.append("A run or session is holding hardware, so no configuration write is accepted until it is closed with `bench_run_stop`.")

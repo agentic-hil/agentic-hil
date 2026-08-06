@@ -35,6 +35,7 @@ from agentic_hil.config import (
     provisionable_state_root,
     user_state_root,
 )
+from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
 from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
@@ -407,11 +408,15 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
         PROJECT_CONFIG_ADOPT,
         PROJECT_CONFIG_CREATE,
         PROJECT_CONFIG_DESCRIBE,
+        PROJECT_CONFIG_RELOAD,
         PROJECT_CONFIG_SET,
     ]
     assert not [name for name in MCP_TOOL_NAMES if any(verb in name for verb in ("delete", "remove", "move", "rename"))]
     assert TOOL_SCHEMAS[PROJECT_CONFIG_CREATE] == {"type": "object", "properties": {}, "additionalProperties": False}
     assert TOOL_SCHEMAS[PROJECT_CONFIG_DESCRIBE] == {"type": "object", "properties": {}, "additionalProperties": False}
+    # No argument at all, and that is what keeps the reload from becoming a
+    # second door onto the permissions: there is no flag for one to arrive under.
+    assert TOOL_SCHEMAS[PROJECT_CONFIG_RELOAD] == {"type": "object", "properties": {}, "additionalProperties": False}
     change = TOOL_SCHEMAS[PROJECT_CONFIG_SET]["properties"]["changes"]["items"]
     assert sorted(change["properties"]) == ["key", "value"]
     assert change["additionalProperties"] is False

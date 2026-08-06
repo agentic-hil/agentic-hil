@@ -8,6 +8,7 @@ from typing import Literal
 
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
+    READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -44,7 +45,13 @@ STLINK_NOT_FOUND: JsonObject = {
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "stm32_programmer_cli_not_found": "debugger_not_found",
     "probe_not_found": "adapter_not_found",
-    "probe_unconfirmed": "target_not_detected",
+    # An exit of 0 whose output is missing at least one of the lines that
+    # confirm the operation. Its own public error_type, for the reason the OpenOCD table
+    # gives: `target_not_detected` is the CLI's positive report that a probe was
+    # opened and nothing answered behind it, and the shipped catalogue entry for
+    # it says so, so publishing it here would claim an abort point this branch
+    # has no evidence for.
+    "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
 }
@@ -260,7 +267,13 @@ class STLinkBackend:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
             confirmation = self._confirm_operation_success(output, tool)
             if not confirmation["confirmed"]:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"]}), audit_error)
+                # Confirmation is all-or-nothing here, so this branch is also
+                # reached with some of the expected lines present — a read that
+                # printed the ST-Link serial and no device name. The lines that
+                # did match travel with the ones that were looked for, so the
+                # result says how far the CLI got rather than leaving a caller
+                # to read the worst case out of the error_type.
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"], "matched_success_text": confirmation["matched"]}), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
 
@@ -269,6 +282,19 @@ class STLinkBackend:
         if self.config.debugger.probe_id is not None:
             args.append(f"sn={self.config.debugger.probe_id}")
         return args
+
+    # STM32CubeProgrammer's own report that the transport never existed, for any
+    # tool, plus — for the reads, whose command drives nothing of its own — its
+    # report that a probe was opened and nothing answered behind it. Both are
+    # read off the CLI's output, so each is a positive statement rather than the
+    # absence of one; `probe_unconfirmed` is not, and stays out.
+    PRE_CONTACT_BACKEND_ERRORS = frozenset({"probe_not_found"})
+    READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
+
+    def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
+        if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
+            return True
+        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
@@ -279,12 +305,18 @@ class STLinkBackend:
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
         if operation_result is not None:
             result["operation_result"] = operation_result
-        if backend_error_type == "probe_not_found":
+        if self._proves_no_contact(tool, backend_error_type):
             # The ST-Link probe is the only transport STM32CubeProgrammer has
             # to the target, and "no ST-LINK detected" is its report that the
-            # transport never existed for this run. A failed call over a
-            # channel that never opened must refuse, not quarantine
-            # (hardci-hq#97).
+            # transport never existed for this run; "No STM32 target found" and
+            # its siblings are the same report one step further out, with the
+            # probe named and nothing behind it. A failed call over a channel
+            # that never carried anything must refuse, not quarantine
+            # (hardci-hq#97). Both are the CLI's own words, read out of its
+            # output by `_classify_output`; `probe_unconfirmed` — an exit status
+            # of 0 whose output is missing at least one line that confirms the
+            # connection — deliberately is not, because it names no abort point
+            # at all, whether it printed some of them or none.
             result.update(NOT_CONTACTED)
         return result
 
@@ -350,10 +382,10 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
 
 
 def version_line(output: str) -> str:

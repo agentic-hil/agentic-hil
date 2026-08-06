@@ -180,6 +180,73 @@ def test_a_symlinked_state_root_component_is_still_refused(tmp_path: Path) -> No
     assert refused.value.error_type == "unsafe_configured_path"
 
 
+def test_state_root_validation_leaves_no_probe_entry_behind(tmp_path: Path) -> None:
+    """Writability is established by creating and removing a private entry, so
+    the directory a normal load leaves behind has to be exactly as clean as
+    before. The name is checked too: a probe a killed process left is
+    recognisable as this and not as project state."""
+    from agentic_hil.config import WRITE_PROBE_PREFIX
+
+    path = write_config(tmp_path)
+    root = Path(load_config(str(path)).state_root)
+
+    assert root.is_dir()
+    assert [entry.name for entry in root.iterdir() if entry.name.startswith(WRITE_PROBE_PREFIX)] == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode semantics; the Windows case is the deny-ACE test below")
+@pytest.mark.skipif(os.name != "nt" and os.geteuid() == 0, reason="root ignores the mode bits this test sets")
+def test_an_existing_unwritable_state_root_is_refused_at_load(tmp_path: Path) -> None:
+    """The half of `state_root` validation the trust walk's removal left open.
+
+    `safe_directory` opens read-only and suppresses `FileExistsError`, so an
+    existing directory that cannot be written loaded clean and failed at the
+    first lease, report or log write — somewhere with far less context than
+    here. This is function, not trust: it asks whether *this* process can create
+    in the directory, not who else could."""
+    path = write_config(tmp_path)
+    root = Path(load_config(str(path)).state_root)
+    root.chmod(0o500)
+    try:
+        with pytest.raises(ConfigError) as refused:
+            load_config(str(path))
+        assert refused.value.error_type == "unsafe_configured_path"
+        assert refused.value.details["field"] == "state_root"
+    finally:
+        root.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL semantics")
+def test_an_existing_undeniably_unwritable_windows_state_root_is_refused_at_load(tmp_path: Path) -> None:
+    """The same on Windows, against a real deny ACE rather than a mode.
+
+    A POSIX mode is not what Windows answers with, and neither is the ACL the
+    removed walk used to read: what decides this is whether the create succeeds,
+    which is what the probe asks."""
+    path = write_config(tmp_path)
+    root = Path(load_config(str(path)).state_root)
+    # Only "add subdirectory". A broad write deny also stops the no-symlink walk
+    # from opening the chain at all, which is a different refusal on a different
+    # line; this leaves listing and traversal intact so the create is what fails.
+    denied = subprocess.run(["icacls", str(root), "/deny", "*S-1-1-0:(OI)(CI)(AD)"], capture_output=True, text=True, check=False)
+    if denied.returncode != 0:
+        pytest.skip(f"could not set temporary test ACL: {denied.stderr}")
+    try:
+        try:
+            (root / "probe-check").mkdir()
+        except OSError:
+            pass
+        else:
+            (root / "probe-check").rmdir()
+            pytest.skip("the deny ACE did not take effect on this host")
+        with pytest.raises(ConfigError) as refused:
+            load_config(str(path))
+        assert refused.value.error_type == "unsafe_configured_path"
+        assert refused.value.details["field"] == "state_root"
+    finally:
+        subprocess.run(["icacls", str(root), "/remove:d", "*S-1-1-0"], capture_output=True, check=False)
+
+
 def test_a_configuration_that_still_carries_the_removed_key_is_refused_by_name(tmp_path: Path) -> None:
     """Silently ignoring it would leave the key looking like it still selects a policy.
 

@@ -284,8 +284,34 @@ class AgenticHILConfig:
     # file on disk is to carry what it read. Empty when the configuration did not
     # come from a file this process read — "unchanged" is then not a claim it may
     # make.
+    #
+    # `config_digest` is the document the *description* in force came from, and
+    # it is the one `config_status` compares against disk. A description reload
+    # (agentic_hil.configreload) moves it; nothing else does.
     config_digest: str = ""
     loaded_at: str = ""
+    # The document the *permissions* in force came from. Equal to
+    # `config_digest` for every configuration that was parsed in one piece, which
+    # is every configuration this process loads from a file. They come apart only
+    # after a description reload whose file also carried different permissions:
+    # the description then comes from the file and the permissions still come
+    # from the document parsed at startup, and this is what lets `config_status`
+    # say so instead of reporting "unchanged" over a divergence it is hiding.
+    # Empty means there is nothing to distinguish and no claim to make.
+    permissions_digest: str = ""
+    # Whether the description document in force *states* the grants being
+    # enforced, which is a different question from where those grants came from.
+    # A reload answers it afresh each time by comparing, and never moves
+    # `permissions_digest` onto the document it compared against: the permission
+    # objects still came from startup, and a later reload that does find a
+    # difference would otherwise report an intermediate file as their source and
+    # pair it with the startup `loaded_at` — two snapshots read as one.
+    permissions_match_description: bool = True
+    # When the description in force was last re-read from disk. Empty on a
+    # configuration that has never been reloaded, which is the normal case.
+    # `loaded_at` stays the startup parse, because that is when the permissions
+    # were taken and they are never taken again.
+    description_reloaded_at: str = ""
 
     @property
     def read_free(self) -> bool:

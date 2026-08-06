@@ -515,23 +515,38 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
 
     interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
-    # python-can's own contract for the two supported direct interfaces: a
-    # CanInitializationError out of Bus() means the channel could not be
-    # brought up — PCANBasic.Initialize refused, or the SocketCAN socket could
-    # not be created/bound — so the adapter never joined the bus and no frame
-    # was possible. Read defensively off the module because tests (and old
-    # python-can) may not provide the class.
-    initialization_errors = tuple(kind for kind in (getattr(can, "CanInitializationError", None),) if isinstance(kind, type))
+    # Which backend can prove, from the exception class alone, that it never
+    # joined the bus. SocketCAN can: the controller is brought up out of band
+    # with `ip link`, and `SocketcanBus()` only creates and binds a raw socket,
+    # so a failure there leaves the interface exactly as this call found it.
+    #
+    # PCAN deliberately cannot, and is deliberately absent. python-can 4.6.1
+    # raises `PcanCanInitializationError` from four `SetValue` calls that run
+    # *after* `PCANBasic.Initialize` has already succeeded — error frames, echo
+    # frames, auto-reset, the receive event — and every one of them raises
+    # before `BusABC.__init__`, so no bus object exists to shut down, the
+    # best-effort destructor has no `_is_shutdown` state to consult, and nothing
+    # is returned here that could be closed. The class carries no phase marker
+    # to tell those apart from the `Initialize` refusal above them. An
+    # initialized PCAN channel is on the bus: it ACKs, and at a wrong bitrate it
+    # emits error frames. That is the unknown quarantine exists for, so this
+    # path keeps the markerless result and the lease stays contained.
+    #
+    # Read defensively off the module because tests (and old python-can) may not
+    # provide the class.
+    proves_no_contact = getattr(can, "CanInitializationError", None) if interface == "socketcan" else None
+    initialization_errors = (proves_no_contact,) if isinstance(proves_no_contact, type) else ()
     try:
         bus = can.Bus(interface=interface, channel=bus_config.channel, bitrate=bus_config.bitrate, fd=bus_config.fd, receive_own_messages=bus_config.receive_own_messages)
     except Exception as error:
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
             # Provably never on the bus: refuse, do not quarantine
-            # (hardci-hq#97). Any other exception class keeps the markerless
-            # result — a partially initialized channel participates on the bus
-            # (it ACKs and can emit error frames at a wrong bitrate), and
-            # nothing here can disprove one was left behind.
+            # (hardci-hq#97). Every other exception class, and every failure on
+            # a backend that is not in `initialization_errors`, keeps the
+            # markerless result — a partially initialized channel participates
+            # on the bus (it ACKs and can emit error frames at a wrong bitrate),
+            # and nothing here can disprove one was left behind.
             failure.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
         return failure
     shutdown = getattr(bus, "shutdown", None)

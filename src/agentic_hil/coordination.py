@@ -45,12 +45,21 @@ DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
 # operator or MCP sink.
 _RECORD_OUTPUT_HIDDEN_KEYS = ("config_path", "workspace")
 LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
-# A one-shot that only ever reads (probe discovery, probe_target) intends no
-# physical effect, so an unconfirmed result of one leaves the board where it was
-# and a read-only re-read can settle it. flash_firmware and reset_target keep the
-# undifferentiated debugger_result_unconfirmed: either may have left the target
-# running, and nothing on the host can tell that from the outside.
+# A one-shot that only ever reads (probe discovery, probe_target) and whose
+# result *names* its abort point before the target: the board is where the last
+# effectful call left it, so whatever is unconfirmed is host-side and a read-only
+# re-read settles it. flash_firmware and reset_target keep the undifferentiated
+# debugger_result_unconfirmed: either may have left the target running, and
+# nothing on the host can tell that from the outside.
 DEBUGGER_READONLY_RESULT_REASON = "debugger_readonly_result_unconfirmed"
+# The same two tools when the result does *not* name its abort point: the read
+# may have reached the target, and a read on this bench is not passive — an SWD
+# attach halts the core, and a backend killed at its deadline never ran the
+# `shutdown` in its own command string. A re-read attests that the probe answers
+# and the target is detected; it says nothing about whether the core is halted,
+# so it cannot settle this. Only driving the target into a defined state can,
+# which is why this sits in the reset set and not in the retryable one.
+DEBUGGER_READONLY_TARGET_STATE_REASON = "debugger_readonly_target_state_unconfirmed"
 RETRYABLE_CLEANUP_REASONS = frozenset(
     {
         "com_buffer_clear_unconfirmed",
@@ -71,6 +80,7 @@ RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
     {
         "debug_session_start_unconfirmed",
         "debugger_result_unconfirmed",
+        DEBUGGER_READONLY_TARGET_STATE_REASON,
     }
 )
 def _public_record(record: JsonObject | None) -> JsonObject | None:
@@ -224,6 +234,34 @@ class HardwareCoordinator:
         self.incident_resources: set[str] = set()
         self._state = "open"
         self._guard = threading.RLock()
+
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        """Bind this coordinator to a re-read description of the same bench.
+
+        ``project_config_reload_description`` is the only caller, and it is
+        refused while anything is held or any incident is open — so this runs
+        with no lease, no run and no quarantine, which is what makes replacing
+        the config safe rather than a change under a live lock.
+
+        ``config_sha256`` moves with it. It is what a lease record carries and
+        what ``recover`` compares to decide whether the operator has to confirm a
+        configuration delta before clearing an incident, and that question is
+        "was the file the same then as it is now" — so it has to name the file
+        this coordinator is now describing, exactly as it would after a restart.
+        It is recomputed from the digest the reload already took rather than by
+        reading the file again: a second read can straddle an edit, and a record
+        stamped with a document nobody parsed would answer that question wrong in
+        both directions.
+
+        ``project_key`` is not recomputed because it cannot move: it is derived
+        from ``config_path`` and ``work_dir``, and a reload that changed either is
+        refused before it gets here.
+        """
+        with self._guard:
+            self.config = config
+            digest = str(config.config_digest or "")
+            _, _, hexdigest = digest.rpartition(":")
+            self.config_sha256 = hexdigest or hashlib.sha256(safe_read_bytes(config.config_path)).hexdigest()
 
     def _state_directory(self, *parts: str) -> Path:
         """Create coordination state only once hardware coordination is used.

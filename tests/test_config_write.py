@@ -863,6 +863,26 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
     assert "`permissions.allow_config_write` to false" in document
 
 
+def test_the_description_grant_remedy_gives_the_reason_that_is_still_true() -> None:
+    """A shipped remedy that reasons from the removed closed default.
+
+    It told an agent that reopening `allow_config_description_write` through
+    `project_config_set` fails because no configuration hands out
+    `allow_config_permissions_write` — and a generated configuration grants
+    exactly that (hardci-hq#96). On a bench where the description grant was
+    narrowed and the permissions grant is still open, the resource gave a
+    factually wrong reason for a correct refusal. The reason is the false-only
+    ratchet, and it holds whether or not the gating grant is true."""
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    remedy = ERROR_CATALOGUE["permission_denied:allow_config_description_write"]
+    text = " ".join(remedy.do_not)
+
+    assert "no configuration hands out" not in text
+    assert "writes only `false` into a permission" in text
+    assert "A generated configuration grants that key" in text
+
+
 def test_the_reference_names_the_two_grants_outside_a_permissions_block() -> None:
     """`artifacts` and `debug` are operator-only apart from their two grants.
 

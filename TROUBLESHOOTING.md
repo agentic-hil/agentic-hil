@@ -135,6 +135,8 @@ It reads the probe the way every other command here reaches hardware, so `device
 
 An agent does the same over MCP with `project_config_adopt_hardware`, which needs `permissions.allow_config_description_write`. Without it the call is refused and still returns the exact keys and values, so what you get is one command to run rather than a serial to transcribe.
 
+A running MCP server does not see the change yet: it parsed the file at startup. It no longer has to be restarted for this. Ask the agent to call `project_config_reload_description` — no arguments, and it re-reads `target`, `debuggers`, `com_ports` and `can_buses` from the file. It re-reads **no permission at all**, so a device that server has never seen arrives with none: it can be probed and read, and flashing, reset, mass erase and COM/CAN writes on it wait for a restart. `agentic-hil config-reload` shows what that call would take from this file and refuses the same way if the file no longer loads. A permission you changed, and anything outside those four sections, still needs the server restarted.
+
 ## 6. `adapter_not_found`
 
 Symptom: OpenOCD starts but Agentic HIL reports `error_type: "adapter_not_found"`.
@@ -150,6 +152,8 @@ Symptom: `probe_target` returns `ok: false` with `error_type: "target_not_detect
 Likely cause: target power is missing, SWD is disabled by firmware, jumpers are wrong, the board is held in reset, or the config is for the wrong target family.
 
 Fix: confirm board power, keep `target/stm32f4x.cfg` for Nucleo-F446RE, disconnect other debug tools, power-cycle the board, and probe again before flashing.
+
+Not the same as `target_state_unconfirmed`, which is what a toolchain that exited without confirming what it did produces — `operation_result` in that result names which confirmation lines arrived and which did not. This one is the backend's own report that it reached the adapter and nothing answered, so it refuses retry-safe and the bench stays in service; that one places the abort point nowhere, quarantines, and is settled by the physical check in its `quarantine_guidance` rather than by another probe.
 
 ## 8. `permission_denied`
 
@@ -211,7 +215,9 @@ Likely cause: another live process owns the project or resource lease, or a prev
 
 Fix: inspect ownership with `agentic-hil lease-status`. If a live owner exists, wait or stop it.
 
-First check whether the failure quarantined at all. A failure that proves it never reached the hardware does not: a missing toolchain executable, an OpenOCD script or adapter that failed before `init` completed, a pyOCD probe or `target_type` refused before any connect, an absent ST-Link, a COM port that could not be opened (handle verifiably closed), a CAN adapter that never initialized, and any plain failure of the read-only `probe_target` / `debugger_probes_list` all refuse with a named `error_type` and `retry_safe: true`, write no quarantine record, and need no recovery — fix the named cause and retry. If such a result also said `quarantined: true`, that is a bug worth reporting; releases before 0.8.0 quarantined several of these.
+First check whether the failure quarantined at all. A failure that proves it never reached the hardware does not: a missing toolchain executable, an OpenOCD script or adapter that failed before `init` completed, a pyOCD probe or `target_type` refused before any connect, an absent ST-Link, a COM port that could not be opened (handle verifiably closed), a SocketCAN adapter that never initialized, and a read (`probe_target` / `debugger_probes_list`) whose backend reports that no target answered all refuse with a named `error_type`, `target_contacted: false` and `retry_safe: true`, write no quarantine record, and need no recovery — fix the named cause and retry. If such a result also said `quarantined: true`, that is a bug worth reporting; releases before 0.8.0 quarantined several of these.
+
+What decides it is the backend's claim, not that the call was a read. A read that names no abort point — killed at its deadline (`timeout`), or a toolchain that exited without a complete confirmation (`target_state_unconfirmed`) — the result names which markers were expected and which arrived, and a partial set still names no safe abort point — quarantines as `debugger_readonly_target_state_unconfirmed`: an SWD attach halts the core, a killed process never ran the `shutdown` in its own command string, and a re-read that finds the probe again does not resume a halted core. `target_state_unconfirmed` is its own `error_type` for that reason: `target_not_detected` beside it is the backend's positive report that it reached the adapter and nothing answered, which is why that one refuses and this one does not. That reason is settled by a verified reset-into-halt or by an operator, never by the read-only predicate. A PCAN `CanInitializationError` likewise quarantines, because python-can raises it from `SetValue` calls that run after `PCANBasic.Initialize` has already put the channel on the bus; only SocketCAN's, where the controller is brought up out of band, proves the adapter never joined.
 
 For a quarantine, read `cleanup_reasons`, `quarantine_guidance`, and `auto_recoverable` from `lease-status` before doing anything physical. They name what is actually unresolved and whether an operator is needed at all:
 
@@ -224,7 +230,7 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 | --- | --- | --- |
 | `off` | none | nothing — operator only |
 | `readonly` | reap this owner's debugger processes, re-read the probe (connects without resetting) | toolchain faults: `debug_session_cleanup_unconfirmed`, `debug_target_state_unconfirmed`, `debugger_readonly_result_unconfirmed`, … |
-| `reset_halt` (default) | the above, plus a reset-into-halt that establishes a defined state | additionally `debugger_result_unconfirmed` (unconfirmed flash/reset) and `debug_session_start_unconfirmed` |
+| `reset_halt` (default) | the above, plus a reset-into-halt that establishes a defined state | additionally `debugger_result_unconfirmed` (unconfirmed flash/reset), `debugger_readonly_target_state_unconfirmed` (a read that named no abort point) and `debug_session_start_unconfirmed` |
 
 `reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
