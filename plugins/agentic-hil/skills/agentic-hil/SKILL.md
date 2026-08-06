@@ -27,6 +27,7 @@ serial, or CAN invocation bypasses that gate.
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
+| Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
 
 Declare a multi-step sequence before its first call: `bench_run_start` with
 `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds
