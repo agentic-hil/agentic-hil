@@ -41,6 +41,20 @@ keys a request happened to name, and why no actor waives it.
 Closing ``allow_config_permissions_write`` is therefore the terminal move, and
 the result of that call says so: what stands frozen, that the caller cannot undo
 it, and the command a person reopens the file with.
+
+**And there is a gate on the one-way street.** hardci-hq#102: everything above
+answers the reopen question for a file that does not exist yet — a generation
+opens everything — and answered nothing for one that does. `init --force`
+carries the existing grants over by name, so a `false` survives it, and deleting
+the file to get an open one costs the baudrate, the `resource_id`, the
+`state_root` and every artifact root the operator set. ``set_permission`` at the
+bottom of this module is ``agentic-hil grant`` and ``agentic-hil revoke``: one
+named permission, written through ``project_config_set`` like every other
+change, from the command line and from nowhere else. It waives the permissions
+grant, because a bench that closed that grant is exactly the bench with no way
+back, and because the same shell already holds ``init --force``, which rewrites
+every permission in the file without consulting anything. Nothing on the MCP
+surface moves: the ratchet there is what it was.
 """
 
 from __future__ import annotations
@@ -79,6 +93,7 @@ from agentic_hil.knowledge import (
     CONFIG_SHAPE_URI,
     CONFIG_WIDENING_ERROR,
     CONFIG_WRITE_RIGHT,
+    PERMISSION_CHANGE_IN_OPEN_RUN,
     ResolvedConfigKey,
     config_key_schema,
     config_rule_fields,
@@ -542,6 +557,7 @@ def project_config_set(
     via: str = f"mcp:{PROJECT_CONFIG_SET}",
     expect: dict[str, Any] | None = None,
     expect_document: JsonObject | None = None,
+    waive_permissions_grant: bool = False,
 ) -> JsonObject:
     """Set named configuration keys, or refuse and change nothing.
 
@@ -549,6 +565,19 @@ def project_config_set(
     ``provenance``. ``ACTOR_HUMAN`` is a person at the CLI, which is the
     authority ``agentic-hil init`` already runs under; it waives the description
     grant and nothing else.
+
+    ``waive_permissions_grant`` waives the other one, and exactly one caller sets
+    it: ``set_permission`` below, which is ``agentic-hil grant`` and
+    ``agentic-hil revoke``. It is not part of any tool schema and no MCP path
+    reaches it. The grant is otherwise consulted for everybody including
+    ``ACTOR_HUMAN`` — a bench that closed the permissions half is closed to
+    `project_config_set` from every direction — and that is what made the closing
+    a move with no way back, which is hardci-hq#102. What reopens it is not a
+    wider `project_config_set`; it is a command that writes one named permission,
+    under the authority the same shell already has in `agentic-hil init --force`,
+    and refuses to touch anything else in the file. Refused for every actor but
+    ``ACTOR_HUMAN`` here as well, so the waiver cannot be reached with an agent's
+    provenance on it even by a caller inside this process.
 
     ``expect`` maps a key to the value the caller decided against. It is not
     part of any tool schema and no caller supplies it: it exists for a caller
@@ -563,7 +592,17 @@ def project_config_set(
     by a carried key. Compared on its description, so a permissions change or a
     provenance bump by another writer does not refuse a change it cannot affect."""
     try:
-        return _project_config_set(workspace, existing, changes, open_holds=open_holds, actor=actor, via=via, expect=expect, expect_document=expect_document)
+        return _project_config_set(
+            workspace,
+            existing,
+            changes,
+            open_holds=open_holds,
+            actor=actor,
+            via=via,
+            expect=expect,
+            expect_document=expect_document,
+            waive_permissions_grant=waive_permissions_grant and actor == ACTOR_HUMAN,
+        )
     except ConfigError as error:
         # The state of the configuration belongs on a refusal about the
         # configuration too: a caller told "this did not load" and not told
@@ -585,6 +624,7 @@ def _project_config_set(
     via: str,
     expect: dict[str, Any] | None = None,
     expect_document: JsonObject | None = None,
+    waive_permissions_grant: bool = False,
 ) -> JsonObject:
     if existing is None:  # pragma: no cover - the unprovisioned service answers first
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
@@ -609,7 +649,13 @@ def _project_config_set(
         # An operator at the CLI is the person the description grant belongs to,
         # so it is not consulted for them; the permissions grant is consulted for
         # everybody, and layer 3 below enforces that from the document itself.
-        rights = {**rights, CONFIG_DESCRIPTION_RIGHT: rights[CONFIG_DESCRIPTION_RIGHT] or actor == ACTOR_HUMAN}
+        # The one exception is the pair of commands that exist to move a single
+        # named permission — see `waive_permissions_grant` on the caller above.
+        rights = {
+            **rights,
+            CONFIG_DESCRIPTION_RIGHT: rights[CONFIG_DESCRIPTION_RIGHT] or actor == ACTOR_HUMAN,
+            CONFIG_PERMISSIONS_RIGHT: rights[CONFIG_PERMISSIONS_RIGHT] or waive_permissions_grant,
+        }
 
         # 1. The key model. A permissions key never resolves to the description
         #    grant, so this alone already separates the two halves.
@@ -986,6 +1032,312 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 
 
 # ---------------------------------------------------------------------------
+# agentic-hil grant / agentic-hil revoke.
+#
+# hardci-hq#96 inverted the generated default and answered the reopen question
+# for the first run only: a generation opens everything. For a file that already
+# exists there was no answer at all. `project_config_set` writes `false` into a
+# permission and nothing else; a regeneration carries the existing grants over by
+# name, so a `false` survives `init --force`; and deleting the file does come
+# back open, at the price of the baudrate, the `resource_id`, the `state_root`
+# and every artifact root the operator ever set. That is the bill hardci-hq#102
+# was filed over, and it was paid.
+#
+# So this is the gate on the one-way street, and it is deliberately the narrowest
+# thing that opens it: the same closed key set `project_config_set` names, one
+# permission per name, written through that same function. Not a second write
+# path — everything below ends in `project_config_set` — and not an MCP tool: it
+# is reachable from `agentic-hil` and from nowhere else, so the ratchet on the
+# MCP surface is exactly as it was.
+
+
+PERMISSION_GRANT = "grant"
+PERMISSION_REVOKE = "revoke"
+# What each command writes. Both ship together: a CLI that could only open would
+# be the next one-way street with the arrow reversed, and an operator who opened
+# something to try it would be back to editing YAML to put it back.
+PERMISSION_COMMAND_VALUES = {PERMISSION_GRANT: True, PERMISSION_REVOKE: False}
+
+
+def resolve_permission_key(key: str) -> tuple[ResolvedConfigKey | None, str | None]:
+    """One permission key, resolved, or why it is not one.
+
+    Two spellings reach the same key, and both are the key model's rather than a
+    parallel one. The canonical `can_buses.dut.permissions.allow_write` is what
+    `project_config_set` and `project_config_describe` name. The short
+    `can_buses.dut.allow_write` is what the issue that asked for this command
+    wrote, and it is what an operator reads off `permission_summary` and off the
+    file itself, where the flag sits under a `permissions:` block whose name
+    nobody repeats out loud.
+
+    The short form is only ever tried after the long one has failed to resolve,
+    so it can never shadow a real key: a description key resolves and is refused
+    below for being a description key, and only a spelling that names nothing at
+    all is rewritten. The rewrite is the exact inverse of the key model's own
+    right-to-left reading — field names contain no dot, so the last component is
+    the field and everything before it is the entry, whatever dots the operator
+    put in the entry name.
+
+    Returns ``(resolved, None)`` or ``(None, reason)``."""
+    resolved = resolve_config_key(key)
+    if resolved is None:
+        entry, dot, field = key.rpartition(".")
+        candidate = resolve_config_key(f"{entry}.permissions.{field}") if dot and entry else None
+        if candidate is None or candidate.right != CONFIG_PERMISSIONS_RIGHT:
+            return None, f"`{key}` is not a permission in an Agentic HIL configuration."
+        return candidate, None
+    if resolved.right != CONFIG_PERMISSIONS_RIGHT:
+        return None, (
+            f"`{key}` is a key of this bench's description rather than a permission, and these commands move "
+            "permissions only. What hardware is there and how it is reached is changed with "
+            f"`{PROJECT_CONFIG_SET}` over MCP, or with `agentic-hil adopt-hardware` for what an attached board "
+            "already knows about itself."
+        )
+    return resolved, None
+
+
+def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path, document: JsonObject) -> JsonObject:
+    """A name that is not a permission, answered with the ones that are.
+
+    The list comes out of *this* document rather than out of the key patterns,
+    because `can_buses.<name>.permissions.allow_write` is not something anybody
+    can type: an operator needs the entry names their own bench has. This is the
+    whole of the discoverability answer, and it is why there is no wildcard and
+    no section form — a name has to be read before it can be typed, and the
+    refusal is where it is read."""
+    return {
+        "ok": False,
+        "command": f"agentic-hil {command}",
+        "error_type": "invalid_argument",
+        "summary": (
+            f"{len(rejected)} of the names given to `agentic-hil {command}` do not name a permission in this "
+            "configuration, so nothing was written. Every key this command accepts is listed in "
+            "`permission_keys_here`, read out of this file as it stands."
+        ),
+        "rejected_keys": rejected,
+        "permission_keys_here": sorted(str(entry["key"]) for entry in _concrete_keys(document) if entry["right"] == CONFIG_PERMISSIONS_RIGHT),
+        "path": str(path),
+        "reference": CONFIG_SHAPE_URI,
+        "next_step": (
+            "Name one of `permission_keys_here`. A permission is named one at a time and several may be given in one "
+            "command; there is no wildcard and no whole-entry form, so what is opened is what was typed."
+        ),
+        **NOT_STARTED,
+        "retry_safe": False,
+    }
+
+
+def _permission_open_run_refusal(existing: AgenticHILConfig, command: str, open_holds: JsonObject) -> JsonObject:
+    """Somebody holds this bench, so its permissions do not move.
+
+    The same rule as `config_write_in_open_run` and hardci-hq#80's: what is held
+    was taken under the permissions this file states. Its own error type because
+    the holder here is another process — an MCP server, another terminal — and
+    "close your run" is not advice this caller can act on."""
+    return {
+        "ok": False,
+        "command": f"agentic-hil {command}",
+        "error_type": PERMISSION_CHANGE_IN_OPEN_RUN,
+        "summary": (
+            "Something on this machine is holding this bench's hardware right now, and it took those holds under the "
+            "permissions this configuration states. Opening or closing one underneath them would move the rules during "
+            "the run they govern, so nothing was written."
+        ),
+        "open_holds": open_holds,
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        **remediation_fields(PERMISSION_CHANGE_IN_OPEN_RUN),
+        **NOT_STARTED,
+        "retry_safe": True,
+    }
+
+
+def set_permission(
+    workspace: Path,
+    existing: AgenticHILConfig | None,
+    keys: list[str],
+    *,
+    command: str,
+    open_holds: JsonObject | None = None,
+) -> JsonObject:
+    """Move the named permissions to what ``command`` writes, or change nothing.
+
+    ``command`` is ``grant`` or ``revoke``; the value follows from it and is
+    never taken from a caller, so there is no spelling of these commands that
+    writes something other than a boolean into a permission.
+
+    **Single keys, several per call, no section form and no wildcard.** That is
+    the open question hardci-hq#102 left, and this is the answer with its
+    reasons:
+
+    * A section form would be defined by a moving target. `can_buses.dut` means
+      the fields `config_rule_fields` reads out of the shipped schema *at the
+      moment it runs* — so a permission added to the schema in a later release
+      silently joins every section form an operator ever learned to type. A named
+      key means the same thing forever, and a group named in this module would
+      drift the same way for the same reason.
+    * The two directions are not symmetric. A slip on `revoke` costs a refused
+      call and is visible the next time the bench is used; a slip on `grant`
+      hands out authority over hardware and is visible to nobody. Convenience is
+      worth much less on the side that opens.
+    * The convenience is available without the blast radius: several keys in one
+      command are applied together or not at all, so opening a whole entry is
+      still one line — one that names what it opened, and whose result lists
+      exactly those keys.
+    * The whole-file form already exists. `agentic-hil init --force` reopens
+      everything, and the gap hardci-hq#102 describes is the surgical one. A
+      section form sits between the two and is the shape that reads narrow and
+      behaves broad.
+    * What a wildcard is really for is not typing but finding out. That is
+      answered where it is asked: an unrecognised name is refused with every
+      permission key of *this* configuration, entry names and all.
+    """
+    try:
+        return _set_permission(workspace, existing, keys, command=command, open_holds=open_holds)
+    except ConfigError as error:
+        return with_config_status({"command": f"agentic-hil {command}", **error.to_dict(), **NOT_STARTED}, config_status(existing))
+
+
+def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: list[str], *, command: str, open_holds: JsonObject | None) -> JsonObject:
+    if existing is None:  # pragma: no cover - the CLI fails to load before it gets here
+        raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
+    value = PERMISSION_COMMAND_VALUES[command]
+    target_path = authoritative_write_target(workspace, existing)
+    _, document = load_config_document(target_path)
+
+    resolved: list[ResolvedConfigKey] = []
+    rejected: list[JsonObject] = []
+    seen: set[str] = set()
+    for key in keys:
+        found, reason = resolve_permission_key(key)
+        if found is None:
+            rejected.append({"key": key, "reason": reason})
+            continue
+        if found.key in seen:
+            continue
+        seen.add(found.key)
+        resolved.append(found)
+    if rejected:
+        return _permission_key_refusal(command, rejected, target_path, document)
+
+    # After the names are known to be good and before anything is written, so an
+    # operator whose command was a typo is told about the typo rather than about
+    # somebody else's run.
+    if open_holds:
+        return _permission_open_run_refusal(existing, command, open_holds)
+
+    changing: dict[str, Any] = {}
+    unchanged: list[JsonObject] = []
+    for item in resolved:
+        current = _current_value(document, item.section, item.entry, item.under_permissions, item.field)
+        # `is value` on a bool and nothing else: a permission holding `1` or
+        # `"true"` is not a permission holding `true`, and rewriting it as one is
+        # a change rather than the no-op a truthiness test would call it.
+        if isinstance(current, bool) and current is value:
+            unchanged.append({"key": item.key, "value": current})
+        else:
+            changing[item.key] = current
+
+    if not changing:
+        return _nothing_to_change(command, value, unchanged, existing)
+
+    # The document was read outside the write lock, so every value this decision
+    # rests on travels with the call and is compared again inside it. A
+    # concurrent write between the two refuses rather than overwrites — and it
+    # is what makes "already open, so nothing was written" a statement about the
+    # file rather than about a document that has since moved.
+    written = project_config_set(
+        workspace,
+        existing,
+        [{"key": key, "value": value} for key in changing],
+        open_holds=None,
+        actor=ACTOR_HUMAN,
+        via=f"cli:{command}",
+        expect=dict(changing),
+        waive_permissions_grant=True,
+    )
+    if written.get("ok") is not True:
+        # Carried through as the write path stated it, with `command` added so a
+        # reader knows which of the two asked. The refusals worth reaching this
+        # way are its own — a permission on an entry that does not exist, a
+        # document somebody else moved in between, a file that stopped loading.
+        return {**written, "command": f"agentic-hil {command}"}
+    return _permission_change_result(command, value, written, unchanged, existing)
+
+
+def _nothing_to_change(command: str, value: bool, unchanged: list[JsonObject], existing: AgenticHILConfig) -> JsonObject:
+    """Every named permission already stood where it was asked to stand.
+
+    Not an error — asking for what is already so is how an operator makes sure —
+    and not a change either. Nothing is written, which means no provenance entry
+    and no change marker in the header for a call that moved nothing, and the
+    result says so in those words rather than reporting a write."""
+    return {
+        "ok": True,
+        "command": f"agentic-hil {command}",
+        "summary": (
+            f"Nothing was written: all {len(unchanged)} permission(s) named are already {str(value).lower()} in this "
+            "configuration. This was a no-op, not a change — the file, its `provenance` and its header are exactly as "
+            "they were."
+        ),
+        "changed": [],
+        "unchanged": unchanged,
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        "restart_required": False,
+        "next_steps": [
+            f"`agentic-hil doctor` reports what this configuration grants, if the question was what the bench allows "
+            f"rather than what `agentic-hil {command}` did.",
+        ],
+        **NOT_STARTED,
+        "cleanup_required": False,
+    }
+
+
+def _permission_change_result(command: str, value: bool, written: JsonObject, unchanged: list[JsonObject], existing: AgenticHILConfig) -> JsonObject:
+    """What moved, from what, and what it takes for it to bind.
+
+    The last part is the one an operator cannot infer. A running MCP server
+    parses permissions once, at startup: `project_config_reload_description`
+    picks up a changed *description* without a restart and deliberately re-reads
+    no permission in either direction. So a permission opened here is in the file
+    immediately and in force nowhere until that server is restarted, and a result
+    that did not say so would leave the operator watching a granted permission
+    keep being refused."""
+    changed = [{"key": item["key"], "previous_value": item["previous_value"], "value": item["value"]} for item in written.get("changes") or []]
+    verb = "granted" if value else "revoked"
+    return {
+        "ok": True,
+        "command": f"agentic-hil {command}",
+        "summary": (
+            f"{len(changed)} permission(s) {verb} in {written.get('path')}"
+            + (f"; {len(unchanged)} named permission(s) were already {str(value).lower()} and were not written" if unchanged else "")
+            + ". Nothing else in the file was touched. A running MCP server does not re-read permissions, so restart it "
+            "before relying on this."
+        ),
+        "changed": changed,
+        "unchanged": unchanged,
+        "path": written.get("path"),
+        "workspace_root": written.get("workspace_root"),
+        "provenance": written.get("provenance"),
+        **({"permissions_frozen": written["permissions_frozen"]} if "permissions_frozen" in written else {}),
+        # Not `reload_required`: a description reload is precisely the call that
+        # will not take this. The word an operator needs is the stronger one.
+        "restart_required": True,
+        "next_steps": [
+            "Restart the MCP server for this workspace — the agent host's, not this command line. A server parses "
+            "permissions once at startup and `project_config_reload_description` re-reads none of them, so until then "
+            "it keeps enforcing the value that was there before.",
+            f"`agentic-hil doctor` reads this file fresh and reports what it now grants; `agentic-hil "
+            f"{PERMISSION_REVOKE if value else PERMISSION_GRANT}` is the way back for any of it.",
+        ],
+        **NOT_STARTED,
+        "cleanup_required": False,
+        "config_status": config_status(existing),
+    }
+
+
+# ---------------------------------------------------------------------------
 # project_config_describe.
 
 
@@ -1259,6 +1611,9 @@ __all__ = [
     "ACTOR_AGENT",
     "ACTOR_HUMAN",
     "GRANTING_PATH",
+    "PERMISSION_COMMAND_VALUES",
+    "PERMISSION_GRANT",
+    "PERMISSION_REVOKE",
     "PROJECT_CONFIG_DESCRIBE",
     "PROJECT_CONFIG_SET",
     "authoritative_write_target",
@@ -1271,4 +1626,6 @@ __all__ = [
     "permission_widening",
     "project_config_describe",
     "project_config_set",
+    "resolve_permission_key",
+    "set_permission",
 ]
