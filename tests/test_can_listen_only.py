@@ -121,7 +121,12 @@ def install_pcan_basic(monkeypatch: pytest.MonkeyPatch, *, complete: bool = True
 
 
 def install_ip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runner) -> list[list[str]]:
-    """Point the link probe at a real file and capture what it would have run."""
+    """Point the link probe at a real file and capture what it would have run.
+
+    The stand-in is bound into `agentic_hil.can` rather than onto `subprocess`
+    itself: this suite spawns real children elsewhere, and a fake `run` in the
+    shared module would be waiting for whichever of them reached it first.
+    """
     executable = tmp_path / "ip"
     executable.write_text("", encoding="utf-8")
     monkeypatch.setattr("agentic_hil.can.IP_COMMAND_PATHS", (str(executable),))
@@ -131,7 +136,8 @@ def install_ip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runner) -> list[
         commands.append(list(command))
         return runner(command, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    forwarded = {name: getattr(subprocess, name) for name in ("PIPE", "DEVNULL", "Popen", "SubprocessError", "TimeoutExpired", "CalledProcessError")}
+    monkeypatch.setattr("agentic_hil.can.subprocess", SimpleNamespace(run=run, **forwarded))
     return commands
 
 
@@ -258,7 +264,7 @@ def test_the_link_probe_never_resolves_ip_from_path(tmp_path: Path, monkeypatch:
     fake_dir.mkdir()
     (fake_dir / "ip").write_text("", encoding="utf-8")
     monkeypatch.setenv("PATH", str(fake_dir))
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("nothing off PATH may answer this"))
+    monkeypatch.setattr("agentic_hil.can.subprocess", SimpleNamespace(run=lambda *args, **kwargs: pytest.fail("nothing off PATH may answer this")))
 
     assert socketcan_link_listen_only("can0")["listen_only"] is False
 
