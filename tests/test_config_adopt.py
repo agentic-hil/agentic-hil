@@ -334,7 +334,7 @@ def _skeleton_from_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: s
     monkeypatch.setenv("APPDATA", str(config_root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.chdir(workspace)
-    monkeypatch.setattr("agentic_hil.cli.discover_attached_hardware", lambda *args, **kwargs: {"ok": False, "error_type": "adapter_not_found", "summary": "No ST-Link probe is attached."})
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", lambda *args, **kwargs: {"ok": False, "error_type": "adapter_not_found", "summary": "No ST-Link probe is attached."})
     started = init_config()
     assert started["ok"] is True, started
     path = Path(started["path"])

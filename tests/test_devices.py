@@ -30,6 +30,7 @@ from agentic_hil.devices import (
     config_devices,
     debugger_device,
     is_device_lock_key,
+    lock_keys,
     resolve_devices,
     uart_device,
 )
@@ -265,14 +266,27 @@ def test_two_config_entries_on_one_physical_unit_collapse_to_one_lock(tmp_path: 
 
 
 def test_a_probe_and_its_virtual_com_port_are_one_lock(tmp_path: Path) -> None:
-    """Across kinds, too: only resource_id can say two entries are one unit."""
+    """Across kinds, too: only resource_id can say two entries are one unit.
+
+    The two entries collapse onto one primary key — the shared `resource_id` —
+    so the set is one lock's worth of identity, not two. The probe half also
+    names a serial, and the collapsed unit keeps it: `resource_id` is this
+    operator's own alias, but the serial is what another workspace's first `init`
+    derives from enumerating the same ST-Link, and holding both is what makes the
+    two collide there rather than each connect believing it is alone
+    (hardci-hq#108)."""
     config = config_for(tmp_path, debuggers_yaml=PROBE_AND_ITS_VCP_DEBUGGER, com_ports_yaml=PROBE_AND_ITS_VCP_PORT)
 
     probe = debugger_device(config, "second_probe")
     vcp = uart_device(config, "probe_vcp")
 
+    # One identity: the primary key is the shared resource_id on both halves.
     assert probe.lock_key == vcp.lock_key == "physical:usb-stlink-0669"
-    assert DeviceSet.of([probe, vcp]).lock_keys == ["physical:usb-stlink-0669"]
+    # One unit, held under every name either half of it answers to — and the
+    # serial survives whichever order the two are declared in, so a plan naming
+    # the port first cannot drop the probe's serial.
+    assert DeviceSet.of([probe, vcp]).lock_keys == ["physical:usb-stlink-0669", "probe:0669ff-vcp"]
+    assert DeviceSet.of([vcp, probe]).lock_keys == ["physical:usb-stlink-0669", "probe:0669ff-vcp"]
 
 
 # --- identity folds case the same way everywhere -------------------------
@@ -328,6 +342,164 @@ def test_a_path_like_device_value_folds_the_way_its_own_host_does(tmp_path: Path
 
     assert as_written.identity_source == "executable"
     assert (as_written.lock_key == as_lowercased.lock_key) is one_name_on_this_host
+    # It keeps a prefix of its own so `probe:` can stay a hardware id that folds
+    # case everywhere (see the probe-serial test below). The executable is the
+    # one path-like fallback, and this is where that shows.
+    assert as_written.lock_key.startswith("probe-exe:")
+
+
+def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_path: Path) -> None:
+    """The folding above belongs to the lock, not to `Device`.
+
+    `HardwareCoordinator.acquire` takes devices *or* resource names, and only
+    the device went through `lock_key`. An unfolded name is a second lock file
+    for one board: the run holds `physical:board-a`, a caller asking for
+    `physical:BOARD-A` is told it is free, and both then believe they have the
+    board. A `resource_id` is an opaque hardware id, so this one has no platform
+    branch — the two spellings are one board on every host."""
+    config = config_for(tmp_path, com_ports_yaml=FOUR_PORTS)
+    device = uart_device(config, "port_a")
+    assert device.lock_key == "physical:board-a"
+
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        coordinator.begin_run(DeviceSet.of([device]), label="one-board")
+        # Declared as a device and reached under a name somebody spelled: the run
+        # has to recognise its own board rather than refuse it as undeclared.
+        lease = coordinator.acquire("physical:BOARD-A")
+        try:
+            assert lease.resources == [device.lock_key]
+        finally:
+            lease.release()
+        # And the machine-wide hold answers to either spelling. This is the lock
+        # file that two keys would have split in two.
+        stranger = BenchMutex(frontend="stranger")
+        with pytest.raises(DeviceBusyError):
+            stranger.acquire(["physical:BOARD-A"])
+    finally:
+        coordinator.end_run()
+        coordinator.close()
+
+    # The issue's own example. A serial device name is a host path rather than an
+    # opaque id, so whether two spellings are one port stays the host's rule (see
+    # the test above); what changed is that a hand-written name now follows that
+    # rule instead of keeping a spelling of its own.
+    ports = config_for(tmp_path / "com9", com_ports_yaml='com_ports:\n  dut_uart:\n    device: "com9"\n')
+    assert uart_device(ports, "dut_uart").lock_key == "com:com9"
+    assert (lock_keys(["com:COM9"]) == ["com:com9"]) is (os.name == "nt")
+
+
+def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_path: Path) -> None:
+    """A probe serial is an opaque hardware id, so it folds case on POSIX too.
+
+    hardci-hq#106: `fold_resource_name` treated every `probe:` name as a host
+    path, and a host path is left untouched on POSIX. A configured
+    `probe_id: STLINK123` locks `probe:stlink123` — `DebuggerDevice.lock_key`
+    builds it with `fold_hardware_id`, which casefolds everywhere — while a
+    hand-written `acquire("probe:STLINK123")` stayed uppercase and split into a
+    second lock file for one probe. Unlike a serial device name, a probe serial
+    has no per-host reading: it is one probe on Windows and on Linux alike, so
+    this assertion carries no platform branch. The executable fallback keeps its
+    own `probe-exe:` prefix precisely so `probe:` can fold this way."""
+    config = config_for(tmp_path, debuggers_yaml='debuggers:\n  dut:\n    type: stlink\n    probe_id: "STLINK123"\n')
+    device = debugger_device(config, "dut")
+    assert device.lock_key == "probe:stlink123"
+    # The operator's own uppercase spelling folds onto that exact key, here and
+    # on POSIX, with no `os.name` branch — the split this fixes.
+    assert lock_keys(["probe:STLINK123"]) == [device.lock_key] == ["probe:stlink123"]
+
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        coordinator.begin_run(DeviceSet.of([device]), label="one-probe")
+        # Declared as a device, reached under the uppercase spelling: the run
+        # recognises its own probe instead of refusing it as undeclared.
+        lease = coordinator.acquire("probe:STLINK123")
+        try:
+            assert lease.resources == [device.lock_key]
+        finally:
+            lease.release()
+        # And the machine-wide hold answers to either spelling — the lock file
+        # two keys would have split in two on POSIX.
+        stranger = BenchMutex(frontend="stranger")
+        with pytest.raises(DeviceBusyError):
+            stranger.acquire(["probe:STLINK123"])
+    finally:
+        coordinator.end_run()
+        coordinator.close()
+
+
+def test_an_executable_debugger_holds_its_legacy_probe_key_too(tmp_path: Path) -> None:
+    """The upgrade transition round 1's split left open (hardci-hq#106).
+
+    Moving the executable from `probe:<path>` to `probe-exe:<path>` gave `probe:`
+    an unambiguous fold, but it also split the new key from the one a process
+    still on the old build — or a caller handing an already-derived name — keeps
+    taking. An executable-identified debugger therefore holds both: its
+    `probe-exe:` key and the legacy `probe:<path>`. `fold_resource_name` keeps a
+    path-shaped `probe:` a host path, so the legacy spelling lands on one lock
+    rather than casefolding into a name nothing else takes — shown here with an
+    uppercase POSIX path, which is exactly where the fold change would otherwise
+    make the two diverge."""
+    exe = "/opt/Tools/OpenOCD"
+    toolchain = replace(config_for(tmp_path).debugger, probe_id=None, resource_id=None, executable=exe)
+    device = DebuggerDevice(config_id="dut", debugger=toolchain)
+
+    assert device.identity_source == "executable"
+    assert device.lock_key == f"probe-exe:{os.path.normcase(exe)}"
+    legacy = f"probe:{os.path.normcase(exe)}"
+    assert set(device.lock_keys) == {device.lock_key, legacy}
+    # Both names a stranger might arrive under fold onto keys the device holds:
+    # the new prefix, and the legacy path preserved rather than casefolded. A
+    # probe *serial* under `probe:` still casefolds — the separator is the whole
+    # distinction — so the round-1 fix stands beside this one.
+    assert lock_keys([device.lock_key]) == [device.lock_key]
+    assert lock_keys([f"probe:{exe}"]) == [legacy]
+    assert lock_keys(["probe:STLINK123"]) == ["probe:stlink123"]
+    # A serial is not an absolute path even if it carries a slash, so it stays a
+    # hardware id and folds case. Testing for an absolute path rather than a bare
+    # separator is what keeps this from re-splitting the round-1 fix.
+    assert lock_keys(["probe:AB/CD-7"]) == ["probe:ab/cd-7"]
+
+
+def test_a_raw_or_pre_upgrade_caller_cannot_bypass_an_executable_debugger(tmp_path: Path) -> None:
+    """The two scenarios the transition has to cover, both directions.
+
+    A run holding the executable debugger holds both its keys. Anyone else
+    reaching the same probe collides on one of them: a caller passing the
+    already-derived `probe:<path>` (a raw legacy caller), and — the upgrade window
+    — a process still on the old build that derived that same legacy key, whether
+    it arrives before or after the current run. Before the fix the new
+    `probe-exe:` key and the old `probe:<path>` were two different locks, so both
+    sides took the one debugger and each believed it was alone."""
+    exe = "/opt/Tools/OpenOCD"
+    toolchain = replace(config_for(tmp_path).debugger, probe_id=None, resource_id=None, executable=exe)
+    device = DebuggerDevice(config_id="dut", debugger=toolchain)
+    legacy = f"probe:{os.path.normcase(exe)}"
+
+    # Current run holds the debugger; a raw legacy caller and a pre-upgrade
+    # process are both refused the probe it is on.
+    run = BenchMutex(frontend="current-run")
+    device.acquire(run)
+    try:
+        raw_caller = BenchMutex(frontend="raw-caller")
+        with pytest.raises(DeviceBusyError):
+            raw_caller.acquire([f"probe:{exe}"])
+        pre_upgrade = BenchMutex(frontend="pre-upgrade-process")
+        with pytest.raises(DeviceBusyError):
+            pre_upgrade.acquire([legacy])
+    finally:
+        run.release_all()
+
+    # The other order of the same window: the old owner got in first, and the
+    # current build's whole-device acquire is what is refused.
+    old_owner = BenchMutex(frontend="pre-upgrade-process")
+    old_owner.acquire([legacy])
+    try:
+        current = BenchMutex(frontend="current-run")
+        with pytest.raises(DeviceBusyError):
+            current.acquire(list(device.lock_keys))
+    finally:
+        old_owner.release_all()
 
 
 def test_config_load_refuses_one_resource_id_spelled_in_two_cases(tmp_path: Path) -> None:
@@ -499,7 +671,7 @@ def test_only_a_debugger_may_be_declared_without_a_name(tmp_path: Path) -> None:
     port or a bus always has to be named."""
     config = config_for(tmp_path, com_ports_yaml=TWO_NAMES_ONE_PORT)
 
-    assert resolve_devices(config, [{"kind": "debugger"}]).lock_keys == [debugger_device(config).lock_key]
+    assert resolve_devices(config, [{"kind": "debugger"}]).lock_keys == sorted(debugger_device(config).lock_keys)
     with pytest.raises(DeviceError) as excinfo:
         resolve_devices(config, [{"kind": "uart"}])
 
@@ -565,7 +737,9 @@ def test_an_agent_driven_run_holds_its_devices_across_several_mcp_calls(tmp_path
     try:
         started = mcp_call(service, "bench_run_start", {"devices": [{"kind": "debugger"}], "label": "boot-smoke"})
         assert started["ok"] is True
-        assert started["declared_devices"] == [probe_key]
+        # The executable-identified debugger declares its `probe-exe:` key and the
+        # legacy `probe:<path>` twin it also holds (hardci-hq#106).
+        assert started["declared_devices"] == sorted(debugger_device(config).lock_keys)
         assert started["run_label"] == "boot-smoke"
 
         for _ in range(3):
@@ -577,11 +751,11 @@ def test_an_agent_driven_run_holds_its_devices_across_several_mcp_calls(tmp_path
 
         status = mcp_call(service, "bench_run_status")
         assert status["run_active"] is True
-        assert status["declared_devices"] == [probe_key]
+        assert status["declared_devices"] == sorted(debugger_device(config).lock_keys)
         assert status["devices"][0]["kind"] == "debugger"
 
         stopped = mcp_call(service, "bench_run_stop")
-        assert stopped["released_devices"] == [probe_key]
+        assert stopped["released_devices"] == sorted(debugger_device(config).lock_keys)
         assert mcp_call(service, "bench_run_status")["run_active"] is False
         # Only now is the board free again.
         stranger.acquire([probe_key])

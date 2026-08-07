@@ -28,7 +28,8 @@ because a detour is known to exist, but because a boundary defended only by a
 path parser is a boundary defended only as well as the parser is right.
 
 **And it only goes one way.** hardci-hq#96 turned the generated default over:
-a configuration is now created with every permission true, because the closed
+a configuration is now created with every permission true bar the two that
+refuse flashing while they are true (hardci-hq#107), because the closed
 one cost this project's owner a working day of hand-edited YAML and bought
 nothing an agent with a shell could not already reach. What replaces it is the
 direction. ``permission_widening`` refuses any write that turns a permission on
@@ -44,16 +45,19 @@ it, and the command a person reopens the file with.
 
 **And there is a gate on the one-way street.** hardci-hq#102: everything above
 answers the reopen question for a file that does not exist yet — a generation
-opens everything — and answered nothing for one that does. `init --force`
-carries the existing grants over by name, so a `false` survives it, and deleting
-the file to get an open one costs the baudrate, the `resource_id`, the
-`state_root` and every artifact root the operator set. ``set_permission`` at the
+opens everything — and answered nothing for one that does. `init --force` does
+reopen it, because it is the full regeneration and writes the open skeleton over
+whatever was there; it costs the baudrate, the `resource_id`, the `state_root`
+and every artifact root the operator set, which is the same bill deleting the
+file comes with. It names the permissions it reopened that way in its result, so
+the reset is loud rather than silent (hardci-hq#113). ``set_permission`` at the
 bottom of this module is ``agentic-hil grant`` and ``agentic-hil revoke``: one
 named permission, written through ``project_config_set`` like every other
 change, from the command line and from nowhere else. It waives the permissions
-grant, because a bench that closed that grant is exactly the bench with no way
-back, and because the same shell already holds ``init --force``, which rewrites
-every permission in the file without consulting anything. Nothing on the MCP
+grant, because a bench that closed that grant is exactly the bench whose only
+way back was the full reset, and because the same shell already holds
+``init --force``, which rewrites every permission in the file without consulting
+anything. Nothing on the MCP
 surface moves: the ratchet there is what it was.
 """
 
@@ -193,11 +197,11 @@ def permission_widening(before: dict[str, Any], after: dict[str, Any]) -> list[s
     """Which permission paths a change opens rather than closes.
 
     The whole of hardci-hq#96 rests on this list being empty for every write an
-    agent makes over MCP. A generated configuration now grants everything, so the
+    agent makes over MCP. A generated configuration now grants everything it can, so the
     property left to defend is the direction: an agent writes ``false`` into a
     permission and never ``true``, which means it can only ever reduce its own
-    authority. It says nothing about creation — a regeneration writes the open
-    skeleton and is the operator's call, not a permissions write — and nothing
+    authority. It says nothing about creation — a regeneration writes the
+    skeleton at its defaults and is the operator's call, not a permissions write — and nothing
     about what a person does at the command line.
 
     Read off ``permission_delta``, so the two answers cannot disagree about what
@@ -465,9 +469,9 @@ def _only_false_allowed(requested: list[str], path: Path) -> JsonObject:
         "error_type": CONFIG_WIDENING_ERROR,
         "summary": (
             f"{len(requested)} permission change(s) in this call carried a value other than false, and false is the only "
-            "value this surface writes into a permission. A configuration is generated with every permission granted, so "
-            "an agent can narrow one and never open one — including one that is already open, which this call would not "
-            "have changed. Nothing was written."
+            "value this surface writes into a permission. A configuration is generated with every permission granted but "
+            "the two that refuse flashing while they are true, so an agent can narrow one and never open one — "
+            "including one that is already open, which this call would not have changed. Nothing was written."
         ),
         "widened_keys": sorted(requested),
         "path": str(path),
@@ -496,9 +500,9 @@ def _widening_denied(widened: list[str], path: Path) -> JsonObject:
         "error_type": CONFIG_WIDENING_ERROR,
         "summary": (
             f"{len(widened)} permission(s) in this configuration would have been turned on by this change, and nothing "
-            "on this surface turns a permission on. A configuration is generated with every permission granted and can "
-            "only be narrowed from here, so an agent writes false into a permission and never true. Nothing was "
-            "written."
+            "on this surface turns a permission on. A configuration is generated with every permission granted but the "
+            "two that refuse flashing while they are true, and can only be narrowed from here, so an agent writes "
+            "false into a permission and never true. Nothing was written."
         ),
         "widened_keys": sorted(widened),
         "path": str(path),
@@ -1035,13 +1039,20 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 # agentic-hil grant / agentic-hil revoke.
 #
 # hardci-hq#96 inverted the generated default and answered the reopen question
-# for the first run only: a generation opens everything. For a file that already
-# exists there was no answer at all. `project_config_set` writes `false` into a
-# permission and nothing else; a regeneration carries the existing grants over by
-# name, so a `false` survives `init --force`; and deleting the file does come
-# back open, at the price of the baudrate, the `resource_id`, the `state_root`
-# and every artifact root the operator ever set. That is the bill hardci-hq#102
-# was filed over, and it was paid.
+# for the first run only: a generation opens everything it can. For a file that already
+# exists there was no answer that did not cost the rest of the file.
+# `project_config_set` writes `false` into a permission and nothing else; and
+# `init --force` and deleting the file both do come back open, at the price of the
+# baudrate, the `resource_id`, the `state_root` and every artifact root the
+# operator ever set. That is the bill hardci-hq#102 was filed over, and it was
+# paid.
+#
+# `carry_over_permissions` is the regeneration that keeps a narrowing, and it is
+# the MCP path's — `project_config_create`, where the caller is an agent and the
+# grants come from the configuration that server loaded rather than from the
+# request. `init --force` is the operator's reset and deliberately carries
+# nothing (hardci-hq#113); `agentic-hil adopt-hardware` is the command that
+# refreshes the hardware and leaves everything else standing.
 #
 # So this is the gate on the one-way street, and it is deliberately the narrowest
 # thing that opens it: the same closed key set `project_config_set` names, one
@@ -1159,6 +1170,7 @@ def set_permission(
     *,
     command: str,
     open_holds: JsonObject | None = None,
+    expect_document: JsonObject | None = None,
 ) -> JsonObject:
     """Move the named permissions to what ``command`` writes, or change nothing.
 
@@ -1184,8 +1196,9 @@ def set_permission(
       command are applied together or not at all, so opening a whole entry is
       still one line — one that names what it opened, and whose result lists
       exactly those keys.
-    * The whole-file form already exists. `agentic-hil init --force` reopens
-      everything, and the gap hardci-hq#102 describes is the surgical one. A
+    * The whole-file form already exists. `agentic-hil init --force` returns the
+      whole file to the generated defaults, and the gap hardci-hq#102 describes
+      is the surgical one. A
       section form sits between the two and is the shape that reads narrow and
       behaves broad.
     * What a wildcard is really for is not typing but finding out. That is
@@ -1193,12 +1206,12 @@ def set_permission(
       permission key of *this* configuration, entry names and all.
     """
     try:
-        return _set_permission(workspace, existing, keys, command=command, open_holds=open_holds)
+        return _set_permission(workspace, existing, keys, command=command, open_holds=open_holds, expect_document=expect_document)
     except ConfigError as error:
         return with_config_status({"command": f"agentic-hil {command}", **error.to_dict(), **NOT_STARTED}, config_status(existing))
 
 
-def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: list[str], *, command: str, open_holds: JsonObject | None) -> JsonObject:
+def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: list[str], *, command: str, open_holds: JsonObject | None, expect_document: JsonObject | None = None) -> JsonObject:
     if existing is None:  # pragma: no cover - the CLI fails to load before it gets here
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to change.", {"workspace_root": str(workspace)})
     value = PERMISSION_COMMAND_VALUES[command]
@@ -1254,6 +1267,13 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
         actor=ACTOR_HUMAN,
         via=f"cli:{command}",
         expect=dict(changing),
+        # The document the bench hold was planned against, when the caller took
+        # one. `agentic-hil grant`/`revoke` derive the devices they lock from a
+        # document read outside this write lock; if a device is repointed in the
+        # gap, the keys held no longer match the ones a run would take, and the
+        # description compare-and-swap here refuses rather than writing a policy
+        # over a bench held under keys this call never saw (hardci-hq#80).
+        expect_document=expect_document,
         waive_permissions_grant=True,
     )
     if written.get("ok") is not True:

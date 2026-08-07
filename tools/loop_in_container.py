@@ -45,6 +45,20 @@ Usage:
     python tools/loop_in_container.py --start-with review --codex-model gpt-5.1-codex
     python tools/loop_in_container.py --rebuild --task "..."
 
+Exit codes:
+
+    0-19  the loop's own, passed through exactly as `agent_review_loop.py`
+          returned them: 0 clean, 1 rounds exhausted, 2 stalled, 3 failed,
+          4 no progress.
+    20    this wrapper failed and there is no review to report -- no Docker, a
+          refused pre-flight, an interrupted run, or a container or volume it
+          could not remove. Which one is a sentence on stderr.
+
+`review loop exit code: N` goes to stderr whenever the loop ran at all, so the
+review's own result is still readable when a cleanup failure has taken the exit
+status. A caller that only wants the verdict can read the status alone: nothing
+below 20 is ever this wrapper's.
+
 Every option this wrapper does not consume is handed to `agent_review_loop.py`
 unchanged, except the four that decide what the container isolates -- `--repo`,
 `--codex-sandbox`, `--review-checkout` and `--review-checkout-dir`. Those are
@@ -113,11 +127,23 @@ MOUNTED_REPOSITORY = "/repo"
 CONTAINER_HOME = "/home/loop"
 MOUNTED_FILES = "/run/loop-agent-files"
 
-EXIT_NO_DOCKER = 2
-EXIT_REFUSED = 3
-# A run whose home volume outlived it is not a successful run, whatever the loop
-# inside it returned: that volume is the one place a copy of a login can be.
-EXIT_CLEANUP_FAILED = 4
+# Everything below 20 is the inner loop's own code, passed through exactly as
+# `agent_review_loop.py` produced it. 20 and up belong to this wrapper, and it
+# uses one: no Docker, a refused pre-flight, an interrupted run and a container
+# it could not remove are all "the wrapper never got a review out of this", and
+# which of them it was is already a sentence on stderr. Numbering them instead
+# would put three more values next to the loop's four and leave the next wrapper
+# failure to be numbered by whoever adds it -- which is how EXIT_CLEANUP_FAILED
+# came to be a third meaning for 4 rather than a new one.
+EXIT_WRAPPER_FAILED = 20
+
+# The loop's own exit code, on stderr, whenever the loop ran at all. A run whose
+# home volume outlived it is not a successful run, whatever the loop inside it
+# returned -- that volume is the one place a copy of a login can be -- so the
+# wrapper's code has to replace it as the exit status. This line is how the
+# review's own result survives that, and how a caller tells it from a number
+# this wrapper made up.
+INNER_EXIT = "review loop exit code: {code}"
 
 DEFAULT_PAPERWORK = {
     "--review-dir": f"{MOUNTED_REPOSITORY}/.agentic-loop/reviews",
@@ -631,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
             "run tools/agent_review_loop.py directly and expect the Windows failures it names.",
             file=sys.stderr,
         )
-        return EXIT_NO_DOCKER
+        return EXIT_WRAPPER_FAILED
 
     docker = shutil.which(options.docker) or options.docker
     image = options.image or f"{IMAGE_NAME}:{recipe_digest()}"
@@ -649,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
             build_image(docker, image)
     except Refused as error:
         print(f"error: {error}", file=sys.stderr)
-        return EXIT_REFUSED
+        return EXIT_WRAPPER_FAILED
 
     token = uuid.uuid4().hex[:12]
     container_name = f"agentic-hil-loop-{token}"
@@ -657,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_capture([docker, "volume", "create", "--label", "agentic-hil.loop=true", home_volume], 60)
     if result.returncode != 0:
         print(f"error: could not create the home volume: {result.stderr.strip()}", file=sys.stderr)
-        return EXIT_REFUSED
+        return EXIT_WRAPPER_FAILED
 
     command = container_command(
         docker=docker,
@@ -679,11 +705,13 @@ def main(argv: list[str] | None = None) -> int:
     announced: dict[str, str] = {}
     failure: str | None = None
     remaining: list[str] = []
+    # None until the loop returns a code of its own. An interrupt leaves it that
+    # way, and a run that never reached a verdict has no verdict to report.
+    inner: int | None = None
     try:
-        exit_code, announced, failure = stream(command, repository)
+        inner, announced, failure = stream(command, repository)
     except KeyboardInterrupt:
         print("\ninterrupted; stopping the container.", file=sys.stderr)
-        exit_code = EXIT_REFUSED
     finally:
         for remove, kind, name in ((remove_container, "container", container_name), (remove_volume, "volume", home_volume)):
             try:
@@ -691,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 remaining.append(f"{kind} {name}: {type(error).__name__}: {error}")
 
-    if failure is not None and exit_code != 0:
+    if failure is not None and inner not in (None, 0):
         print(
             f"\nan agent CLI reported an authentication failure inside the container: {failure!r}\n"
             "The stored login needs to be renewed on this machine; the container cannot fix it.",
@@ -700,19 +728,24 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nreviews    : {announced.get('reviews', on_this_side(paperwork['--review-dir'], repository))}")
     print(f"logs       : {announced.get('logs', on_this_side(paperwork['--log-dir'], repository))}")
     print(f"commits    : in {repository}; nothing was pushed and no pull request was opened.")
+    if inner is not None:
+        print(INNER_EXIT.format(code=inner), file=sys.stderr)
     if remaining:
         # The home volume is the one place a copy of a login can outlive the run,
         # and a CLI that rewrites its login file in place turns the tmpfs symlink
         # the entrypoint made into a regular file in that volume. A run that
         # leaves it behind is not a run that succeeded, whatever the loop
-        # returned, so this is never folded into the loop's own exit code.
+        # returned, so this is never folded into the loop's own exit code -- and
+        # the loop's code is on stderr above rather than lost to this one.
         print(
             "\nerror: this run left Docker resources behind, and the home volume is where the logins were "
-            "copied to:\n  " + "\n  ".join(remaining) + f"\nRemove them by hand. The loop itself exited {exit_code}.",
+            "copied to:\n  " + "\n  ".join(remaining) + "\nRemove them by hand.",
             file=sys.stderr,
         )
-        return EXIT_CLEANUP_FAILED
-    return exit_code
+        return EXIT_WRAPPER_FAILED
+    if inner is None:
+        return EXIT_WRAPPER_FAILED
+    return inner
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

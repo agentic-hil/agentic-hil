@@ -4,10 +4,13 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import FAKE_STLINK
+from conftest import FAKE_STLINK, write_config
 
+import agentic_hil.cli
+import agentic_hil.tools
 from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_paths
 from agentic_hil.backends.stlink import stlink_target_info
+from agentic_hil.bench import BenchMutex
 from agentic_hil.bootstrap import (
     PROJECT_PROFILE,
     apply_discovery_to_template,
@@ -16,7 +19,16 @@ from agentic_hil.bootstrap import (
     select_probe_id,
 )
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
-from agentic_hil.config import debugger_drives_hardware, debugger_is_placeholder, load_config
+from agentic_hil.config import (
+    ConfigError,
+    debugger_drives_hardware,
+    debugger_is_placeholder,
+    load_authoritative_config,
+    load_config,
+)
+from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
+from agentic_hil.devices import debugger_device
+from agentic_hil.report import read_last_report
 from agentic_hil.tools import project_config_create
 from agentic_hil.types import JsonObject, fold_hardware_id
 
@@ -206,10 +218,13 @@ def test_discovery_applies_project_requirements() -> None:
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     profile = {
         "target": {"name": "demo", "controller": "stm32f446ret6"},
-        # Every flag is granted by default now, so what a profile can still say
-        # is "not this one". allow_mass_erase below is the narrowing; the
-        # version 1 read grants beside it are the request that is dropped.
-        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_mass_erase": False}}},
+        # Every flag a generation can grant is granted by default now, so what a
+        # profile can still say is "not this one". allow_reset below is the
+        # narrowing — it has to be a flag the default leaves *true*, or the test
+        # passes without the profile being consulted at all. The version 1 read
+        # grant beside it is the request that is dropped, and allow_mass_erase is
+        # a profile agreeing with a default that is already false (hardci-hq#107).
+        "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_reset": False, "allow_mass_erase": False}}},
         "com_ports": {"uart": {"baudrate": 115200, "permissions": {"allow_read": True, "allow_write": False}}},
     }
     discovery = {
@@ -229,12 +244,15 @@ def test_discovery_applies_project_requirements() -> None:
     # refused by name, so the request is satisfied by dropping it.
     assert configured["version"] == 2
     # Granted unless the profile said otherwise: a flag it does not name follows
-    # the generated default, and one it names is honoured — which can now only
-    # narrow, because the default it would have to beat is already true.
+    # the generated default, and one it names is honoured — which can only
+    # narrow, because the default it would have to beat is already true wherever
+    # a generation grants anything. allow_raw_debugger_commands is not named here
+    # and is false, which is the generated default arriving through this path
+    # rather than through the template text.
     assert configured["debuggers"]["dut"]["permissions"] == {
         "allow_flash": True,
-        "allow_reset": True,
-        "allow_raw_debugger_commands": True,
+        "allow_reset": False,
+        "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
@@ -251,8 +269,8 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     )
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
-        "agentic_hil.cli.discover_attached_hardware",
-        lambda: {
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: {
             "ok": True,
             "executable": str(executable),
             "probe_id": "STLINK123",
@@ -319,8 +337,8 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     )
     executable = Path(__file__).resolve()
     monkeypatch.setattr(
-        "agentic_hil.cli.discover_attached_hardware",
-        lambda: {
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: {
             "ok": True,
             "executable": str(executable),
             "probe_id": "STLINK123",
@@ -337,11 +355,11 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert result["ok"] is True, result
     assert written["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is False
     assert written["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
-    assert result["narrowed_permissions"] == [
-        "com_ports.dut_uart.permissions.allow_write",
-        "debuggers.dut.permissions.allow_mass_erase",
-    ]
-    assert "every permission granted." not in result["summary"]
+    # allow_mass_erase is false here too, and is deliberately *not* in this list:
+    # the generated default writes it false on every bench, so reporting it as
+    # something the profile narrowed would be a standing false positive
+    # (hardci-hq#107). `permissions` below still carries its actual value.
+    assert result["narrowed_permissions"] == ["com_ports.dut_uart.permissions.allow_write"]
     assert "the project profile set to false" in result["summary"]
     assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
     assert any("allow_mass_erase" in step for step in result["next_steps"])
@@ -361,11 +379,11 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
 
     assert result["ok"] is True, result
     assert result["narrowed_permissions"] == []
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert result["permissions"]["allow_config_permissions_write"] is True
     assert result["permissions"]["debug"]["allow_all_symbols"] is True
     assert result["permissions"]["artifacts"]["allow_upload"] is True
-    assert any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
+    assert any(step.startswith("Every permission in this file is true") for step in result["next_steps"])
     # The permissions are open and the entry still drives nothing. The starter
     # entry names no toolchain and pinning does not find it one, so the steps say
     # that rather than promising a bench that works as written.
@@ -380,7 +398,7 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
 # hardci-hq#104: one machine, one bench, and every path that reads it agreeing.
 
 
-def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> None:
+def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> list[list[str]]:
     """One bench on this host, seen through the real discovery path.
 
     Only the two ST-Link processes and the host port inventory are replaced, so
@@ -388,9 +406,15 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLI
     for real — a double for `discover_attached_hardware` itself would let a caller
     that never calls it pass. It answers by command rather than out of an
     iterator, because more than one caller reads this host per test, and that is
-    the whole point."""
+    the whole point.
+
+    Returns the commands this host was given, in order, so a test can say that
+    the HOTPLUG connect did not happen rather than only that the caller was
+    refused."""
+    commands: list[list[str]] = []
 
     def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(list(command))
         listing = f"ST-LINK SN : {serial}\n"
         return CompletedCommand(listing if "-l" in command else f"{listing}Device name : {controller}\n", "", 0, False, False)
 
@@ -400,6 +424,7 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLI
         "agentic_hil.bootstrap.list_available_com_ports",
         lambda tool: {"ok": True, "tool": tool, "ports": [{"device": device, "serial_number": serial}]},
     )
+    return commands
 
 
 def _bench_facts(path: Path) -> JsonObject:
@@ -470,7 +495,7 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     assert result["hardware_discovery"]["ok"] is False
     assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
     assert result["summary"].startswith("No attached bench was found")
-    assert result["summary"].endswith("with every permission granted.")
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
 
@@ -530,4 +555,502 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
         # The port's own identity (hardci-hq#100), which `init` now writes for
         # the same reason it writes the device: it read it off the same board.
         "com_ports.dut_uart.serial_number",
+    }
+
+
+# ---------------------------------------------------------------------------
+# hardci-hq#113: `init --force` is the reset, and it names what the reset cost.
+
+# The sentences the issue was filed over. Every one was true of
+# `project_config_create`, which calls `carry_over_permissions`, and false of
+# `agentic-hil init --force`, which never has — and every one shipped.
+RETIRED_CARRY_OVER_CLAIMS = (
+    "carries the existing grants over",
+    "carries every existing grant over",
+    "survives `init --force`",
+    "a `false` survives it",
+    "`init --force` keeps it",
+    "still there afterwards",
+    "`--force` does not clear it",
+    "the `false` survives it",
+)
+
+
+def _narrow_by_hand(target: Path, *closures: str) -> None:
+    """Close permissions in a written configuration the way an operator does.
+
+    In the file, with an editor, which is the state hardci-hq#113 is about: a
+    bench somebody narrowed weeks ago and has not thought about since."""
+    text = target.read_text(encoding="utf-8")
+    for flag in closures:
+        assert f"{flag}: true" in text, f"the generated configuration does not grant {flag}"
+        text = text.replace(f"{flag}: true", f"{flag}: false", 1)
+    target.write_text(text, encoding="utf-8")
+
+
+def test_init_force_names_every_narrowing_it_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dangerous case, and the whole of what the issue asked for.
+
+    Somebody narrows a bench, runs `--force` weeks later for an unrelated reason,
+    and the bench is open again with nothing saying so — the silent reopening the
+    one-way street on `project_config_set` exists to prevent. The behaviour stays
+    what its name says: `--force` already discards the baudrate, the
+    `resource_id`, the `state_root` and the artifact roots, and a version that
+    rescued permissions but not those would be harder to predict rather than
+    easier. What it owes the operator is the list. Against master this fails —
+    both permissions came back open and the result mentioned neither."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    _narrow_by_hand(target, "allow_flash", "allow_upload")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert result["discarded_narrowings"] == ["artifacts.allow_upload", "debuggers.dut.permissions.allow_flash"]
+    assert "discarded_narrowings_unreadable" not in result
+    # Named where a person actually reads: the sentence and the field, not only
+    # somewhere among the next steps a long result ends with.
+    for key in result["discarded_narrowings"]:
+        assert key in result["summary"], result["summary"]
+    assert "open again" in result["summary"]
+    # And the way back is in the result rather than in a document. `revoke`
+    # closes what the reset reopened; `grant` is named as its inverse, and
+    # `adopt-hardware` as the command this operator may have wanted instead.
+    reset_step = result["next_steps"][0]
+    assert "agentic-hil revoke <key>" in reset_step
+    assert "agentic-hil grant <key>" in reset_step
+    assert "agentic-hil adopt-hardware" in reset_step
+    # The reset itself is unchanged, which is the decision taken on this issue.
+    written = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    assert written["artifacts"]["allow_upload"] is True
+
+
+def test_init_force_over_a_configuration_it_cannot_read_says_that_rather_than_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--force` is the reset, so it has to work on the file most in need of one.
+
+    "Nothing was lost" and "this could not be checked" are different answers and
+    only one of them is safe to act on, so an unreadable predecessor is reported
+    as itself instead of as an empty list — and the regeneration still happens."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    target.write_text("workspace_root: [unclosed\n\tallow_flash: false\n", encoding="utf-8")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "not parseable YAML" in result["discarded_narrowings_unreadable"]
+    assert result["discarded_narrowings_unreadable"] in result["summary"]
+    assert "is not known" in result["summary"]
+    assert "agentic-hil revoke <key>" in result["next_steps"][0]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+
+
+def test_init_force_replaces_a_configuration_that_is_not_utf8_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated write, a UTF-16 save, something binary dropped on the path.
+
+    The alias refusal inside `secure_atomic_write_text` is the guarded open and
+    never the decode, so reading the existing object as text made a file that is
+    not UTF-8 unwritable rather than replaceable — and `init --force`, the one
+    command whose job is to replace it, failed with a decode error instead."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    target.write_bytes(b"\xff\xfe\x00\x00truncated \x80\x81")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "not UTF-8 text" in result["discarded_narrowings_unreadable"]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+
+
+def test_init_force_restores_a_non_utf8_original_when_the_new_file_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed regeneration puts the exact original back, non-UTF-8 included.
+
+    `--force` authorises replacing the file on success, not deleting the original
+    after the replacement fails. The rollback snapshot used to be the decoded
+    text, and a file that would not decode was recorded as absence — so when the
+    regenerated file failed its final validation, `_restore_file_snapshots`
+    removed the original it reported having restored (hardci-hq#106). The
+    snapshot is the exact bytes now, so the file that could not be read is the
+    file that comes back, byte for byte, rather than a deleted path under a
+    result that says "was rolled back"."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    original = b"\xff\xfe\x00\x00truncated \x80\x81 not utf-8 at all"
+    target.write_bytes(original)
+
+    # The failure is the final validation, after the new file is already written
+    # over the original — the double fault the rollback path exists to survive.
+    def refuse_final_validation(_workspace: Path) -> object:
+        raise ConfigError("config_invalid", "injected final-validation failure", {})
+
+    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", refuse_final_validation)
+
+    result = init_config(force=True)
+
+    assert "rolled back" in result["summary"], result
+    # A clean rollback, not a second fault dressed up as one: the original was
+    # restorable because it was held as bytes.
+    assert "rollback_errors" not in result, result.get("rollback_errors")
+    # The whole of the fix: the exact original is on disk, neither deleted nor
+    # re-encoded.
+    assert target.read_bytes() == original
+
+
+def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first `init` reads the board under machine-wide exclusion, lease or not.
+
+    A workspace with no configuration has no `state_root` to lease against, so the
+    read goes without the audit trail — but "this project holds no lease" was
+    never "nobody holds this board". Another workspace on the machine can be
+    mid-HOTPLUG on the same ST-Link, and the probe lock lives under the user's
+    home keyed on the device, reachable with no shared config. So the read takes
+    it in `before_connect` — the last point before the HOTPLUG connect — and a
+    held board comes back `device_busy` with nothing said to it, exactly as the
+    leased path answers (hardci-hq#108). Against the previous behaviour this
+    connected regardless."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    other_workspace = BenchMutex(frontend="other-workspace")
+    other_workspace.acquire([f"probe:{fold_hardware_id('STLINK123')}"])
+
+    state = {"connected": False}
+
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+        # Enumeration selected this probe; `before_connect` is the last gate before
+        # HOTPLUG, and where the machine-wide probe lock is taken.
+        if before_connect is not None:
+            refusal = before_connect("STLINK123")
+            if refusal is not None:
+                return refusal
+        state["connected"] = True
+        return {
+            "ok": True,
+            "tool": "bootstrap_hardware_discovery",
+            "backend": "stlink",
+            "executable": str(Path(__file__).resolve()),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "available_com_ports": {"ok": True, "ports": []},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        }
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", fake_discovery)
+
+    try:
+        result = init_config()
+    finally:
+        other_workspace.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert result["retry_safe"] is True
+    # Nothing was said to the board, and nothing was written: the read is what was
+    # refused, so there is no file to have written it from.
+    assert state["connected"] is False, "a HOTPLUG connect was attempted on a held probe"
+    assert not Path(result["path"]).exists()
+
+
+def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alias case round 1 left open: the holder is a real configured debugger.
+
+    The other workspace does not reach for `probe:<serial>` by hand — it holds an
+    ordinary debugger the way any run does. That debugger names both a
+    `resource_id` and the probe serial, so its primary lock is
+    `physical:<resource_id>`, an alias only its own operator knows. A first `init`
+    here can derive the serial from enumerating the attached ST-Link but never
+    that alias, so it locks `probe:<serial>` and nothing else. The debugger now
+    holds `probe:<serial>` alongside its `resource_id`, which is the whole fix:
+    the two collide on the one name both sides can name (hardci-hq#108). Before it,
+    the first `init` took `probe:<serial>` unopposed and connected to a board the
+    other workspace was holding under `physical:bench-a`."""
+    other_workspace_dir = tmp_path / "other"
+    other_config = load_config(
+        str(
+            write_config(
+                other_workspace_dir,
+                debuggers_yaml='debuggers:\n  bench:\n    type: stlink\n    probe_id: "STLINK123"\n    resource_id: "bench-a"\n',
+            )
+        )
+    )
+    holder = debugger_device(other_config, "bench")
+    # A real run's hold: the primary alias plus the serial, taken as one set.
+    assert holder.lock_key == "physical:bench-a"
+    assert set(holder.lock_keys) == {"physical:bench-a", f"probe:{fold_hardware_id('STLINK123')}"}
+
+    other_bench = BenchMutex(frontend="other-workspace")
+    holder.acquire(other_bench)
+    assert other_bench.holds("physical:bench-a")
+    assert other_bench.holds(f"probe:{fold_hardware_id('STLINK123')}")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    state = {"connected": False}
+
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+        # Enumeration selects the attached ST-Link by its serial, which is all the
+        # bootstrap read can see of it; `before_connect` locks `probe:<serial>`.
+        if before_connect is not None:
+            refusal = before_connect("STLINK123")
+            if refusal is not None:
+                return refusal
+        state["connected"] = True
+        return {
+            "ok": True,
+            "tool": "bootstrap_hardware_discovery",
+            "backend": "stlink",
+            "executable": str(Path(__file__).resolve()),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "available_com_ports": {"ok": True, "ports": []},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        }
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", fake_discovery)
+
+    try:
+        result = init_config()
+    finally:
+        other_bench.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert result["retry_safe"] is True
+    # The board the other workspace holds under its private alias was never
+    # connected to: the serial lock is what caught it.
+    assert state["connected"] is False, "a HOTPLUG connect reached a probe another workspace held by alias"
+    assert not Path(result["path"]).exists()
+
+
+def test_first_init_refuses_while_another_read_holds_the_enumeration_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bootstrap enumeration serialises machine-wide too, not only the connect.
+
+    `debugger-discovery:all` is the enumeration pseudo-resource. The leased path
+    locks it beneath `state_root`; a bootstrap read has none, so it takes it as a
+    machine-wide lock beside the device locks and two first-time `init`s enumerate
+    one at a time. Held here, the read refuses before it ever runs `st-link -l`."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    other_read = BenchMutex(frontend="other-read")
+    other_read.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+
+    def never(*args: object, **kwargs: object) -> JsonObject:
+        raise AssertionError("enumeration ran while another read held the enumeration lock")
+
+    monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", never)
+
+    try:
+        result = init_config()
+    finally:
+        other_read.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy"
+    assert not Path(result["path"]).exists()
+
+
+def test_a_first_init_reports_no_discard_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """There was no file, so there was nothing to discard.
+
+    An empty list is not the same as silence: a field reading `[]` beside a
+    sentence about what was lost is a finding an operator has to rule out. Absent
+    means absent."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "discarded_narrowings_unreadable" not in result
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
+    assert not any("replaced a file" in step for step in result["next_steps"])
+
+
+def test_init_force_over_a_file_that_narrowed_nothing_reports_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary reset, where the same silence is the honest answer.
+
+    Everything else in the file is still gone — that is what `--force` is — but no
+    permission moved, so there is no permission to name."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert "discarded_narrowings" not in result
+    assert "discarded_narrowings_unreadable" not in result
+    assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
+
+
+def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The claim and the behaviour, asserted in one place, which is the point.
+
+    hardci-hq#113 was not a bug beside a documentation error. It was the two
+    drifting apart with nothing holding them together: three places in the
+    shipped tree promised `init --force` carried a narrowing over, `init_config`
+    never called `carry_over_permissions`, and the whole suite passed either way.
+    So the sentences and the behaviour are pinned to each other here."""
+    root = Path(__file__).resolve().parents[1]
+    # The three the issue named, and `cli.py`, which said it a fourth time in the
+    # docstring of `agentic-hil grant` — fifty lines below the code that reports
+    # the discards, and missed by a sweep that had looked only at the documents.
+    shipped = {
+        "TROUBLESHOOTING.md": root / "TROUBLESHOOTING.md",
+        "src/agentic_hil/configwrite.py": root / "src" / "agentic_hil" / "configwrite.py",
+        "src/agentic_hil/cli.py": root / "src" / "agentic_hil" / "cli.py",
+        "CHANGELOG.md": root / "CHANGELOG.md",
+    }
+    for name, path in shipped.items():
+        text = path.read_text(encoding="utf-8")
+        for claim in RETIRED_CARRY_OVER_CLAIMS:
+            assert claim not in text, f"{name} still claims `init --force` keeps a narrowing: {claim!r}"
+        assert "agentic-hil adopt-hardware" in text, f"{name} does not name the command that does keep the rest"
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = Path(init_config()["path"])
+    _narrow_by_hand(target, "allow_flash")
+
+    result = init_config(force=True)
+
+    assert result["discarded_narrowings"] == ["debuggers.dut.permissions.allow_flash"]
+    assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
+    # And the carrying regeneration stays `project_config_create`'s alone. A CLI
+    # that starts calling it makes the retired sentences true again by the back
+    # door, which is exactly the drift this test exists to catch — so the pin is
+    # on the binding rather than on the word: to call it, `cli` must hold it.
+    assert not hasattr(agentic_hil.cli, "carry_over_permissions")
+    assert hasattr(agentic_hil.tools, "carry_over_permissions")
+
+# hardci-hq#108: `init` reads a board, so `init` is held to what a board read is
+# held to.
+#
+# Enumerating probes and connecting in HOTPLUG mode is a hardware read whichever
+# command does it — an SWD attach halts the core. `init` did it directly: no
+# `before_connect`, no coordinator, no record, while `project_config_create`
+# writes the same file from the same read under a lease. That the CLI is the
+# operator's authority does not carry the exception; `adopt-hardware` makes the
+# same argument about the grant, waives that, and leases anyway.
+
+
+def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agentic-hil init --force` gets `device_busy`, not the board.
+
+    The holder is a stranger — an MCP server, another project's run, a test
+    reactor. It has the physical probe, which is the lock the read takes between
+    enumerating and connecting, so the HOTPLUG connect never happens. Rewriting
+    this workspace's whole policy in the middle of somebody else's run is not
+    something an operator wants either, so nothing is written."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands = _one_attached_stlink(monkeypatch)
+    first = init_config()
+    assert first["ok"] is True, first
+    path = Path(first["path"])
+    before = path.read_bytes()
+    commands.clear()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"probe:{fold_hardware_id('STLINK123')}"])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["holder"]["label"] == "other-bench-session"
+    # The record and the refusal name the command that ran, not the MCP tool
+    # that writes the same file — an incident has to say which one left it.
+    assert refused["tool"] == "cli_init"
+    assert not any("mode=HOTPLUG" in argument for command in commands for argument in command), commands
+    assert path.read_bytes() == before
+
+
+def test_the_board_init_reads_is_written_into_the_audit_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading a board is reading a board, whichever command did it.
+
+    `init` left nothing behind at all, so a bench could be connected to with the
+    audit trail showing no access. The record says which probe, which locks were
+    held for it and the state those leases actually ended in — the same record
+    `project_config_create` leaves for the same read."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+    first = init_config()
+    assert first["ok"] is True, first
+
+    regenerated = init_config(force=True)
+
+    assert regenerated["ok"] is True, regenerated
+    report = read_last_report(load_authoritative_config(workspace))
+    assert report["tool"] == "cli_init"
+    assert report["probe_id"] == "STLINK123"
+    assert report["resources"] == ["debugger-discovery:all", f"probe:{fold_hardware_id('STLINK123')}"]
+    # Written while the board was held and re-committed once the leases reached
+    # their terminal state, so the record and the result agree about the bench.
+    assert report["lease_state"] == "released"
+    assert report["cleanup_required"] is False
+    assert report["quarantined"] is False
+
+
+def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one case that cannot be leased, handled rather than refused.
+
+    A workspace with no loadable configuration has no `state_root` to record a
+    lease under and no policy to audit against — the machinery does not exist
+    rather than being skipped — and it is also the one case where nothing on this
+    machine can be holding a board on this project's behalf. Refusing it would
+    make a first `init` impossible, which is worse than the defect. What it must
+    not be is silent: the result names the unleased read and the reason, so the
+    operator is not left inferring it from a record that is not there."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+
+    first = init_config()
+
+    assert first["ok"] is True, first
+    assert first["hardware_discovery"]["ok"] is True
+    assert first["hardware_lease"] == {
+        "leased": False,
+        "reason": "config_file_not_found",
+        "summary": first["hardware_lease"]["summary"],
+    }
+    assert "no loadable configuration" in first["hardware_lease"]["summary"]
+    # And the very next one is leased, because by then there is something to
+    # lease against. The unleased read is the first and only the first.
+    assert init_config(force=True)["hardware_lease"] == {
+        "leased": True,
+        "tool": "cli_init",
+        "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
     }

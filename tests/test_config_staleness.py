@@ -301,7 +301,7 @@ def test_an_edit_after_this_session_created_the_configuration_is_still_reported(
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(
         "agentic_hil.tools.discover_attached_hardware",
-        lambda: {
+        lambda *args, **kwargs: {
             "ok": True,
             "tool": "bootstrap_hardware_discovery",
             "backend": "stlink",
