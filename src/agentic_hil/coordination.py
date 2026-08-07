@@ -111,6 +111,36 @@ DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
 # lose nothing by staying out: the automatic path still attempts them, with its
 # predicate, on the next hardware call.
 NO_CONTACT_RECOVERABLE_REASONS = frozenset({DEAD_OWNER_NO_CONTACT_REASON, LEASE_RELEASE_RETRY_REASON})
+
+
+class _PerformedRecoveryReasons(frozenset):  # type: ignore[type-arg]
+    """Every reason a recovery action that actually ran may settle.
+
+    An incident is not a padlock: a run that failed has already delivered its
+    verdict, and what follows is an attempt to put the board back into a state
+    the next run can start from. When that attempt performs the thing the reason
+    names as unconfirmed — a reset driven into halt, a probe that answers, a
+    flash that completed and reset — the reason is answered, whatever it was
+    called. So this set is defined by what it excludes rather than by an
+    enumeration that would silently fail to cover a reason added later, and the
+    exclusion is the ``audit_broken`` families: those name a ledger that could
+    not be written, and no amount of driving the target writes it. They keep
+    needing the operator's route.
+
+    ``retryable_incident`` refuses a lease whose ``audit_ok`` is false before
+    this is ever consulted, so the name test here is the second of two locks on
+    the same door, not the only one."""
+
+    __slots__ = ()
+
+    def __contains__(self, item: object) -> bool:
+        return isinstance(item, str) and "audit_broken" not in item
+
+
+RECOVERY_ACTION_REASONS: frozenset[str] = _PerformedRecoveryReasons()
+# What a performed recovery action records as its route in the ledger, beside
+# the operator's `cli:recover` and the agent's `mcp:hardware_recover`.
+RECOVERY_ACTION_VIA = "recovery_action"
 # Who a recovery ledger line records as having cleared the incident. Spelled
 # exactly as `agentic_hil.configwrite`'s provenance actors rather than imported
 # from it — coordination sits below the configuration writer — and a test
@@ -125,6 +155,16 @@ RECOVERY_ACTOR_SERVER = "server"
 # same way could not be audited afterwards.
 ATTESTATION_OPERATOR = "operator_confirmation"
 ATTESTATION_NO_CONTACT_CLASS = "no_contact_reason_class"
+# The safe state was established by performing the act the reason named as
+# unconfirmed, and a predicate then read it back. Distinct from the operator's
+# signature because it attests a narrower thing: that this host drove the target
+# into a defined state and saw it, not that anybody looked at the bench.
+ATTESTATION_RECOVERY_ACTION = "recovery_action_verified"
+# An operator's statement, relayed by the agent that asked them for it in chat.
+# Deliberately not spelled the same as `ATTESTATION_OPERATOR`: the operator did
+# not sign this line themselves, and the ledger has to keep the difference
+# between a person at a command line and a person quoted by a program.
+ATTESTATION_OPERATOR_VIA_AGENT = "operator_statement_via_agent"
 def _public_record(record: JsonObject | None) -> JsonObject | None:
     if not isinstance(record, dict):
         return record
@@ -749,20 +789,65 @@ class HardwareCoordinator:
             reason = reasons.pop()
             return reason if reason in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed) else None
 
-    def resolve_retryable_incident(self, reason: str, *, allowed: frozenset[str] | None = None) -> bool:
+    def resolve_retryable_incident(
+        self,
+        reason: str,
+        *,
+        allowed: frozenset[str] | None = None,
+        via: str = "auto_recovery",
+        attestation: str = ATTESTATION_NO_CONTACT_CLASS,
+    ) -> bool:
         """Clear a recoverable incident once the caller has verified safe state.
 
         The caller owns the verification and, with it, the decision of how wide
         ``allowed`` may be; this only performs the state transition, and only for
-        the exact incident ``retryable_incident`` still reports."""
+        the exact incident ``retryable_incident`` still reports.
+
+        Evidence first, exactly as ``recover`` and ``_release_dead_owner`` do it:
+        the ledger line is appended before any lease moves, so an incident whose
+        clearing could not be durably recorded is not cleared at all. That
+        ordering is the reason this can be handed the wide
+        ``RECOVERY_ACTION_REASONS`` set without the ledger going quiet about what
+        happened — every incident that stops blocking the bench leaves a line
+        naming who cleared it and on what evidence."""
         with self._guard:
             permitted = RETRYABLE_CLEANUP_REASONS if allowed is None else allowed
             if reason not in permitted or self.retryable_incident(permitted) != reason:
+                return False
+            if not self._append_recovery_resolution(reason, via=via, attestation=attestation):
                 return False
             for lease in [item for item in self.leases.values() if item.state == "cleanup_required"]:
                 if not self.resolve_retryable_cleanup(lease, reason, allowed=permitted):
                     return False
             return not self.blocked
+
+    def _append_recovery_resolution(self, reason: str, *, via: str, attestation: str) -> bool:
+        """Record an incident clearing that no operator signed, or refuse it.
+
+        Returns False when the line could not be written, which the caller reads
+        as "the incident stays" — the ledger is the only place a bench owner can
+        later find out that a quarantine ended without anybody being asked."""
+        event = {
+            "event": "recovery",
+            "recovery": "incident_resolved",
+            "reason": reason,
+            "actor": RECOVERY_ACTOR_SERVER,
+            "via": via,
+            "attestation": attestation,
+            "quarantine_id": self.quarantine_id,
+            "resources": sorted(self.incident_resources),
+            "workspace": self.config.workspace_root,
+            "config_path": self.config.config_path,
+            "recorded_config_sha256": self.config_sha256,
+            "current_config_sha256": self.config_sha256,
+            "resumed": False,
+            "time": utc_now_iso(),
+        }
+        try:
+            safe_append_text(self.root / "recovery.jsonl", json.dumps(event) + "\n")
+        except OSError:
+            return False
+        return True
 
     def poison(self, reason: str, error: object | None = None, *, audit_broken: bool = False, resources: list[str] | None = None) -> None:
         with self._guard:
@@ -1111,6 +1196,7 @@ class HardwareCoordinator:
         actor: str = RECOVERY_ACTOR_HUMAN,
         via: str = "cli:recover",
         attestation: str = ATTESTATION_OPERATOR,
+        operator_statement: str | None = None,
     ) -> JsonObject:
         """Clear a quarantine and give its resources back.
 
@@ -1122,6 +1208,13 @@ class HardwareCoordinator:
         happens in the caller (`agent_recoverable_reasons`), never here. This
         performs the transition, and the transition is the same one either way —
         which is the point of there being one implementation of it.
+
+        ``operator_statement`` carries what a person said about the bench when
+        the agent is the one relaying it. It lands in the ledger verbatim and
+        only when there is one: the key is absent otherwise rather than null,
+        because a line reading ``"operator_statement": null`` invites being read
+        as an operator who said nothing, and what actually happened is that
+        nobody was quoted at all.
         """
         if not safe_state_confirmed:
             return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state."}
@@ -1198,6 +1291,8 @@ class HardwareCoordinator:
                     "resumed": resuming,
                     "time": utc_now_iso(),
                 }
+                if operator_statement:
+                    audit_event["operator_statement"] = operator_statement
                 try:
                     safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
                 except BaseException as error:
@@ -1231,9 +1326,12 @@ class HardwareCoordinator:
                     # opening the ledger.
                     "actor": actor,
                     "attestation": attestation,
+                    **({"operator_statement": operator_statement} if operator_statement else {}),
                     "summary": (
                         "Quarantined hardware resources were released after operator-confirmed recovery."
                         if attestation == ATTESTATION_OPERATOR
+                        else "Quarantined hardware resources were released on the operator's statement, recorded verbatim in the recovery ledger."
+                        if attestation == ATTESTATION_OPERATOR_VIA_AGENT
                         else "Quarantined hardware resources were released: every reason it was held for names a call that never reached the hardware."
                     ),
                 }

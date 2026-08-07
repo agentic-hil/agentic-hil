@@ -1098,6 +1098,15 @@ class TestReactor:
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
         elif not cleanup_ok:
             result["error_type"] = "cleanup_failed"
+        if not ok:
+            # A run that failed aborts, and the abort calls the recovery action.
+            # After the devices are closed and after this result exists, so the
+            # evidence is written before anything drives the board again, and
+            # `ok` is not touched: recovering the bench does not un-fail a test.
+            # Reached for a failed cleanup as well as for a failed step —
+            # cleanup is where the unconfirmed-effect incidents come from, and
+            # those are precisely the ones that used to sit until a person came.
+            result["recovery"] = self.service.recover_after_failed_run(sorted(self.devices))
         return result
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:

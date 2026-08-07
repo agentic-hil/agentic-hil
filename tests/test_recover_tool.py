@@ -340,14 +340,29 @@ def test_the_schema_offers_no_way_to_confirm_a_safe_state() -> None:
     """The absence is the contract, so it is asserted rather than assumed.
 
     A `confirm_safe_state` argument would be a flag the caller sets for itself,
-    and a confirmation one gives oneself is not a confirmation. The tool takes no
-    arguments at all, which also closes every neighbouring spelling at once.
+    and a confirmation one gives oneself is not a confirmation.
+
+    Narrowed from "no properties at all" when `operator_statement` arrived. The
+    original pin used emptiness as a cheap way to close every spelling of a
+    self-signed confirmation at once, and that shortcut stopped being available
+    once the tool grew an argument — but the thing it was protecting is intact
+    and is what this now states directly: the only property is a string, and no
+    boolean of any name exists to be set. That distinction is the whole design.
+    A boolean can be invented by a caller with nothing to go on; a sentence about
+    the state of a bench has to have been given to it by somebody.
     """
     schema = schema_for(TOOL)
 
-    assert schema.get("properties", {}) == {}
+    assert set(schema.get("properties", {})) == {"operator_statement"}
+    assert schema["properties"]["operator_statement"]["type"] == "string"
+    # Empty is not a statement: a caller with nothing to relay must be refused
+    # rather than allowed to satisfy the argument with "".
+    assert schema["properties"]["operator_statement"]["minLength"] == 1
     assert schema.get("additionalProperties") is False
+    # Still nothing the tool demands — the no-contact reasons clear with no
+    # arguments, exactly as before.
     assert not schema.get("required")
+    assert not [key for key, value in schema.get("properties", {}).items() if value.get("type") == "boolean"]
     serialized = json.dumps(schema)
     for spelling in ("confirm", "safe_state", "force", "override", "quarantine_id"):
         assert spelling not in serialized, spelling

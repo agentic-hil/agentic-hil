@@ -129,26 +129,31 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
-    # No arguments, and the missing one is the contract. There is no
-    # `confirm_safe_state` here and there will not be: that flag attests that a
-    # physical board is still and holds the expected firmware, and a flag the
-    # caller sets for itself is not a confirmation of anything. The reasons
-    # that need it are refused with the operator's command line instead,
-    # whatever the configuration grants. A schema test pins the absence, as
-    # another pins the absent version argument on the upgrade tool.
+    # One optional argument, and its type is the contract. There is no
+    # `confirm_safe_state` boolean here and there will not be: that flag attests
+    # that a physical board is still and holds the expected firmware, and a flag
+    # the caller sets for itself is not a confirmation of anything. A schema test
+    # pins its absence, as another pins the absent version argument on the
+    # upgrade tool. `operator_statement` is the opposite shape and that is why it
+    # is allowed to exist: it cannot be satisfied by a value the caller invents,
+    # because what it has to contain is what a person said. A boolean can be
+    # guessed into existence; a sentence about the state of a bench has to come
+    # from somebody. The tool refuses an empty one for the same reason.
     {
         "name": "hardware_recover",
         "description": (
-            "Clear this bench's quarantine when every reason it is held for names a call that never reached the "
-            "hardware — a lease release that could not persist its own record, an owner process that died before its "
-            "call touched a board. Takes no arguments. A reason that needs somebody to look at the board is refused "
-            "with recovery_requires_physical_check and the exact `agentic-hil recover --confirm-safe-state "
-            "--quarantine-id <id>` line to relay to the operator, because confirming that a board is still and runs "
-            "the expected firmware is a statement about the physical world that nothing here can make. Needs "
+            "Clear this bench's quarantine. Reasons that name a call which never reached the hardware — a lease "
+            "release that could not persist its own record, an owner process that died before its call touched a "
+            "board — clear with no arguments. Every other reason needs operator_statement: ask the operator in chat "
+            "what state the bench is in, then pass back what they answered, in their words. It is written verbatim "
+            "to the recovery ledger as their statement, relayed by you. Never write one you were not given — a "
+            "ledger line that reflects no actual operator utterance is a false record with you recorded as the "
+            "actor; when you have nobody to ask, relay the `agentic-hil recover --confirm-safe-state "
+            "--quarantine-id <id>` line the refusal hands you and let them run it themselves. Needs "
             "permissions.allow_recover. Safe to call when nothing is quarantined; it answers was_quarantined: false. "
             "Use this instead of deleting the server's state files, which is never the fix."
         ),
-        "inputSchema": EMPTY_OBJECT_SCHEMA,
+        "inputSchema": object_schema({"operator_statement": NONEMPTY_STRING}),
     },
     # No parameters, and that is the contract. The configuration is generated for
     # the workspace this server is bound to, out of what is attached to this
