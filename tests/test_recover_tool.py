@@ -340,14 +340,29 @@ def test_the_schema_offers_no_way_to_confirm_a_safe_state() -> None:
     """The absence is the contract, so it is asserted rather than assumed.
 
     A `confirm_safe_state` argument would be a flag the caller sets for itself,
-    and a confirmation one gives oneself is not a confirmation. The tool takes no
-    arguments at all, which also closes every neighbouring spelling at once.
+    and a confirmation one gives oneself is not a confirmation.
+
+    Narrowed from "no properties at all" when `operator_statement` arrived. The
+    original pin used emptiness as a cheap way to close every spelling of a
+    self-signed confirmation at once, and that shortcut stopped being available
+    once the tool grew an argument — but the thing it was protecting is intact
+    and is what this now states directly: the only property is a string, and no
+    boolean of any name exists to be set. That distinction is the whole design.
+    A boolean can be invented by a caller with nothing to go on; a sentence about
+    the state of a bench has to have been given to it by somebody.
     """
     schema = schema_for(TOOL)
 
-    assert schema.get("properties", {}) == {}
+    assert set(schema.get("properties", {})) == {"operator_statement"}
+    assert schema["properties"]["operator_statement"]["type"] == "string"
+    # Empty is not a statement: a caller with nothing to relay must be refused
+    # rather than allowed to satisfy the argument with "".
+    assert schema["properties"]["operator_statement"]["minLength"] == 1
     assert schema.get("additionalProperties") is False
+    # Still nothing the tool demands — the no-contact reasons clear with no
+    # arguments, exactly as before.
     assert not schema.get("required")
+    assert not [key for key, value in schema.get("properties", {}).items() if value.get("type") == "boolean"]
     serialized = json.dumps(schema)
     for spelling in ("confirm", "safe_state", "force", "override", "quarantine_id"):
         assert spelling not in serialized, spelling
@@ -389,3 +404,127 @@ def test_each_refusal_carries_its_own_fix(key: str) -> None:
     # Both point at the same route out, and neither invents a second one.
     assert any("operator_command" in step for step in entry["remediation"])
     assert any("state_root" in step for step in entry["do_not"])
+
+
+# ---------------------------------------------------------------------------
+# The operator's statement, relayed.
+#
+# The class boundary did not move: a claim about a physical bench still comes
+# from a person. What moved is who may carry the sentence. Telling an agent in a
+# chat window to send its operator hunting for a shell — on a host that may not
+# have one — never protected the board; it only meant the claim was made out of
+# band and the ledger never saw it.
+
+
+def test_a_relayed_operator_statement_clears_a_physical_reason(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    incident = quarantine(config, "safe_state_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {"operator_statement": "Board is powered down and on the bench, I looked."})
+
+        assert result["ok"] is True, result
+        assert result["was_quarantined"] is True
+        assert result["recovered_quarantine_id"] == incident
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+
+def test_the_statement_is_recorded_verbatim_and_not_as_a_signature(tmp_path: Path) -> None:
+    """The ledger has to keep a person quoted by a program distinct from a person
+    at their own command line. Both are the operator's word; only one of them is
+    the operator's signature, and an audit that spelled them the same could never
+    tell afterwards which had happened."""
+    config = config_for(tmp_path)
+    quarantine(config, "safe_state_unconfirmed")
+    said = "Powered off, USB unplugged, nothing else is attached to it."
+    service = AgenticHILToolService(config)
+    try:
+        service.call(TOOL, {"operator_statement": said})
+    finally:
+        service.close()
+
+    lines = ledger(config)
+    assert len(lines) == 1
+    assert lines[0]["operator_statement"] == said
+    assert lines[0]["attestation"] == "operator_statement_via_agent"
+    assert lines[0]["attestation"] != ATTESTATION_NO_CONTACT_CLASS
+    assert lines[0]["actor"] == ACTOR_AGENT
+
+
+def test_a_no_contact_reason_needs_no_statement(tmp_path: Path) -> None:
+    """The statement is for the reasons that need a person, and asking for one
+    where nothing was ever touched would teach an agent to produce sentences for
+    a form rather than because somebody spoke."""
+    config = config_for(tmp_path)
+    quarantine(config, LEASE_RELEASE_RETRY_REASON)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+
+        assert result["ok"] is True, result
+    finally:
+        service.close()
+
+    assert "operator_statement" not in ledger(config)[0]
+
+
+def test_an_empty_statement_is_not_a_statement(tmp_path: Path) -> None:
+    """`minLength: 1` on the wire, so a caller with nothing to relay cannot
+    satisfy the argument by passing the absence of one."""
+    config = config_for(tmp_path)
+    quarantine(config, "safe_state_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {"operator_statement": ""})
+
+        assert result["ok"] is False
+        assert result["error_type"] == "invalid_argument"
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+
+def test_the_refusal_explains_the_argument_and_the_lie_it_would_be(tmp_path: Path) -> None:
+    """A refusal that only says "a person must do this" sends an agent looking
+    for a shell. What is actually needed is the person's sentence, and the agent
+    is already talking to them — so the refusal says to ask, says what happens to
+    the answer, and says outright what inventing one would be. The operator's own
+    command line stays in it as the route for when there is nobody to ask."""
+    config = config_for(tmp_path)
+    incident = quarantine(config, "safe_state_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == RECOVERY_PHYSICAL_CHECK_ERROR
+    assert result["missing_argument"] == "operator_statement"
+    assert "ask the operator" in result["next_step"].lower()
+    assert "ledger" in result["next_step"].lower()
+    # The catalogue carries the warning, and it is the first thing in it.
+    assert "never invent an `operator_statement`" in result["do_not"][0].lower()
+    assert "false" in result["do_not"][0].lower()
+    assert result["operator_command"] == recovery_operator_command(incident)
+
+
+def test_a_statement_does_not_reach_the_audit_broken_family(tmp_path: Path) -> None:
+    """The one family no sentence settles. The reason names a ledger that could
+    not be written, and clearing it on a statement would put the attestation into
+    the very file whose failure raised the incident."""
+    config = config_for(tmp_path)
+    owner = HardwareCoordinator(config, "audit-broken-setup")
+    lease = owner.acquire(RESOURCE)
+    lease.quarantine("audit_broken", audit_broken=True)
+    owner.close()
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {"operator_statement": "I looked at it, it is fine."})
+
+        assert result["ok"] is False, result
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()

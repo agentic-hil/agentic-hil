@@ -50,9 +50,13 @@ from agentic_hil.configwrite import (
 from agentic_hil.contracts import MCP_TOOL_NAMES, validate_tool_arguments
 from agentic_hil.coordination import (
     ATTESTATION_NO_CONTACT_CLASS,
+    ATTESTATION_OPERATOR_VIA_AGENT,
+    ATTESTATION_RECOVERY_ACTION,
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    RECOVERY_ACTION_REASONS,
+    RECOVERY_ACTION_VIA,
     RECOVERY_ACTOR_AGENT,
     RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
@@ -420,7 +424,7 @@ class AgenticHILToolService:
             # that exists to answer a blocked bench, so the gate above — which
             # refuses every hardware tool while an incident is open — must not
             # stand in front of it.
-            "hardware_recover": lambda: self.hardware_recover(),
+            "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement")),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it. It also reads a
@@ -455,7 +459,8 @@ class AgenticHILToolService:
                 return unbound_debugger_error(name, self.config)
             if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
-            if self.coordinator.blocked and name in audited_hardware_tools() and name not in containment_tools():
+            blocked_before = self.coordinator.blocked
+            if blocked_before and name in audited_hardware_tools() and name not in containment_tools():
                 try:
                     recovered = self._attempt_machine_recovery()
                 except Exception as error:
@@ -464,7 +469,13 @@ class AgenticHILToolService:
                     # stays exactly as it was and the operator still owns it.
                     self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
                     recovered = None
-                if recovered is None:
+                # The automatic attempt still runs for every tool — it is the
+                # cheapest way out and it costs a caller nothing. What the
+                # recovery class is exempt from is the *refusal* when that
+                # attempt did not settle the incident: those calls are the
+                # remedy, and refusing them was what left an incident with no
+                # way out but a person at a shell.
+                if recovered is None and name not in recovery_class_tools():
                     return {
                         "ok": False,
                         "tool": name,
@@ -487,8 +498,8 @@ class AgenticHILToolService:
                     permission_failure = self._debug_permission_failure(name, args)
                     if permission_failure is not None:
                         return permission_failure
-                    return self._coordinated_debug_call(name, lambda: self._invoke_dispatch(dispatch[name]))
-                return self._invoke_dispatch(dispatch[name])
+                    return self._settle_after_recovery_class_call(name, blocked_before, self._coordinated_debug_call(name, lambda: self._invoke_dispatch(dispatch[name])))
+                return self._settle_after_recovery_class_call(name, blocked_before, self._invoke_dispatch(dispatch[name]))
             except BaseException as error:
                 if name in audited_hardware_tools() or name in containment_tools():
                     poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
@@ -590,8 +601,8 @@ class AgenticHILToolService:
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
 
-    def hardware_recover(self) -> JsonObject:
-        """Clear this bench's quarantine, for the reasons that need no bench visit.
+    def hardware_recover(self, operator_statement: str | None = None) -> JsonObject:
+        """Clear this bench's quarantine, on its own or on a relayed statement.
 
         Before this tool a quarantine could be seen and explained over MCP and
         cleared nowhere but at a shell, so on a host that has no shell an agent
@@ -604,15 +615,26 @@ class AgenticHILToolService:
         since 0.8.0 and narrowable to false and not back, through the same
         one-way `project_config_set` as the rest.
 
-        The class boundary is not authorization and no grant reaches it.
-        `--confirm-safe-state` attests that a physical board is still and holds
-        the firmware somebody expects; that is a claim about the world, and the
-        only entity that can make it is a person standing at the bench. So a
-        reason that requires it is refused here whatever the configuration says,
-        and the refusal carries the command line for the person to run. This is
-        also why this tool takes no arguments at all: a `confirm_safe_state`
-        parameter would be a flag the agent sets for itself, and a confirmation
-        one gives oneself is not one.
+        The class boundary is not authorization and no grant reaches it. Safe
+        state — that a physical board is still and holds the firmware somebody
+        expects — is a claim about the world, and the only entity that can make
+        it is a person. That has not changed. What changed is who may carry the
+        sentence: an agent in a chat window has a person on the other end of it,
+        and telling that person to go find a shell, on a host that may not have
+        one, was never protecting anything. It only meant the claim was made out
+        of band and the ledger never saw it.
+
+        So the boundary now reads: the agent may not *make* the claim, and may
+        relay one. `operator_statement` is a string and not a boolean precisely
+        because of that split — a boolean is a flag the caller sets for itself,
+        which is why `confirm_safe_state` does not exist here and will not, while
+        a sentence about a bench is something the caller has to have been given.
+        Nothing here can verify it was; the tool's own description says outright
+        that inventing one writes a false ledger record with the agent named as
+        actor, and the ledger keeps `operator_statement_via_agent` distinct from
+        an operator's own `operator_confirmation` so the two are never read as
+        the same evidence afterwards. The operator's command line stays in every
+        refusal as the direct route for when there is nobody to ask.
 
         The transition, when it is allowed, is the same `coordinator.recover`
         the CLI performs — one implementation, one set of marker-consistency
@@ -660,6 +682,28 @@ class AgenticHILToolService:
         # It goes to the operator with the rest, because "unnamed" is the one
         # thing an automatic clearance must never read as "harmless".
         physical = sorted(set(reasons) - allowed) if reasons else ["unnamed_incident"]
+        # No sentence settles a broken audit. The reason names a ledger that
+        # could not be written, and clearing it on a statement would put the
+        # attestation into the very file whose failure raised the incident —
+        # so this one family keeps the operator's own route, as it did before.
+        audit_broken = sorted(reason for reason in reasons if "audit_broken" in reason)
+        if physical and operator_statement and not audit_broken:
+            # The operator answered, and the agent is relaying what they said.
+            # This is not the agent attesting anything — it holds no opinion
+            # about the board and the ledger does not record one. It records a
+            # quoted person, under a label that stays distinct from a signature
+            # made at the operator's own command line.
+            cleared = self.coordinator.recover(
+                safe_state_confirmed=True,
+                quarantine_id=quarantine_id if isinstance(quarantine_id, str) else None,
+                actor=RECOVERY_ACTOR_AGENT,
+                via="mcp:hardware_recover",
+                attestation=ATTESTATION_OPERATOR_VIA_AGENT,
+                operator_statement=operator_statement,
+            )
+            if cleared.get("ok") is not True:
+                return {**cleared, "cleanup_reasons": reasons, "operator_command": recovery_operator_command(quarantine_id)}
+            return {**cleared, "was_quarantined": True, "cleared_reasons": reasons}
         if physical:
             # `quarantine_guidance` is attached by `call`, so the four facts the
             # signer needs travel with the command they are needed for.
@@ -668,10 +712,22 @@ class AgenticHILToolService:
                 "tool": "hardware_recover",
                 "error_type": RECOVERY_PHYSICAL_CHECK_ERROR,
                 "summary": (
-                    "This quarantine names a physical state only somebody at the bench can confirm, so it is not clearable from here."
+                    "This quarantine names a state only a person can speak for, so it needs an operator_statement: "
+                    "ask the operator what state the bench is in and call again with their answer."
                     if reasons
-                    else "This quarantine names no reason at all, so nothing here can classify it; an unnamed incident is the last thing to read as harmless."
+                    else "This quarantine names no reason at all, so nothing here can classify it; an unnamed incident is the last "
+                    "thing to read as harmless. Ask the operator what state the bench is in and call again with their answer."
                 ),
+                # The argument, not just the rule. A refusal that only says "a
+                # person must do this" sends an agent looking for a shell it may
+                # not have; what is actually needed is the person's sentence, and
+                # the agent is talking to them.
+                "next_step": (
+                    "Ask the operator, in chat: is the board powered, still, and holding the firmware you expect? "
+                    "Call hardware_recover again with operator_statement set to what they answered, in their words. "
+                    "It is written to the recovery ledger verbatim, recorded as their statement relayed by you."
+                ),
+                "missing_argument": "operator_statement",
                 "quarantine_id": quarantine_id,
                 "cleanup_reasons": reasons,
                 "physical_check_reasons": physical,
@@ -755,11 +811,23 @@ class AgenticHILToolService:
         """Close the run and give the devices back.
 
         Idempotent: closing a run that is not open is how an agent recovers from
-        losing track of its own state, so it answers instead of refusing."""
+        losing track of its own state, so it answers instead of refusing.
+
+        This is the interactive half of the run teardown, so it carries the same
+        recovery seam the reactor's abort path does: an agent that drove its own
+        steps and hit a failure ends its run here, and the bench it hands back
+        should be one the next run can start on. The trigger is an incident still
+        standing after the devices are released — an interactive run has no step
+        list to read a verdict off, and an open incident is the same statement in
+        the form this call can actually see."""
+        declared = [item for item in (self.coordinator.run_status().get("declared_devices") or []) if isinstance(item, str)]
         try:
-            return self.coordinator.end_run()
+            stopped = self.coordinator.end_run()
         except CoordinationError as error:
             return {"tool": "bench_run_stop", "side_effect_committed": False, **error.result}
+        if not self.coordinator.blocked:
+            return stopped
+        return {**stopped, "recovery": self.recover_after_failed_run(declared)}
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
@@ -841,6 +909,186 @@ class AgenticHILToolService:
         self._release_recovered_leases()
         return report
 
+    def recover_after_failed_run(self, devices: list[str] | None = None) -> JsonObject:
+        """Put the bench back into a state the next run can start from.
+
+        This is the run teardown's recovery seam. A run that failed has already
+        delivered its verdict — the failure is the result, and nothing here
+        changes it — so what is left to do is leave the bench usable instead of
+        leaving a padlock on it for a person to come and take off. The actions
+        are the ones `_attempt_machine_recovery` performs on the acquire path:
+        reap this owner's leftover debugger processes, drive the target into a
+        halted state where the bench's policy and the probe's grants allow it,
+        and re-read the probe to see that it answers.
+
+        It runs whether or not the failure raised an incident, because the two
+        cases want the same thing: a step that failed on an assertion leaves a
+        board in whatever state the test drove it to, and the next run should not
+        inherit it. When there *is* an incident and the actions performed the
+        thing it named as unconfirmed, the incident is resolved here too — see
+        `RECOVERY_ACTION_REASONS` for which reasons that covers and why the
+        `audit_broken` families are not among them.
+
+        Returns the run result's `recovery` block. It never raises: a fault
+        inside recovery must not replace the run's own verdict with a crash."""
+        block: JsonObject = {"attempted": False, "actions": [], "outcome": "skipped"}
+        if devices:
+            block["devices"] = sorted(devices)
+        policy = self.config.recovery
+        block["auto_recover_policy"] = policy.auto_recover
+        block["auto_recover_policy_source"] = "config" if policy.auto_recover_explicit else "default"
+        withheld = self._recovery_withheld_reason()
+        if withheld is not None:
+            reason, summary = withheld
+            return {**block, "reason_not_attempted": reason, "summary": summary}
+        try:
+            return {**block, **self._perform_recovery_actions()}
+        except Exception as error:
+            # Same rule as the acquire path: recovery may unblock hardware, so a
+            # fault inside it fails closed. The incident, if there is one, stays.
+            self._poison_quietly("run_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
+            return {
+                **block,
+                "attempted": True,
+                "outcome": "error",
+                "summary": f"Recovery after the failed run raised {type(error).__name__} and the bench was left held.",
+            }
+
+    def _recovery_withheld_reason(self) -> tuple[str, str] | None:
+        """Why no recovery action will run, or None. Named in the run result.
+
+        A bench that withholds recovery is a bench somebody has to attend to by
+        hand, so the result says which setting made that choice rather than
+        reporting an attempt that quietly did nothing."""
+        policy = self.config.recovery
+        if policy.auto_recover == "off":
+            return (
+                "auto_recover_policy_off",
+                "recovery.auto_recover is off, so this bench takes no recovery action after a failed run.",
+            )
+        if not self.config.probe_allowed():
+            return (
+                "probe_not_permitted",
+                "No configured probe may be read, so nothing here can establish what state the target is in.",
+            )
+        debugger = self.config.debugger
+        if policy.auto_recover == "reset_halt" and (debugger is None or not debugger.permissions.allow_reset):
+            return (
+                "allow_reset_missing",
+                "recovery.auto_recover asks for reset_halt but this probe does not grant allow_reset, so the target "
+                "was left in whatever state the failed run put it in.",
+            )
+        return None
+
+    def _perform_recovery_actions(self) -> JsonObject:
+        """Reap, reset into halt, re-read the probe; then settle any incident."""
+        actions: list[str] = ["reap_processes"]
+        result: JsonObject = {"attempted": True, "actions": actions}
+        if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
+            return {
+                **result,
+                "outcome": "failed",
+                "failed_action": "reap_processes",
+                "summary": "Leftover debugger processes from this owner could not be reaped, so no target action followed.",
+            }
+        reset_halt = self.config.recovery.auto_recover == "reset_halt"
+        if reset_halt:
+            actions.append("reset_halt")
+            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+            if not overall_success(reset):
+                return {
+                    **result,
+                    "outcome": "failed",
+                    "failed_action": "reset_halt",
+                    "summary": "The target did not confirm a reset into halt, so the bench stays as the failed run left it.",
+                }
+        actions.append("probe_target")
+        verification = self._invoke_dispatch(self.backend.probe_target)
+        if not overall_success(verification) or verification.get("target_detected") is not True:
+            return {
+                **result,
+                "outcome": "failed",
+                "failed_action": "probe_target",
+                "summary": "The probe did not report a detected target after the recovery action.",
+            }
+        result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
+        return {**result, "outcome": "recovered", **self._settle_incident_after_recovery(reset_halt)}
+
+    def _settle_incident_after_recovery(self, reset_halt: bool) -> JsonObject:
+        """Clear the incident the failed run raised, if the actions answered it.
+
+        A read-only re-read only settles what a re-read can settle; a verified
+        reset into halt settles everything but the `audit_broken` families. The
+        distinction is the same one the acquire path draws, and it is the whole
+        reason the wide set is not simply handed to every caller."""
+        allowed = RECOVERY_ACTION_REASONS if reset_halt else RETRYABLE_CLEANUP_REASONS
+        reason = self.coordinator.retryable_incident(allowed)
+        if reason is None:
+            if not self.coordinator.blocked:
+                return {"incident_resolved": False, "incident_open": False}
+            return {
+                "incident_resolved": False,
+                "incident_open": True,
+                "incident_summary": "The incident this run raised is not one a recovery action settles; it needs the operator's route.",
+                "quarantine_id": self.coordinator.quarantine_id,
+            }
+        quarantine_id = self.coordinator.quarantine_id
+        if not self.coordinator.resolve_retryable_incident(
+            reason,
+            allowed=allowed,
+            via=RECOVERY_ACTION_VIA,
+            attestation=ATTESTATION_RECOVERY_ACTION,
+        ):
+            return {"incident_resolved": False, "incident_open": True, "quarantine_id": quarantine_id}
+        self._release_recovered_leases()
+        return {"incident_resolved": True, "incident_open": False, "resolved_reason": reason, "resolved_quarantine_id": quarantine_id}
+
+    def _settle_after_recovery_class_call(self, name: str, blocked_before: bool, result: JsonObject) -> JsonObject:
+        """Let a recovery-class call that succeeded clear the incident it ran under.
+
+        The call is the predicate. Nothing else here attests anything: the reset
+        that came back confirmed, or the probe that reported a detected target,
+        is the same evidence the acquire path's own recovery collects, arrived at
+        because the agent asked for it instead of because a gate ran it. So the
+        incident ends the same way, with the same ledger line.
+
+        Silent on failure by design — a recovery-class call whose incident could
+        not be cleared still returns its own result. The bench stays held and the
+        next call says so; swallowing the call's answer to report a bookkeeping
+        problem would lose the thing the caller actually asked for."""
+        if not blocked_before or name not in recovery_class_tools() or not isinstance(result, dict):
+            return result
+        allowed = recovery_class_settles(name, result)
+        if allowed is None:
+            return result
+        reason = self.coordinator.retryable_incident(allowed)
+        if reason is None:
+            return result
+        quarantine_id = self.coordinator.quarantine_id
+        try:
+            resolved = self.coordinator.resolve_retryable_incident(
+                reason,
+                allowed=allowed,
+                via=RECOVERY_ACTION_VIA,
+                attestation=ATTESTATION_RECOVERY_ACTION,
+            )
+        except Exception:
+            return result
+        if not resolved:
+            return result
+        self._release_recovered_leases()
+        # The envelope was stamped while the incident still stood; saying
+        # `cleanup_required` on the call that just ended it would send a caller
+        # looking for a quarantine that is no longer there.
+        return {
+            **result,
+            "cleanup_required": False,
+            "quarantined": False,
+            "incident_resolved": True,
+            "resolved_reason": reason,
+            "resolved_quarantine_id": quarantine_id,
+        }
+
     def _machine_recovery_attempt_allowed(self) -> bool:
         """Bound recovery attempts per incident.
 
@@ -912,19 +1160,30 @@ class AgenticHILToolService:
         one_shot = name in {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
+        for_recovery = name in recovery_class_tools() and self.coordinator.blocked
         if one_shot or starts_session:
-            if lease is not None:
+            # A recovery-class one-shot runs on whichever hold the incident left
+            # standing — the lease a quarantined session kept, or the one a
+            # quarantined one-shot kept. Both still hold the locks it needs, so
+            # asking for a second lease is refused as busy by the very hold the
+            # incident left; queueing the remedy behind the incident is what
+            # made the incident a padlock in the first place.
+            held = next((item for item in (lease, self._quarantined_lease) if item is not None and item.state == "cleanup_required"), None)
+            if one_shot and for_recovery and held is not None:
+                lease = held
+            elif lease is not None:
                 if starts_session:
                     result = callback()
                     if self._result_requires_quarantine(result):
                         lease.quarantine("debug_session_start_unconfirmed", audit_broken=result.get("audit_ok") is False)
                     return self._lease_result(result, lease)
                 return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
-            try:
-                resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
-                lease = self.coordinator.acquire(*resources)
-            except CoordinationError as error:
-                return {"tool": name, "side_effect_committed": False, **error.result}
+            else:
+                try:
+                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
+                    lease = self.coordinator.acquire(*resources, for_recovery=for_recovery)
+                except CoordinationError as error:
+                    return {"tool": name, "side_effect_committed": False, **error.result}
         try:
             result = callback()
         except BaseException as error:
@@ -1219,6 +1478,52 @@ def containment_tools() -> set[str]:
         "debug_stop_session", "debug_clear_breakpoints", "debug_halt",
         "com_session_stop", "can_session_stop",
     }
+
+
+def recovery_class_tools() -> set[str]:
+    """The calls that are the remedy for an incident, not a use of the bench.
+
+    An incident is what a failed run leaves behind, and the answer to it is to
+    put the target back into a known state. Refusing exactly the calls that do
+    that — probe it, reset it, flash a known image onto it — made the incident a
+    padlock: the one route out was a person at a command line, for a condition a
+    reset settles. So these run *during* an incident.
+
+    The line is what the call is for, not how physical it is: a reset drives the
+    target harder than a `com_write` does. The stimulus class — `com_write`,
+    `can_send`, session starts, new runs — stays behind the incident, because
+    those neither establish a known state nor are meaningful without one, and a
+    measurement taken across an unresolved incident is a measurement nobody can
+    stand behind afterwards.
+
+    `debug_halt` reaches the same conclusion from the other side and is already
+    in `containment_tools`, which the same gate lets through."""
+    return {"probe_target", "reset_target", "flash_firmware"}
+
+
+def recovery_class_settles(name: str, result: JsonObject) -> frozenset[str] | None:
+    """Which incident reasons this finished recovery-class call has answered.
+
+    None when it answered none. A probe that reports a detected target has
+    re-read the bench and nothing more, so it settles what a re-read settles; a
+    confirmed reset into halt, or a flash that completed and reset, has put the
+    target into a defined state and settles everything but the `audit_broken`
+    families. Same distinction the acquire path draws between its two
+    predicates, for the same reason: the evidence differs."""
+    # The call's own answer, not `overall_success` of the envelope: a
+    # recovery-class call runs on the incident's lease, so the result it comes
+    # back in is still stamped `cleanup_required` by the very incident this is
+    # deciding whether to clear. Asking the envelope would make the question
+    # answer itself, always with no.
+    if result.get("ok") is not True or result.get("audit_ok") is False:
+        return None
+    if name == "probe_target":
+        return RETRYABLE_CLEANUP_REASONS if result.get("target_detected") is True else None
+    if name == "reset_target":
+        return RECOVERY_ACTION_REASONS if result.get("mode") == "halt" else RETRYABLE_CLEANUP_REASONS
+    if name == "flash_firmware":
+        return RECOVERY_ACTION_REASONS if result.get("reset_after_flash") is not False else RETRYABLE_CLEANUP_REASONS
+    return None
 
 
 def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:

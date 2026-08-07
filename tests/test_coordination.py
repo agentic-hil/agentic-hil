@@ -1721,11 +1721,15 @@ def test_machine_recovery_writes_its_own_attestation_evidence(tmp_path: Path, mo
 def test_machine_recovery_refuses_while_the_probe_stays_unreachable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = quarantined_probe_service(tmp_path, monkeypatch)
     try:
-        refused = service.call("probe_target")
+        attempted = service.call("probe_target")
 
-        assert refused["error_type"] == "resource_quarantined"
-        assert refused["auto_recovery_attempted"] is True
-        assert refused["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        # Was: `resource_quarantined`, because every hardware call was refused
+        # while an incident stood. A probe is the recovery class now and is not
+        # refused — but the automatic attempt still runs ahead of it and still
+        # fails against an unreachable probe, so the thing this test guards is
+        # unchanged: nothing clears an incident it could not verify.
+        assert "incident_resolved" not in attempted
+        assert service.coordinator.status()["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
         assert service.coordinator.blocked is True
     finally:
         service.close()
@@ -1757,10 +1761,14 @@ def test_readonly_policy_leaves_an_unconfirmed_reset_to_the_operator(tmp_path: P
         # A reset may have left the target running, and a re-read cannot see
         # that, so under this policy no amount of reachable probe helps.
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
-        refused = service.call("probe_target")
+        attempted = service.call("probe_target")
 
-        assert refused["error_type"] == "resource_quarantined"
-        assert refused["auto_recovery_attempted"] is True
+        # Was: `resource_quarantined`. The probe runs now — it is the recovery
+        # class — and the policy still decides what a *read* is allowed to
+        # settle, which is the tooth here. Under `readonly` a reachable probe
+        # attests reachability and nothing about a core that may be running, so
+        # the incident stays with the operator exactly as before.
+        assert "incident_resolved" not in attempted
         assert service.coordinator.blocked is True
         assert service.coordinator.status()["auto_recoverable"] is False
     finally:

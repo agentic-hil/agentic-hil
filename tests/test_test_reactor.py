@@ -52,6 +52,14 @@ class RecordingService:
         self.audit_failure_call = audit_failure_call
         self.fail_call = fail_call
         self.breakpoint_id = 0
+        self.recovery_calls: list[list[str]] = []
+
+    def recover_after_failed_run(self, devices: list[str] | None = None) -> dict:
+        # Part of the service contract the reactor drives, so the double carries
+        # it: every abort calls this, and a double that lacked it would only
+        # prove the seam is never reached.
+        self.recovery_calls.append(sorted(devices or []))
+        return {"attempted": True, "actions": ["reap_processes", "reset_halt", "probe_target"], "outcome": "recovered", "incident_resolved": False}
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
         arguments = arguments or {}

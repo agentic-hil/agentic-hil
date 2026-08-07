@@ -258,8 +258,16 @@ def test_debug_load_failure_retains_quarantined_lease(
         assert result["lease_state"] == "cleanup_required"
         assert result.get("command_timed_out", False) is timed_out
         assert service.coordinator.blocked is True
-        blocked = service.call("probe_target")
-        assert blocked["error_type"] == "resource_quarantined"
+        # Was: the probe comes back `resource_quarantined`. It now runs — a
+        # probe is the recovery class, and refusing the call that reads what
+        # state the board is in was the padlock this release removed. What this
+        # test is about survives untouched and is now asserted directly: a
+        # failed load leaves a target that may be running a partial image, a
+        # read-only re-read does not settle that, and the incident stays open.
+        probe = service.call("probe_target")
+        assert probe.get("error_type") != "resource_quarantined"
+        assert "incident_resolved" not in probe
+        assert service.coordinator.blocked is True
     finally:
         with pytest.raises(RuntimeError):
             service.close()
