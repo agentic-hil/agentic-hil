@@ -708,7 +708,7 @@ def test_discovery_failure_leaves_the_grant_unspent(tmp_path: Path, monkeypatch:
     workspace = bench(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "agentic_hil.tools.discover_attached_hardware",
-        lambda: {
+        lambda *args, **kwargs: {
             "ok": False,
             "tool": "bootstrap_hardware_discovery",
             "error_type": "adapter_not_found",

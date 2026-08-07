@@ -1857,7 +1857,7 @@ def _schema_type_label(node: JsonObject) -> str:
     pattern = node.get("pattern")
     if isinstance(pattern, str):
         label += f", matching `{pattern}`"
-    for bound in ("minimum", "maximum", "minLength"):
+    for bound in ("minimum", "exclusiveMinimum", "maximum", "minLength"):
         if bound in node:
             label += f", {bound} {node[bound]}"
     return label
@@ -2125,9 +2125,9 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 
 | Property | Rule |
 |---|---|
-| what is locked | the physical device: `physical:<resource_id>`, `probe:<identity>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
+| what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware — `resource_id`, a probe serial, a port's `serial_number`, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. An entry that *does* name hardware is compared against what is attached when it is opened, and a port that has come to be a different board is refused with `com_port_identity_mismatch` rather than used |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, or no serial reported — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

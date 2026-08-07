@@ -607,13 +607,13 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
     # two boards attached would enumerate, pick the one probe that answers, and
     # produce a plan about a board this entry is not for.
     requested_probe = _optional_string(arguments.get("probe_id")) or configured_probe_id(debugger_entry)
-    configured_resource = configured_probe_resource(existing, debugger_name)
+    configured_resources = configured_probe_resource(existing, debugger_name)
     discovery, refusal = discover_under_hardware_lease(
         existing,
         coordinator,
         tool=PROJECT_CONFIG_ADOPT,
         reason_prefix="adopt",
-        resources=[] if configured_resource is None else [configured_resource],
+        resources=configured_resources,
         probe_id=requested_probe,
     )
     if refusal is not None:
@@ -769,19 +769,24 @@ def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path
     }
 
 
-def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> str | None:
-    """The machine-wide lock of a configured entry, when it names a board.
+def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> list[str]:
+    """The machine-wide locks of a configured entry, when it names a board.
 
     ``resource_id`` and ``probe_id`` name a physical unit and produce the same
-    key a run holding that board holds. The remaining fallbacks name a toolchain
+    keys a run holding that board holds. The remaining fallbacks name a toolchain
     — every unfilled skeleton on the host would derive one and the same
     `probe:openocd` — so locking those would serialize two unrelated benches
-    against each other while protecting neither."""
+    against each other while protecting neither, and none is returned.
+
+    Every key the device carries, not just its primary: an entry naming both a
+    ``resource_id`` and a probe serial is leased under both, so the read holds the
+    serial another workspace's bootstrap `init` derives from enumeration as well
+    as the alias only this workspace knows (hardci-hq#108)."""
     entry = existing.debuggers.get(debugger_id)
     if entry is None:
-        return None
+        return []
     device = DebuggerDevice(config_id=debugger_id, debugger=entry)
-    return device.lock_key if device.identity_source in {"resource_id", "probe_id"} else None
+    return list(device.lock_keys) if device.identity_source in {"resource_id", "probe_id"} else []
 
 
 def discover_under_hardware_lease(
@@ -818,8 +823,9 @@ def discover_under_hardware_lease(
       hardware call until an operator resolves it.
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
-    names it in a quarantine reason — the two callers are `project_config_adopt_hardware`
-    and `project_config_create`, and an incident has to say which one left it.
+    names it in a quarantine reason — the callers are `project_config_adopt_hardware`,
+    `project_config_create` and `agentic-hil init` (hardci-hq#108), and an incident
+    has to say which one left it.
 
     Returns the discovery result and, when the read never got that far or did not
     end cleanly, the refusal that is the whole answer.

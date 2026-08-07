@@ -3,12 +3,16 @@
 hardci-hq#96 built the ratchet — an agent writes `false` into a permission over
 MCP and never `true` — and answered the other direction for a configuration that
 does not exist yet: a generation opens everything it can. For one that does exist there
-was no answer at all, and the three routes an operator had were a dead end each:
-`project_config_set` only narrows, `init --force` calls `carry_over_permissions`
-and so copies the `false` forward, and deleting the file does come back open
-while throwing away the baudrate, the `resource_id`, the `state_root` and every
+was no answer that did not cost the rest of the file, and the three routes an
+operator had were one refusal and two resets: `project_config_set` only
+narrows, and `init --force` and deleting the file both do come back open while
+throwing away the baudrate, the `resource_id`, the `state_root` and every
 artifact root somebody set. hardci-hq#102 was filed after its owner took the
 third route and paid exactly that.
+
+(`carry_over_permissions` is the regeneration that keeps a narrowing, and it is
+`project_config_create`'s alone — hardci-hq#113. `init --force` is the operator's
+reset and carries nothing; it now names what it discarded.)
 
 The decisive test here is therefore not "a permission changed". It is
 `test_the_bench_from_the_issue_is_repaired_without_losing_the_file`: the
@@ -33,6 +37,7 @@ import pytest
 import yaml
 from conftest import write_authoritative_config
 
+from agentic_hil.bench import BenchMutex
 from agentic_hil.config import load_authoritative_config
 from agentic_hil.configwrite import (
     PERMISSION_COMMAND_VALUES,
@@ -593,6 +598,112 @@ def test_a_run_blocks_it_as_completely_as_a_lease(tmp_path: Path, monkeypatch: p
         assert bench_open_holds(config) is None
     finally:
         tools.close()
+
+
+def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check and the write are one transaction against a run starting.
+
+    hardci-hq#80 refuses a permission change while the bench is held, but reading
+    the holds and then writing left a gap: a run that began in it took the bench
+    under the old policy while the write moved the policy underneath. The command
+    now holds every configured device across the check-and-write on the same
+    machine-wide locks a run takes, so a run that begins the instant after the
+    status read — modelled here by starting one inside the seam the writer used to
+    leave open — collides with the writer rather than slipping through. Either the
+    run or the write is refused; here it is the write, and nothing is written.
+
+    Against the pre-fix command this passed the status read, wrote the file, and
+    reported success with a run holding the bench underneath it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    from agentic_hil import cli
+
+    config = load_authoritative_config(workspace)
+    device_keys = config_devices(config).lock_keys
+    a_run = BenchMutex(frontend="a-run")
+    real_bench_open_holds = cli.bench_open_holds
+
+    def a_run_starts_in_the_gap(cfg: Any) -> dict | None:
+        holds = real_bench_open_holds(cfg)  # the real read: the bench is free
+        if holds is None:
+            # The instant after the writer saw the bench free, a run takes it, on
+            # the very device locks the writer is about to reach for.
+            a_run.acquire(device_keys, wait_s=0)
+        return holds
+
+    monkeypatch.setattr(cli, "bench_open_holds", a_run_starts_in_the_gap)
+
+    before = path.read_bytes()
+    try:
+        refused = cli.change_permission("grant", ["can_buses.dut.allow_write"])
+    finally:
+        a_run.release_all()
+
+    assert refused["error_type"] == PERMISSION_CHANGE_IN_OPEN_RUN
+    assert refused["command"] == "agentic-hil grant"
+    assert refused["side_effect_committed"] is False
+    assert refused["open_holds"]["raced_a_run"] is True
+    # The one thing hardci-hq#80 rules out did not happen: the file is untouched.
+    assert path.read_bytes() == before
+
+    # With the seam gone — no run in the gap — the same command writes, so the
+    # atomic hold did not close the ordinary path along with the race.
+    monkeypatch.setattr(cli, "bench_open_holds", real_bench_open_holds)
+    assert cli.change_permission("grant", ["can_buses.dut.allow_write"])["ok"] is True
+    assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is True
+
+
+def test_a_device_repointed_after_the_status_read_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gap round 1's transaction still left: the key set itself moves.
+
+    The command derived the devices to hold from the config it loaded before the
+    status read. If another writer repoints a device in the gap — `COM9` to
+    `COM10` — a run can take `com:COM10` while the command holds only `com:COM9`,
+    and the two never collide: the old command re-read the moved document and
+    wrote the permission with a run holding the bench underneath it, the exact
+    outcome hardci-hq#80 rules out. The command now derives its locks and the
+    document it writes against from one read taken after the status probe, so it
+    holds the moved key and collides with the run rather than slipping past it.
+    Nothing is written.
+
+    Against the pre-fix command this held the stale `com:COM9`, missed the run on
+    `com:COM10`, and wrote the permission underneath it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    from agentic_hil import cli
+
+    a_run = BenchMutex(frontend="a-run-on-the-new-key")
+    real_bench_open_holds = cli.bench_open_holds
+    moved: dict[str, str | None] = {"key": None}
+
+    def a_device_moves_then_a_run_starts(cfg: Any) -> dict | None:
+        holds = real_bench_open_holds(cfg)  # the real read: the bench is free
+        if holds is None and moved["key"] is None:
+            # Another writer repoints the port, and a run takes its new lock — both
+            # inside the seam the command used to leave between the read and the write.
+            document = document_of(path)
+            document["com_ports"]["dut_uart"]["device"] = "COM10"
+            path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+            new_key = f"com:{os.path.normcase('COM10')}"
+            a_run.acquire([new_key], wait_s=0)
+            moved["key"] = new_key
+        return holds
+
+    monkeypatch.setattr(cli, "bench_open_holds", a_device_moves_then_a_run_starts)
+
+    try:
+        refused = cli.change_permission("grant", ["can_buses.dut.allow_write"])
+    finally:
+        a_run.release_all()
+
+    # The command derived the moved key from the fresh document and collided with
+    # the run holding it, rather than holding the stale key and slipping past.
+    assert moved["key"] is not None
+    assert refused["error_type"] == PERMISSION_CHANGE_IN_OPEN_RUN
+    assert refused["command"] == "agentic-hil grant"
+    assert refused["side_effect_committed"] is False
+    # The permission did not move: only the other writer's port change is in the
+    # file, never the grant this refused.
+    assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is not True
+    assert document_of(path)["com_ports"]["dut_uart"]["device"] == "COM10"
 
 
 def test_a_typo_is_answered_before_somebody_elses_run_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

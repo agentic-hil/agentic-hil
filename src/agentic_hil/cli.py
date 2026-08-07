@@ -22,7 +22,6 @@ from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
-    discover_attached_hardware,
     load_project_profile,
 )
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
@@ -44,7 +43,9 @@ from agentic_hil.config import (
     permission_summary,
     project_config_path,
     safe_directory,
+    secure_atomic_write_bytes,
     secure_atomic_write_text,
+    secure_optional_read_bytes,
     secure_optional_read_text,
     secure_remove_file,
     secure_user_file_lock,
@@ -55,10 +56,23 @@ from agentic_hil.config import (
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
-from agentic_hil.configwrite import ACTOR_HUMAN, PERMISSION_COMMAND_VALUES, set_permission
+from agentic_hil.configwrite import (
+    ACTOR_HUMAN,
+    PERMISSION_COMMAND_VALUES,
+    authoritative_write_target,
+    load_config_document,
+    permission_surface,
+    set_permission,
+)
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.devices import config_devices
-from agentic_hil.knowledge import CONFIG_REOPEN_COMMAND, RUNNING_SERVER_COMPARISON, remediation_fields
+from agentic_hil.knowledge import (
+    CONFIG_GRANT_COMMAND,
+    CONFIG_REOPEN_COMMAND,
+    CONFIG_REVOKE_COMMAND,
+    RUNNING_SERVER_COMPARISON,
+    remediation_fields,
+)
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -67,12 +81,18 @@ from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
+    discover_for_generation,
     narrowed_permissions,
     unbound_debugger_error,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SKILL_NAME = "agentic-hil"
+# What `agentic-hil init`'s read of the board is called in the audit record it
+# leaves and in any incident it files. Deliberately not `project_config_create`,
+# though the two write the same file from the same read: a record that could not
+# say which of them touched the bench is the wrong record to hand an operator.
+CLI_INIT = "cli_init"
 # How far up the process tree the upgrade guard follows launchers before it
 # stops looking, and how many holding processes a refusal names before the
 # count carries the rest.
@@ -107,8 +127,36 @@ class SkillAgent:
 
 @dataclass(frozen=True)
 class FileSnapshot:
+    """The exact prior state of one file, for transactional rollback.
+
+    Bytes, and existence tracked as its own fact (``raw is None`` ⟺ the path did
+    not exist; ``raw == b""`` is an empty file that did). A rollback has to put
+    back what was there, and a file that is not UTF-8 — a UTF-16 config, a
+    truncated write, something binary dropped on the path — is still something a
+    forced regeneration must restore rather than delete. Snapshotting it as
+    decoded text mapped those bytes to ``None``, which reads as "absent", and a
+    failed final validation then removed the original instead of restoring it
+    (hardci-hq#106)."""
+
     path: Path
-    content: str | None
+    raw: bytes | None
+
+    @property
+    def existed(self) -> bool:
+        """Whether the file was there when the snapshot was taken."""
+        return self.raw is not None
+
+    @property
+    def content(self) -> str | None:
+        """The snapshot decoded as UTF-8, or ``None`` when it was absent or its
+        bytes are not text. For callers that reason about text — the skill-install
+        ownership check — never for restoring, which is byte-exact."""
+        if self.raw is None:
+            return None
+        try:
+            return self.raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
 
 def skill_agents() -> list[SkillAgent]:
@@ -795,7 +843,7 @@ def _capture_file_snapshots(paths: list[Path]) -> list[FileSnapshot]:
         if identity in seen:
             continue
         seen.add(identity)
-        snapshots.append(FileSnapshot(absolute, secure_optional_read_text(absolute)))
+        snapshots.append(FileSnapshot(absolute, secure_optional_read_bytes(absolute)))
     return snapshots
 
 
@@ -803,13 +851,13 @@ def _restore_file_snapshots(snapshots: list[FileSnapshot]) -> list[JsonObject]:
     errors: list[JsonObject] = []
     for snapshot in reversed(snapshots):
         try:
-            current = secure_optional_read_text(snapshot.path)
-            if current == snapshot.content:
+            current = secure_optional_read_bytes(snapshot.path)
+            if current == snapshot.raw:
                 continue
-            if snapshot.content is None:
+            if snapshot.raw is None:
                 secure_remove_file(snapshot.path)
             else:
-                secure_atomic_write_text(snapshot.path, snapshot.content)
+                secure_atomic_write_bytes(snapshot.path, snapshot.raw)
         except BaseException as error:
             errors.append({"path": str(snapshot.path), "exception_type": type(error).__name__, "summary": str(error)})
     return errors
@@ -1125,7 +1173,10 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     """
     identity = os.path.normcase(str(absolute_without_symlinks(skill_target)))
     for snapshot in snapshots:
-        if os.path.normcase(str(snapshot.path)) != identity or snapshot.content is None:
+        # `existed`, not the decoded text: a skill that was already there is one
+        # rollback restored, and whether its bytes happen to be UTF-8 does not
+        # change that it survived.
+        if os.path.normcase(str(snapshot.path)) != identity or not snapshot.existed:
             continue
         if not _path_entry_exists(snapshot.path):
             return None
@@ -1141,6 +1192,140 @@ def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Pat
     return None
 
 
+def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, str | None]:
+    """The file `--force` is about to overwrite: its exact bytes, its decoded
+    text, and why the text could not be read.
+
+    `--force` is the operator's reset, so it has to work on exactly the file most
+    in need of one. Bytes that are not UTF-8 — a UTF-16 save, a truncated write,
+    something binary dropped on the path — once left this command with an
+    unhandled ``UnicodeDecodeError`` and no way to regenerate at all.
+
+    Three returns because a rollback and a permission-narrowing analysis want
+    different reads of one file. The bytes are what a failed regeneration
+    restores — the original, exactly, whether or not it is UTF-8 — so a non-UTF-8
+    file is put back rather than deleted (hardci-hq#106); before this, the
+    snapshot was taken from the decoded text, and text that would not decode was
+    recorded as absence, so rollback removed the original it claimed to restore.
+    The decoded text is for the narrowing comparison, which is over UTF-8 YAML
+    and has no answer for bytes that are not text; there the reason takes its
+    place.
+
+    The decode is caught and nothing else. A ``ConfigError`` from the guarded
+    read — the path is a symlink, a hardlink, or sits under a directory this user
+    does not solely own — must keep coming out of it, because it says the object
+    about to be overwritten is not the one that was named. Widening this to
+    swallow it would turn a fail-closed refusal into a silent write over the
+    wrong file."""
+    raw = secure_optional_read_bytes(target_path)
+    if raw is None:
+        return None, None, None
+    try:
+        return raw, raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return raw, None, "the file it replaced is not UTF-8 text, so nothing in it could be read"
+
+
+def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tuple[list[str], str | None]:
+    """Which permissions the replaced file had closed and the new one grants.
+
+    `--force` is the full regeneration and stays that way (hardci-hq#113): it
+    already discards the baudrate, the `resource_id`, the `state_root` and the
+    artifact roots, so a version that rescued permissions and nothing else would
+    be harder to predict rather than easier. `carry_over_permissions` is the MCP
+    path's answer and is deliberately not wired in here; `agentic-hil
+    adopt-hardware` is the command for refreshing hardware and keeping the rest.
+
+    What the reset owes its operator is the list. Somebody narrows a bench, runs
+    `--force` weeks later for an unrelated reason, and without this nothing in
+    the result says the bench is open again — the same silent reopening the
+    one-way street on `project_config_set` exists to prevent.
+
+    Returns ``(paths, unreadable_reason)``. A file that is not there yields
+    neither: there was nothing to discard and an empty list would be noise. A
+    file that cannot be read as a configuration yields the reason instead of an
+    empty list, because "nothing was lost" and "this could not be checked" are
+    different answers and only one of them is safe to act on."""
+    if previous_text is None:
+        return [], None
+    try:
+        previous = yaml.safe_load(previous_text)
+    except yaml.YAMLError as error:
+        detail = getattr(error, "problem", None) or str(error).splitlines()[0]
+        return [], f"the file it replaced was not parseable YAML: {detail}"
+    if not isinstance(previous, dict):
+        return [], "the file it replaced held no YAML mapping, so it named no permissions to compare"
+    granted = permission_surface(written)
+    closed = (path for path, permitted in permission_surface(previous).items() if not permitted)
+    return sorted(path for path in closed if granted.get(path)), None
+
+def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None]:
+    """Read the attached board for `init`, holding what a probe read holds.
+
+    `init` called `discover_attached_hardware` directly: no `before_connect`, no
+    coordinator, no record. Enumerating probes and connecting in HOTPLUG mode is
+    a hardware read either way, so that reached a board another run was holding —
+    where `project_config_create`, which writes the same file out of the same
+    read, answers `device_busy` — and it did so leaving nothing in the audit
+    trail (hardci-hq#108). Since agentic-hil/agentic-hil#112 made `init` look
+    unconditionally that applied to every `init` rather than only to a workspace
+    carrying a profile.
+
+    That the CLI is the operator's authority does not carry the exception, and
+    `adopt_hardware` is the proof: it makes the same argument about the *grant*,
+    waives that, and leases anyway. Authority over your own configuration is not
+    authority over somebody else's running bench — and `--force` rewriting the
+    file in the middle of a stranger's run is not something the operator wants
+    either. So this goes through `discover_for_generation`, which is the function
+    `project_config_create` uses, under this command's own coordinator.
+
+    Returns the discovery, the refusal that is the whole answer when the read did
+    not happen or did not end cleanly, and — when the board was read without a
+    lease — the reason it could not be leased.
+    """
+    try:
+        current: AgenticHILConfig | None = load_authoritative_config(workspace)
+    except ConfigError as error:
+        # No configuration to lease against, so no `state_root` to record a lease
+        # under and no policy to audit against — the machinery does not exist
+        # rather than being skipped. Both cases that reach here are that: the
+        # first `init` of a workspace, and an `init --force` over a file that
+        # cannot be loaded, which is the one command that repairs it. Refusing
+        # either would leave no way to reach a configured bench at all, which is
+        # worse than what this fixes. Named in the result instead of inferred
+        # from a record that is not there.
+        current, unleased = None, error.error_type
+    else:
+        unleased = None
+    discovery, refusal = discover_for_generation(
+        current,
+        None,
+        tool=CLI_INIT,
+        reason_prefix=CLI_INIT,
+        frontend="operator-cli",
+    )
+    return discovery, refusal, unleased
+
+
+def _init_lease_note(unleased: str | None) -> JsonObject:
+    """Whether the board `init` read was read under a lease, and if not, why not."""
+    if unleased is None:
+        return {
+            "leased": True,
+            "tool": CLI_INIT,
+            "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
+        }
+    return {
+        "leased": False,
+        "reason": unleased,
+        "summary": (
+            "This workspace had no loadable configuration to lease or audit against, so the attached probe was read "
+            "directly. That is the one case where nothing on this machine can be holding a board on this project's "
+            "behalf; every read after this one goes through the lease."
+        ),
+    }
+
+
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
     workspace = Path.cwd().resolve()
     target_path = initialized_config_path(workspace)
@@ -1150,7 +1335,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not _locked:
         with secure_user_file_lock(target_path):
             return init_config(config_path, force, _locked=True)
-    existing = secure_optional_read_text(target_path)
+    original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
     # cannot say whether looking is allowed, and gating the read on it (hardci-hq#104)
@@ -1162,7 +1347,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery = discover_attached_hardware()
+    discovery, refusal, unleased = _init_bench_read(workspace)
+    if refusal is not None:
+        # The read is what was refused, so there is nothing to write a file from
+        # and nothing was written. The refusal is the whole answer.
+        return {**refusal, "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
@@ -1189,7 +1378,11 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     finally:
         secure_remove_file(temporary_path)
 
-    snapshot = FileSnapshot(target_path, existing)
+    # Snapshotted as the exact bytes that were there, not as `existing` (the
+    # decoded text, which is None for a non-UTF-8 file): a failed final
+    # validation below has to put the original back byte-for-byte rather than
+    # delete a file it could not decode (hardci-hq#106).
+    snapshot = FileSnapshot(target_path, original_bytes)
     try:
         secure_atomic_write_text(target_path, text)
         written = load_authoritative_config(workspace)
@@ -1212,12 +1405,15 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # two flags the skeleton itself writes false are not reported as the
     # profile's doing (hardci-hq#107). They are the same two on every bench,
     # profile or no profile, and are stated once here instead.
-    narrowed = narrowed_permissions(yaml.safe_load(text) or {})
+    written_document = yaml.safe_load(text) or {}
+    narrowed = narrowed_permissions(written_document)
     granted_clause = (
         "with every permission granted except the two that are false so that flashing works"
         if not narrowed
         else f"with every permission granted except the two that are false so that flashing works, and {len(narrowed)} the project profile set to false"
     )
+    discarded, unreadable_previous = _discarded_narrowings(existing, written_document)
+    unreadable_previous = unreadable_existing or unreadable_previous
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
@@ -1236,19 +1432,55 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
             "controller and the probe's own COM port without anything being retyped.",
         )
+    # First, and before anything about COM ports or OpenOCD scripts: a bench that
+    # was narrowed and is open again is the one thing here that changes what this
+    # machine may be told to do.
+    if discarded:
+        next_steps.insert(
+            0,
+            f"`{CONFIG_REOPEN_COMMAND}` replaced a file that had {len(discarded)} "
+            f"{'permission' if len(discarded) == 1 else 'permissions'} set to false, and this one grants "
+            f"{'it' if len(discarded) == 1 else 'them'}: {', '.join(discarded)}. Close each one again with "
+            f"`{CONFIG_REVOKE_COMMAND} <key>`, which moves one permission and leaves every other setting in the file "
+            f"alone (`{CONFIG_GRANT_COMMAND} <key>` is the inverse) — or leave them open if the reset is what you "
+            "wanted. The rest of the old file is gone the same way: `--force` starts over, and `agentic-hil "
+            "adopt-hardware` is the command that refreshes the hardware and keeps everything else.",
+        )
+    elif unreadable_previous:
+        next_steps.insert(
+            0,
+            f"`{CONFIG_REOPEN_COMMAND}` replaced a file it could not read as a configuration — {unreadable_previous} — "
+            "so it cannot say which permissions that file had set to false, and this one grants every permission the "
+            "profile did not narrow. Read the `permissions` blocks in the new file and close what this bench should "
+            f"not have with `{CONFIG_REVOKE_COMMAND} <key>`.",
+        )
     return {
         "ok": True,
         "summary": (
-            f"Attached hardware was discovered and configured, {granted_clause}."
-            if discovered
-            else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+            (
+                f"Attached hardware was discovered and configured, {granted_clause}."
+                if discovered
+                else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+            )
+            + (
+                f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "
+                f"set to false that this one grants, so {'it is' if len(discarded) == 1 else 'they are'} open again: "
+                f"{', '.join(discarded)}."
+                if discarded
+                else f" What the file it replaced had narrowed is not known, because {unreadable_previous}."
+                if unreadable_previous
+                else ""
+            )
         ),
         "path": str(target_path),
         "optional_override": f'{CONFIG_ENV}={target_path}',
         "permissions": permission_summary(written),
         "narrowed_permissions": sorted(narrowed),
+        **({"discarded_narrowings": discarded} if discarded else {}),
+        **({"discarded_narrowings_unreadable": unreadable_previous} if unreadable_previous else {}),
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
+        "hardware_lease": _init_lease_note(unleased),
         "next_steps": next_steps,
     }
 
@@ -1298,11 +1530,12 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     hardci-hq#96 left an agent able to write `false` into a permission and
     nothing else, and answered the other direction for a file that does not exist
     yet: a generation opens everything it can. For a bench that has been running a while
-    there was no answer. `init --force` carries the existing grants over by name,
-    so the `false` survives it; deleting the configuration does come back open,
-    at the cost of the baudrate, the `resource_id`, the `state_root` and every
-    artifact root somebody set. hardci-hq#102 is the bill for that, and this is
-    the gate.
+    there was no answer that did not cost the rest of the file: `init --force`
+    does come back open, and so does deleting the configuration, both at the cost
+    of the baudrate, the `resource_id`, the `state_root` and every artifact root
+    somebody set. hardci-hq#102 is the bill for that, and this is the gate.
+    `carry_over_permissions`, the regeneration that does keep a narrowing, is
+    `project_config_create`'s and belongs to no command here (hardci-hq#113).
 
     It is a command and not a tool, and that is the whole security argument: an
     agent holding only the MCP tools cannot reach it, so the ratchet on that
@@ -1310,9 +1543,105 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     --force`, which rewrites every permission in the file at once without
     consulting a grant — so a command that moves one named permission is strictly
     narrower than the authority already standing here, not a new one.
+
+    The check and the write are one transaction against a run starting. Reading
+    the holds and then writing left a gap: a run that began inside it took the
+    bench under the old policy while the write moved the policy underneath —
+    hardci-hq#80's open-run refusal, defeated by timing rather than argued away.
+    So when the bench reads free, every configured device is held for the length
+    of the check-and-write, on the same machine-wide locks a run or a session
+    takes; one that begins now collides with those instead of slipping between the
+    read and the write, and the outcome is that either it is refused or this write
+    is. The holds are given back the moment the write returns.
     """
     config = load_cli_authoritative_config(None)
-    return set_permission(Path(config.work_dir), config, keys, command=command, open_holds=bench_open_holds(config))
+    return _change_permission_holding_the_bench(command, keys, config)
+
+
+def _change_permission_holding_the_bench(command: str, keys: list[str], config: AgenticHILConfig) -> JsonObject:
+    workspace = Path(config.work_dir)
+    # The holder that is already there: a live session or a quarantine on the
+    # project lock, or a run's device holds. Answered first, so a busy bench is a
+    # refusal that still validates the key names before it (set_permission decides
+    # that order), and so the one holder a device-lock hold cannot see — a project
+    # lock with no device under it — is still caught.
+    holds = bench_open_holds(config)
+    if holds is not None:
+        return set_permission(workspace, config, keys, command=command, open_holds=holds)
+    # The devices to hold and the document to write against come from one read
+    # taken here, after the (slow) holds probe above rather than from the config
+    # loaded before it. The keys and the description then describe the same file
+    # state, so a device repointed in the gap — `COM9` to `COM10`, a `resource_id`
+    # moved from one board to another — cannot leave this command holding the old
+    # key while a run takes the new one. `expect_document` carries that same
+    # description into the write, which refuses if it has moved by the time the
+    # write lock is held: either the run collides with the keys held here, or the
+    # write is refused, never a policy landing over a bench held under keys this
+    # call never saw (hardci-hq#80).
+    try:
+        fresh, document = _config_and_document_for_hold(workspace, config)
+    except ConfigError:
+        # The file stopped loading between the CLI's own load and here. Let
+        # set_permission read it again and return the structured refusal it owns.
+        return set_permission(workspace, config, keys, command=command)
+    device_keys = config_devices(fresh).lock_keys
+    if not device_keys:
+        # No physical device to hold, and so no run to race: the file is the whole
+        # of what changes, and its own write lock makes that atomic already. The
+        # description CAS still guards against an entry appearing in the gap.
+        return set_permission(workspace, fresh, keys, command=command, expect_document=document)
+    # Hold every configured device across the check-and-write. `begin_run` and a
+    # lease both take these machine-wide device locks, so a run or session that
+    # begins now waits or is refused here rather than starting under the old
+    # policy — and a run that got in first makes this acquisition fail, which is
+    # the "the write is refused" side of the same guarantee.
+    bench = BenchMutex(frontend="operator-cli")
+    try:
+        try:
+            bench.acquire(device_keys, wait_s=0)
+        except DeviceBusyError as collision:
+            return set_permission(workspace, fresh, keys, command=command, open_holds=_holds_from_collision(collision.result), expect_document=document)
+        return set_permission(workspace, fresh, keys, command=command, expect_document=document)
+    finally:
+        bench.release_all()
+
+
+def _config_and_document_for_hold(workspace: Path, config: AgenticHILConfig) -> tuple[AgenticHILConfig, JsonObject]:
+    """A fresh pinned config and the document it was read from, for one hold.
+
+    Two adjacent reads of the one authoritative file: the config gives the lock
+    keys a run would take (pinned, so an executable-identified debugger's key
+    matches what a run holds), and the document is what the write refuses a
+    description move of. Reading both here rather than reusing the config the CLI
+    loaded before the holds probe is what ties the keys acquired to the state the
+    write is checked against."""
+    target_path = authoritative_write_target(workspace, config)
+    _, document = load_config_document(target_path)
+    return load_authoritative_config(workspace), document
+
+
+def _holds_from_collision(busy: JsonObject) -> JsonObject:
+    """A `BenchMutex` device-busy result, shaped as the open-holds a refusal names.
+
+    `bench_open_holds` describes the bench from outside its holder; a collision
+    the writer hit while taking the bench for its own write describes the same
+    fact from the other side — the device it could not take, and who holds it.
+    Marked `owner_active: False` because what refused here was a device lock, not
+    the project lock a live session holds, and `raced_a_run` so the reason the
+    write stopped is legible rather than looking like a bench that was busy all
+    along."""
+    resource = busy.get("resource")
+    holds: JsonObject = {"owner_active": False, "raced_a_run": True}
+    if isinstance(resource, str):
+        holds["held_devices"] = [resource]
+        holds["busy_devices"] = [resource]
+    holder = busy.get("holder")
+    if isinstance(holder, dict):
+        holds["holder"] = holder
+    for field in ("held_since", "heartbeat_age_s"):
+        if busy.get(field) is not None:
+            holds[field] = busy[field]
+    return holds
 
 
 def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
@@ -1320,23 +1649,22 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
 
     The MCP service asks its own coordinator and gets an exact answer, because
     the holder is itself. A command line is a different process and has to ask
-    the two locks instead, which is why both are asked:
+    the locks, and both of them have to be asked: a lease takes the project lock
+    and holds it for as long as the session lives, while a declared run takes the
+    machine-wide device locks and *not* the project lock, so a run between two of
+    its own calls is invisible to the first question.
 
-    * The **project lock**, through `HardwareCoordinator.status()`. A lease takes
-      it — a COM or CAN session, a debug session, any single hardware call — and
-      holds it for as long as the session lives.
-    * The **device locks**, through the machine-wide mutex. A declared run takes
-      those and *not* the project lock, so a run between two of its own calls is
-      invisible to the first check. Asked by taking each device lock and giving
-      it straight back rather than by reading the holder records beside them: the
-      OS lock is what makes a hold true, a record is only what the last owner
-      wrote, and an owner that died leaves the record saying `held` forever. A
-      check that believed the record would refuse every permission change on a
-      bench whose last run crashed — a new dead end inside the change that exists
-      to remove one.
+    Asking is `HardwareCoordinator.status()`'s job, not this one's. Until
+    hardci-hq#105 the device half lived here and helped no other caller — the
+    same status read a second terminal makes still reported a run's held bench as
+    free. This reshapes the one answer for the refusal; it does not go back to
+    the locks a second time. Why the holder records are not that answer, and why
+    each device is taken and released on its own, is in `device_holds`.
 
-    One device at a time and released immediately, so this never holds a set
-    somebody else is midway through taking.
+    `held_devices` here is deliberately wider than the field of that name in
+    `status()`: the locks say which devices are held, and the project record
+    additionally names what the live owner declared. A refusal that says what a
+    permission change would move underneath wants both.
 
     From out here a declared run and a session that outlived one are the same
     fact, so neither is claimed: what is reported is that the bench is held and
@@ -1349,13 +1677,13 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         status = coordinator.status()
     finally:
         coordinator.close()
-    busy = busy_devices(config)
-    if not status.get("owner_active") and not busy:
+    if not status.get("bench_held"):
         return None
     record = status.get("record") or {}
+    busy = list(status.get("device_holds") or [])
     holds: JsonObject = {
         "owner_active": bool(status.get("owner_active")),
-        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item["resource"]) for item in busy)}),
+        "held_devices": sorted({*(str(item) for item in (record.get("resources") or []) if isinstance(item, str)), *(str(item) for item in (status.get("held_devices") or []) if isinstance(item, str))}),
         "busy_devices": busy,
         # The project record is advisory while somebody holds the lock, so say so
         # rather than presenting a read that could have straddled their write.
@@ -1365,32 +1693,6 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
         if record.get(field) is not None:
             holds[field] = record[field]
     return holds
-
-
-# What a busy device is reported with. `error_class` and `errno` are carried
-# because `BenchMutex` answers a lock it could not even open the same way as one
-# somebody holds — fail-closed, which is right — and without them an unwritable
-# lock directory would read as "another run has the bench" forever.
-_HOLDER_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
-
-
-def busy_devices(config: AgenticHILConfig) -> list[JsonObject]:
-    """Every device of this configuration another owner is holding right now.
-
-    Each lock is taken and released on its own. Taking the whole set at once
-    would be the acquisition a run makes, and this is a question rather than a
-    run: holding six devices to find out whether one of them is free is how a
-    question turns into a collision."""
-    mutex = BenchMutex(frontend="operator-cli")
-    busy: list[JsonObject] = []
-    for key in config_devices(config).lock_keys:
-        try:
-            mutex.acquire([key], wait_s=0.0)
-        except DeviceBusyError as error:
-            busy.append({field: error.result[field] for field in _HOLDER_FIELDS if error.result.get(field) is not None})
-        else:
-            mutex.release([key])
-    return busy
 
 
 def initialized_config_path(workspace: Path) -> Path:

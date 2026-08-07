@@ -15,6 +15,7 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template, discover_attached_hardware
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
@@ -71,7 +72,7 @@ from agentic_hil.report import (
     read_last_report,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject, fold_hardware_id
 
 
 def _backend_kind(config: AgenticHILConfig | None) -> str | None:
@@ -1382,7 +1383,7 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal = _discover_for_generation(current, coordinator)
+        discovery, refusal = discover_for_generation(current, coordinator)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -1512,8 +1513,23 @@ def _create_in_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObje
     }
 
 
-def _discover_for_generation(current: AgenticHILConfig | None, coordinator: HardwareCoordinator | None) -> tuple[JsonObject, JsonObject | None]:
+def discover_for_generation(
+    current: AgenticHILConfig | None,
+    coordinator: HardwareCoordinator | None,
+    *,
+    tool: str = PROJECT_CONFIG_CREATE,
+    reason_prefix: str = "config_create",
+    frontend: str = "mcp",
+) -> tuple[JsonObject, JsonObject | None]:
     """Read what is attached, holding everything a probe read holds.
+
+    Public because `agentic-hil init` writes the same file out of the same read
+    and so is held to the same lifecycle (hardci-hq#108). ``tool``,
+    ``reason_prefix`` and ``frontend`` are the whole of what a caller varies:
+    which name the audit record and every refusal carry, which name an incident
+    is filed under, and which frontend an owned coordinator announces itself as.
+    What is read, what is locked and what happens when any of it fails are not
+    a caller's to vary — that was the defect.
 
     Not a partial copy of the adoption path any more but the same function:
     `discover_under_hardware_lease` proves the audit trail writable before the
@@ -1534,9 +1550,20 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
 
     A workspace with no configuration at all has none of that machinery — no
     policy to audit against, no `state_root` under which a lease could be
-    recorded — and it is also the one case where nothing on this machine can be
-    holding a board on this project's behalf. That call reads directly, as it
-    always has.
+    recorded. It is the first `init` and the first `project_config_create` of a
+    workspace, so refusing it outright would leave no way to reach a configured
+    one at all; the audit trail and the lease record are what it goes without,
+    and the caller says so in its own result rather than letting the read pass
+    unremarked. But "this project holds no lease" was never "nobody holds this
+    board": another workspace, another server, or an `adopt-hardware` in a
+    different project can be mid-HOTPLUG on the same physical ST-Link right now.
+    The enumeration pseudo-resource and the probe lock live under the user's
+    home, keyed on the device and reachable with no configuration
+    (`agentic_hil.bench`), so the bootstrap read still takes them — the host-wide
+    enumeration before it enumerates, `probe:<serial>` before it says the first
+    word to the selected board — and answers `device_busy` without connecting
+    when either is held. Physical-device exclusion is not the part that needed a
+    policy (hardci-hq#108).
 
     ``current`` decides that, and ``coordinator`` never does. An unprovisioned
     server has no coordinator and hands None, and the in-lock reread is exactly
@@ -1549,11 +1576,11 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
     function every other caller uses.
     """
     if current is None:
-        return discover_attached_hardware(), None
+        return _discover_without_policy(tool=tool, frontend=frontend)
     if coordinator is None:
-        owned = HardwareCoordinator(current, frontend="mcp")
+        owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -1563,9 +1590,68 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
             # than an exception out of an MCP call.
             cleanup_error = _closed_cleanly(owned)
         if refusal is None and cleanup_error is not None:
-            return {}, _lock_cleanup_refusal(cleanup_error)
+            return {}, _lock_cleanup_refusal(cleanup_error, tool)
         return discovery, refusal
-    return _discover_under_lease(current, coordinator)
+    return _discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix)
+
+
+def _discover_without_policy(*, tool: str, frontend: str) -> tuple[JsonObject, JsonObject | None]:
+    """Bootstrap discovery with machine-wide physical exclusion but no lease.
+
+    The one caller is a workspace with no loadable configuration — the first
+    `init` or `project_config_create` — so there is no `state_root` to record a
+    lease under and no policy to audit against. What is *not* absent is the risk
+    the mutex exists for: the enumeration and the HOTPLUG connect are the same
+    hardware read they are under a lease, and the same ST-Link can be held by
+    another workspace on this machine. So the two device locks are taken directly
+    through `BenchMutex` — the host-wide enumeration pseudo-resource around the
+    whole read, and `probe:<serial>` in `before_connect`, which is the last point
+    before anything is said to the selected board — and a board another owner is
+    holding comes back `device_busy` here exactly as it would through
+    `discover_under_hardware_lease`, with nothing said to it.
+
+    Returns the discovery and, when a lock refused, the refusal that is the whole
+    answer. A refusal from `before_connect` is surfaced as that refusal rather
+    than as the discovery result: `discover_attached_hardware` would otherwise
+    hand it back as an unsuccessful read, which the caller would write a
+    placeholder file from instead of refusing.
+    """
+    bench = BenchMutex(frontend=frontend)
+    try:
+        try:
+            bench.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+        except DeviceBusyError as busy:
+            return {}, _bootstrap_device_busy(busy.result, tool)
+
+        refused: JsonObject = {}
+
+        def before_connect(selected: str) -> JsonObject | None:
+            resource = f"probe:{fold_hardware_id(selected)}"
+            try:
+                bench.acquire([resource])
+            except DeviceBusyError as busy:
+                refusal = _bootstrap_device_busy(busy.result, tool)
+                refused.update(refusal)
+                return refusal
+            return None
+
+        discovery = discover_attached_hardware(before_connect=before_connect)
+        if refused:
+            return {}, refused
+        return discovery, None
+    finally:
+        bench.release_all()
+
+
+def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:
+    """A bootstrap read refused because the physical probe is held elsewhere.
+
+    The machine-wide lock answered — another workspace or server is on this
+    board — before anything was said to it. `discover_attached_hardware` reads
+    the device directly here because there is no configuration to lease against,
+    but "no lease" was never "no exclusion": the refusal names the holder and is
+    retry-safe, exactly as the leased path's `device_busy` is."""
+    return {**busy, "tool": tool, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 
 def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
@@ -1576,10 +1662,10 @@ def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
     return None
 
 
-def _lock_cleanup_refusal(error: Exception) -> JsonObject:
+def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     return {
         "ok": False,
-        "tool": PROJECT_CONFIG_CREATE,
+        "tool": tool,
         "error_type": "resource_quarantined",
         "summary": (
             "The attached probe was read and the coordination locks taken for that read could not all be given back, so "
@@ -1594,13 +1680,13 @@ def _lock_cleanup_refusal(error: Exception) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator) -> tuple[JsonObject, JsonObject | None]:
-    resources = [resource for name in current.debuggers if (resource := configured_probe_resource(current, name)) is not None]
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
+    resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
         coordinator,
-        tool=PROJECT_CONFIG_CREATE,
-        reason_prefix="config_create",
+        tool=tool,
+        reason_prefix=reason_prefix,
         resources=resources,
     )
 

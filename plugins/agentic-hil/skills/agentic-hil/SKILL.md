@@ -123,8 +123,10 @@ answering the hardware question another way.
 
 The CLI installs, configures, and diagnoses: `agentic-hil agent-install`,
 `agentic-hil init`, `agentic-hil setup`, and `agentic-hil doctor` report what is
-configured and whether hardware access is permitted. None of them is a hardware
-call.
+configured and whether hardware access is permitted. `init` reads the attached
+board, so it takes the same machine-wide lock every board read takes and answers
+`device_busy` when another run holds the probe; `setup` does the same when it
+writes the file rather than keeping one.
 
 Installation and project binding are separate commands with separate scopes.
 `agent-install` installs this skill and the user-level MCP registration once per

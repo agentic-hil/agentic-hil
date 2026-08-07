@@ -7,8 +7,8 @@ nobody. Two properties follow, and both are about *where* the lock lives rather
 than what it locks.
 
 **One place per machine.** The lock is keyed on the physical device
-(``physical:<resource_id>``, ``probe:<identity>``, ``com:<device>``,
-``can:<adapter>:<channel>``) and lives under the user's home, never under
+(``physical:<resource_id>``, ``probe:<serial>``, ``probe-exe:<executable>``,
+``com:<device>``, ``can:<adapter>:<channel>``) and lives under the user's home, never under
 ``state_root``. On 2026-08-02 two sessions held the same Nucleo and could not
 see each other because their ``state_root`` differed; a lock kept per
 configuration is not a bench lock. There is deliberately no environment override
@@ -47,7 +47,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.redact import filesystem_error_detail
-from agentic_hil.types import JsonObject
+from agentic_hil.types import JsonObject, fold_device_path, fold_hardware_id
 
 HOLDER_RECORD_VERSION = 1
 BENCH_ROOT_NAME = ".agentic-hil"
@@ -63,7 +63,7 @@ MAX_WAIT_S = 900.0
 # configuration and `debugger-discovery:` a host-wide enumeration, and locking
 # either machine-wide would serialize unrelated benches instead of protecting a
 # board.
-PHYSICAL_RESOURCE_PREFIXES = ("physical:", "probe:", "com:", "can:")
+PHYSICAL_RESOURCE_PREFIXES = ("physical:", "probe:", "probe-exe:", "com:", "can:")
 
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
@@ -169,12 +169,97 @@ def is_physical_resource(resource: str) -> bool:
     return resource.startswith(PHYSICAL_RESOURCE_PREFIXES)
 
 
+def fold_resource_name(resource: str) -> str:
+    """Fold a resource name the way the device it names already folded it.
+
+    ``Device.lock_key`` is where a lock key is built, and it folds the config
+    field it was built from: an opaque hardware id one way and a host path the
+    other (``types.fold_hardware_id``, ``types.fold_device_path``). A name that
+    reaches the mutex without a device behind it never met that step, so
+    ``com:COM9`` and ``com:com9`` became two lock files for one port and a
+    caller that spelled its own key locked something no configured device ever
+    locks. This is that same rule expressed over the finished name, applied
+    where the lock is created rather than only where a key happens to be
+    derived.
+
+    Idempotent on every key ``Device.lock_key`` can produce, on Windows and on
+    POSIX alike. That is the property being bought: folding a derived key
+    changes nothing, so a hand-written spelling lands *on* the derived key
+    instead of beside it.
+
+    Names that are not device keys are returned untouched, deliberately.
+    ``project:<digest>`` is a hex digest of a configuration and
+    ``debugger-discovery:all`` names a host-wide enumeration; neither is a
+    board, neither is reachable under a second spelling, and folding them would
+    only suggest they were hardware."""
+    # Opaque hardware ids, folded case on every platform. `com:serial:` is tried
+    # before `com:` below because the longer prefix carries an adapter serial
+    # while the shorter one carries a host path, and they fold by different
+    # rules.
+    for prefix in ("com:serial:", "physical:", "can:"):
+        if resource.startswith(prefix):
+            return prefix + fold_hardware_id(resource[len(prefix) :])
+    # `probe:` is a probe serial or the `type` fallback — both hardware ids that
+    # `DebuggerDevice.lock_key` builds with `fold_hardware_id`, which casefolds on
+    # POSIX as well as on Windows. Folding it as a path instead left a
+    # hand-written `probe:<SERIAL>` uppercase on POSIX while the configured
+    # `probe_id` locked `probe:<serial>`, so two spellings of one probe bypassed
+    # each other (hardci-hq#106). The one exception is the legacy executable
+    # spelling that predates `probe-exe:`: an executable is a host path, and a
+    # debugger identified by one still holds `probe:<path>` beside its
+    # `probe-exe:` key so a pre-upgrade process or a raw caller cannot take the
+    # probe out from under it. A path and a serial are told apart by being an
+    # absolute filesystem path, which a configured executable is (pinning makes it
+    # one) and which a probe serial or a backend type name never is — a stricter
+    # test than "contains a separator", so a serial that happened to carry one is
+    # still a hardware id and the round-1 fix above stands.
+    if resource.startswith("probe:"):
+        value = resource[len("probe:") :]
+        if _is_executable_path(value):
+            return "probe:" + fold_device_path(value)
+        return "probe:" + fold_hardware_id(value)
+    # Host paths. `com:<device>` is a serial device name and `probe-exe:` a
+    # debugger executable; the path rule leaves an opaque name alone on POSIX and
+    # lowercases it on Windows, which is what `fold_device_path` already did to
+    # it by the time it was a name. Folding case into a POSIX path would rewrite
+    # `probe-exe:/usr/bin/Foo` to a name no configured debugger ever locks — the
+    # same bug facing the other way, which is why the executable keeps a prefix
+    # of its own rather than sharing `probe:`.
+    for prefix in ("com:", "probe-exe:"):
+        if resource.startswith(prefix):
+            return prefix + fold_device_path(resource[len(prefix) :])
+    return resource
+
+
+def _is_executable_path(value: str) -> bool:
+    """Whether a bare `probe:` value is the legacy executable spelling, not an id.
+
+    The legacy `probe:<executable>` key is the only `probe:` name that is a host
+    path, and a configured executable is always absolute — pinning resolves it to
+    an absolute path before it is ever a lock key (`/usr/bin/openocd`,
+    `C:\\Tools\\openocd.exe`). A probe serial and a backend type name are never
+    absolute paths. Testing for an absolute path rather than for a separator is
+    deliberate: a probe serial that happened to contain a `/` would be misread as
+    a path by the looser test and split from the casefolded key its `probe_id`
+    locks — the very hardci-hq#106 split, reintroduced — whereas it is not
+    absolute and so stays a hardware id here.
+
+    Rooted counts as absolute on purpose. Python 3.13 redefined
+    ``ntpath.isabs`` so a drive-less rooted path (``\\opt\\tools\\openocd``,
+    which is what ``os.path.normcase`` makes of a POSIX-style executable) stopped
+    being absolute on Windows — so the same key folded as a path under 3.12 and
+    as a hardware id under 3.13, and the legacy spelling stopped colliding with
+    the ``probe-exe:`` holder on exactly one interpreter. A rooted value is
+    still never a probe serial, so the wider reading reintroduces nothing."""
+    return os.path.isabs(value) or value[:1] in ("/", "\\")
+
+
 def physical_resources(resources: object) -> list[str]:
     if isinstance(resources, str):
         candidates: list[str] = [resources]
     else:
         candidates = [item for item in (resources or []) if isinstance(item, str)]
-    return sorted({item for item in candidates if is_physical_resource(item)})
+    return sorted({fold_resource_name(item) for item in candidates if is_physical_resource(item)})
 
 
 def device_lock_root() -> Path:
@@ -276,6 +361,24 @@ class BenchMutex:
                     self._drop(resource)
                 raise
             return taken
+
+    def acquire_named(self, resource: str, *, wait_s: float = 0.0) -> bool:
+        """Hold one machine-wide lock by name, whether or not it is a device.
+
+        `acquire` locks devices and skips everything else, because a run declares
+        devices and the mutex's job is boards. The one non-device name that still
+        wants a machine-wide lock is the enumeration pseudo-resource
+        `debugger-discovery:all`: it serialises probe enumeration across the
+        machine rather than naming a board. Under a lease the coordinator locks it
+        through its own per-resource lock beneath `state_root`; a bootstrap read
+        has no `state_root`, so it takes the lock here, beside the device locks, so
+        two first-time `init`s enumerate one at a time rather than over each other.
+        Folded and taken through the same path as a device, so a caller cannot
+        split it by spelling and the holder record names whoever holds it. Raises
+        DeviceBusyError naming the holder, exactly as `acquire` does."""
+        deadline = time.monotonic() + _validated_wait(wait_s)
+        with self._guard:
+            return self._take(fold_resource_name(resource), deadline)
 
     def release(self, resources: list[str] | tuple[str, ...]) -> None:
         with self._guard:

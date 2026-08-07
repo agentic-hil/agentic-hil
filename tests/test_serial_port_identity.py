@@ -24,6 +24,7 @@ from agentic_hil.adopt import plan_adoption
 from agentic_hil.cli import doctor
 from agentic_hil.comports import (
     COM_PORT_IDENTITY_MISMATCH,
+    COM_PORT_IDENTITY_UNVERIFIED,
     ComPortService,
     available_port_info,
     expected_port_identity,
@@ -380,23 +381,61 @@ def test_an_entry_that_names_no_hardware_behaves_exactly_as_it_did(tmp_path: Pat
     assert asked == [], "an entry that claims nothing costs no enumeration"
 
 
-def test_what_cannot_be_checked_is_reported_rather_than_guessed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Three ways the question has no answer, and none of them is a refusal.
+def test_a_declared_identity_that_cannot_be_checked_is_refused_not_guessed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three ways the question has no answer, and for a declared identity each is
+    a refusal returned before the port is opened.
 
     A pseudo-terminal, a port that reports no serial, and a host whose serial
-    backend is missing are all "unknown", and unknown is not "wrong board"."""
+    backend is missing are all "unknown" — and for an entry that named a board so
+    its name would be proved to still reach it before use, unknown is not
+    permission to open (hardci-hq#100). Reporting the gap in the result does not
+    protect the hardware once the connection has already been allowed. The port
+    is never touched, so every one is retry-safe and no side effect committed."""
     config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
 
     fake_host(monkeypatch, inventory(host_port("/dev/ttyACM1", BOARD_B)))
-    assert verify_port_identity(config, "dut_uart", "com_session_start")["identity"]["status"] == "port_not_enumerated"
+    not_enumerated = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert not_enumerated["ok"] is False
+    assert not_enumerated["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+    assert not_enumerated["identity"]["status"] == "port_not_enumerated"
+    assert not_enumerated["retry_safe"] is True
+    assert not_enumerated["side_effect_committed"] is False
+    assert not_enumerated["expected_serial_number"] == BOARD_A
 
     fake_host(monkeypatch, inventory(host_port("/dev/ttyACM0", None)))
-    assert verify_port_identity(config, "dut_uart", "com_session_start")["identity"]["status"] == "serial_unknown"
+    no_serial = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert no_serial["ok"] is False
+    assert no_serial["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+    assert no_serial["identity"]["status"] == "serial_unknown"
 
     fake_host(monkeypatch, {"ok": False, "tool": "com_ports_available", "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported."})
-    unchecked = verify_port_identity(config, "dut_uart", "com_session_start")
-    assert unchecked["ok"] is True
-    assert unchecked["identity"]["status"] == "backend_unavailable"
+    no_backend = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert no_backend["ok"] is False
+    assert no_backend["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+    assert no_backend["identity"]["status"] == "backend_unavailable"
+    assert no_backend["identity"]["backend_error"]
+
+
+def test_a_declared_port_is_not_opened_when_its_identity_cannot_be_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal is what stops the wrong-board write, so it has to precede the open.
+
+    The value of failing closed is only real if nothing is contacted first: a
+    result that says "the check did not run" is no protection once the port is
+    already open. So `session_start` returns the refusal before it ever reaches
+    `_open_serial` — here the host cannot enumerate the port at all."""
+    config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
+    fake_host(monkeypatch, {"ok": False, "tool": "com_ports_available", "error_type": "serial_backend_not_available", "summary": "pyserial is not installed."})
+    service = ComPortService(config)
+    monkeypatch.setattr(service, "_open_serial", lambda *args: pytest.fail("a port whose identity was unverifiable was opened"))
+
+    try:
+        result = service.session_start("dut_uart")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+    assert result["side_effect_committed"] is False
 
 
 # --- carrying an existing bench forward ------------------------------------

@@ -1023,3 +1023,104 @@ def test_clear_breakpoints_missing_delete_does_not_poison_next_continue(tmp_path
         assert service.call("debug_stop_session")["ok"] is True
     finally:
         service.close()
+
+
+# Every class of unusable `timeout_s`, and why each one is worth a case.
+# The numeric string and the bool are the load-bearing pair: `float("5")` is 5.0
+# and `float(True)` is 1.0, so plain coercion accepts both without complaint, and
+# the point here is that the gate does not. `1e400` is the one the stdio JSON
+# hook does not catch — it parses to `inf` rather than firing `parse_constant` —
+# so refusing it is `find_nonfinite`'s job, and the case is what says so.
+INVALID_TIMEOUT_VALUES = [
+    ("non_numeric_string", "abc"),
+    ("numeric_string", "5"),
+    ("bool", True),
+    ("null", None),
+    ("negative", -1),
+    ("overflow_to_infinity", float("1e400")),
+    ("nan", float("nan")),
+    ("list", [1]),
+]
+
+TIMEOUT_TOOLS = ("debug_start_session", "debug_stop_session", "debug_continue", "debug_halt")
+
+
+def timeout_arguments(tool: str, value: object) -> dict:
+    arguments: dict = {"timeout_s": value}
+    if tool == "debug_start_session":
+        # This tool additionally requires exactly one of image_path/artifact_id.
+        # That failure sits at the document root, sorts ahead of one at
+        # `timeout_s`, and would leave the refusal naming a different field, so
+        # the artifact is supplied and the timeout is the only thing wrong.
+        arguments["image_path"] = "build/app.elf"
+    return arguments
+
+
+@pytest.mark.parametrize(("label", "value"), INVALID_TIMEOUT_VALUES, ids=[label for label, _ in INVALID_TIMEOUT_VALUES])
+def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path, label: str, value: object) -> None:
+    """A `timeout_s` that cannot be used is refused, on every tool that takes one.
+
+    This pins behaviour that was already correct rather than changing it
+    (hardci-hq#57, which read the swallowing coercion in `number_argument` as
+    the shipped answer). The refusal comes from the schema gate in `call`,
+    before `number_argument` is reached, so no unusable value ever reaches a
+    backend as a dropped `None` — which a backend cannot tell apart from the
+    argument having been omitted, and would answer by silently substituting the
+    configured default for the cap the caller asked for.
+
+    Driven through `call` because that is the only entry point an MCP host can
+    reach, and the three fields asserted are what it reads.
+    """
+    service = debug_service(tmp_path)
+    try:
+        for tool in TIMEOUT_TOOLS:
+            result = service.call(tool, timeout_arguments(tool, value))
+            assert result["ok"] is False, (tool, label, result)
+            assert result["error_type"] == "invalid_argument", (tool, label, result)
+            assert result["field"] == "timeout_s", (tool, label, result)
+    finally:
+        service.close()
+
+
+def test_usable_timeout_is_not_refused_as_invalid_argument(tmp_path: Path) -> None:
+    """The positive control for the refusals above.
+
+    Without it a gate that rejected every `timeout_s` would satisfy them. These
+    three still fail on their own terms — there is no session to stop, continue
+    or halt — but not for the shape of the argument. `debug_start_session` is
+    left out on purpose: the only way it gets past this point is by starting a
+    real session, which is not what this test is for.
+    """
+    service = debug_service(tmp_path)
+    try:
+        for tool in ("debug_stop_session", "debug_continue", "debug_halt"):
+            result = service.call(tool, {"timeout_s": 5})
+            assert result.get("error_type") != "invalid_argument", (tool, result)
+    finally:
+        service.close()
+
+
+def test_direct_debug_call_reenters_validation_for_invalid_timeout(tmp_path: Path) -> None:
+    """Calling the method directly is refused exactly as calling through `call` is.
+
+    Each of these four opens with a `_dispatch_depth == 0` guard that routes a
+    call arriving from outside back through `call`, which is where arguments are
+    validated. That guard is the whole reason the schema gate cannot be walked
+    around, and nothing else pins it: without it the payload would reach
+    `number_argument` unchecked and `"abc"` would become `None` on its way to the
+    backend.
+    """
+    service = debug_service(tmp_path)
+    try:
+        results = {
+            "debug_start_session": service.debug_start_session({"image_path": "build/app.elf", "timeout_s": "abc"}),
+            "debug_stop_session": service.debug_stop_session({"timeout_s": "abc"}),
+            "debug_continue": service.debug_continue({"timeout_s": "abc"}),
+            "debug_halt": service.debug_halt({"timeout_s": "abc"}),
+        }
+    finally:
+        service.close()
+    for tool, result in results.items():
+        assert result["ok"] is False, (tool, result)
+        assert result["error_type"] == "invalid_argument", (tool, result)
+        assert result["field"] == "timeout_s", (tool, result)
