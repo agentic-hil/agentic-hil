@@ -532,7 +532,11 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
         "tool": "com_session_start",
         "port_id": port_id,
         "error_type": COM_PORT_BUSY_ERROR,
-        "field": f"com_ports.{port_id}.device",
+        # `configured_device`, and deliberately no `field`. A `field` names the
+        # configuration key that is wrong, and here nothing in the configuration
+        # is: the entry reaches exactly the port it means, and somebody else has
+        # it. Naming a key invites the one repair the remediation warns against —
+        # pointing the entry at whichever device is free, which is another board.
         "configured_device": port_config.device,
         "summary": (
             f"COM port {port_config.device} is held by another program, so the session was refused at the open: no "

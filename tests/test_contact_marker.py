@@ -241,6 +241,9 @@ def test_a_port_another_program_holds_refuses_instead_of_quarantining(tmp_path: 
 
         assert result["error_type"] == COM_PORT_BUSY_ERROR, result
         assert result["configured_device"] == DEVICE
+        # No `field`: nothing in the configuration is wrong, and naming a key
+        # would point the reader at the one repair that is a different board.
+        assert "field" not in result, result
         assert result["target_contacted"] is False
         assert result["lease_state"] == "released"
         assert_refused_without_quarantine(result, config)
