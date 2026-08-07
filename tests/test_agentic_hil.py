@@ -141,7 +141,7 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert not config_path.exists(), "setup must bootstrap before any project config exists"
 
     real_which = shutil.which
-    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None if name == "claude" else real_which(name))
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: None if name == "claude" else real_which(name))
 
     result = setup_project(agent="claude-code")
 
@@ -303,9 +303,9 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
             return subprocess.CompletedProcess(command, 0, '{"ok": true}\n', "")
         return subprocess.CompletedProcess(command, 0, "installed\n", "")
 
-    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
-    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
-    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", run)
 
     result = upgrade_installation(["opencode"])
 
@@ -326,10 +326,10 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
-    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: ("pip", command))
-    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("pip", command))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
     monkeypatch.setattr(
-        "agentic_hil.cli._run_upgrade_process",
+        "agentic_hil.upgrade._run_upgrade_process",
         lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
     )
 
@@ -368,9 +368,9 @@ def _upgrade_reporting(
             return subprocess.CompletedProcess(invoked, 0, '{"ok": true}\n', "")
         return installed
 
-    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: (manager, command))
-    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", list)
-    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", run)
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: (manager, command))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", run)
     return calls
 
 
@@ -388,7 +388,7 @@ def test_upgrade_blocked_by_an_exact_pin_names_the_pin_and_keeps_the_extras(
     not: `agentic-hil@latest` re-resolves the bare distribution and uninstalls
     what `[can]` brought in, which takes CAN support off a bench that has it.
     """
-    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     calls = _upgrade_reporting(
         monkeypatch,
         manager="uv",
@@ -475,9 +475,9 @@ def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(
     and none is invented. A pin nobody can name a fix for is reported as the
     plain unchanged outcome, never as advice that does not exist.
     """
-    from agentic_hil.cli import _unpinned_reinstall_command
+    from agentic_hil.upgrade import _unpinned_reinstall_command
 
-    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
 
     assert _unpinned_reinstall_command(manager, command) == expected
 
@@ -485,7 +485,7 @@ def test_the_command_that_clears_a_pin_exists_only_where_a_pin_can_be_recorded(
 def test_upgrade_rejects_unknown_agent_before_mutating_installation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
 
     result = upgrade_installation(["unknown"])
 
@@ -509,13 +509,13 @@ def test_upgrade_selects_manager_owning_running_installation(
     expected: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agentic_hil.cli import _upgrade_command
+    from agentic_hil.upgrade import _upgrade_command
 
     monkeypatch.setattr(sys, "prefix", prefix)
     monkeypatch.setattr(sys, "executable", "PYTHON")
-    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
-    monkeypatch.setattr("agentic_hil.cli._installed_extras", tuple)
-    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
 
     selected_manager, command = _upgrade_command()
 
@@ -544,13 +544,13 @@ def test_upgrade_asks_for_the_extras_that_are_installed(
     tool and pipx paths need nothing here because both reinstall from a
     requirement their own receipt already records with its extras.
     """
-    from agentic_hil.cli import _upgrade_command
+    from agentic_hil.upgrade import _upgrade_command
 
     monkeypatch.setattr(sys, "prefix", prefix)
     monkeypatch.setattr(sys, "executable", "PYTHON")
-    monkeypatch.setattr("agentic_hil.cli._distribution_installer", lambda: installer)
-    monkeypatch.setattr("agentic_hil.cli._installed_extras", lambda: ("can", "pyocd"))
-    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: f"{name}.exe")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can", "pyocd"))
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
 
     _manager, command = _upgrade_command()
 
@@ -563,7 +563,7 @@ def test_installed_extras_names_only_the_extras_whose_requirements_are_present()
     `can` is installed for the test suite and `pyocd` is not, so this also
     proves the two are told apart rather than both being reported.
     """
-    from agentic_hil.cli import _installed_extras
+    from agentic_hil.upgrade import _installed_extras
 
     extras = _installed_extras()
 
@@ -596,8 +596,8 @@ def _watch_installation(
 ) -> None:
     monkeypatch.setattr(sys, "prefix", prefix)
     monkeypatch.setattr(sys, "executable", executable or f"{prefix}/Scripts/python.exe")
-    monkeypatch.setattr("agentic_hil.cli.os.getpid", lambda: 300)
-    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: processes)
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 300)
+    monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: processes)
 
 
 def test_the_upgrading_process_does_not_report_itself_as_holding_the_installation(
@@ -610,7 +610,7 @@ def test_the_upgrading_process_does_not_report_itself_as_holding_the_installatio
     Excluding only the current pid would leave that launcher looking exactly
     like a running MCP server.
     """
-    from agentic_hil.cli import _processes_holding_installation
+    from agentic_hil.upgrade import _processes_holding_installation
 
     _watch_installation(monkeypatch, _UPGRADE_ITSELF)
 
@@ -621,7 +621,7 @@ def test_a_second_process_in_the_installation_is_reported_with_pid_and_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The MCP server the agent host started is a sibling, never an ancestor."""
-    from agentic_hil.cli import _processes_holding_installation
+    from agentic_hil.upgrade import _processes_holding_installation
 
     server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=5)
     _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
@@ -641,7 +641,7 @@ def test_a_reused_parent_pid_does_not_hide_a_process_holding_the_installation(
     process that inherited the number, and hiding it is what would destroy the
     installation.
     """
-    from agentic_hil.cli import _processes_holding_installation
+    from agentic_hil.upgrade import _processes_holding_installation
 
     recycled = (
         _fake_process(100, 1, "C:/Users/op/.local/bin/agentic-hil.exe", created_ns=10),
@@ -661,7 +661,7 @@ def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
     Reading each of those as a holder would refuse an upgrade because something
     unrelated happens to be running, which is worse than the bug this guards.
     """
-    from agentic_hil.cli import _processes_holding_installation
+    from agentic_hil.upgrade import _processes_holding_installation
 
     # A shared prefix has a real shape per platform, and the console script only
     # sits where that platform puts it: `<prefix>/Scripts/agentic-hil.exe` beside
@@ -687,10 +687,10 @@ def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     The upgrade completes and nothing is lost, so a refusal there would block a
     valid upgrade over a failure that platform does not have.
     """
-    from agentic_hil.cli import _processes_holding_installation
+    from agentic_hil.upgrade import _processes_holding_installation
 
     monkeypatch.setattr(sys, "prefix", _TOOL_ENV)
-    monkeypatch.setattr("agentic_hil.cli.snapshot_process_images", lambda: None)
+    monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
 
     assert _processes_holding_installation() == []
 
@@ -705,9 +705,9 @@ def test_upgrade_refuses_before_removing_anything_when_the_installation_is_in_us
     old installation nor the new one, so the only safe move is to stop first.
     """
     holder = {"pid": 4242, "image": f"{_TOOL_ENV}/Scripts/python.exe"}
-    monkeypatch.setattr("agentic_hil.cli._processes_holding_installation", lambda: [holder])
-    monkeypatch.setattr("agentic_hil.cli._upgrade_command", lambda: pytest.fail("must not select a manager"))
-    monkeypatch.setattr("agentic_hil.cli._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [holder])
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: pytest.fail("must not select a manager"))
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
 
     result = upgrade_installation(["opencode"])
 
@@ -1168,7 +1168,7 @@ def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch:
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
     command = _trusted_test_mcp_command(monkeypatch)
-    monkeypatch.setattr("agentic_hil.cli.shutil.which", lambda name: None)
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: None)
     result = register_agent_mcp("claude-code")
     assert result["ok"] is True
     assert result["method"] == "file"
@@ -2037,7 +2037,7 @@ def _documented_tools(text: str, header: str) -> list[str]:
 
     Verbatim because a token that is not a tool name has to be visible to the
     caller. Matching the shape of a name here would drop `debug_*` on the floor
-    and report a table that names 26 of 37 tools as complete.
+    and report a table that names 26 of 39 tools as complete.
     """
     return [token for cell in _table_column(text, header) for token in re.findall(r"`([^`]+)`", cell)]
 
@@ -2082,7 +2082,7 @@ def test_readme_tool_table_spells_out_every_tool_rather_than_a_prefix() -> None:
     completeness direction blind exactly where the wildcard sits — a twelfth
     session tool would be absorbed by `debug_*` and README would never have to
     mention it, which is the drift this check exists to catch. Spelling the
-    names out costs one long cell and holds all 37.
+    names out costs one long cell and holds all 38.
     """
     declared = _documented_tools(_repository_document("README.md"), README_TOOL_COLUMN)
 
@@ -2095,7 +2095,7 @@ def test_readme_tool_table_spells_out_every_tool_rather_than_a_prefix() -> None:
 def test_agents_configuration_table_holds_the_configuration_family() -> None:
     """AGENTS.md's table is a partial inventory, and partial does not mean unchecked.
 
-    It claims the configuration tools, not all 37, so it is held to exactly
+    It claims the configuration tools, not all 38, so it is held to exactly
     that: every `project_config_*` tool this server serves has a row, and every
     row names one. Demanding the whole contract here would be a false claim
     about a table that never made it; demanding nothing would let a new
@@ -3274,8 +3274,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 37
-    assert len(set(MCP_TOOL_NAMES)) == 37
+    assert len(MCP_TOOL_NAMES) == 39
+    assert len(set(MCP_TOOL_NAMES)) == 39
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a

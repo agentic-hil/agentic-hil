@@ -1,10 +1,13 @@
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override.
 # Steps address configured devices by their names: `debugger` names a
-# `debuggers` entry, `port_id` names a `com_ports` entry. `debugger` may be
-# omitted while the config declares exactly one probe; with several, name it —
-# e.g. a second board as
+# `debuggers` entry, `port_id` names a `com_ports` entry, `bus_id` names a
+# `can_buses` entry. `debugger` may be omitted while the config declares exactly
+# one probe; with several, name it — e.g. a second board as
 #   - {debugger: dut_b, action: flash, image_path: build/sensor.elf}
+# The CAN steps below only read: the example configuration's `dut_can` is
+# `listen_only: true`, which is the claim that observing that bus sends nothing,
+# and a `can_send` step on such a bus is refused before the run starts.
 version: 2
 name: capture-state
 steps:
@@ -14,6 +17,10 @@ steps:
 
   - port_id: dut_uart
     action: uart_open
+
+  - bus_id: dut_can
+    action: can_open
+    clear_rx_queue: true
 
   - debugger: dut
     action: debug_start
@@ -25,6 +32,11 @@ steps:
     location: capture_done
     timeout_s: 5
 
+  - bus_id: dut_can
+    action: can_read
+    max_frames: 64
+    wait_timeout_s: 1
+
   - debugger: dut
     action: dump_memory
     symbol: capture_buffer
@@ -32,6 +44,9 @@ steps:
 
   - debugger: dut
     action: debug_stop
+
+  - bus_id: dut_can
+    action: can_close
 
   - port_id: dut_uart
     action: uart_close
