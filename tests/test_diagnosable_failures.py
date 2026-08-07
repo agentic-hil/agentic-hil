@@ -181,7 +181,7 @@ def test_pack_install_commands_never_run_anything() -> None:
 
 
 def test_the_probe_refusal_carries_the_pack_command(tmp_path: Path) -> None:
-    """#66 stage 2: the fix belongs in the answer, not only in `doctor`.
+    """Stage 2: the fix belongs in the answer, not only in `doctor`.
 
     Driven through the real backend against a pyOCD that emits the real message,
     so the classifier, the catalogue lookup and the substituted command are

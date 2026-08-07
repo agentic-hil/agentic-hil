@@ -481,7 +481,7 @@ def test_a_configured_listen_only_reaches_the_driver_through_the_whole_service(t
     """The decisive one: config field to driver, with nothing stubbed between.
 
     A field of this kind that is read and then dropped fails here, which is what
-    #103 asked for — the defect was invisible precisely because every layer above
+    this test exists for — the defect was invisible precisely because every layer above
     the constructor still reported success.
     """
     config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=True)
@@ -544,7 +544,7 @@ def test_the_reason_the_keyword_is_not_simply_passed_through() -> None:
     this fails and the per-adapter mechanism above should be reconsidered rather
     than kept out of habit. Until then, passing the keyword would be discarded by
     `BusABC.__init__(**kwargs: object)` without a word — a silent downgrade, one
-    level below the one #103 reported.
+    level below the one that was reported.
     """
     import inspect
 

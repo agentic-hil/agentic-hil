@@ -696,7 +696,7 @@ def test_without_the_description_grant_the_agent_gets_the_values_and_not_the_wri
 
     The grant belongs to the operator and this call does not argue with it. What
     it does is hand back the exact keys and values rather than a probe listing
-    somebody has to correlate by hand — which is the whole complaint in #76,
+    somebody has to correlate by hand — which is the whole complaint,
     answered even where the write is shut."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch)
     before = path.read_text(encoding="utf-8")

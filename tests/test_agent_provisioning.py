@@ -648,7 +648,7 @@ def test_creation_is_only_for_the_workspace_the_server_is_bound_to(tmp_path: Pat
 
 
 def test_a_refused_state_root_falls_back_to_a_location_that_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #64: the documented default is refused on a stock Windows profile.
+    """The documented default is refused on a stock Windows profile.
 
     A generated configuration naming it would be written and then refused on
     load, so the creation path picks the location every refusal already

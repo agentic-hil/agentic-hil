@@ -1415,7 +1415,7 @@ def provisionable_state_root(workspace: Path) -> Path:
 
     The documented default lands under ``%LOCALAPPDATA%``/``$XDG_STATE_HOME``,
     and on a stock Windows 11 profile that inherits AppData's app-capability ACE
-    and is rejected (issue #64). A generated configuration that named it would be
+    and is rejected. A generated configuration that named it would be
     written and then refused on load, so the trusted fallback under
     ``~/.agentic-hil`` — the same location every refusal already recommends — is
     tried next. When neither passes, the caller gets the same

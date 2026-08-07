@@ -132,10 +132,10 @@ MCP_TOOLS: list[JsonObject] = [
     # No arguments, and the missing one is the contract. There is no
     # `confirm_safe_state` here and there will not be: that flag attests that a
     # physical board is still and holds the expected firmware, and a flag the
-    # caller sets for itself is not a confirmation of anything. The reasons that
-    # need it are refused with the operator's command line instead, whatever the
-    # configuration grants. A schema test pins the absence, the way #126 pins the
-    # absent version argument on the upgrade tool.
+    # caller sets for itself is not a confirmation of anything. The reasons
+    # that need it are refused with the operator's command line instead,
+    # whatever the configuration grants. A schema test pins the absence, as
+    # another pins the absent version argument on the upgrade tool.
     {
         "name": "hardware_recover",
         "description": (

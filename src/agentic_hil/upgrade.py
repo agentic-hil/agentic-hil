@@ -405,7 +405,7 @@ def _upgrade_changed_nothing(
         # not, because the operator wanted a newer release and did not get it.
         # Refusing both would make `agentic-hil upgrade` exit non-zero on every
         # up-to-date machine, which breaks the provisioning scripts that run it
-        # unconditionally. The defect in #99 was claiming an upgrade that never
+        # unconditionally. The defect was claiming an upgrade that never
         # happened, not reporting that there was none to make.
         "ok": False,
         "tool": tool,

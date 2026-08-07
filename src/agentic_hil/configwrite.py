@@ -1,6 +1,6 @@
 """Field-wise changes to the authoritative configuration, gated by grants in it.
 
-The one-time provisioning path (#71) let an agent generate a configuration it
+The one-time provisioning path let an agent generate a configuration it
 could not find, and the file it generated refused every further write. That kept
 the invariant — an agent enables itself up to observation, never up to
 modification — and it left every later correction as hand work on YAML. In the
@@ -34,7 +34,8 @@ one cost this project's owner a working day of hand-edited YAML and bought
 nothing an agent with a shell could not already reach. What replaces it is the
 direction. ``permission_widening`` refuses any write that turns a permission on
 — one this server never touched, and one it set to ``false`` itself a moment
-earlier — so the invariant from #71 and #80 survives read from the other side:
+earlier — so the invariant behind the provisioning path and this one survives read
+from the other side:
 **an agent can only ever reduce its own authority.** It is the only one left,
 which is why it is enforced on the same before/after surfaces rather than on the
 keys a request happened to name, and why no actor waives it.

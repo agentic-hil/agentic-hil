@@ -428,7 +428,7 @@ def test_an_entry_id_that_looks_like_a_grant_is_read_as_the_id_it_is() -> None:
 
 
 def test_a_new_device_an_agent_adds_arrives_granted_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """#76's case: hardware attached after init. It may be described, not empowered."""
+    """Hardware attached after init: it may be described, not empowered."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     tools = service(workspace)
     try:
