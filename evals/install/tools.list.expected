@@ -36,3 +36,4 @@ project_config_describe
 project_config_reload_description
 project_config_set
 reset_target
+server_upgrade

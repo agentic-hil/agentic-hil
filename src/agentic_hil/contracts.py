@@ -244,6 +244,30 @@ MCP_TOOLS: list[JsonObject] = [
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # No arguments, and here the empty schema is the security property rather
+    # than a convenience (hardci-hq#126). There is deliberately no way to name a
+    # version: this tool lifts the installation to the newest release and can do
+    # nothing else. A `version` argument would put the whole permission model
+    # behind it — an agent that can install 0.7.x installs a release that reads
+    # `permissions:` under weaker rules, and every narrowing an operator made is
+    # undone by a downgrade rather than by a permission change. Downgrades and
+    # exact versions stay at the shell, with the operator, and
+    # `additionalProperties: false` is what refuses one that arrives anyway.
+    {
+        "name": "server_upgrade",
+        "description": (
+            "Replace this Agentic HIL installation with the newest release, gated by permissions.allow_upgrade. Takes "
+            "no arguments: it can only lift to the latest release, never to a version you name, so it cannot be used "
+            "to install a build that reads this bench's permissions differently. It replaces the package on disk and "
+            "does not change the code this server is running — a successful call answers upgraded_on_disk with "
+            "previous_version, version, running_version and restart_required: true, and the operator restarting the "
+            "MCP server is what loads it; the agentic-hil command line reads the new code straight away. Refused "
+            "while a run or a session holds this bench, and refused on Windows, where the files of a running process "
+            "are locked and only `agentic-hil upgrade` at a shell can replace them. Use this instead of running uv, "
+            "pipx or pip yourself."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -301,16 +325,23 @@ MCP_TOOLS: list[JsonObject] = [
 # distinction the host needs would not exist. The carve-out is for the trail
 # only, and it is the sole carve-out.
 #
-# `openWorldHint` is `false` on every tool, which is the one answer this surface
-# can give for all of them. A bench is a closed, named set: the target and the
-# probe, the COM ports and CAN buses the authoritative configuration declares,
-# the artifact store under the workspace, and that configuration itself. Nothing
-# here reaches the network or an unbounded set of entities. The four tools that
+# `openWorldHint` is `false` on every tool that acts on the bench, which is all
+# of them but one. A bench is a closed, named set: the target and the probe, the
+# COM ports and CAN buses the authoritative configuration declares, the artifact
+# store under the workspace, and that configuration itself. The four tools that
 # read what is physically attached rather than what is configured —
 # `debugger_probes_list`, `com_ports_list`, `project_config_adopt_hardware` and
 # `project_config_create` — are bounded by one machine's hardware, which is
 # still a closed domain and not the open world the schema contrasts a web search
 # against.
+#
+# `server_upgrade` is the exception and the first honest `openWorldHint: true`
+# here (hardci-hq#126). It hands the installation to `uv`, `pipx` or `pip`, which
+# resolve against a package index over the network: what arrives is whatever the
+# newest release is at that moment, from an entity outside this machine and
+# outside this configuration. That is the open world exactly as the schema means
+# it, and a `false` there would be the one place this table told a host the
+# opposite of what the code does.
 TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # Runs `<backend executable> --version` and reads the configuration. No
     # probe is opened and no board is contacted.
@@ -495,6 +526,15 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # at startup. A second call against the same file reports that nothing
     # moved.
     "project_config_reload_description": {"title": "Reload the bench description", "readOnlyHint": True, "openWorldHint": False},
+    # Not read-only: it replaces the installed package on disk. Not destructive
+    # either, and the distinction is the point — nothing is erased that this
+    # server holds, the configuration and the bench are untouched, and the
+    # previous release is a `uv tool install "agentic-hil==X.Y.Z"` away because
+    # the index still has it. Idempotent: it can only lift to the newest release,
+    # so a second call finds the installation already there and answers
+    # `already_current` without replacing anything. `openWorldHint: true` because
+    # the package comes off a network index — see the note above.
+    "server_upgrade": {"title": "Upgrade this Agentic HIL installation", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 }
 
 # Attached here rather than written into each literal above so that the

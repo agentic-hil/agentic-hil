@@ -132,15 +132,17 @@ class IoPermissions:
 
 @dataclass(frozen=True)
 class ProjectPermissions:
-    """What may be done to this project, beside its hardware.
+    """What may be done to this project — its configuration, its installation,
+    its incidents.
 
     Every flag belongs to the write class of decision 0018: reading the
     configuration needs no grant, writing it does. A generated configuration
-    carries all of them true (hardci-hq#96), so an agent can describe the bench and
-    narrow it on the operator's request without anyone opening YAML. The
-    dataclass defaults stay ``False`` for the same reason the per-device ones do:
-    they say what a file that names nothing means, and widening that would widen
-    every configuration already on disk.
+    carries all of them true (hardci-hq#96), so an agent can describe the bench,
+    narrow it on the operator's request, clear an incident nothing physical was
+    part of, and lift the server onto the current release — without anyone
+    opening YAML. The dataclass defaults stay ``False`` for the same reason the
+    per-device ones do: they say what a file that names nothing means, and
+    widening that would widen every configuration already on disk.
 
     What holds instead of a closed start is the direction. No call writes ``true``
     into a permission, so each of these can go from true to false and none of them
@@ -148,8 +150,8 @@ class ProjectPermissions:
     change an agent can make at all. ``agentic-hil init --force`` is what reopens
     the file, and it is a person's command.
 
-    Three grants rather than one, because one would be a master key. Somebody who
-    opens the file so an agent can enter a probe serial must not thereby have
+    Separate grants rather than one, because one would be a master key. Somebody
+    who opens the file so an agent can enter a probe serial must not thereby have
     handed over the permissions block:
 
     ``allow_config_write``
@@ -171,12 +173,21 @@ class ProjectPermissions:
         device-scoped, and because a bench that wants an agent kept away from its
         incidents narrows it in the same block as the rest. What it cannot hand
         over is the physical attestation — that boundary is in the tool, not in
-        this flag, and granting this does not move it."""
+        this flag, and granting this does not move it.
+
+    ``allow_upgrade``
+        replace this installation with the newest release over MCP
+        (``server_upgrade``, hardci-hq#126). Not about this file at all, and here
+        anyway because it is the same class of decision and the same ratchet: an
+        agent may close it and can never open it. The tool it gates takes no
+        version and can only lift to latest, so closing this key cannot be
+        undone by installing a release that reads it differently."""
 
     allow_config_write: bool = False
     allow_config_description_write: bool = False
     allow_config_permissions_write: bool = False
     allow_recover: bool = False
+    allow_upgrade: bool = False
 
 
 @dataclass(frozen=True)

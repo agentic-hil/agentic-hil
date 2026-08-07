@@ -80,6 +80,7 @@ from agentic_hil.report import (
     write_report,
 )
 from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject, fold_hardware_id
+from agentic_hil.upgrade import SERVER_UPGRADE, server_upgrade
 
 
 def _backend_kind(config: AgenticHILConfig | None) -> str | None:
@@ -440,6 +441,14 @@ class AgenticHILToolService:
             # allow_config_description_write is false must still be able to pick
             # up a board somebody plugged in.
             PROJECT_CONFIG_RELOAD: lambda: self.reload_description(),
+            # The one tool that changes neither the bench nor its configuration
+            # but the code enforcing both. It takes this service's own
+            # coordinator status rather than asking the locks a second time: a
+            # declared run holds the devices and not the project lock, so
+            # `bench_held` is the only reading that calls a held bench held
+            # (hardci-hq#105), and the refusal is hardci-hq#80's rule applied to
+            # the release instead of to the permissions.
+            SERVER_UPGRADE: lambda: server_upgrade(self.config, self.coordinator.status()),
         }
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:

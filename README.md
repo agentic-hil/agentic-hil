@@ -228,16 +228,19 @@ An update never widens this. What is generated changed; what an existing file me
 
 ### Changing it from an agent
 
-An agent reaches this file only through the MCP tools; `agentic-hil setup` writes host deny rules so its own file tools cannot. Two project-scoped permissions decide how far it gets, and they are deliberately separate:
+An agent reaches this file only through the MCP tools; `agentic-hil setup` writes host deny rules so its own file tools cannot. Project-scoped permissions decide how far it gets, and they are deliberately separate:
 
 ```yaml
 permissions:
   allow_config_write: true                  # regenerate the whole file from hardware discovery
   allow_config_description_write: true      # what the bench IS
   allow_config_permissions_write: true      # take back what the bench MAY do
+  allow_upgrade: true                       # lift this installation to the newest release
 ```
 
 `allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+
+`allow_upgrade` is the one that is not about this file. It opens `server_upgrade`, which replaces the installed package with the newest release, because on an MCP host without a shell there is otherwise no way for the main surface to perform the basic maintenance of its own server. It takes no version, so it cannot be used to install a release that reads the rest of this block differently, and it is subject to the same ratchet as everything else here: an agent can set it false and never true.
 
 #### Permissions move one way
 
@@ -355,6 +358,7 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Debug sessions | `debug_start_session`, `debug_stop_session`, `debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, `debug_halt`, `debug_get_stop_reason`, `debug_symbol_info`, `debug_dump_symbol_ihex` | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 | Run boundary | `bench_run_start`, `bench_run_stop`, `bench_run_status` | declares the devices of a multi-call run and holds them for its whole duration; without it each call holds its device only for its own duration |
 | Recovery | `hardware_recover` | clears a quarantine whose every reason names a call that never reached the hardware, gated by `permissions.allow_recover`; a reason that needs the board looked at is refused with the exact `agentic-hil recover --confirm-safe-state --quarantine-id <id>` line for the operator. It takes no arguments at all: a confirmation an agent gives itself is not one |
+| Installation | `server_upgrade` | lifts this installation to the newest release, gated by `permissions.allow_upgrade`. There is no version argument, so it can only go forward — an agent that could name a version could install one that reads this file's permissions differently. It replaces the package on disk and not the code this server is running: a successful result carries `previous_version`, `version`, `running_version` and `restart_required: true`, and an operator restarting the MCP server is what loads it. Refused while a run or session holds the bench (`upgrade_in_open_run`), on Windows, where a running process's files are locked and `agentic-hil upgrade` at a shell is the way (`upgrade_cli_only_on_host`), and on a pinned installation (`upgrade_blocked_by_pin`, which names an extras-preserving reinstall command and never runs it) |
 
 A typical loop: build firmware → `bench_run_start` naming the probe and the port → `flash_firmware` with `reset_after_flash: true` when a fresh boot is required → `com_session_start` → stimulate via `com_write`/`can_send` → assert on `com_read`/`can_read` → `bench_run_stop` → on failure, `classify_last_error`.
 
@@ -364,9 +368,9 @@ Devices are named as `{"kind": "debugger" | "uart" | "can", "id": "<config entry
 
 Write a hardware test as a plan, not a script: one reviewable YAML file describes flash → stimulate → break → dump, and the reactor guarantees it is either executed exactly as written or rejected before the first hardware action. No half-run plans, no leftover breakpoints, no orphaned debug or UART sessions — the same file behaves identically on your bench and in CI, and it diffs like code in a pull request.
 
-The test reactor executes a strict, sequential YAML or JSON test plan against the named devices in the authoritative config. A debugger step names a `debuggers` entry (`debugger: <name>`); a UART step names a `com_ports` entry (`port_id: <name>`). `debugger` may be omitted while the config declares exactly one probe — with several, the plan must name one, because picking a board for the author is how the wrong board gets flashed. Every probe carries its own permissions, so a step is judged by the grants of the board it names. Probes other than the bound one run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
+The test reactor executes a strict, sequential YAML or JSON test plan against the named devices in the authoritative config. A debugger step names a `debuggers` entry (`debugger: <name>`); a UART step names a `com_ports` entry (`port_id: <name>`); a CAN step names a `can_buses` entry (`bus_id: <name>`). Every device kind the config models can take part in a plan, and each kind answers for its own actions, permissions, session order and cleanup. `debugger` may be omitted while the config declares exactly one probe — with several, the plan must name one, because picking a board for the author is how the wrong board gets flashed. Every probe carries its own permissions, so a step is judged by the grants of the board it names. Probes other than the bound one run on their own service under one shared project lease. Typed debug actions currently require OpenOCD; flash/UART-only plans can use the other backends.
 
-Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug/UART sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
+Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple — validate everything, then execute, then always clean up:
 
@@ -382,12 +386,17 @@ name: capture-state
 steps:
   - {debugger: dut, action: flash, image_path: build/app.elf}
   - {port_id: dut_uart, action: uart_open}
+  - {bus_id: dut_can, action: can_open}
   - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
   - {debugger: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
+  - {bus_id: dut_can, action: can_read, max_frames: 64, wait_timeout_s: 1}
   - {debugger: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
   - {debugger: dut, action: debug_stop}
+  - {bus_id: dut_can, action: can_close}
   - {port_id: dut_uart, action: uart_close}
 ```
+
+`dut_can` above is the `listen_only: true` bus from the configuration example, so the plan only reads it. A `can_send` step belongs on a bus whose entry sets `listen_only: false` and grants `allow_write`.
 
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
