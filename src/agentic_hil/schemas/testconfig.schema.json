@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["version", "steps"],
   "properties": {
-    "version": { "const": 2, "description": "Format version. Version 1 addressed a `device:` that no longer exists; steps now name a `debuggers` entry or a `com_ports` entry directly." },
+    "version": { "const": 2, "description": "Format version. Version 1 addressed a `device:` that no longer exists; steps now name a `debuggers` entry, a `com_ports` entry or a `can_buses` entry directly." },
     "name": { "type": "string", "minLength": 1 },
     "steps": {
       "type": "array",
@@ -17,6 +17,10 @@
           { "$ref": "#/$defs/flash" },
           { "$ref": "#/$defs/uartOpen" },
           { "$ref": "#/$defs/uartClose" },
+          { "$ref": "#/$defs/canOpen" },
+          { "$ref": "#/$defs/canClose" },
+          { "$ref": "#/$defs/canSend" },
+          { "$ref": "#/$defs/canRead" },
           { "$ref": "#/$defs/debugStart" },
           { "$ref": "#/$defs/runUntilBreakpoint" },
           { "$ref": "#/$defs/dumpMemory" },
@@ -28,6 +32,7 @@
   "$defs": {
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
+    "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
     "path": { "type": "string", "minLength": 1 },
     "timeout": { "type": "number", "minimum": 0 },
     "location": {
@@ -88,6 +93,50 @@
       "properties": {
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_close" }
+      }
+    },
+    "canOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "bus_id"],
+      "properties": {
+        "bus_id": { "$ref": "#/$defs/busId" },
+        "action": { "const": "can_open" },
+        "clear_rx_queue": { "type": "boolean", "default": true, "description": "Drain the receive queue before the plan reads. Requires permissions.allow_read on the bus." }
+      }
+    },
+    "canClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "bus_id"],
+      "properties": {
+        "bus_id": { "$ref": "#/$defs/busId" },
+        "action": { "const": "can_close" }
+      }
+    },
+    "canSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "bus_id", "frame_id"],
+      "description": "One classic CAN frame on a bus this plan opened. Refused before the run on a bus configured `listen_only: true`, which is the claim that observing it sends nothing.",
+      "properties": {
+        "bus_id": { "$ref": "#/$defs/busId" },
+        "action": { "const": "can_send" },
+        "frame_id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }] },
+        "extended": { "type": "boolean", "default": false },
+        "rtr": { "type": "boolean", "default": false },
+        "data_hex": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "default": "" }
+      }
+    },
+    "canRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "bus_id"],
+      "properties": {
+        "bus_id": { "$ref": "#/$defs/busId" },
+        "action": { "const": "can_read" },
+        "max_frames": { "type": "integer", "minimum": 1, "description": "Defaults to the bus's configured max_buffer_frames, which is also the ceiling." },
+        "wait_timeout_s": { "$ref": "#/$defs/timeout" }
       }
     },
     "debugStart": {
