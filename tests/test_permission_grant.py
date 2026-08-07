@@ -1,17 +1,17 @@
 """`agentic-hil grant` and `agentic-hil revoke`: the gate on the one-way street.
 
-hardci-hq#96 built the ratchet — an agent writes `false` into a permission over
+0.8.0 built the ratchet — an agent writes `false` into a permission over
 MCP and never `true` — and answered the other direction for a configuration that
 does not exist yet: a generation opens everything it can. For one that does exist there
 was no answer that did not cost the rest of the file, and the three routes an
 operator had were one refusal and two resets: `project_config_set` only
 narrows, and `init --force` and deleting the file both do come back open while
 throwing away the baudrate, the `resource_id`, the `state_root` and every
-artifact root somebody set. hardci-hq#102 was filed after its owner took the
+artifact root somebody set. These two commands were written after the owner took the
 third route and paid exactly that.
 
 (`carry_over_permissions` is the regeneration that keeps a narrowing, and it is
-`project_config_create`'s alone — hardci-hq#113. `init --force` is the operator's
+`project_config_create`'s alone. `init --force` is the operator's
 reset and carries nothing; it now names what it discarded.)
 
 The decisive test here is therefore not "a permission changed". It is
@@ -77,7 +77,7 @@ def bench(
 ) -> tuple[Path, Path]:
     """A bench somebody grew: settings all over it, and every permission closed.
 
-    The device grants start `false` because that is the state hardci-hq#102 is
+    The device grants start `false` because that is the state these commands are
     about — a configuration generated before the inversion, or narrowed since.
     The project grants start `false` too unless a test asks otherwise, so the
     default here is the hardest case: a file `project_config_set` cannot move a
@@ -124,7 +124,7 @@ def run(workspace: Path, command: str, *keys: str, open_holds: dict[str, Any] | 
 def test_the_bench_from_the_issue_is_repaired_without_losing_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`can_buses.dut.allow_write` opens, and nothing else in the file moves.
 
-    The owner's own words on hardci-hq#102, and the point of the whole command:
+    The owner's own words, and the point of the whole command:
     the workaround it replaces was deleting the configuration, which returns an
     open one and throws away everything else. So the assertion that matters is
     not that the flag is true — it is that the baudrate, the bitrate, the
@@ -206,7 +206,7 @@ def test_revoke_is_the_way_back_from_grant(tmp_path: Path, monkeypatch: pytest.M
 def test_the_terminal_move_is_no_longer_terminal_for_a_person(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`allow_config_permissions_write: false` closes MCP and not the shell.
 
-    This is the hardest case hardci-hq#102 names: a bench whose permissions half
+    This is the hardest case: a bench whose permissions half
     is shut cannot be moved by `project_config_set` in either direction, whoever
     asks. Before this command, the only way back was regenerating the whole file
     or deleting it."""
@@ -524,7 +524,7 @@ def test_a_call_that_mixes_a_no_op_with_a_change_writes_only_the_change(tmp_path
 
 
 def test_a_permission_does_not_move_while_something_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """hardci-hq#80's rule, reached from the command line.
+    """The open-run refusal, reached from the command line.
 
     Those holds were taken under the permissions this file states, so opening
     one underneath them would move the rules during the run they govern."""
@@ -572,7 +572,7 @@ def test_a_run_blocks_it_as_completely_as_a_lease(tmp_path: Path, monkeypatch: p
     project lock is a lease's. So a run between two of its own calls is invisible
     to the check that catches a session, and asking only that question would have
     let a permission move in the middle of somebody's test — the one thing
-    hardci-hq#80 rules out. The device locks are the second question, and this is
+    the open-run refusal rules out. The device locks are the second question, and this is
     the case that makes them necessary rather than thorough."""
     workspace, _ = bench(tmp_path, monkeypatch)
     from agentic_hil.cli import bench_open_holds
@@ -603,7 +603,7 @@ def test_a_run_blocks_it_as_completely_as_a_lease(tmp_path: Path, monkeypatch: p
 def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check and the write are one transaction against a run starting.
 
-    hardci-hq#80 refuses a permission change while the bench is held, but reading
+    The rule refuses a permission change while the bench is held, but reading
     the holds and then writing left a gap: a run that began in it took the bench
     under the old policy while the write moved the policy underneath. The command
     now holds every configured device across the check-and-write on the same
@@ -642,7 +642,7 @@ def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_pat
     assert refused["command"] == "agentic-hil grant"
     assert refused["side_effect_committed"] is False
     assert refused["open_holds"]["raced_a_run"] is True
-    # The one thing hardci-hq#80 rules out did not happen: the file is untouched.
+    # The one thing the rule rules out did not happen: the file is untouched.
     assert path.read_bytes() == before
 
     # With the seam gone — no run in the gap — the same command writes, so the
@@ -660,7 +660,7 @@ def test_a_device_repointed_after_the_status_read_refuses_the_write(tmp_path: Pa
     `COM10` — a run can take `com:COM10` while the command holds only `com:COM9`,
     and the two never collide: the old command re-read the moved document and
     wrote the permission with a run holding the bench underneath it, the exact
-    outcome hardci-hq#80 rules out. The command now derives its locks and the
+    outcome the rule rules out. The command now derives its locks and the
     document it writes against from one read taken after the status probe, so it
     holds the moved key and collides with the run rather than slipping past it.
     Nothing is written.
@@ -743,7 +743,7 @@ def test_the_new_refusal_is_in_the_catalogue_with_both_halves() -> None:
 def test_the_widening_refusal_now_names_the_surgical_way_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An agent that reports "this permission is needed" should name the command.
 
-    Before hardci-hq#102 the only answer was `init --force`, which for a grown
+    Before these commands the only answer was `init --force`, which for a grown
     bench is not a repair. The refusal names both now, and says which is which."""
     workspace, _ = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
     tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")

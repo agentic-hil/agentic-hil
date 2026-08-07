@@ -1,12 +1,12 @@
 """One-time agent provisioning of a project configuration.
 
-The invariant every test here circles, since hardci-hq#96 turned the generated
-default over: **an agent can only ever reduce its own authority.** A generation
+The invariant every test here circles, since the generated
+default turned over: **an agent can only ever reduce its own authority.** A generation
 grants everything it can — the file it writes is workable from the first call,
 flashing included — and the direction is what is defended: `project_config_set`
 writes `false` into a permission and never `true`.
 
-"Everything it can" is the correction hardci-hq#107 made: the two permissions in
+"Everything it can" carries a correction of its own: the two permissions in
 `EXCLUSIVE_FLASH_PERMISSIONS` refuse flashing while they are true and put no tool
 behind that, so a generation writes them false and the file works. They are the
 one exception, they are derived from the constant here rather than spelled out,
@@ -139,7 +139,7 @@ def withheld_by_design(document: object) -> set[str]:
 
     The `EXCLUSIVE_FLASH_PERMISSIONS` pair on each debugger entry, read off the
     constant rather than spelled out here, so that widening the pair moves these
-    assertions with it instead of leaving them quietly weaker (hardci-hq#107)."""
+    assertions with it instead of leaving them quietly weaker."""
     entries = document.get("debuggers") if isinstance(document, dict) else None
     if not isinstance(entries, dict):
         return set()
@@ -210,7 +210,7 @@ def test_generated_configuration_grants_everything_at_all(tmp_path: Path, monkey
             "allow_flash": True,
             "allow_reset": True,
             # False, and that is what makes allow_flash above mean anything:
-            # either one true refuses flash_firmware on this probe (hardci-hq#107).
+            # either one true refuses flash_firmware on this probe.
             "allow_raw_debugger_commands": False,
             "allow_mass_erase": False,
         }
@@ -293,12 +293,12 @@ def test_generated_configuration_says_an_agent_wrote_it(tmp_path: Path, monkeypa
         # It says it about `project_config_set` and it says what regeneration
         # does instead, because a header that promised the ratchet covered the
         # whole file would be describing a rule this project does not have — the
-        # owner's clarification on hardci-hq#96 keeps creation out of it.
+        # owner's decision on the generated default keeps creation out of it.
         assert "project_config_set" in text
         assert "arrives at the skeleton's defaults" in text
         assert "comes back at those defaults" in text
         # And the header states the pair it wrote false, so a reader does not
-        # meet them as an unexplained narrowing further down (hardci-hq#107).
+        # meet them as an unexplained narrowing further down.
         assert "allow_raw_debugger_commands and allow_mass_erase" in text
         assert "false so that\n# flashing works" in text
         # Provenance is a note to a reader, never policy: what decides the next
@@ -330,7 +330,7 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     # A person narrows what their project should not have, then the file is lost.
     # allow_flash and not allow_mass_erase: the narrowing has to be of a flag a
     # generation leaves *true*, or the cycle this test measures costs nothing and
-    # the assertion below passes without the file having moved (hardci-hq#107).
+    # the assertion below passes without the file having moved.
     narrowed = deepcopy(original)
     narrowed["debuggers"]["dut"]["permissions"]["allow_flash"] = False
     config_file.write_text(yaml.safe_dump(narrowed, sort_keys=False), encoding="utf-8")
@@ -648,7 +648,7 @@ def test_creation_is_only_for_the_workspace_the_server_is_bound_to(tmp_path: Pat
 
 
 def test_a_refused_state_root_falls_back_to_a_location_that_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #64: the documented default is refused on a stock Windows profile.
+    """The documented default is refused on a stock Windows profile.
 
     A generated configuration naming it would be written and then refused on
     load, so the creation path picks the location every refusal already
@@ -776,19 +776,19 @@ def test_default_state_root_is_still_preferred_when_it_passes(tmp_path: Path, mo
 
 
 # ---------------------------------------------------------------------------
-# The two proofs hardci-hq#96 asks for.
+# The two proofs the open generated default asks for.
 
 
 def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """From nothing to hardware, counted in round trips between human and agent.
 
-    The whole of hardci-hq#96, as a sequence. Under the closed default this run
+    The whole of the open generated default, as a sequence. Under the closed default this run
     stopped at the second call with `permission_denied` on `allow_flash`, and the
     way on was a person finding the key in a YAML file outside the repository and
     setting it by hand — the day of work that produced this change. Here nobody
     opens an editor at any point.
 
-    Flashing takes no extra call, and that is what hardci-hq#107 fixed. Validated
+    Flashing takes no extra call, and that is what the interlock correction fixed. Validated
     flashing and unrestricted debugger access are mutually exclusive policies
     (docs/security-design.md), and for a while a generated configuration granted
     both sides of that exclusion — so `flash_firmware` was refused on a file
@@ -824,7 +824,7 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
 
         # 3. Flashing works on the first try. There is no narrowing step between
         #    the generation and the first flash, and that is the whole point of
-        #    this test: until hardci-hq#107 there was one, and an operator who did
+        #    this test: until the interlock correction there was one, and an operator who did
         #    not know to take it could not flash a freshly generated bench at all.
         flashed = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
         try:
@@ -955,7 +955,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
 #
 # Under the closed default this path was reachable exactly once per workspace, so
 # a run could not be open across it and there was nothing to coordinate with.
-# hardci-hq#96 grants `allow_config_write` in every generated file, which makes
+# A generation grants `allow_config_write` in every generated file, which makes
 # regeneration an ordinary call an agent can make at any moment — including the
 # middle of a run, and including while another process on this machine is driving
 # the probe it would enumerate.
@@ -1341,7 +1341,7 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
         service.close()
 
     # Nothing was narrowed, and the two flags a generation writes false are not
-    # reported as a narrowing: nobody chose them for this bench (hardci-hq#107).
+    # reported as a narrowing: nobody chose them for this bench.
     assert created["narrowed_permissions"] == []
     assert "flash the bench" in created["summary"]
     config_file = Path(created["path"])
@@ -1384,7 +1384,7 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     a live instruction telling a connected agent that a bench it just generated
     grants nothing, at the moment it in fact grants flashing.
 
-    Since hardci-hq#107 the same applies in the other direction, and it is the
+    Since the interlock correction the same applies in the other direction, and it is the
     sharper case: a contract that still said "every permission is true" would be
     telling an agent that the two flags the interlock reads are on, and the
     documented way to make flashing work would be to ask an operator to turn them
@@ -1442,7 +1442,7 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
     # One service, one session: narrow, then regenerate, with no restart between.
     # allow_reset and not allow_mass_erase, because the narrowing has to be of a
     # flag a generation leaves true, or the regeneration below puts nothing back
-    # and this passes without exercising anything (hardci-hq#107).
+    # and this passes without exercising anything.
     service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
     try:
         narrowed = service.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": False}]})

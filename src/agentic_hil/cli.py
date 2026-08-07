@@ -127,8 +127,7 @@ class FileSnapshot:
     truncated write, something binary dropped on the path — is still something a
     forced regeneration must restore rather than delete. Snapshotting it as
     decoded text mapped those bytes to ``None``, which reads as "absent", and a
-    failed final validation then removed the original instead of restoring it
-    (hardci-hq#106)."""
+    failed final validation then removed the original instead of restoring it."""
 
     path: Path
     raw: bytes | None
@@ -205,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     adopt_parser.add_argument("--probe-id", default=None, help="which attached probe this is about; only needed when more than one is attached")
     adopt_parser.add_argument("--dry-run", action="store_true", help="report what would be filled in and write nothing")
 
-    # The gate on the one-way street (hardci-hq#102). Deliberately here and in no
+    # The gate on the one-way street. Deliberately here and in no
     # tool list: an agent narrows a permission over MCP and never widens one, and
     # opening one is the operator's, at the operator's shell — the same shell
     # that already holds `agentic-hil init --force`, which rewrites every
@@ -349,7 +348,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     """Upgrade the package owning this process, then run maintenance from new code.
 
     The manager half is `upgrade.replace_installation`, shared verbatim with the
-    `server_upgrade` MCP tool (hardci-hq#126). What is this command's alone is
+    `server_upgrade` MCP tool. What is this command's alone is
     what follows a swap that actually happened: a shell can refresh the agent
     skills out of the new package, and an MCP server cannot — it is still the old
     code until somebody restarts it.
@@ -383,12 +382,12 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
             skill_results[agent] = child
 
     skills_ok = all(child.get("returncode") == 0 for child in skill_results.values())
-    # hardci-hq#125's third hole, on the path the release notes actually send an
-    # operator down: an upgrade that came back without the extra this bench's
-    # configuration needs. Best effort by design — `upgrade` has to work on a
-    # machine that has no project configured yet, so a configuration that will
-    # not load is a reason to say nothing here rather than to fail the upgrade
-    # that just succeeded.
+    # One more way an installation stops matching its own configuration, on the
+    # path the release notes actually send an operator down: an upgrade that
+    # came back without the extra this bench's configuration needs. Best effort
+    # by design — `upgrade` has to work on a machine that has no project
+    # configured yet, so a configuration that will not load is a reason to say
+    # nothing here rather than to fail the upgrade that just succeeded.
     extras_warning = None
     with suppress(ConfigError, OSError):
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
@@ -557,7 +556,7 @@ def _smooth_user_permissions() -> list[str]:
     ``trusted_persistent_executable`` is the last check that refuses a path for
     its POSIX mode, and it looks at the executable and its ancestors and nothing
     else. Smoothing was once wider because configured paths were mode-checked
-    too; that check was removed whole (hardci-hq#95), and chmod-ing a tree
+    too; that check was removed whole, and chmod-ing a tree
     nothing validates any more would be this policy's remnant mutating an
     operator's filesystem for no refusal it can prevent. The skill and the
     user-level MCP config are therefore no longer touched, and neither is
@@ -667,7 +666,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     mutation_paths = _project_mutation_paths(resolved_agent, target_path)
     # Nothing project-side is smoothed. `state_root`, the authoritative config
     # and the agent's policy file were chmod-ed here to satisfy the configured
-    # path trust check, which is gone (hardci-hq#95); nothing left refuses any
+    # path trust check, which is gone; nothing left refuses any
     # of them for its mode, so an operator's group-writable tree keeps the modes
     # it was given. The field stays because callers read it.
     permission_changes: list[str] = []
@@ -870,7 +869,7 @@ def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, 
     Three returns because a rollback and a permission-narrowing analysis want
     different reads of one file. The bytes are what a failed regeneration
     restores — the original, exactly, whether or not it is UTF-8 — so a non-UTF-8
-    file is put back rather than deleted (hardci-hq#106); before this, the
+    file is put back rather than deleted; before this, the
     snapshot was taken from the decoded text, and text that would not decode was
     recorded as absence, so rollback removed the original it claimed to restore.
     The decoded text is for the narrowing comparison, which is over UTF-8 YAML
@@ -895,7 +894,7 @@ def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, 
 def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tuple[list[str], str | None]:
     """Which permissions the replaced file had closed and the new one grants.
 
-    `--force` is the full regeneration and stays that way (hardci-hq#113): it
+    `--force` is the full regeneration and stays that way: it
     already discards the baudrate, the `resource_id`, the `state_root` and the
     artifact roots, so a version that rescued permissions and nothing else would
     be harder to predict rather than easier. `carry_over_permissions` is the MCP
@@ -933,7 +932,7 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     a hardware read either way, so that reached a board another run was holding —
     where `project_config_create`, which writes the same file out of the same
     read, answers `device_busy` — and it did so leaving nothing in the audit
-    trail (hardci-hq#108). Since agentic-hil/agentic-hil#112 made `init` look
+    trail. Since agentic-hil/agentic-hil#112 made `init` look
     unconditionally that applied to every `init` rather than only to a workspace
     carrying a profile.
 
@@ -1004,7 +1003,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
-    # cannot say whether looking is allowed, and gating the read on it (hardci-hq#104)
+    # cannot say whether looking is allowed, and gating the read on it
     # meant a fresh installation with no `agentic-hil.config.example.yaml` got a
     # file full of placeholders on a machine with the board plugged in — while the
     # MCP server, which reads unconditionally, found that same board. The two
@@ -1047,7 +1046,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # Snapshotted as the exact bytes that were there, not as `existing` (the
     # decoded text, which is None for a non-UTF-8 file): a failed final
     # validation below has to put the original back byte-for-byte rather than
-    # delete a file it could not decode (hardci-hq#106).
+    # delete a file it could not decode.
     snapshot = FileSnapshot(target_path, original_bytes)
     try:
         secure_atomic_write_text(target_path, text)
@@ -1069,7 +1068,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     #
     # `narrowed_permissions` rather than a walk of the whole surface, so that the
     # two flags the skeleton itself writes false are not reported as the
-    # profile's doing (hardci-hq#107). They are the same two on every bench,
+    # profile's doing. They are the same two on every bench,
     # profile or no profile, and are stated once here instead.
     written_document = yaml.safe_load(text) or {}
     narrowed = narrowed_permissions(written_document)
@@ -1089,7 +1088,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
         # told that discovery ran and came back empty reads the same file as
-        # "detection is broken" — which is what hardci-hq#104 was reported as.
+        # "detection is broken" — which is exactly how this was reported.
         next_steps.insert(
             0,
             "This file describes no board yet, because hardware discovery ran and found none: "
@@ -1167,7 +1166,7 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     names no permission, which the before/after comparison inside the write path
     enforces from the document rather than from the request. Nothing here needs
     to be argued as the lesser evil either: the same shell already has
-    `agentic-hil init --force`, which since hardci-hq#96 rewrites the whole file
+    `agentic-hil init --force`, which since 0.8.0 rewrites the whole file
     at the generated defaults. Whoever has that shell has the operator's
     authority over this configuration outright, and the ratchet was never a
     promise about them — it holds on the MCP write path, which is where an agent
@@ -1193,15 +1192,16 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
 def change_permission(command: str, keys: list[str]) -> JsonObject:
     """`agentic-hil grant` and `agentic-hil revoke`, the operator's half of the ratchet.
 
-    hardci-hq#96 left an agent able to write `false` into a permission and
-    nothing else, and answered the other direction for a file that does not exist
-    yet: a generation opens everything it can. For a bench that has been running a while
-    there was no answer that did not cost the rest of the file: `init --force`
-    does come back open, and so does deleting the configuration, both at the cost
-    of the baudrate, the `resource_id`, the `state_root` and every artifact root
-    somebody set. hardci-hq#102 is the bill for that, and this is the gate.
-    `carry_over_permissions`, the regeneration that does keep a narrowing, is
-    `project_config_create`'s and belongs to no command here (hardci-hq#113).
+    The ratchet leaves an agent able to write `false` into a permission and
+    nothing else, and answers the other direction only for a file that does not
+    exist yet: a generation opens everything it can. For a bench that has been
+    running a while there was no answer that did not cost the rest of the file:
+    `init --force` does come back open, and so does deleting the configuration,
+    both at the cost of the baudrate, the `resource_id`, the `state_root` and
+    every artifact root somebody set. That is the bill these two commands
+    settle, and this is the gate. `carry_over_permissions`, the regeneration
+    that does keep a narrowing, is `project_config_create`'s and belongs to no
+    command here.
 
     It is a command and not a tool, and that is the whole security argument: an
     agent holding only the MCP tools cannot reach it, so the ratchet on that
@@ -1213,7 +1213,7 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     The check and the write are one transaction against a run starting. Reading
     the holds and then writing left a gap: a run that began inside it took the
     bench under the old policy while the write moved the policy underneath —
-    hardci-hq#80's open-run refusal, defeated by timing rather than argued away.
+    the open-run refusal, defeated by timing rather than argued away.
     So when the bench reads free, every configured device is held for the length
     of the check-and-write, on the same machine-wide locks a run or a session
     takes; one that begins now collides with those instead of slipping between the
@@ -1243,7 +1243,7 @@ def _change_permission_holding_the_bench(command: str, keys: list[str], config: 
     # description into the write, which refuses if it has moved by the time the
     # write lock is held: either the run collides with the keys held here, or the
     # write is refused, never a policy landing over a bench held under keys this
-    # call never saw (hardci-hq#80).
+    # call never saw.
     try:
         fresh, document = _config_and_document_for_hold(workspace, config)
     except ConfigError:
@@ -1320,8 +1320,8 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
     machine-wide device locks and *not* the project lock, so a run between two of
     its own calls is invisible to the first question.
 
-    Asking is `HardwareCoordinator.status()`'s job, not this one's. Until
-    hardci-hq#105 the device half lived here and helped no other caller — the
+    Asking is `HardwareCoordinator.status()`'s job, not this one's. The device
+    half used to live here and helped no other caller — the
     same status read a second terminal makes still reported a run's held bench as
     free. This reshapes the one answer for the refusal; it does not go back to
     the locks a second time. Why the holder records are not that answer, and why
@@ -1335,8 +1335,8 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
     From out here a declared run and a session that outlived one are the same
     fact, so neither is claimed: what is reported is that the bench is held and
     by whom. A hold is a hold, and that is what the refusal turns on — those
-    devices were taken under the permissions in this file, and hardci-hq#80 ruled
-    out moving the rules underneath them.
+    devices were taken under the permissions in this file, and moving the rules
+    underneath them is what the open-run refusal rules out.
     """
     coordinator = HardwareCoordinator(config, "operator-cli")
     try:
@@ -1676,7 +1676,7 @@ def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[st
     Earlier releases built both rules straight from the absolute path: a
     `Write(...)` that Claude Code never consults, and an `Edit(...)` whose single
     leading slash anchored it under `~/.claude` instead of at the filesystem root.
-    The first is loud — a yellow warning at every start (hardci-hq#81) — and the
+    The first is loud — a yellow warning at every start — and the
     second is silent, which is worse: it reads as protection and is not.
 
     Identifying them needs no heuristic. The globs are derived from this
@@ -1695,7 +1695,7 @@ def _stale_opencode_deny_patterns(config_path: Path, state_root: Path) -> set[st
 
     They match nothing at all. opencode compares that key against the
     worktree-relative path, established from its source rather than from its
-    documentation, which does not say (hardci-hq#84): `write.ts`, `edit.ts` and
+    documentation, which does not say: `write.ts`, `edit.ts` and
     `apply_patch.ts` ask with `patterns: [path.relative(instance.worktree,
     filepath)]`, `evaluate` in `permission/index.ts` matches the configured
     pattern against that subject, and `Wildcard.match` anchors it `^...$`. Both
@@ -1705,7 +1705,7 @@ def _stale_opencode_deny_patterns(config_path: Path, state_root: Path) -> set[st
     They are taken back rather than corrected, because Agentic HIL no longer
     writes a restriction for this host at all — see `restrict_agent_write_access`.
     A rule that reads as protection and is not is worse than none, which is the
-    silent half of hardci-hq#81 over again.
+    same silent failure over again.
 
     Identifying them needs the same argument as `_stale_claude_code_deny_rules`:
     the text is derived from this project's own paths, so an operator's own
@@ -2116,7 +2116,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
     # and `debugger_drives_hardware` is literally the set config load validated —
-    # which since hardci-hq#96 excludes the starter entry `init` writes with
+    # which since 0.8.0 excludes the starter entry `init` writes with
     # every permission granted and no toolchain named, and includes every entry
     # that has one, whatever its scripts looked like before it did. It takes the
     # configuration too, because under version 2 an entry with no mutation grant
@@ -2177,7 +2177,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # before a bench misbehaves, and the warning says what to run to fix it.
     identity_warnings = config_devices(config).warnings()
     # The other thing that is already wrong before anything misbehaves, and which
-    # until hardci-hq#125 nothing said: an installation that lost the extra its
+    # nothing said until now: an installation that lost the extra its
     # own configuration needs. `uv tool install --upgrade` replaces the recorded
     # requirement, so a bench installed as `agentic-hil[can]` came back without
     # python-can, and the first `can_session_start` — hours later, in a result

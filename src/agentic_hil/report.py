@@ -259,7 +259,7 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
     it is published in a different spelling — the bare hex the lease records on
     disk carry, not the algorithm-prefixed one ``config_status`` uses — and a
     report is written on paths that never took a lease at all. It is derived from
-    these same parsed bytes since hardci-hq#109; until then it came from a second
+    these same parsed bytes; it used to come from a second
     read at coordinator construction and could, under the very race this record
     exists for, name a document nobody parsed.
 
@@ -705,7 +705,7 @@ def no_contact_refusal(result: JsonObject, contact: ContactMarker) -> JsonObject
 # keeps it for the session.
 #
 # Read by the coordination layer to decide whether a report can speak for a lease
-# that is still open on disk (hardci-hq#127). For a tool in this set, a report
+# that is still open on disk. For a tool in this set, a report
 # saying `side_effect_status: not_started` beside a still-active lease says the
 # owner died between committing that report and releasing the lease — and in that
 # window nothing can have touched the bench, because the next call would have

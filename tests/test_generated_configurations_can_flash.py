@@ -1,13 +1,13 @@
 """A configuration a generation writes can flash the bench it describes.
 
 The rule this file exists for is not in either of the two rules it is made of.
-hardci-hq#96 opened every permission a generated configuration declares. The
+A generation opens every permission a configuration declares. The
 flash interlock refuses `flash_firmware` while `allow_raw_debugger_commands` or
 `allow_mass_erase` is true on the probe. Each was tested on its own and each
 passed on its own, and together they meant that a freshly generated bench could
 not flash at all — the interlock was written when the pair defaulted to false, so
 "both on" was a state somebody had chosen, and the inversion made it the shipped
-state without either rule being edited (hardci-hq#107).
+state without either rule being edited.
 
 So the assertions here are deliberately *crossings*: a generation on one side, the
 interlock's own constant on the other. A test that only read the template would
@@ -115,7 +115,7 @@ def test_a_generated_configuration_is_not_refused_by_the_flash_interlock(path: s
 def test_a_generated_configuration_still_grants_what_it_can(path: str) -> None:
     """The other half, or the fix would be "write false everywhere".
 
-    hardci-hq#96 is not undone by hardci-hq#107: everything that has a tool
+    The open default is not undone by the two exceptions: everything that has a tool
     behind it is still open on a fresh file, and the exception is exactly the
     permissions that have none."""
     permissions = debugger_permissions(GENERATION_PATHS[path]())

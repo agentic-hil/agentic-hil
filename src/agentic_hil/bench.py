@@ -204,7 +204,7 @@ def fold_resource_name(resource: str) -> str:
     # POSIX as well as on Windows. Folding it as a path instead left a
     # hand-written `probe:<SERIAL>` uppercase on POSIX while the configured
     # `probe_id` locked `probe:<serial>`, so two spellings of one probe bypassed
-    # each other (hardci-hq#106). The one exception is the legacy executable
+    # each other. The one exception is the legacy executable
     # spelling that predates `probe-exe:`: an executable is a host path, and a
     # debugger identified by one still holds `probe:<path>` beside its
     # `probe-exe:` key so a pre-upgrade process or a raw caller cannot take the
@@ -234,15 +234,16 @@ def fold_resource_name(resource: str) -> str:
 def _is_executable_path(value: str) -> bool:
     """Whether a bare `probe:` value is the legacy executable spelling, not an id.
 
-    The legacy `probe:<executable>` key is the only `probe:` name that is a host
-    path, and a configured executable is always absolute — pinning resolves it to
-    an absolute path before it is ever a lock key (`/usr/bin/openocd`,
-    `C:\\Tools\\openocd.exe`). A probe serial and a backend type name are never
-    absolute paths. Testing for an absolute path rather than for a separator is
-    deliberate: a probe serial that happened to contain a `/` would be misread as
-    a path by the looser test and split from the casefolded key its `probe_id`
-    locks — the very hardci-hq#106 split, reintroduced — whereas it is not
-    absolute and so stays a hardware id here.
+    The legacy `probe:<executable>` key is the only `probe:` name that is a
+    host path, and a configured executable is always absolute — pinning
+    resolves it to an absolute path before it is ever a lock key
+    (`/usr/bin/openocd`, `C:\\Tools\\openocd.exe`). A probe serial and a
+    backend type name are never absolute paths. Testing for an absolute path
+    rather than for a separator is deliberate: a probe serial that happened to
+    contain a `/` would be misread as a path by the looser test and split from
+    the casefolded key its `probe_id` locks — the very split this fold exists
+    to prevent, reintroduced — whereas it is not absolute and so stays a
+    hardware id here.
 
     Rooted counts as absolute on purpose. Python 3.13 redefined
     ``ntpath.isabs`` so a drive-less rooted path (``\\opt\\tools\\openocd``,

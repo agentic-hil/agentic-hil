@@ -273,8 +273,7 @@ def test_a_probe_and_its_virtual_com_port_are_one_lock(tmp_path: Path) -> None:
     names a serial, and the collapsed unit keeps it: `resource_id` is this
     operator's own alias, but the serial is what another workspace's first `init`
     derives from enumerating the same ST-Link, and holding both is what makes the
-    two collide there rather than each connect believing it is alone
-    (hardci-hq#108)."""
+    two collide there rather than each connect believing it is alone."""
     config = config_for(tmp_path, debuggers_yaml=PROBE_AND_ITS_VCP_DEBUGGER, com_ports_yaml=PROBE_AND_ITS_VCP_PORT)
 
     probe = debugger_device(config, "second_probe")
@@ -392,7 +391,7 @@ def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_pa
 def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_path: Path) -> None:
     """A probe serial is an opaque hardware id, so it folds case on POSIX too.
 
-    hardci-hq#106: `fold_resource_name` treated every `probe:` name as a host
+    `fold_resource_name` treated every `probe:` name as a host
     path, and a host path is left untouched on POSIX. A configured
     `probe_id: STLINK123` locks `probe:stlink123` — `DebuggerDevice.lock_key`
     builds it with `fold_hardware_id`, which casefolds everywhere — while a
@@ -429,7 +428,7 @@ def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_pat
 
 
 def test_an_executable_debugger_holds_its_legacy_probe_key_too(tmp_path: Path) -> None:
-    """The upgrade transition round 1's split left open (hardci-hq#106).
+    """The upgrade transition round 1's split left open.
 
     Moving the executable from `probe:<path>` to `probe-exe:<path>` gave `probe:`
     an unambiguous fold, but it also split the new key from the one a process
@@ -738,7 +737,7 @@ def test_an_agent_driven_run_holds_its_devices_across_several_mcp_calls(tmp_path
         started = mcp_call(service, "bench_run_start", {"devices": [{"kind": "debugger"}], "label": "boot-smoke"})
         assert started["ok"] is True
         # The executable-identified debugger declares its `probe-exe:` key and the
-        # legacy `probe:<path>` twin it also holds (hardci-hq#106).
+        # legacy `probe:<path>` twin it also holds.
         assert started["declared_devices"] == sorted(debugger_device(config).lock_keys)
         assert started["run_label"] == "boot-smoke"
 

@@ -56,7 +56,7 @@ Fix: run `agentic-hil init`, review the file it writes outside the repository �
 
 If the refusal is `unsafe_configured_path` on the location rather than the file contents, a component of the path is not what the path claims: a symlink where a real directory is needed, or a file where a directory belongs. `path` names the path and `component` the part of the chain that stopped the walk. Replace it, or move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path.
 
-**A path is no longer refused for who else could write it.** Until 0.8.0 a Windows ACL walk and a POSIX ownership/mode walk went over every ancestor and refused a path some other principal could write, delete or re-permission. Both were removed (hardci-hq#95): the guarantee they were reaching for — that no *other account on the same machine* can rewrite the policy — was never a requirement of this project, and no ACL could have held it anyway, because the operator owns these files and every ordinary process of that user can rewrite them. `windows_path_trust` went with the check; a configuration that still carries the key is refused by name, and the refusal says what replaced it.
+**A path is no longer refused for who else could write it.** Until 0.8.0 a Windows ACL walk and a POSIX ownership/mode walk went over every ancestor and refused a path some other principal could write, delete or re-permission. Both were removed: the guarantee they were reaching for — that no *other account on the same machine* can rewrite the policy — was never a requirement of this project, and no ACL could have held it anyway, because the operator owns these files and every ordinary process of that user can rewrite them. `windows_path_trust` went with the check; a configuration that still carries the key is refused by name, and the refusal says what replaced it.
 
 What replaced it is detection rather than prevention. `config_status`, on every tool result, compares the SHA-256 of the configuration this server loaded against the bytes on disk, so an unexpected change is announced instead of prevented; the audit trail records the digest each hardware action ran under; and the file-level deny rules `agentic-hil setup` writes into the agent's own configuration still keep the agent's file tools off the authoritative file. If a refusal on `%APPDATA%` or `%LOCALAPPDATA%` is what sent you here from an older release, upgrade: those folders are no longer inspected at all.
 
@@ -117,7 +117,7 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
 
-Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (hardci-hq#104: it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery` — check that first, because a probe that was attached and refused reads differently from one that was not there.
+Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery` — check that first, because a probe that was attached and refused reads differently from one that was not there.
 
 Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since — every narrowed permission included, which it then lists in its result.
 
@@ -175,7 +175,7 @@ Fix: stop and ask the human operator to review the authoritative config. Do not 
 
 Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and the only route out that an agent can reach is shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value.
 
-Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. `agentic-hil init --force` does clear it — it regenerates the whole file with every permission granted — but it is a reset rather than a repair, and it takes the baudrate, the `resource_id`, the `state_root` and every artifact root with it. It names every permission it reopened this way in its own result, so a `--force` run for some unrelated reason cannot reopen a narrowed bench silently (hardci-hq#113).
+Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. `agentic-hil init --force` does clear it — it regenerates the whole file with every permission granted — but it is a reset rather than a repair, and it takes the baudrate, the `resource_id`, the `state_root` and every artifact root with it. It names every permission it reopened this way in its own result, so a `--force` run for some unrelated reason cannot reopen a narrowed bench silently.
 
 Fix, in your own terminal in the project root:
 
@@ -325,7 +325,7 @@ For the operator case, `lease-status` carries a `quarantine_guidance` entry per 
 
 Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it — `uv tool`, `pipx`, `uv pip`, or `pip` — instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.
 
-**Read the version, not the exit code.** The result distinguishes three outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release (hardci-hq#99).
+**Read the version, not the exit code.** The result distinguishes three outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release.
 
 | Result | What happened | What to do |
 |---|---|---|

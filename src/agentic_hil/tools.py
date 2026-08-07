@@ -445,9 +445,9 @@ class AgenticHILToolService:
             # but the code enforcing both. It takes this service's own
             # coordinator status rather than asking the locks a second time: a
             # declared run holds the devices and not the project lock, so
-            # `bench_held` is the only reading that calls a held bench held
-            # (hardci-hq#105), and the refusal is hardci-hq#80's rule applied to
-            # the release instead of to the permissions.
+            # `bench_held` is the only reading that calls a held bench held,
+            # and the refusal is the open-run rule applied to the release
+            # instead of to the permissions.
             SERVER_UPGRADE: lambda: server_upgrade(self.config, self.coordinator.status()),
         }
         if name in dispatch:
@@ -593,7 +593,7 @@ class AgenticHILToolService:
     def hardware_recover(self) -> JsonObject:
         """Clear this bench's quarantine, for the reasons that need no bench visit.
 
-        Until hardci-hq#128 a quarantine could be seen and explained over MCP and
+        Before this tool a quarantine could be seen and explained over MCP and
         cleared nowhere but at a shell, so on a host that has no shell an agent
         watched a bench it could not return to service — including for incidents
         that had provably never touched a board.
@@ -601,7 +601,7 @@ class AgenticHILToolService:
         Two things gate it, and they are different in kind. `permissions
         .allow_recover` is authorization: this bench's operator decides whether an
         agent is in the recovery business at all, open by default like every grant
-        since hardci-hq#96 and narrowable to false and not back, through the same
+        since 0.8.0 and narrowable to false and not back, through the same
         one-way `project_config_set` as the rest.
 
         The class boundary is not authorization and no grant reaches it.
@@ -1328,7 +1328,7 @@ def debugger_effect_tools() -> set[str]:
 # by hand and impossible to guess, and they are the ONLY values the agent side
 # contributes. Everything else is the fixed skeleton. The agent authors no
 # content, so it does not decide allow_flash either — the skeleton does, and from
-# hardci-hq#96 it decides it open, so the bench an operator gets back is one they
+# 0.8.0 it decides it open, so the bench an operator gets back is one they
 # can use without opening an editor.
 #
 # The gate still needs no state outside the configuration. A configuration
@@ -1409,8 +1409,8 @@ def narrowed_permissions(document: JsonObject) -> list[str]:
     and a result that claimed the first while writing the second would be telling
     an operator their narrowed bench had just been reopened.
 
-    "Beyond the generated default" rather than "every false value", because since
-    hardci-hq#107 a generation writes two of them false itself, and those two are
+    "Beyond the generated default" rather than "every false value", because a
+    generation writes two of them false itself, and those two are
     not a narrowing: nobody chose them for this bench and there is nothing for an
     operator to restore. Reporting them here would answer the question this list
     exists to answer — did anything survive, or get taken away? — with a standing
@@ -1544,7 +1544,7 @@ def _project_config_create(
         # generating against the file would write permissions this server is not
         # running under. The cost is stated rather than fixed — in one session a
         # narrow-then-regenerate puts the loaded grant back, which is accepted
-        # because regeneration is creation and the operator's (hardci-hq#96).
+        # because regeneration is creation and the operator's.
         grant_every_permission(document)
         dropped: list[str] = [] if current is None else carry_over_permissions(document, current)
         narrowed = narrowed_permissions(document)
@@ -1655,7 +1655,7 @@ def discover_for_generation(
     """Read what is attached, holding everything a probe read holds.
 
     Public because `agentic-hil init` writes the same file out of the same read
-    and so is held to the same lifecycle (hardci-hq#108). ``tool``,
+    and so is held to the same lifecycle. ``tool``,
     ``reason_prefix`` and ``frontend`` are the whole of what a caller varies:
     which name the audit record and every refusal carry, which name an incident
     is filed under, and which frontend an owned coordinator announces itself as.
@@ -1694,7 +1694,7 @@ def discover_for_generation(
     enumeration before it enumerates, `probe:<serial>` before it says the first
     word to the selected board — and answers `device_busy` without connecting
     when either is held. Physical-device exclusion is not the part that needed a
-    policy (hardci-hq#108).
+    policy.
 
     ``current`` decides that, and ``coordinator`` never does. An unprovisioned
     server has no coordinator and hands None, and the in-lock reread is exactly

@@ -1382,7 +1382,7 @@ def test_status_flags_non_atomic_snapshot_while_foreign_owner_holds_lock(tmp_pat
 
 
 def test_status_reports_a_held_bench_while_a_declared_run_holds_the_devices(tmp_path: Path) -> None:
-    """hardci-hq#105: the project lock is a lease's, and a run does not take it.
+    """The project lock is a lease's, and a run does not take it.
 
     `begin_run` locks every declared device and leaves the project lock alone, so
     between two calls of a live run there is genuinely no project lock to find —

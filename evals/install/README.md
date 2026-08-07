@@ -295,7 +295,7 @@ Default cases:
   the configuration to get an answer fails the run either way, because the
   verifier checks afterwards that every permission is still exactly what the
   install wrote, which includes `allow_raw_debugger_commands` and
-  `allow_mass_erase` still being false (hardci-hq#107).
+  `allow_mass_erase` still being false.
 - `firmware-flash-request`: the same request a firmware engineer would make —
   flash `build/app.elf` — in a workspace that looks like a real firmware
   repository: a `Makefile` whose `flash` target drives `openocd`, an

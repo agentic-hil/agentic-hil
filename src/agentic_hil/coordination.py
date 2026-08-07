@@ -86,7 +86,7 @@ RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
     }
 )
 # What `status` names when it gives a dead owner's devices back instead of
-# quarantining them (hardci-hq#127). A release reason, not a quarantine reason:
+# quarantining them. A release reason, not a quarantine reason:
 # it appears in a status result and in the recovery ledger, and by construction
 # never in `cleanup_reasons`, because the incident it would have keyed was never
 # opened. It is in the agent-clearable class below all the same — the class is
@@ -96,7 +96,7 @@ DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
 # Reason classes whose members are provably free of hardware contact, and which
 # therefore need no attestation from anybody — not an operator's, and not a
 # predicate run against the board. This is the boundary the `hardware_recover`
-# tool may clear on its own (hardci-hq#128).
+# tool may clear on its own.
 #
 # Deliberately narrower than `recoverable_reasons`, and the difference is what
 # each kind of recovery actually *does*. Machine recovery is allowed the wider
@@ -833,7 +833,7 @@ class HardwareCoordinator:
                 # session is open still reads this and still gets that answer.
                 "owner_active": owner_active,
                 # The wider question, and the one an operator asking "is the bench
-                # free" is actually asking. hardci-hq#105: a declared run takes the
+                # free" is actually asking. A declared run takes the
                 # device locks and leaves the project lock alone, so deriving a
                 # free bench from `owner_active` called a run's held bench free.
                 "bench_held": bool(owner_active or holds),
@@ -872,15 +872,15 @@ class HardwareCoordinator:
     def _dead_owner_made_no_contact(self, record: JsonObject) -> JsonObject | None:
         """What the dead owner's own last record proves about its hardware, or ``None``.
 
-        The reclassification of 0.8.0 — a quarantine needs the *possibility* of an
-        effect — was applied to call failures and never to the owner's death, so a
-        session that provably never reached a board was held all the same
-        (hardci-hq#127). The bench-mutex layer has behaved the other way round
-        since it existed, and by construction rather than by policy: the machine-
+        The reclassification of 0.8.0 — a quarantine needs the *possibility* of
+        an effect — was applied to call failures and never to the owner's
+        death, so a session that provably never reached a board was held all
+        the same. The bench-mutex layer has behaved the other way round since
+        it existed, and by construction rather than by policy: the machine-
         wide device lock is an OS lock, the operating system drops it when the
         process ends, and `bench.py` hands the device to the next run with
-        `reclaimed` and no incident. This is the project layer catching up to its
-        own sibling, and the asymmetry was the defect.
+        `reclaimed` and no incident. This is the project layer catching up to
+        its own sibling, and the asymmetry was the defect.
 
         Returns the finding when the evidence positively says *no contact*, and
         ``None`` for everything else — including every case where the evidence is
@@ -910,7 +910,7 @@ class HardwareCoordinator:
         ``side_effect_status: not_started`` — the backend's own claim, the same
         pair `_readonly_failure_is_settled` requires, never this layer's inference
         — plus an intact audit trail, plus a ``config_in_force`` naming the exact
-        configuration bytes the lease record was stamped with (hardci-hq#114). A
+        configuration bytes the lease record was stamped with. A
         report written under a different document is not evidence about this one.
 
         And, since the session backends record one, an absent contact marker.
@@ -1540,8 +1540,7 @@ def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, ...]:
     # Every one of the debugger's own lock keys follows it, not just the primary:
     # a probe known by both a resource_id and a serial has to be held under both
     # here, or a flash under `physical:<resource_id>` would leave a bootstrap read
-    # elsewhere free to take `probe:<serial>` and connect underneath it
-    # (hardci-hq#108).
+    # elsewhere free to take `probe:<serial>` and connect underneath it.
     return (DEBUGGER_DISCOVERY_RESOURCE, *_bound_debugger_device(config).lock_keys)
 
 

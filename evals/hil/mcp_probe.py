@@ -95,7 +95,7 @@ def main() -> int:
         checks.append({"name": "tool surface matches snapshot", "ok": not missing and not added,
                        "detail": f"count={len(names)} missing={sorted(missing)} added={sorted(added)}"})
         # A host decides from these which calls pass without a prompt; a build
-        # that ships the table bare is the failure hardci-hq#101 reported.
+        # that ships the table bare is the failure the annotations prevent.
         bare = sorted(t["name"] for t in tools if not isinstance(t.get("annotations"), dict) or not str(t["annotations"].get("title", "")).strip())
         checks.append({"name": "every tool carries annotations", "ok": not bare, "detail": f"without annotations={bare}"})
     finally:

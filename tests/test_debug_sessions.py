@@ -1061,7 +1061,7 @@ def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path, label: s
     """A `timeout_s` that cannot be used is refused, on every tool that takes one.
 
     This pins behaviour that was already correct rather than changing it
-    (hardci-hq#57, which read the swallowing coercion in `number_argument` as
+    (the report read the swallowing coercion in `number_argument` as
     the shipped answer). The refusal comes from the schema gate in `call`,
     before `number_argument` is reached, so no unusable value ever reaches a
     backend as a dropped `None` — which a backend cannot tell apart from the

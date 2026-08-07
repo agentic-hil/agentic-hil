@@ -314,10 +314,10 @@ class STLinkBackend:
             # transport never existed for this run; "No STM32 target found" and
             # its siblings are the same report one step further out, with the
             # probe named and nothing behind it. A failed call over a channel
-            # that never carried anything must refuse, not quarantine
-            # (hardci-hq#97). Both are the CLI's own words, read out of its
-            # output by `_classify_output`; `probe_unconfirmed` — an exit status
-            # of 0 whose output is missing at least one line that confirms the
+            # that never carried anything must refuse, not quarantine. Both are
+            # the CLI's own words, read out of its output by
+            # `_classify_output`; `probe_unconfirmed` — an exit status of 0
+            # whose output is missing at least one line that confirms the
             # connection — deliberately is not, because it names no abort point
             # at all, whether it printed some of them or none.
             result.update(NOT_CONTACTED)

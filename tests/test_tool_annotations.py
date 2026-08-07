@@ -1,6 +1,6 @@
 """Every advertised tool declares what it does, and a host receives it.
 
-hardci-hq#101: none of our tools carried MCP annotations, so a host had the
+None of our tools carried MCP annotations, so a host had the
 name and nothing else and blocked `project_config_reload_description` — the one
 call that re-reads the configuration and writes nothing — because it sits next
 to two tools that do write. These tests are the gate that keeps a new tool from
@@ -116,7 +116,7 @@ def test_every_tool_states_the_hints_whose_default_is_not_silence() -> None:
 
 
 def test_the_tools_that_change_nothing_are_declared_read_only() -> None:
-    """The set hardci-hq#101 named, minus the two it named that this server
+    """The set the annotation work named, minus the two it named that this server
     does not expose: there is no `mass_erase` tool (it is a permission,
     `allow_mass_erase`, and while it is true flashing is refused outright) and
     `hardware_lease_status` is CLI-only, reachable as `agentic-hil
@@ -144,7 +144,7 @@ def test_what_changes_hardware_irreversibly_is_declared_destructive() -> None:
         assert advertised[name]["readOnlyHint"] is False, name
         assert advertised[name]["destructiveHint"] is True, name
     # probe_target reads, and is still not read-only: an SWD attach halts the
-    # core, which is the line the quarantine inventory (hardci-hq#97) already
+    # core, which is the line the quarantine inventory already
     # drew. It is reversible and repeatable, and says so.
     assert advertised["probe_target"] == {
         "title": "Probe the target",

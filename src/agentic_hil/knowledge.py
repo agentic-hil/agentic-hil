@@ -61,7 +61,7 @@ CONFIG_WIDENING_ERROR = "permission_widening_denied"
 # It regenerates from attached hardware, so it is also the command that repairs a
 # configuration nobody can change any more.
 CONFIG_REOPEN_COMMAND = "agentic-hil init --force"
-# And the surgical one beside it (hardci-hq#102). `init --force` returns the whole
+# And the surgical one beside it. `init --force` returns the whole
 # file to the generated defaults by rewriting it from hardware discovery, which on a
 # bench somebody grew is not a repair but a loss: baudrate, `resource_id`,
 # `state_root` and the artifact roots go with it. These two name one permission
@@ -81,14 +81,14 @@ PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 # policies (docs/security-design.md): while either of these is true on a probe,
 # `flash_firmware` on that probe is refused, and so is a debug session.
 #
-# They are therefore the two exceptions to the allow-by-default generation of
-# hardci-hq#96, and a generated configuration writes both false. For a while it
-# did not, and the two rules met for the first time on the bench: #96 opened
-# every permission, this interlock reads both of these as a reason to refuse, and
-# the result was that a freshly generated configuration could not flash at all
-# (hardci-hq#107). The interlock was written when the pair defaulted to false, so
-# "both on" meant somebody had chosen it; the inversion made it the shipped
-# state without either rule changing.
+# They are therefore the two exceptions to the allow-by-default generation, and
+# a generated configuration writes both false. For a while it did not, and the
+# two rules met for the first time on the bench: the generation opened every
+# permission, this interlock reads both of these as a reason to refuse, and the
+# result was that a freshly generated configuration could not flash at all. The
+# interlock was written when the pair defaulted to false, so "both on" meant
+# somebody had chosen it; the inversion made it the shipped state without
+# either rule changing.
 #
 # What settles which side gives way is that neither flag grants anything. There
 # is no MCP tool for raw debugger commands and none for mass erase, so every read
@@ -105,7 +105,7 @@ EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase"
 
 # `can_buses.<name>.listen_only: true` is the one configuration flag whose entire
 # value is that it is a proof rather than a preference, so the two ways it can
-# fail to be one are named separately (hardci-hq#103). `unsupported` is settled
+# fail to be one are named separately. `unsupported` is settled
 # before the bus is touched — the adapter has no such mode on this host, so the
 # refusal is clean and `retry_safe`. `unconfirmed` is settled after: the adapter
 # was asked, was already on the bus by the time it could answer, and did not
@@ -116,7 +116,7 @@ LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
 # A SocketCAN channel that is not a netdev on this host. Its own error_type
 # rather than a shade of `can_adapter_open_failed`, because it is the one open
 # failure whose outcome is not merely unproven: the bind had nothing to bind to,
-# so no controller was addressed and the bench is untouched (hardci-hq#127).
+# so no controller was addressed and the bench is untouched.
 CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
 # A serial device another program is already holding. Its own error_type for the
 # same reason as the one above: the open was refused by the operating system
@@ -128,6 +128,9 @@ COM_PORT_BUSY_ERROR = "com_port_busy"
 # What `hardware_recover` answers when the incident needs somebody at the bench
 # (hardci-hq#128). Not `permission_denied`: no grant on this or any bench opens
 # it, because the missing thing is a statement about a physical board and not an
+# What `hardware_recover` answers when the incident needs somebody at the
+# bench. Not `permission_denied`: no grant on this or any bench opens it,
+# because the missing thing is a statement about a physical board and not an
 # authorization. The refusal carries the command the person runs instead.
 RECOVERY_PHYSICAL_CHECK_ERROR = "recovery_requires_physical_check"
 
@@ -701,7 +704,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the one the configuration names. "
             "This is about what the path *is*, not about who else on the machine holds rights on it. That second "
             "question used to be asked — a Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor — and "
-            "it was removed in 0.8.0 (hardci-hq#95): it could only ever defend against a different account on the same "
+            "it was removed in 0.8.0: it could only ever defend against a different account on the same "
             "machine, which was never a requirement here, and it could never defend against the operator's own "
             "processes, which own these objects and can rewrite them regardless of any ACL."
         ),
@@ -1731,17 +1734,17 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
     ``allow_config_permissions_write: false`` loses the way back in the same
     instant, and if the result does not say so, an agent nails the bench shut in
     passing and the operator is in front of a file they have to open by hand —
-    the exact state hardci-hq#96 exists to end.
+    the exact state the open generated default exists to end.
 
     Three things, because three are what a reader needs: what stands frozen now,
     that the agent itself cannot undo it, and the name of the command that can.
 
     Said about `project_config_set` and about nothing else, because that is the
-    whole of what this closes. Regeneration is a different call under a different
-    grant and it is creation rather than a permissions write — the owner's
-    clarification on hardci-hq#96 keeps it out of the ratchet deliberately. A
-    notice that claimed the whole file was sealed would be describing a rule this
-    project does not have.
+    whole of what this closes. Regeneration is a different call under a
+    different grant and it is creation rather than a permissions write — the
+    owner's decision behind the open generated default keeps it out of the
+    ratchet deliberately. A notice that claimed the whole file was sealed would
+    be describing a rule this project does not have.
     """
     return {
         "closed_key": closed_key,
@@ -1803,7 +1806,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
     # enumeration record and say which *kind* of device it is, which is what
-    # makes the serial mean a unit at all (hardci-hq#124).
+    # makes the serial mean a unit at all.
     ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # The permissions half, every block of it.
@@ -1815,7 +1818,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # inside a `permissions` block. A generation writes both true like every
     # other permission, so leaving them out of the key model left two things a
     # generated bench grants that an operator could only take back by opening the
-    # YAML — the one thing hardci-hq#96 exists to stop. Only the grant of each
+    # YAML — the one thing the ratchet exists to stop. Only the grant of each
     # section is settable; `debug.allowed_symbols` and `artifacts.allowed_roots`
     # are lists, and this surface writes scalars.
     ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_all_symbols",)),
@@ -2186,7 +2189,7 @@ These calls are the only door. The file itself is protected by deny rules `agent
 
 ### Permissions move one way — through `project_config_set`
 
-A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Validated flashing and unrestricted debugger access are mutually exclusive, so while either of those is true `flash_firmware` on that probe is refused; neither has a tool behind it here, so leaving them false costs nothing and is what makes the bench flashable (hardci-hq#107). The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
+A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Validated flashing and unrestricted debugger access are mutually exclusive, so while either of those is true `flash_firmware` on that probe is refused; neither has a tool behind it here, so leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
 
 What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 
@@ -2409,7 +2412,7 @@ The one identity that is *not* hardware-derived: a debugger entry with neither `
 
 Reading can still perturb a target — an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
 
-What `listen_only: true` is worth is what the adapter can be held to, and that differs by adapter, so it is enforced rather than assumed (hardci-hq#103).
+What `listen_only: true` is worth is what the adapter can be held to, and that differs by adapter, so it is enforced rather than assumed.
 
 | adapter | how the mode is obtained | what backs the claim |
 |---|---|---|
@@ -2540,7 +2543,7 @@ Agentic HIL keeps three things outside the workspace: the authoritative configur
 
 A configured path is opened component by component without following links, and every component of the chain is held open while the operation runs — on Windows without `FILE_SHARE_DELETE`, which blocks a rename or a delete of any of them for the duration. So a path is refused when it *is not what it claims to be*: a symlinked component, a file where a directory is needed, a final object that is not a single-link regular file. That refusal carries `error_type: unsafe_configured_path` and names the component that stopped the walk.
 
-What is **not** asked is who else on this machine could write the path. A Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor used to ask exactly that, and both were removed in 0.8.0 (hardci-hq#95). Two reasons, and the second is the one that decides it:
+What is **not** asked is who else on this machine could write the path. A Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor used to ask exactly that, and both were removed in 0.8.0. Two reasons, and the second is the one that decides it:
 
 - A multi-user guarantee was never a requirement of this project. The check only ever defended against a *different account on the same machine*.
 - It could not have held one anyway. The operator owns these objects and holds FullControl on them, so every ordinary process of that user can rewrite the configuration with a text editor, whatever any ACL says.

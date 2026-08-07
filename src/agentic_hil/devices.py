@@ -59,7 +59,7 @@ UNIDENTIFIED_DEBUGGER_WARNING = (
 # The same failure one kind down, and the reason it is worse: a debugger without
 # hardware identity falls back to a name that at least does not move, while a
 # serial port falls back to a name that moves the moment a second adapter is
-# attached. Named once for the same reason as above (hardci-hq#100).
+# attached. Named once for the same reason as above.
 VOLATILE_SERIAL_DEVICE_WARNING = (
     "This COM port names no serial_number and no resource_id, so its identity is the kernel name in `device` "
     "— and a kernel name is an enumeration order, not hardware: attaching a second adapter can hand this "
@@ -74,7 +74,7 @@ VOLATILE_SERIAL_DEVICE_WARNING = (
 # and no unit. Weaker than the two warnings above rather than a variant of them,
 # because half the problem is genuinely solved — a CH340 answering to a name
 # written for an ST-Link is refused at open — and the other half provably cannot
-# be, since two identical adapters publish identical ids (hardci-hq#124).
+# be, since two identical adapters publish identical ids.
 TYPE_ONLY_SERIAL_DEVICE_WARNING = (
     "This COM port is identified by `vid`/`pid` and a kernel name: the type check refuses a different kind of "
     "adapter under this name, but two adapters of the same type are indistinguishable to it, and the lock "
@@ -288,7 +288,7 @@ class DebuggerDevice(Device):
             # host path and folds only where the host does. Sharing `probe:`
             # between the two forced one rule on both, and a hand-written
             # `probe:<SERIAL>` then split from the `probe:<serial>` a configured
-            # probe_id locks on POSIX (hardci-hq#106).
+            # probe_id locks on POSIX.
             return f"probe-exe:{fold_device_path(self.debugger.executable)}"
         return f"probe:{fold_hardware_id(self.debugger.type)}"
 
@@ -303,8 +303,7 @@ class DebuggerDevice(Device):
         A debugger that carries both therefore holds both, so the two workspaces
         collide on the serial even though only one of them knows the alias —
         without it a run here holding ``physical:<resource_id>`` and a bootstrap
-        read there taking ``probe:<serial>`` would each believe it had the probe
-        (hardci-hq#108).
+        read there taking ``probe:<serial>`` would each believe it had the probe.
 
         The executable fallback holds, besides its own ``probe-exe:`` key, the
         legacy ``probe:<path>`` this key was spelled as before it moved to its own
@@ -312,7 +311,7 @@ class DebuggerDevice(Device):
         already-derived name, takes that legacy key; holding it here means an
         upgrade in progress cannot let an old owner and a new one both take the
         one debugger. ``fold_resource_name`` keeps ``probe:<path>`` a host path so
-        the two spellings land on one lock (hardci-hq#106)."""
+        the two spellings land on one lock."""
         if self.debugger.resource_id and self.debugger.probe_id:
             return (self.lock_key, f"probe:{fold_hardware_id(self.debugger.probe_id)}")
         if self.identity_source == "executable" and self.debugger.executable:
@@ -446,7 +445,7 @@ class UartDevice(Device):
         it names a type, the lock still follows the kernel name, and saying so is
         a different sentence rather than the same one. A `serial_number` without
         them is complete and warns about nothing — the serial is the anchor and
-        the ids only narrow it (hardci-hq#124)."""
+        the ids only narrow it."""
         if self.port.resource_id or self.port.serial_number or is_stable_device_name(self.port.device):
             return None
         return TYPE_ONLY_SERIAL_DEVICE_WARNING if self.identity_source != "device" else VOLATILE_SERIAL_DEVICE_WARNING
@@ -505,7 +504,7 @@ class DeviceSet:
             # key the richer identity is retained — a probe and its virtual COM
             # port share a `resource_id`, but only the probe half also names the
             # serial, and dropping it would leave the collapsed unit locking one
-            # name where its two entries between them name two (hardci-hq#108). A
+            # name where its two entries between them name two. A
             # tie keeps the one named first.
             current = unique.get(device.lock_key)
             if current is None or len(device.lock_keys) > len(current.lock_keys):
@@ -720,7 +719,7 @@ def lock_keys(resources: Iterable[object]) -> list[str]:
         if isinstance(item, Device):
             # Every exclusion name the device carries, not only its primary key,
             # so a lease taken on a device holds the same second id a run holding
-            # the same device does (hardci-hq#108).
+            # the same device does.
             keys.extend(item.lock_keys)
         elif isinstance(item, str):
             keys.append(fold_resource_name(item))
