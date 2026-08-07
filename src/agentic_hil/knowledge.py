@@ -343,6 +343,80 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "bigger surprise than the one being reported here.",
         ),
     ),
+    "permission_denied:allow_upgrade": ErrorRemedy(
+        meaning=(
+            "`permissions.allow_upgrade` is false in the authoritative configuration, so this server may not replace "
+            "the installation it is running out of. Nothing was attempted and the installed version is unchanged. It "
+            "is a decision about who performs the maintenance of this bench's software, not about which release it "
+            "should be on."
+        ),
+        remediation=(
+            "Report the refusal, name `permissions.allow_upgrade`, and say which file carries it. The operator opens "
+            "it by editing that file; you cannot, and `project_config_set` writes only `false` into a permission.",
+            "The command line does the same job for a person and needs no permission at all: `agentic-hil upgrade` "
+            "from any directory. It preserves the extras the installation was created with, and it refuses while this "
+            "server is still running out of the installation, so it is run with the agent host closed.",
+            "`agentic-hil --version` beside this result's `running_version` is how an operator checks whether a newer "
+            "release is even the difference they are chasing.",
+        ),
+        do_not=(
+            "Do not run `uv tool upgrade`, `pipx upgrade` or `pip install --upgrade` through a shell instead. This is "
+            "the same action the configuration just refused, taken where the operator cannot see or audit it — and "
+            "the bare forms of those commands drop the extras this bench was installed with.",
+            "Do not ask for `allow_upgrade` to be turned on as a precondition for the work in hand. Whatever was "
+            "being done is not blocked by the version; if it genuinely is, say which behaviour you need and let the "
+            "operator decide about the upgrade separately.",
+        ),
+    ),
+    "upgrade_in_open_run": ErrorRemedy(
+        meaning=(
+            "`server_upgrade` was called while something holds this bench: a declared run, an open COM or CAN "
+            "session, a debug session, or another process on this machine. Those holds were taken under the release "
+            "this server is running, and replacing the code underneath them would move the rules during the run they "
+            "govern — the same objection as changing a permission mid-run. Nothing was replaced and the holder was "
+            "not disturbed."
+        ),
+        remediation=(
+            "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
+            "`com_session_stop` / `can_session_stop` and any debug session with `debug_stop_session`, then repeat the "
+            "upgrade.",
+            "`bench_run_status` says whether a run is open on this server; `held_devices` and `device_holds` in this "
+            "refusal name what is held whoever holds it, including another process.",
+            "Nothing was lost by the refusal. The installation is untouched and the upgrade is exactly as available "
+            "after the run as it was before it.",
+        ),
+        do_not=(
+            "Do not end a run early only to get the upgrade through. The run is holding a board for a reason, and no "
+            "release is urgent enough to abandon hardware in an unconfirmed state.",
+            "Do not run the package manager through a shell to get past this. That is the same replacement without "
+            "the check, under measurements that were started on the code being replaced.",
+        ),
+    ),
+    "upgrade_cli_only_on_host": ErrorRemedy(
+        meaning=(
+            "This host is Windows, where the operating system refuses to delete a file that is mapped as a running "
+            "image — and this server is running out of the very installation an upgrade would replace. A package "
+            "manager that removes the environment before rebuilding it fails on that delete part way through and "
+            "leaves neither the old installation nor the new one, so nothing was attempted. The alternative, a helper "
+            "that swaps the files after this server exits, was rejected: it outlives the result that announced it, so "
+            "a failure would have nobody to report to and would produce exactly the half-replaced environment this "
+            "refusal exists to prevent."
+        ),
+        remediation=(
+            "Ask the operator to run `agentic-hil upgrade` at a shell with the agent host closed. It runs as a "
+            "separate process, so it can replace this installation; it upgrades through the manager that owns the "
+            "installation and keeps the extras it was created with; and if a server is still running out of it, it "
+            "refuses with `installation_in_use` and names the holding process rather than breaking the environment.",
+            "Then the host is started again, which loads the new server. Report `running_version` from this result as "
+            "the version still in force until that has happened.",
+        ),
+        do_not=(
+            "Do not retry this tool after closing a run or a session. The refusal is about the platform, not about "
+            "what the bench is doing, and it will be the same answer every time on this host.",
+            "Do not reach for `uv tool install --force` or delete the environment to work around the lock. Removing "
+            "an environment around a live process is the outcome being refused here, not a way past it.",
+        ),
+    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "

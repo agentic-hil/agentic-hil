@@ -51,7 +51,7 @@ PROBE_DIAGNOSTIC_CHARS = 800
 # The project-scoped permissions this release defines, listed here rather than
 # imported: the verifier checks an installed distribution and must not read its
 # expectations out of the thing it is verifying.
-PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_upgrade")
 # The two debugger permissions an install must write *false*, listed here for the
 # same reason and mattering more: while either is true the flash interlock refuses
 # flash_firmware on that probe, so an install that granted them shipped a bench

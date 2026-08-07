@@ -427,13 +427,14 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert filled["provenance"]["last_modified_by"] == ACTOR_HUMAN
     assert filled["provenance"]["last_modified_via"] == "cli:adopt-hardware"
-    # No grant was needed and none moved. The skeleton names all three project
-    # permissions granted, and they are still exactly what it named: this path
+    # No grant was needed and none moved. The skeleton names every project
+    # permission granted, and they are still exactly what it named: this path
     # carries hardware identity and touches no permission in either direction.
     assert filled["permissions"] == {
         CONFIG_WRITE_RIGHT: True,
         CONFIG_DESCRIPTION_RIGHT: True,
         CONFIG_PERMISSIONS_RIGHT: True,
+        "allow_upgrade": True,
     }
 
     checked = doctor()

@@ -228,16 +228,19 @@ An update never widens this. What is generated changed; what an existing file me
 
 ### Changing it from an agent
 
-An agent reaches this file only through the MCP tools; `agentic-hil setup` writes host deny rules so its own file tools cannot. Two project-scoped permissions decide how far it gets, and they are deliberately separate:
+An agent reaches this file only through the MCP tools; `agentic-hil setup` writes host deny rules so its own file tools cannot. Project-scoped permissions decide how far it gets, and they are deliberately separate:
 
 ```yaml
 permissions:
   allow_config_write: true                  # regenerate the whole file from hardware discovery
   allow_config_description_write: true      # what the bench IS
   allow_config_permissions_write: true      # take back what the bench MAY do
+  allow_upgrade: true                       # lift this installation to the newest release
 ```
 
 `allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+
+`allow_upgrade` is the one that is not about this file. It opens `server_upgrade`, which replaces the installed package with the newest release, because on an MCP host without a shell there is otherwise no way for the main surface to perform the basic maintenance of its own server. It takes no version, so it cannot be used to install a release that reads the rest of this block differently, and it is subject to the same ratchet as everything else here: an agent can set it false and never true.
 
 #### Permissions move one way
 
@@ -354,6 +357,7 @@ Export the full JSON schema with `agentic-hil schema --output agentic-hil-config
 | Project config | `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` | field-wise changes to an existing configuration, gated by `allow_config_description_write` (what the bench is) and `allow_config_permissions_write` (every permission key: the `permissions:` blocks plus `artifacts.allow_upload` and `debug.allow_all_symbols`). `describe` needs no permission and says which keys are open in this state; `set` takes named keys with scalar values; `adopt_hardware` reads the attached probe and fills in the identity keys that are still unset, through `set`; `reload_description` makes a changed description the one this running server answers out of, re-reading no permission at all and needing no grant because it writes nothing |
 | Debug sessions | `debug_start_session`, `debug_stop_session`, `debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, `debug_halt`, `debug_get_stop_reason`, `debug_symbol_info`, `debug_dump_symbol_ihex` | typed GDB/MI sessions via the OpenOCD backend's gdbserver; unexpected breakpoints and target exceptions are returned as structured stop reasons; symbol allowlist and dump-size limits come from the `debug:` config section |
 | Run boundary | `bench_run_start`, `bench_run_stop`, `bench_run_status` | declares the devices of a multi-call run and holds them for its whole duration; without it each call holds its device only for its own duration |
+| Installation | `server_upgrade` | lifts this installation to the newest release, gated by `permissions.allow_upgrade`. There is no version argument, so it can only go forward — an agent that could name a version could install one that reads this file's permissions differently. It replaces the package on disk and not the code this server is running: a successful result carries `previous_version`, `version`, `running_version` and `restart_required: true`, and an operator restarting the MCP server is what loads it. Refused while a run or session holds the bench (`upgrade_in_open_run`), on Windows, where a running process's files are locked and `agentic-hil upgrade` at a shell is the way (`upgrade_cli_only_on_host`), and on a pinned installation (`upgrade_blocked_by_pin`, which names an extras-preserving reinstall command and never runs it) |
 
 A typical loop: build firmware → `bench_run_start` naming the probe and the port → `flash_firmware` with `reset_after_flash: true` when a fresh boot is required → `com_session_start` → stimulate via `com_write`/`can_send` → assert on `com_read`/`can_read` → `bench_run_stop` → on failure, `classify_last_error`.
 
