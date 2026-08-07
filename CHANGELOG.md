@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Added
+
+- **A test plan can drive a CAN bus, and every device kind now answers for itself.** `can_buses` is a first-class section of the authoritative configuration — permissions, `listen_only`, `fd`, `bitrate` — and the MCP surface drives it fully, but the test reactor knew seven actions across two device kinds, so a configured bus could take part in no plan at all and was never even declared or locked by a run, though `CanDevice` has carried its own lock key from the start. Plans now take `can_open`, `can_close`, `can_send` and `can_read`, routed by `bus_id: <name of a can_buses entry>` — the CAN tool surface and nothing invented beside it. The bus is declared with the plan's other devices, so the run holds it from before its first step to after its last, and a session the plan leaves open is closed by the run's cleanup exactly as a UART session is. Preflight refuses, before anything reaches the bench: a `bus_id` the configuration does not declare, answered with the names it does; a read or a send the entry's own permissions deny; traffic on a bus the plan never opened; and `can_send` on a bus configured `listen_only: true` — a plan cannot both claim that observing a bus sends nothing and send on it, and that contradiction belongs to the plan rather than to the frame that failed to leave. Implements hardci-hq#121.
+
 ## [0.9.0] - 2026-08-07
 
 The entries below add surface — two CLI commands, tool annotations, a configuration key, a record in every report, three error types — so this is a minor under decision 0019, not a patch.

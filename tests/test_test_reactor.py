@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
 
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
@@ -36,17 +36,36 @@ class FakeComPortService:
 
 
 class RecordingService:
-    def __init__(self, *, fail_cleanup: bool = False, raise_flash: bool = False, audit_flash_failure: bool = False, audit_failure_call: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_cleanup: bool = False,
+        raise_flash: bool = False,
+        audit_flash_failure: bool = False,
+        audit_failure_call: str | None = None,
+        fail_call: str | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.fail_cleanup = fail_cleanup
         self.raise_flash = raise_flash
         self.audit_flash_failure = audit_flash_failure
         self.audit_failure_call = audit_failure_call
+        self.fail_call = fail_call
         self.breakpoint_id = 0
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
         arguments = arguments or {}
         self.calls.append((name, arguments))
+        if name == self.fail_call:
+            return {"ok": False, "tool": name, "error_type": "can_read_failed", "summary": "adapter would not read"}
+        if name == "can_session_start":
+            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "already_active": False}
+        if name == "can_session_stop":
+            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "was_active": True}
+        if name == "can_read":
+            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "frames": [], "frames_read": 0}
+        if name == "can_send":
+            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "frame": {"id": arguments.get("frame_id")}}
         if name == "flash_firmware" and self.raise_flash:
             raise OSError("flash transport failed")
         if name == "flash_firmware" and self.audit_flash_failure:
@@ -1052,3 +1071,233 @@ def test_version_1_plan_is_refused_with_the_key_that_replaced_device(tmp_path: P
     migration = rejected.value.details["migration"]
     assert any("debugger:" in value for value in migration.values())
     assert any("port_id:" in value for value in migration.values())
+
+
+CAN_BUS_YAML = """can_buses:
+  dut_can:
+    adapter: "socketcan"
+    channel: "can0"
+    bitrate: 500000
+"""
+
+
+def can_config(tmp_path: Path, *, listen_only: bool = False, allow_write: bool = True, allow_read: bool = True):
+    """A project with one configured CAN bus, and the flags that decide what a
+    plan may do with it."""
+    permissions = {**DEFAULT_TEST_PERMISSIONS, "allow_can_write": allow_write, "allow_can_read": allow_read}
+    bus = CAN_BUS_YAML + ("    listen_only: true\n" if listen_only else "")
+    return load_config(str(write_config(tmp_path, can_buses_yaml=bus, permissions=permissions)))
+
+
+def test_reactor_runs_a_can_read_and_send_plan_end_to_end(tmp_path: Path) -> None:
+    # A CAN bus is a device a plan drives like any other: it opens, it is read
+    # from and written to, and it closes.
+    config = can_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+name: bus-traffic
+steps:
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_read, max_frames: 4, wait_timeout_s: 0.5}
+  - {bus_id: dut_can, action: can_send, frame_id: "0x123", data_hex: "01ff"}
+  - {bus_id: dut_can, action: can_close}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["can_open", "can_read", "can_send", "can_close"]
+    assert [step["route"] for step in result["steps"]] == ["dut_can"] * 4
+    # Every call names the entry the step routed to, supplied by the device
+    # rather than taken from the plan's own arguments.
+    assert service.calls == [
+        ("can_session_start", {"clear_rx_queue": True, "bus_id": "dut_can"}),
+        ("can_read", {"max_frames": 4, "wait_timeout_s": 0.5, "bus_id": "dut_can"}),
+        ("can_send", {"frame_id": "0x123", "data_hex": "01ff", "bus_id": "dut_can"}),
+        ("can_session_stop", {"bus_id": "dut_can"}),
+    ]
+    # The plan closed what it opened, so cleanup has nothing left to do.
+    assert result["cleanup"] == []
+
+
+def test_preflight_rejects_a_can_bus_the_config_does_not_declare(tmp_path: Path) -> None:
+    config = can_config(tmp_path)
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {bus_id: missing_can, action: can_open}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[0].bus_id"
+    assert result["validation_error"]["configured_can_buses"] == ["dut_can"]
+    assert service.calls == []
+
+
+def test_preflight_refuses_a_can_send_on_a_bus_that_may_not_be_written(tmp_path: Path) -> None:
+    # The permission the backend would raise, moved to where the plan can still
+    # be corrected: nothing is opened for a send that was never going to happen.
+    config = can_config(tmp_path, allow_write=False)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_send, frame_id: 291}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["validation_error"]["field"] == "steps[1].action"
+    assert result["validation_error"]["permission"] == "allow_write"
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_preflight_refuses_a_can_send_on_a_listen_only_bus(tmp_path: Path) -> None:
+    # Writing is permitted here; the bus itself is what refuses. `listen_only`
+    # is the claim that observing this bus sends nothing, so a plan that also
+    # sends on it contradicts the bus it declared — and that is a fault in the
+    # plan, findable before anything reaches the bench.
+    config = can_config(tmp_path, listen_only=True, allow_write=True)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_send, frame_id: "0x7ff"}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    validation = result["validation_error"]
+    assert validation["field"] == "steps[1].action"
+    assert validation["listen_only"] is True
+    assert validation["config_field"] == "can_buses.dut_can.listen_only"
+    assert "listen_only" in validation["summary"]
+    assert service.calls == []
+
+
+def test_reactor_closes_an_open_can_session_after_a_failed_step(tmp_path: Path) -> None:
+    config = can_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_read}
+  - {bus_id: dut_can, action: can_close}
+""",
+    )
+    service = RecordingService(fail_call="can_read")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["error_type"] == "can_read_failed"
+    # The plan never reached its own can_close, so the run closes the session it
+    # opened, exactly as it does for a UART.
+    assert [item["action"] for item in result["cleanup"]] == ["can_close"]
+    assert result["cleanup"][0]["bus_id"] == "dut_can"
+    assert result["cleanup_ok"] is True
+    assert [name for name, _ in service.calls] == ["can_session_start", "can_read", "can_session_stop"]
+
+
+def test_preflight_refuses_can_traffic_before_the_bus_is_open(tmp_path: Path) -> None:
+    config = can_config(tmp_path)
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {bus_id: dut_can, action: can_read}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[0].action"
+    assert result["validation_error"]["summary"] == "CAN bus session must be opened before this action."
+    assert service.calls == []
+
+
+def test_a_can_session_may_only_be_closed_by_the_plan_that_opened_it(tmp_path: Path) -> None:
+    # Preflight refuses this plan, so the ownership guard underneath it is
+    # reached only by a step that got past preflight — which is exactly what it
+    # is there for.
+    from agentic_hil.test_reactor import TestStep
+
+    config = can_config(tmp_path)
+    service = RecordingService()
+
+    result = TestReactor(config, service).execute_step(TestStep("can_close", {}, bus_id="dut_can"))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "can_session_not_owned"
+    assert result["bus_id"] == "dut_can"
+    assert service.calls == []
+
+
+def test_a_plan_declares_and_locks_the_can_bus_it_drives(tmp_path: Path) -> None:
+    # A device kind the reactor can drive is a device kind the run holds: the
+    # bus is in what the mutex takes, or an observation from outside could reach
+    # it between two of this plan's steps.
+    from agentic_hil.devices import can_device
+    from agentic_hil.test_reactor import declared_devices
+
+    config = can_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {debugger: dut, action: flash, image_path: build/app.elf}
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_close}
+""",
+    )
+
+    devices = declared_devices(config, load_test_config(str(plan_path), str(tmp_path)))
+
+    assert can_device(config, "dut_can").lock_key in devices
+    # One entry per physical unit, not one per step — where a unit is every key
+    # its device holds, not one: an executable debugger carries its legacy
+    # `probe:<path>` alias beside `probe-exe:` so old and new processes collide
+    # during an upgrade window, and counting keys would break each time a
+    # device gains an alias. The set equality is the real claim.
+    from agentic_hil.devices import debugger_device
+
+    expected = {can_device(config, "dut_can").lock_key}
+    expected.update(debugger_device(config).lock_keys)
+    assert set(devices) == expected
+
+
+def test_every_device_kind_answers_for_its_own_actions() -> None:
+    # The one authority: a step action belongs to the class that serves it, and
+    # the schema map, the routing keys and the tools are all read off those
+    # classes. A kind naming a tool its device does not own, or a schema entry
+    # the bundled schema does not define, would be a second answer.
+    from importlib import resources
+
+    from agentic_hil.test_reactor import ACTION_SCHEMAS, ROUTE_FIELDS, STEP_DEVICE_CLASSES, step_device_class
+
+    schema = json.loads(resources.files("agentic_hil").joinpath("schemas/testconfig.schema.json").read_text(encoding="utf-8"))
+    claimed: set[str] = set()
+    for device_class in STEP_DEVICE_CLASSES:
+        assert device_class.route_field in ROUTE_FIELDS
+        for action, schema_key in device_class.step_actions.items():
+            assert action not in claimed, f"{action} is claimed by two device kinds"
+            claimed.add(action)
+            assert schema_key in schema["$defs"], f"{action} names a schema $def that does not exist"
+            assert step_device_class(action) is device_class
+        for action, tool in device_class.step_tools.items():
+            assert action in device_class.step_actions
+            assert tool in device_class.device_class.tools, f"{tool} is not a tool {device_class.device_class.__name__} owns"
+
+    assert claimed == set(ACTION_SCHEMAS)
+    assert {"can_open", "can_close", "can_send", "can_read"} <= claimed
