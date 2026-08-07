@@ -278,6 +278,16 @@ def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[Js
         )
 
 
+def _discovered_usb_id(matched_port: JsonObject | None, field: str) -> int | None:
+    """One USB id out of a discovery record, in the spelling the file stores.
+
+    pyserial reports integers and that is what is written down; a record that
+    carries something else carries no answer, and adoption proposes nothing
+    rather than a value the loader would have to guess at."""
+    value = (matched_port or {}).get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def configured_probe_id(debugger: JsonObject) -> str | None:
     """The probe serial this entry already names, if somebody named one."""
     value = debugger.get("probe_id")
@@ -455,6 +465,8 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     # Falling back to the probe's own spelling would be inventing an identity;
     # the enumerator's spelling is the one a later open compares against.
     port_serial = str((matched_port or {}).get("serial_number") or "") if device is not None else ""
+    port_vid = _discovered_usb_id(matched_port, "vid") if device is not None else None
+    port_pid = _discovered_usb_id(matched_port, "pid") if device is not None else None
     port_name, port_entry = _choose_com_port(document, com_port_id, port_names)
     if device is None:
         available = discovery.get("available_com_ports")
@@ -521,6 +533,24 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 field="serial_number",
                 current=(port_entry or {}).get("serial_number"),
                 value=port_serial,
+            )
+        # The same record already carries the vendor and product ids, so they
+        # cost nothing to write and they are what makes the serial mean a unit:
+        # a USB serial is unique within a vendor and nowhere else (hardci-hq#124).
+        # Reported exactly like the serial — carried, already current, or left
+        # alone — because they are the same kind of fact about the same entry.
+        for field, discovered in (("vid", port_vid), ("pid", port_pid)):
+            if discovered is None:
+                continue
+            _propose(
+                carried,
+                already,
+                kept,
+                key=f"com_ports.{port_name}.{field}",
+                section="com_ports",
+                field=field,
+                current=(port_entry or {}).get(field),
+                value=discovered,
             )
 
     return {

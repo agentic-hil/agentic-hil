@@ -34,14 +34,20 @@ from agentic_hil.comports import (
     stable_device_name,
     verify_port_identity,
 )
-from agentic_hil.config import load_config
-from agentic_hil.devices import VOLATILE_SERIAL_DEVICE_WARNING, uart_device
+from agentic_hil.config import ConfigError, load_config, usb_id_config
+from agentic_hil.devices import TYPE_ONLY_SERIAL_DEVICE_WARNING, VOLATILE_SERIAL_DEVICE_WARNING, uart_device
 from agentic_hil.types import is_stable_device_name
 
 # The two boards on the bench in the report: one plugged in, then a second, and
 # the kernel names swap depending on which was seen first.
 BOARD_A = "0669FF534948717867012345"
 BOARD_B = "0670FF534948717867054321"
+# What the bench's own adopt log carries for the ST-Link behind those boards:
+# `"vid": 1155, "pid": 14159`, which is `VID:PID=0483:374F` in the same record's
+# `hwid`. The CH340 is the other half of hardci-hq#124 — a different vendor, and
+# an adapter that often publishes no serial number at all.
+STLINK_VID, STLINK_PID = 1155, 14159
+CH340_VID, CH340_PID = 0x1A86, 0x7523
 BY_ID_A = f"/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_{BOARD_A}-if02"
 BY_ID_B = f"/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_{BOARD_B}-if02"
 
@@ -55,13 +61,17 @@ def com_ports_yaml(**entry: object) -> str:
     return f"com_ports:\n  dut_uart:\n{body}"
 
 
-def host_port(device: str, serial: str | None, stable: str | None = None) -> dict:
+def host_port(device: str, serial: str | None, stable: str | None = None, vid: int | None = None, pid: int | None = None) -> dict:
     """One entry as `list_available_com_ports` shapes it."""
     port: dict = {"device": device}
     if serial is not None:
         port["serial_number"] = serial
     if stable is not None:
         port["stable_device"] = stable
+    if vid is not None:
+        port["vid"] = vid
+    if pid is not None:
+        port["pid"] = pid
     return port
 
 
@@ -441,9 +451,9 @@ def test_a_declared_port_is_not_opened_when_its_identity_cannot_be_checked(tmp_p
 # --- carrying an existing bench forward ------------------------------------
 
 
-def discovery_of(device: str, stable: str | None = None) -> dict:
+def discovery_of(device: str, stable: str | None = None, vid: int | None = None, pid: int | None = None) -> dict:
     """One correlated board, as `bootstrap.discover_attached_hardware` reports it."""
-    port = host_port(device, BOARD_A, stable)
+    port = host_port(device, BOARD_A, stable, vid, pid)
     return {
         "ok": True,
         "backend": "stlink",
@@ -584,3 +594,226 @@ def test_a_successful_open_carries_the_identity_it_was_opened_on(tmp_path: Path,
 
     assert result["error_type"] == "com_port_open_failed"
     assert verify_port_identity(config, "dut_uart", "com_session_start")["identity"]["status"] == "confirmed"
+
+
+# --- the type beside the unit ----------------------------------------------
+#
+# A USB serial number is unique within a vendor and nowhere else, so a serial
+# that matches proves the right *unit* only once the vendor and product agree
+# too. The same two keys are the whole identity an adapter that publishes no
+# serial can have (hardci-hq#124).
+
+
+def test_a_matching_serial_under_a_foreign_device_type_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The core of hardci-hq#124: serials are vendor-scoped, not global.
+
+    The entry names board A's serial and the adapter behind the name reports
+    exactly that serial — and is a CH340 rather than the ST-Link the entry was
+    written for. Comparing the serial alone opens it, because the one thing
+    checked agrees."""
+    config = config_for(
+        tmp_path,
+        com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A, vid=STLINK_VID, pid=STLINK_PID),
+    )
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyACM0", BOARD_A, vid=CH340_VID, pid=CH340_PID)))
+    service = ComPortService(config)
+    monkeypatch.setattr(service, "_open_serial", lambda *args: pytest.fail("a foreign device type was opened on a serial that happened to match"))
+
+    try:
+        result = service.session_start("dut_uart")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == COM_PORT_IDENTITY_MISMATCH
+    # Both sides of the comparison, in the integers the file holds.
+    assert result["expected_vid"] == STLINK_VID and result["expected_pid"] == STLINK_PID
+    assert result["found_vid"] == CH340_VID and result["found_pid"] == CH340_PID
+    # And in the summary, in the hexadecimal spelling every tool prints, so the
+    # operator can look the vendor up without converting a decimal first.
+    assert "0483:374f" in result["summary"] and "1a86:7523" in result["summary"]
+    # The serial is in the payload as the thing that agreed and proved nothing.
+    assert result["expected_serial_number"] == BOARD_A
+    assert result["found_serial_number"] == BOARD_A
+    assert result["identity"]["status"] == "mismatch"
+    assert result["side_effect_committed"] is False
+    assert result["retry_safe"] is True
+    # Not the "it moved" repair: the board this entry names is not attached under
+    # another name, it is a different device wearing its serial.
+    assert "expected_device" not in result
+
+
+def test_an_adapter_that_publishes_no_serial_gets_a_named_type_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The serial-less CH340, which had no identity at all before.
+
+    What it gets is not a unit check and does not pretend to be one:
+    `identity_source` names the two keys that carry it, and the confirmation
+    says out loud that two adapters of one type are indistinguishable to it."""
+    config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyUSB0", vid=CH340_VID, pid=CH340_PID))
+
+    assert uart_device(config, "dut_uart").identity_source == "vid_pid"
+    identified = port_identity_fields(config, "dut_uart")
+    assert identified["identity_source"] == "vid_pid"
+    assert identified["vid"] == CH340_VID and identified["pid"] == CH340_PID
+    assert identified["expected_vid"] == CH340_VID
+    assert "expected_serial_number" not in identified, "this entry names no unit, and must not claim to"
+
+    # The right kind of adapter behind the name opens, on stated grounds.
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyUSB0", None, vid=CH340_VID, pid=CH340_PID)))
+    checked = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert checked["ok"] is True
+    assert checked["identity"]["status"] == "confirmed"
+    assert "type check" in checked["identity"]["summary"]
+
+    # The wrong kind does not, and the refusal names both types.
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyUSB0", BOARD_A, vid=STLINK_VID, pid=STLINK_PID)))
+    refused = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert refused["ok"] is False
+    assert refused["error_type"] == COM_PORT_IDENTITY_MISMATCH
+    assert refused["expected_vid"] == CH340_VID and refused["found_vid"] == STLINK_VID
+    assert "expected_serial_number" not in refused
+
+    # And a host that reports no ids at all is the same answer as a host that
+    # reports no serial to an entry that names one: the check did not run, so
+    # the port is not opened on it.
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyUSB0", None)))
+    unverified = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert unverified["ok"] is False
+    assert unverified["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+    assert unverified["identity"]["status"] == "usb_ids_unknown"
+    assert unverified["retry_safe"] is True
+
+
+def test_a_usb_id_may_be_written_the_way_lsusb_prints_it(tmp_path: Path) -> None:
+    """Two spellings of one number, and no third.
+
+    `lsusb`, the datasheet and pyserial's own `hwid` all say `0483:374f`, while
+    pyserial's own fields say `1155` and `14159`. Both are accepted and both load
+    to the same integer, because the alternative is an operator converting hex to
+    decimal by hand while writing down which board a write may reach."""
+    hexed = config_for(tmp_path / "hex", com_ports_yaml=com_ports_yaml(device="COM7", vid="0483", pid="374F"))
+    prefixed = config_for(tmp_path / "prefixed", com_ports_yaml=com_ports_yaml(device="COM7", vid="0x0483", pid="0x374f"))
+    decimal = config_for(tmp_path / "decimal", com_ports_yaml=com_ports_yaml(device="COM7", vid=STLINK_VID, pid=STLINK_PID))
+
+    for label, config in (("hex", hexed), ("prefixed", prefixed), ("decimal", decimal)):
+        port = config.com_ports["dut_uart"]
+        assert (port.vid, port.pid) == (STLINK_VID, STLINK_PID), label
+
+    # A number is decimal, always. That rule is what lets both spellings exist at
+    # once, so a quoted value that is not hexadecimal is refused by name rather
+    # than read under whichever rule happens to match.
+    with pytest.raises(ConfigError) as refused:
+        config_for(tmp_path / "nonsense", com_ports_yaml=com_ports_yaml(device="COM7", vid="ffff0"))
+    assert refused.value.to_dict()["field"] == "com_ports.dut_uart.vid"
+
+    # The schema is one gate and the loader is the other, and the loader is the
+    # one that has to hold when a caller reaches `com_port_config` with a value
+    # the schema never saw: `pid: true` is not a product id, and a 16-bit field
+    # does not hold 70000.
+    for rejected in (True, 70000, -1, 1.5):
+        with pytest.raises(ConfigError) as refused_value:
+            usb_id_config(rejected, "com_ports.dut_uart.pid")
+        assert refused_value.value.to_dict()["field"] == "com_ports.dut_uart.pid"
+    assert usb_id_config(None, "com_ports.dut_uart.pid") is None
+    assert usb_id_config("  ", "com_ports.dut_uart.pid") is None
+
+
+def test_adoption_records_the_device_type_beside_the_serial(tmp_path: Path) -> None:
+    """The ids are in the record adoption already reads, so they cost nothing.
+
+    Same reporting shape as the serial: carried when the key is empty, already
+    current on the second run, kept when somebody set something else."""
+    document = {"debuggers": {"dut": {"type": "stlink", "probe_id": None, "executable": None}}, "com_ports": {}}
+    discovery = discovery_of("/dev/ttyACM0", BY_ID_A, STLINK_VID, STLINK_PID)
+
+    planned = plan_adoption(document, discovery)
+
+    assert planned["ok"] is True
+    written = {item["key"]: item["value"] for item in planned["carried"]}
+    assert written["com_ports.dut_uart.serial_number"] == BOARD_A
+    assert written["com_ports.dut_uart.vid"] == STLINK_VID
+    assert written["com_ports.dut_uart.pid"] == STLINK_PID
+
+    settled = plan_adoption(
+        {**document, "com_ports": {"dut_uart": {"device": BY_ID_A, "serial_number": BOARD_A, "vid": STLINK_VID, "pid": STLINK_PID}}},
+        discovery,
+    )
+    assert [item["key"] for item in settled["carried"] if item["key"].startswith("com_ports.")] == []
+    assert {item["key"] for item in settled["already_current"]} >= {"com_ports.dut_uart.vid", "com_ports.dut_uart.pid"}
+
+    disagreeing = plan_adoption(
+        {**document, "com_ports": {"dut_uart": {"device": BY_ID_A, "serial_number": BOARD_A, "vid": CH340_VID}}},
+        discovery,
+    )
+    assert [item["key"] for item in disagreeing["kept"]] == ["com_ports.dut_uart.vid"]
+
+    # A host record without the ids proposes nothing about them at all.
+    without = plan_adoption(document, discovery_of("/dev/ttyACM0", BY_ID_A))
+    assert [key for key in {item["key"] for item in without["carried"]} if key.endswith((".vid", ".pid"))] == []
+
+
+def test_an_entry_that_names_no_usb_ids_is_checked_exactly_as_it_was(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bestandsschutz for every configuration written before these two keys.
+
+    The host reports vid and pid for every USB adapter, so the check must not
+    start reading them into an entry that names none: the comparison is the same
+    comparison, the refusal carries the same fields, and nothing new appears."""
+    config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
+    port = config.com_ports["dut_uart"]
+    assert (port.vid, port.pid) == (None, None)
+    assert uart_device(config, "dut_uart").identity_source == "serial_number"
+
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyACM0", BOARD_B, BY_ID_B, CH340_VID, CH340_PID), host_port("/dev/ttyACM1", BOARD_A, BY_ID_A, STLINK_VID, STLINK_PID)))
+    refused = verify_port_identity(config, "dut_uart", "com_session_start")
+
+    assert refused["error_type"] == COM_PORT_IDENTITY_MISMATCH
+    assert refused["summary"] == (
+        f"'/dev/ttyACM0' currently belongs to hardware '{BOARD_B}', but this entry names '{BOARD_A}'. "
+        "The port was not opened: a device name is an enumeration order, so this is another board under the "
+        f"name this entry used to have. The hardware it names is attached as '{BY_ID_A}'."
+    )
+    for absent in ("expected_vid", "expected_pid", "found_vid", "found_pid"):
+        assert absent not in refused, absent
+        assert absent not in refused["identity"], absent
+
+    # And the port that is what it says it is still opens, on the serial alone.
+    fake_host(monkeypatch, inventory(host_port("/dev/ttyACM0", BOARD_A, BY_ID_A, CH340_VID, CH340_PID)))
+    confirmed = verify_port_identity(config, "dut_uart", "com_session_start")
+    assert confirmed["ok"] is True
+    assert confirmed["identity"]["summary"] == "The port behind this entry is the hardware it names."
+
+
+def test_doctor_says_what_a_type_only_entry_is_and_stays_quiet_about_the_rest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The warning tracks what the identity actually buys.
+
+    A `serial_number` is the strong anchor, and adding the ids to it changes
+    nothing an operator has to act on — so no new noise. An entry identified by
+    the ids alone has half the problem solved and half of it provably unsolvable,
+    which is a different sentence rather than the old one repeated."""
+    typed = tmp_path / "typed"
+    write_authoritative_config(typed, monkeypatch, com_ports_yaml=com_ports_yaml(device="/dev/ttyUSB0", vid=CH340_VID, pid=CH340_PID))
+    monkeypatch.chdir(typed)
+    named_type = doctor()
+
+    assert TYPE_ONLY_SERIAL_DEVICE_WARNING in named_type["warnings"]
+    assert VOLATILE_SERIAL_DEVICE_WARNING not in named_type["warnings"]
+    assert named_type["com_ports"]["dut_uart"]["identity_source"] == "vid_pid"
+
+    # A serial without the ids is complete, and warns about nothing.
+    serial_only = tmp_path / "serial-only"
+    write_authoritative_config(serial_only, monkeypatch, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
+    monkeypatch.chdir(serial_only)
+    quiet = doctor()
+
+    assert TYPE_ONLY_SERIAL_DEVICE_WARNING not in quiet.get("warnings", [])
+    assert VOLATILE_SERIAL_DEVICE_WARNING not in quiet.get("warnings", [])
+
+    # And an entry that names neither is still told what to run, including the
+    # fallback for an adapter that has no serial to record.
+    nothing = tmp_path / "nothing"
+    write_authoritative_config(nothing, monkeypatch, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0"))
+    monkeypatch.chdir(nothing)
+    warned = doctor()
+
+    assert VOLATILE_SERIAL_DEVICE_WARNING in warned["warnings"]
+    assert "vid`/`pid" in VOLATILE_SERIAL_DEVICE_WARNING

@@ -589,7 +589,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`found_serial_number` is the adapter actually behind `configured_device` right now. The port was not "
             "opened and nothing was written to it. A device name — `COM7`, `/dev/ttyACM0` — is an enumeration order "
             "rather than an identity, so attaching a second adapter or replugging in another order can hand one entry "
-            "another board; this refusal is that having happened."
+            "another board; this refusal is that having happened. `expected_vid`/`expected_pid` and "
+            "`found_vid`/`found_pid` are the same comparison one level up, and they are present when the entry names "
+            "them: a USB serial number is unique only within a vendor, so a serial that matches under a foreign vendor "
+            "or product id is refused too, and an entry for an adapter that publishes no serial at all is compared on "
+            "these alone."
         ),
         remediation=(
             "Read `expected_device` when it is present: the board this entry names is still attached, under that name, "
@@ -600,9 +604,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "name from the device's own serial, so it follows the board instead of the enumeration order.",
         ),
         do_not=(
-            "Do not change `serial_number` to the serial that was found, and do not delete the key. That turns the one "
-            "check that noticed into agreement with whatever is plugged in, which is the silent wrong-board flash this "
-            "refusal exists to prevent. Change the board or change `device`; the identity is not the thing to edit.",
+            "Do not change `serial_number`, `vid` or `pid` to the values that were found, and do not delete those keys. "
+            "That turns the one check that noticed into agreement with whatever is plugged in, which is the silent "
+            "wrong-board flash this refusal exists to prevent. Change the board or change `device`; the identity is not "
+            "the thing to edit.",
         ),
     ),
     "undeclared_device": ErrorRemedy(
@@ -1581,8 +1586,10 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
-    # entry is rather than what may be done to it.
-    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number")),
+    # entry is rather than what may be done to it. `vid`/`pid` come off the same
+    # enumeration record and say which *kind* of device it is, which is what
+    # makes the serial mean a unit at all (hardci-hq#124).
+    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # The permissions half, every block of it.
     ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
@@ -1769,7 +1776,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
-    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": (
         "The CAN buses. `listen_only: true` is how a bus is observed without sending ACK bits, and it is enforced per "
         "adapter rather than assumed: `peak` sets the mode and reads it back from the driver, `socketcan` reads the "
@@ -2127,7 +2134,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware — `resource_id`, a probe serial, a port's `serial_number`, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, or no serial reported — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone — which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

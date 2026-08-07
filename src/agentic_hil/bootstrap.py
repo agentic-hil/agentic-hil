@@ -288,6 +288,11 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
                 # a replug: `device` is how the port is opened, this is which
                 # board it is (hardci-hq#100).
                 "serial_number": str(matched_port.get("serial_number") or discovery["probe_id"]),
+                # And the vendor and product ids from the same record, because a
+                # USB serial is unique only within a vendor: without them a
+                # matching serial on another kind of adapter passes the check
+                # (hardci-hq#124). Written only when the host reported them.
+                **{field: value for field in ("vid", "pid") if isinstance(value := matched_port.get(field), int) and not isinstance(value, bool)},
                 # `allow_read` went the same way as `allow_probe`: reading a
                 # port needs no grant at version 2, and the key is refused there.
                 "permissions": {

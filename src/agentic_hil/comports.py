@@ -43,6 +43,7 @@ from agentic_hil.types import (
     JsonObject,
     fold_device_path,
     fold_hardware_id,
+    format_usb_id,
     is_stable_device_name,
 )
 
@@ -88,28 +89,85 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 
 COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
 # A declared identity that could not be confirmed before opening — the host has
-# no serial backend, the port is not enumerated exactly once, or the matched
-# port reports no serial. Distinct from a mismatch: the name may still lead to
+# no serial backend, the port is not enumerated exactly once, the matched port
+# reports no serial, or it reports no vendor and product ids while the entry
+# names them. Distinct from a mismatch: the name may still lead to
 # the right board, but nothing proved it does, and an entry that asked for the
 # guarantee is not opened on a check that did not run (hardci-hq#100).
 COM_PORT_IDENTITY_UNVERIFIED = "com_port_identity_unverified"
 
 
+def usb_id_phrase(vid: int | None, pid: int | None) -> str:
+    """The vendor/product pair as a refusal says it out loud, or ``""``.
+
+    Hexadecimal, because that is the spelling on the datasheet, in `lsusb` and
+    in pyserial's own ``hwid``; the integers travel in the payload beside it."""
+    if vid is not None and pid is not None:
+        return f"type {format_usb_id(vid)}:{format_usb_id(pid)}"
+    if vid is not None:
+        return f"vendor {format_usb_id(vid)}"
+    return f"product {format_usb_id(pid)}" if pid is not None else ""
+
+
+def host_usb_id(value: object) -> int | None:
+    """One USB id as the host inventory reports it, or nothing.
+
+    pyserial hands out integers. Anything else is a host that did not answer the
+    question, which is the same as not answering it — and an entry that named an
+    id is then refused rather than opened, exactly as it is for a serial the host
+    does not report."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 @dataclass(frozen=True)
 class PortIdentity:
-    """The hardware a configured COM port claims, and the field that claims it."""
+    """The hardware a configured COM port claims, and the fields that claim it.
 
-    expected: str
-    field: str
+    ``expected`` is the unit — a USB serial — and is None for an adapter that
+    publishes none. ``vid``/``pid`` are the type, and either half may stand
+    alone: they narrow a serial that matches (a USB serial is unique only within
+    a vendor) and they are the whole claim when there is no serial to narrow."""
+
+    expected: str | None
+    field: str | None
+    vid: int | None = None
+    pid: int | None = None
+
+    @property
+    def claim(self) -> str:
+        """What this entry says its port is, in one phrase a refusal can quote."""
+        ids = usb_id_phrase(self.vid, self.pid)
+        if self.expected is None:
+            return f"a device of {ids}"
+        return f"hardware '{self.expected}' of {ids}" if ids else f"hardware '{self.expected}'"
+
+    @property
+    def fields(self) -> JsonObject:
+        """The claim as result keys: only what this entry actually names."""
+        stated: JsonObject = {}
+        if self.expected is not None:
+            stated["expected_serial_number"] = self.expected
+            stated["expected_from"] = self.field
+        if self.vid is not None:
+            stated["expected_vid"] = self.vid
+        if self.pid is not None:
+            stated["expected_pid"] = self.pid
+        return stated
 
 
 def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdentity | None:
-    """The USB serial this entry says its port belongs to, if it says one.
+    """The hardware this entry says its port belongs to, if it says any.
 
-    Two sources, and no third. ``serial_number`` is the entry stating its own
-    hardware. A ``resource_id`` shared with a configured debugger is the operator
-    stating that this port and that probe are one unit — which they are on any
-    Nucleo — so the probe's serial is the port's serial.
+    Two sources for the serial, and no third. ``serial_number`` is the entry
+    stating its own hardware. A ``resource_id`` shared with a configured debugger
+    is the operator stating that this port and that probe are one unit — which
+    they are on any Nucleo — so the probe's serial is the port's serial.
+
+    ``vid``/``pid`` ride along with whichever of those answered, and stand on
+    their own when neither did: an adapter that publishes no serial can still say
+    what kind of adapter it is, and a check that refuses a CH340 answering to a
+    name written for an ST-Link is worth more than no check at all
+    (hardci-hq#124).
 
     What is deliberately absent is a guess. A project with one debugger and one
     COM port is *probably* one board, and probably is exactly what must not
@@ -125,19 +183,20 @@ def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdenti
     if port is None:  # pragma: no cover - callers resolve the entry first
         return None
     if port.serial_number:
-        return PortIdentity(port.serial_number, f"com_ports.{port_id}.serial_number")
-    if not port.resource_id:
+        return PortIdentity(port.serial_number, f"com_ports.{port_id}.serial_number", port.vid, port.pid)
+    if port.resource_id:
+        shared = fold_hardware_id(port.resource_id)
+        named = sorted(
+            (name, debugger.probe_id)
+            for name, debugger in config.debuggers.items()
+            if debugger.probe_id and debugger.resource_id and fold_hardware_id(debugger.resource_id) == shared
+        )
+        if len(named) == 1:
+            debugger_id, probe_id = named[0]
+            return PortIdentity(str(probe_id), f"debuggers.{debugger_id}.probe_id", port.vid, port.pid)
+    if port.vid is None and port.pid is None:
         return None
-    shared = fold_hardware_id(port.resource_id)
-    named = sorted(
-        (name, debugger.probe_id)
-        for name, debugger in config.debuggers.items()
-        if debugger.probe_id and debugger.resource_id and fold_hardware_id(debugger.resource_id) == shared
-    )
-    if len(named) != 1:
-        return None
-    debugger_id, probe_id = named[0]
-    return PortIdentity(str(probe_id), f"debuggers.{debugger_id}.probe_id")
+    return PortIdentity(None, None, port.vid, port.pid)
 
 
 def port_identity_fields(config: AgenticHILConfig, port_id: str) -> JsonObject:
@@ -149,12 +208,15 @@ def port_identity_fields(config: AgenticHILConfig, port_id: str) -> JsonObject:
     fields: JsonObject = {"identity_source": device.identity_source}
     if device.port.serial_number:
         fields["serial_number"] = device.port.serial_number
+    if device.port.vid is not None:
+        fields["vid"] = device.port.vid
+    if device.port.pid is not None:
+        fields["pid"] = device.port.pid
     if device.port.resource_id:
         fields["resource_id"] = device.port.resource_id
     expectation = expected_port_identity(config, port_id)
     if expectation is not None:
-        fields["expected_serial_number"] = expectation.expected
-        fields["expected_from"] = expectation.field
+        fields.update(expectation.fields)
     warning = device.identity_warning
     if warning:
         fields["identity_warning"] = warning
@@ -194,21 +256,62 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
         "port_id": port_id,
         "error_type": COM_PORT_IDENTITY_UNVERIFIED,
         "summary": (
-            f"'{port.device}' names hardware '{expectation.expected}', but that could not be confirmed before opening, so "
+            f"'{port.device}' names {expectation.claim}, but that could not be confirmed before opening, so "
             f"the port was not opened: {identity['summary']}"
         ),
         "identity": identity,
         "configured_device": port.device,
-        "expected_serial_number": expectation.expected,
-        "expected_from": expectation.field,
+        **expectation.fields,
         "next_step": (
             "This entry names a board on purpose, so it is opened only once the host confirms the name still leads to it. "
             "Restore the check — install the serial backend, plug the board in, or use a host that reports the adapter's "
             "serial — or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
-            "entry's `serial_number`/`resource_id` only if it genuinely names no fixed board."
+            "entry's `serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
         ),
         # Nothing was reached, so the bench stays in service and this is not an
         # incident: restore the check and call again.
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": True,
+    }
+
+
+def _identity_mismatch(
+    tool: str,
+    port_id: str,
+    port: ComPortConfig,
+    expectation: PortIdentity,
+    identity: JsonObject,
+    *,
+    summary: str,
+    likely_causes: list[str],
+) -> JsonObject:
+    """Refuse a declared port that is currently other hardware than it names.
+
+    One refusal with two ways in, because from the caller's side they are one
+    thing: the name no longer leads to what the entry says. The serial says this
+    is another *unit*, the vendor and product ids say it is another *kind* of
+    device — and the second is not the weaker of the two, since a USB serial
+    number is unique only within a vendor and a matching one across vendors
+    proves nothing at all (hardci-hq#124). Both sides of the comparison are in
+    the payload, whichever ran: ``expected_*`` from the configuration,
+    ``found_*`` from the host."""
+    identity["status"] = "mismatch"
+    return {
+        "ok": False,
+        "tool": tool,
+        "port_id": port_id,
+        "error_type": COM_PORT_IDENTITY_MISMATCH,
+        "summary": summary,
+        "identity": identity,
+        "configured_device": port.device,
+        **expectation.fields,
+        **{name: identity[name] for name in ("found_serial_number", "found_vid", "found_pid") if name in identity},
+        "likely_causes": likely_causes,
+        # Nothing was reached, so the bench stays in service and this is not an
+        # incident: fix the named cause — plug the board in, or let
+        # `adopt-hardware` rewrite the entry — and call again.
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
@@ -225,10 +328,11 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     board a name now leads to is itself the failure.
 
     An entry that declares hardware is opened on one ground only: the attached
-    device was `confirmed` to be the board it names. The three ways that question
+    device was `confirmed` to be the board it names. The four ways that question
     has no answer — the serial backend is missing (`backend_unavailable`), the
-    device is not enumerated exactly once (`port_not_enumerated`), or the matched
-    port reports no serial (`serial_unknown`) — are refusals too, not opens with
+    device is not enumerated exactly once (`port_not_enumerated`), the matched
+    port reports no serial (`serial_unknown`), or it reports no USB ids while the
+    entry names them (`usb_ids_unknown`) — are refusals too, not opens with
     a note (hardci-hq#100). The entry asked that this name be proved to still
     reach its board before use, and "the check could not run" does not prove it;
     reporting the gap in a result the caller reads *after* it has already written
@@ -249,7 +353,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
             identity["warning"] = VOLATILE_SERIAL_DEVICE_WARNING
         return {"ok": True, "identity": identity}
 
-    identity.update({"expected_serial_number": expectation.expected, "expected_from": expectation.field})
+    identity.update(expectation.fields)
     available = list_available_com_ports("com_ports_available")
     if not available.get("ok"):
         # The inventory is how this question is answered at all. This entry named
@@ -276,59 +380,108 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     stable = matches[0].get("stable_device")
     if stable:
         identity["stable_device"] = stable
-    if not found:
-        identity["status"] = "serial_unknown"
-        identity["summary"] = "This host port reports no serial number, so it could not be compared with the hardware this entry names."
+    found_vid = host_usb_id(matches[0].get("vid"))
+    found_pid = host_usb_id(matches[0].get("pid"))
+    if found:
+        identity["found_serial_number"] = found
+    # Reported when this entry names them, and only then. The host reports vid
+    # and pid for every USB adapter, so recording them unconditionally would add
+    # fields to the result of every configuration written before these keys
+    # existed — and an entry that names no type has had no type compared.
+    if expectation.vid is not None or expectation.pid is not None:
+        if found_vid is not None:
+            identity["found_vid"] = found_vid
+        if found_pid is not None:
+            identity["found_pid"] = found_pid
+
+    if expectation.expected is not None:
+        if not found:
+            identity["status"] = "serial_unknown"
+            identity["summary"] = "This host port reports no serial number, so it could not be compared with the hardware this entry names."
+            return _identity_unverified(tool, port_id, port, expectation, identity)
+        if fold_hardware_id(found) != fold_hardware_id(expectation.expected):
+            elsewhere = next((entry for entry in ports if fold_hardware_id(str(entry.get("serial_number") or "")) == fold_hardware_id(expectation.expected)), None)
+            result = _identity_mismatch(
+                tool,
+                port_id,
+                port,
+                expectation,
+                identity,
+                summary=(
+                    f"'{port.device}' currently belongs to hardware '{found}', but this entry names '{expectation.expected}'. "
+                    "The port was not opened: a device name is an enumeration order, so this is another board under the "
+                    "name this entry used to have."
+                ),
+                likely_causes=[
+                    "another serial adapter was attached, so the kernel handed this name to a different device",
+                    "the boards were replugged in a different order, or the host was rebooted with both attached",
+                    "this entry was written for a board that is no longer the one behind this name",
+                    (
+                        "this entry shares a resource_id with a probe whose virtual COM port it is not, so it is being "
+                        "compared against that probe's serial; give the port its own serial_number if the two really are "
+                        "separate devices"
+                    ),
+                ],
+            )
+            if isinstance(elsewhere, dict):
+                # The board this entry means is still attached, under another
+                # name. Say where, because that is the whole repair.
+                moved = str(elsewhere.get("stable_device") or elsewhere.get("device") or "")
+                result["expected_device"] = moved
+                result["summary"] += f" The hardware it names is attached as '{moved}'."
+            return result
+
+    # The type check. It runs after the serial and never instead of it: a serial
+    # that matches proves the unit only once the vendor agrees, because a USB
+    # serial number is unique within a vendor and nowhere else. For an adapter
+    # that publishes no serial this is the whole check, and it is honest about
+    # being one — it separates a CH340 from an ST-Link, not one CH340 from
+    # another (hardci-hq#124).
+    declared = [(claimed, seen) for claimed, seen in ((expectation.vid, found_vid), (expectation.pid, found_pid)) if claimed is not None]
+    if any(seen is None for _, seen in declared):
+        identity["status"] = "usb_ids_unknown"
+        identity["summary"] = (
+            "This host port reports no USB vendor and product id, so the device type this entry names could not be "
+            "compared with what is behind the name."
+        )
         return _identity_unverified(tool, port_id, port, expectation, identity)
-
-    identity["found_serial_number"] = found
-    if fold_hardware_id(found) == fold_hardware_id(expectation.expected):
-        identity["status"] = "confirmed"
-        identity["summary"] = "The port behind this entry is the hardware it names."
-        return {"ok": True, "identity": identity}
-
-    elsewhere = next((entry for entry in ports if fold_hardware_id(str(entry.get("serial_number") or "")) == fold_hardware_id(expectation.expected)), None)
-    identity["status"] = "mismatch"
-    result: JsonObject = {
-        "ok": False,
-        "tool": tool,
-        "port_id": port_id,
-        "error_type": COM_PORT_IDENTITY_MISMATCH,
-        "summary": (
-            f"'{port.device}' currently belongs to hardware '{found}', but this entry names '{expectation.expected}'. "
-            "The port was not opened: a device name is an enumeration order, so this is another board under the "
-            "name this entry used to have."
-        ),
-        "identity": identity,
-        "configured_device": port.device,
-        "expected_serial_number": expectation.expected,
-        "expected_from": expectation.field,
-        "found_serial_number": found,
-        "likely_causes": [
-            "another serial adapter was attached, so the kernel handed this name to a different device",
-            "the boards were replugged in a different order, or the host was rebooted with both attached",
-            "this entry was written for a board that is no longer the one behind this name",
-            (
-                "this entry shares a resource_id with a probe whose virtual COM port it is not, so it is being "
-                "compared against that probe's serial; give the port its own serial_number if the two really are "
-                "separate devices"
+    if any(claimed != seen for claimed, seen in declared):
+        return _identity_mismatch(
+            tool,
+            port_id,
+            port,
+            expectation,
+            identity,
+            summary=(
+                f"'{port.device}' is currently a device of {usb_id_phrase(found_vid, found_pid)}, but this entry names "
+                f"{usb_id_phrase(expectation.vid, expectation.pid)}. The port was not opened: this is a different kind of "
+                "device under the name this entry used to have"
+                + (
+                    ", and its serial number matching proves nothing, because a USB serial is unique only within a vendor."
+                    if expectation.expected is not None
+                    else "."
+                )
             ),
-        ],
-        # Nothing was reached, so the bench stays in service and this is not an
-        # incident: fix the named cause — plug the board in, or let
-        # `adopt-hardware` rewrite the entry — and call again.
-        "side_effect_committed": False,
-        "side_effect_status": "not_started",
-        "hardware_state": "unchanged",
-        "retry_safe": True,
-    }
-    if isinstance(elsewhere, dict):
-        # The board this entry means is still attached, under another name. Say
-        # where, because that is the whole repair.
-        moved = str(elsewhere.get("stable_device") or elsewhere.get("device") or "")
-        result["expected_device"] = moved
-        result["summary"] += f" The hardware it names is attached as '{moved}'."
-    return result
+            likely_causes=[
+                "a different USB-serial adapter was attached and the kernel handed this name to it",
+                "this entry was written for an adapter that is no longer the one behind this name",
+                (
+                    "the serial numbers agree by coincidence: a USB serial number is scoped to its vendor, and cheap "
+                    "adapters ship duplicates of it, which is the case `vid`/`pid` exist to separate"
+                ),
+            ],
+        )
+
+    identity["status"] = "confirmed"
+    identity["summary"] = (
+        "The port behind this entry is the hardware it names."
+        if expectation.expected is not None
+        else (
+            "The port behind this entry is a device of the type it names. This entry names no serial number, so that "
+            "is a type check: it separates this kind of adapter from another kind, not one of them from an identical one."
+        )
+    )
+    return {"ok": True, "identity": identity}
 
 
 class ComPortSession:

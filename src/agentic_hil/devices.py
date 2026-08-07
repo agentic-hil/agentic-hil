@@ -65,7 +65,21 @@ VOLATILE_SERIAL_DEVICE_WARNING = (
     "— and a kernel name is an enumeration order, not hardware: attaching a second adapter can hand this "
     "entry another board, at which point the lock protects a name rather than a board and nothing refuses "
     "the wrong one. Run `agentic-hil adopt-hardware` to record the port's serial_number (and, on Linux, its "
-    "/dev/serial/by-id/... name), or give the entry the resource_id its probe already carries."
+    "/dev/serial/by-id/... name), or give the entry the resource_id its probe already carries. An adapter "
+    "that publishes no serial at all — the cheap CH340 clones — can still name `vid`/`pid`, which refuses at "
+    "least a different kind of adapter under this name."
+)
+
+# The middle ground the vid/pid keys create: an entry that names a device *type*
+# and no unit. Weaker than the two warnings above rather than a variant of them,
+# because half the problem is genuinely solved — a CH340 answering to a name
+# written for an ST-Link is refused at open — and the other half provably cannot
+# be, since two identical adapters publish identical ids (hardci-hq#124).
+TYPE_ONLY_SERIAL_DEVICE_WARNING = (
+    "This COM port is identified by `vid`/`pid` and a kernel name: the type check refuses a different kind of "
+    "adapter under this name, but two adapters of the same type are indistinguishable to it, and the lock "
+    "still follows the kernel name. That is as far as identity goes for an adapter that publishes no serial "
+    "number; if this one does publish one, `agentic-hil adopt-hardware` records it and the entry names a unit."
 )
 
 
@@ -398,9 +412,19 @@ class UartDevice(Device):
 
     @property
     def identity_source(self) -> str:
+        """Which key of this entry says which hardware it is.
+
+        Every value is the name of the key (or keys) that carries the identity,
+        strongest first, so the answer is something an operator can go and read.
+        ``vid_pid`` — or ``vid``/``pid`` alone, when only one is set — is the
+        honest name for the type check: it says the entry names a kind of
+        adapter and not a unit, which is exactly what those keys are."""
         if self.port.resource_id:
             return "resource_id"
-        return "serial_number" if self.port.serial_number else "device"
+        if self.port.serial_number:
+            return "serial_number"
+        usb_ids = "_".join(name for name, value in (("vid", self.port.vid), ("pid", self.port.pid)) if value is not None)
+        return usb_ids or "device"
 
     @property
     def identity_warning(self) -> str | None:
@@ -416,10 +440,16 @@ class UartDevice(Device):
         where nothing is attached; deriving it from what is currently enumerated
         would make one entry's key change as boards come and go, which is a worse
         failure than the one being fixed. The entry says what it knows, and this
-        says when that is not enough."""
-        if self.identity_source != "device" or is_stable_device_name(self.port.device):
+        says when that is not enough.
+
+        An entry identified by `vid`/`pid` is not silent and not sound either:
+        it names a type, the lock still follows the kernel name, and saying so is
+        a different sentence rather than the same one. A `serial_number` without
+        them is complete and warns about nothing — the serial is the anchor and
+        the ids only narrow it (hardci-hq#124)."""
+        if self.port.resource_id or self.port.serial_number or is_stable_device_name(self.port.device):
             return None
-        return VOLATILE_SERIAL_DEVICE_WARNING
+        return TYPE_ONLY_SERIAL_DEVICE_WARNING if self.identity_source != "device" else VOLATILE_SERIAL_DEVICE_WARNING
 
 
 @dataclass(frozen=True)

@@ -90,9 +90,14 @@ that name and refuses rather than connecting. Nothing was opened. Report
 present, it names where the configured board is now, and
 `agentic-hil adopt-hardware` rewrites the entry from the attached hardware;
 absent, the configured board is not attached and the operator has to plug it in.
-Never resolve it by writing the found serial into `serial_number` or by removing
-the key — that makes the one check that noticed agree with whatever is plugged
-in, which is the silent wrong-board flash it exists to prevent.
+When the entry also names `vid`/`pid`, the same refusal carries
+`expected_vid`/`expected_pid` and `found_vid`/`found_pid`, and report those too:
+a USB serial number is unique only within a vendor, so a matching serial under a
+foreign device type is refused as well, and an adapter that publishes no serial
+at all is compared on the type alone. Never resolve any of it by writing the
+found values into `serial_number`, `vid` or `pid`, or by removing those keys —
+that makes the one check that noticed agree with whatever is plugged in, which is
+the silent wrong-board flash it exists to prevent.
 
 `can_listen_only_unsupported` and `can_listen_only_unconfirmed` are a third kind
 again, and the one most likely to look like an obstacle worth removing. The bus

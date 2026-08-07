@@ -2567,6 +2567,8 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         assert_dtr=bool(raw.get("assert_dtr", True)),
         assert_rts=bool(raw.get("assert_rts", True)),
         serial_number=optional_string(raw.get("serial_number")),
+        vid=usb_id_config(raw.get("vid"), f"com_ports.{name}.vid"),
+        pid=usb_id_config(raw.get("pid"), f"com_ports.{name}.pid"),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )
@@ -2860,6 +2862,56 @@ def positive_integer_config(value: Any, default_value: int, field: str) -> int:
     if parsed < 1:
         raise ConfigError("config_invalid", f"{field} must be a finite integer >= 1.", {"field": field, "value": value})
     return parsed
+
+
+# A USB vendor or product id is a 16-bit number, and it has two spellings in the
+# wild: pyserial hands out `1155`, while `lsusb`, the `hwid` string pyserial
+# itself builds (`VID:PID=0483:374F`) and every vendor datasheet print `0483`.
+# Both are accepted and both mean the same device, because the alternative is an
+# operator transcribing hex into decimal by hand at exactly the moment they are
+# writing down which board a write may reach.
+#
+# The rule is one line and has no middle: a number in the file is decimal — the
+# spelling `adopt-hardware` writes — and a *quoted* value is hex, with or
+# without the `0x` marker. A file therefore cannot say `0483` unquoted and mean
+# 1155, and it does not have to: YAML would already read a leading zero as
+# something else. Both normalise to the integer here, so nothing downstream sees
+# two spellings, and refusals print the hex back (`types.format_usb_id`) so a
+# value entered under the wrong rule is visible rather than merely wrong.
+USB_ID_HEX = re.compile(r"^(?:0[xX])?[0-9A-Fa-f]{1,4}$")
+USB_ID_MAX = 0xFFFF
+
+
+def usb_id_config(value: Any, field: str) -> int | None:
+    """One USB vendor or product id, in either spelling, as an integer."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if not USB_ID_HEX.match(text):
+            raise ConfigError(
+                "config_invalid",
+                f"{field} is written as text, which is the hexadecimal spelling `lsusb` prints, so it must be one to "
+                "four hex digits such as \"0483\" (a plain number is read as decimal instead).",
+                {"field": field, "value": value},
+            )
+        return int(text, 16)
+    # `bool` is an `int` in Python and `pid: true` is not a product id.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            "config_invalid",
+            f"{field} must be a whole number (the decimal id pyserial reports) or the hexadecimal spelling in quotes.",
+            {"field": field, "value": value},
+        )
+    if not 0 <= value <= USB_ID_MAX:
+        raise ConfigError(
+            "config_invalid",
+            f"{field} must be a 16-bit USB id between 0 and {USB_ID_MAX}.",
+            {"field": field, "value": value},
+        )
+    return value
 
 
 def positive_timeout_config(value: Any, default_value: float, field: str) -> float:

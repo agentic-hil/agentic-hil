@@ -50,6 +50,18 @@ def fold_device_path(value: str) -> str:
     return os.path.normcase(value)
 
 
+def format_usb_id(value: int | None) -> str:
+    """A USB vendor or product id in the spelling every tool but pyserial uses.
+
+    pyserial reports them as integers, and that is what a configuration stores —
+    but nobody reads `1155` off a board. `lsusb`, Windows' device manager and
+    pyserial's own ``hwid`` all print the four-digit hex (``VID:PID=0483:374F``),
+    so that is what a refusal has to say out loud, and both spellings travel: the
+    payload carries the integer the file holds, the summary carries the hex the
+    operator can look up."""
+    return "none" if value is None else f"{value:04x}"
+
+
 # The directory udev fills with one symlink per serial port, named after the
 # vendor, the product and the device's own serial number:
 #
@@ -229,6 +241,21 @@ class ComPortConfig:
     # means the entry is identified by its kernel name alone, which is the
     # situation `UartDevice.identity_warning` names and `adopt-hardware` fills in.
     serial_number: str | None = None
+    # The USB vendor and product ids of that same adapter, as pyserial reports
+    # them: integers, and the file may also spell them the way `lsusb` does (see
+    # `config.usb_id_config`). They are not a second serial — every ST-Link on
+    # earth carries 0483:374f — so they name a *type* rather than a unit, and
+    # they are deliberately absent from the lock key for that reason.
+    #
+    # What they buy is the thing a serial alone cannot: a USB serial number is
+    # unique only within a vendor, so `serial_number` matching proves the right
+    # unit only once the type agrees too, and an adapter that publishes no serial
+    # at all (the cheap CH340 clones) gets a named type check instead of nothing
+    # (hardci-hq#124). Optional and independent of each other, like
+    # `serial_number` and unset in every configuration written before they
+    # existed.
+    vid: int | None = None
+    pid: int | None = None
     resource_id: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
 

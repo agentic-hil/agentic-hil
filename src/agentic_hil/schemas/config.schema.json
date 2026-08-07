@@ -374,6 +374,30 @@
             "default": null,
             "description": "The USB serial number of the adapter behind this port, which on a Nucleo is the ST-Link serial that probe_id also carries. This is the port's identity; device is only the way in. Set, it becomes the machine-wide lock key, and it is compared against the attached hardware when the port is opened so an entry that has come to name a different board is refused rather than used. Unset, the entry is identified by its kernel name alone. `agentic-hil adopt-hardware` fills it in from the attached probe."
           },
+          "vid": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 65535,
+            "pattern": "^(?:0[xX])?[0-9A-Fa-f]{1,4}$",
+            "default": null,
+            "description": "The USB vendor id of the adapter behind this port. Two spellings, both accepted and normalised to the integer on load: a number is decimal, which is what pyserial reports and what adopt-hardware writes (1155), and a quoted value is the hexadecimal lsusb prints, with or without the 0x marker (\"0483\", \"0x0483\"). Unlike serial_number this names a device type rather than a unit, so it is never a lock key — what it buys is that a USB serial is unique only within a vendor, so a matching serial under a foreign vid/pid is refused at open, and an adapter that publishes no serial at all still gets a named type check."
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "string",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 65535,
+            "pattern": "^(?:0[xX])?[0-9A-Fa-f]{1,4}$",
+            "default": null,
+            "description": "The USB product id of the adapter behind this port, alongside vid and spelled the same two ways: decimal as a number (14159), hexadecimal in quotes (\"374f\"). Optional and independent of vid; each one set is compared against the attached device when the port is opened."
+          },
           "timeout_s": {
             "type": "number",
             "minimum": 0,

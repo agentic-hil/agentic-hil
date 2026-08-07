@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Added
+
+- `com_ports.<name>.vid` and `com_ports.<name>.pid`, beside `serial_number` and optional like it, and the open-time identity check compares them when they are set (hardci-hq#124). A USB serial number is unique within its vendor and nowhere else, so the check that shipped in 0.9.0 accepted the same serial from a completely different kind of adapter; a matching serial under a foreign vid/pid is now `com_port_identity_mismatch` as well, with `expected_vid`/`expected_pid` and `found_vid`/`found_pid` beside the serials and the hexadecimal pair in the summary. An entry that names the ids and no serial — the cheap CH340 clones publish none — gets a named type check instead of nothing: `identity_source` reads `vid_pid`, and both the confirmation and `doctor` say out loud that it separates one kind of adapter from another and not one adapter from an identical one. `adopt-hardware` and `init` write the ids from the same discovery record that already carried them, reported exactly like the serial. Both spellings load: a number is the decimal pyserial reports (`1155`), a quoted value is the hexadecimal `lsusb` prints (`"0483"`, `"0x0483"`), and both normalise to the integer. A configuration that names neither key is checked exactly as it was.
+
 ## [0.9.0] - 2026-08-07
 
 The entries below add surface — two CLI commands, tool annotations, a configuration key, a record in every report, three error types — so this is a minor under decision 0019, not a patch.
