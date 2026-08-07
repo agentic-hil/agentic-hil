@@ -17,7 +17,7 @@
   "timeout_seconds": 1800,
   "target": {
     "mode": "local",
-    "expected_version": "0.8.0"
+    "expected_version": "0.9.0"
   },
   "jobs": [
     {
