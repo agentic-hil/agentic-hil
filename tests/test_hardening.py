@@ -47,6 +47,7 @@ from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.knowledge import CONFIG_WORKED_EXAMPLE
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import (
+    ContactMarker,
     append_canonical_audit_log,
     append_jsonl,
     append_jsonl_audited,
@@ -427,9 +428,20 @@ def test_com_session_stop_attempts_close_after_cancel_failure(tmp_path: Path) ->
 
 
 def test_com_open_failure_without_cleanup_confirmation_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open that got far enough to leave something behind still quarantines.
+
+    The stub says so the way the backend does: it marks contact as unproven,
+    which is what an open that may have left a handle on the device records. A
+    stub that touched the marker not at all would be describing an open that
+    never happened, and would rightly be refused instead."""
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
-    monkeypatch.setattr(service, "_open_serial", lambda *args: {"ok": False, "tool": "com_session_start", "port_id": "dut", "error_type": "com_port_open_failed", "summary": "partial open unknown"})
+
+    def partial_open(port_id, port_config, log_path, lease, contact):
+        contact.record_unproven("test_partial_open")
+        return {"ok": False, "tool": "com_session_start", "port_id": "dut", "error_type": "com_port_open_failed", "summary": "partial open unknown"}
+
+    monkeypatch.setattr(service, "_open_serial", partial_open)
     try:
         result = service.session_start("dut")
 
@@ -457,8 +469,8 @@ def test_com_reader_start_failure_reports_before_lease_release(tmp_path: Path, m
     service = ComPortService(config)
     handle = SimpleNamespace(is_open=True, in_waiting=0, close=lambda: setattr(handle, "is_open", False))
 
-    def opened(port_id, port_config, log_path, lease):
-        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False)
+    def opened(port_id, port_config, log_path, lease, contact):
+        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False, contact=contact)
         session.start_reader = lambda: (_ for _ in ()).throw(RuntimeError("thread failed"))
         return {"ok": True, "session": session}
 
@@ -496,8 +508,8 @@ def test_com_reader_started_then_start_raises_is_joined_before_release(tmp_path:
     handle = BlockingHandle()
     captured: list[ComPortSession] = []
 
-    def opened(port_id, port_config, log_path, lease):
-        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False)
+    def opened(port_id, port_config, log_path, lease, contact):
+        session = ComPortSession(port_id, port_config, handle, log_path, lease, start_reader=False, contact=contact)
         captured.append(session)
         return {"ok": True, "session": session}
 
@@ -534,8 +546,8 @@ def test_new_com_session_clears_os_and_memory_buffers(tmp_path: Path, monkeypatc
         def close(self) -> None:
             self.is_open = False
 
-    def opened(port_id, port_config, log_path, lease):
-        session = ComPortSession(port_id, port_config, BufferedHandle(), log_path, lease, start_reader=False)
+    def opened(port_id, port_config, log_path, lease, contact):
+        session = ComPortSession(port_id, port_config, BufferedHandle(), log_path, lease, start_reader=False, contact=contact)
         session.buffer.extend(b"stale")
         session.overflow_bytes = 3
         session.start_reader = lambda: None
@@ -562,7 +574,7 @@ def test_com_session_constructor_failure_closes_raw_handle(tmp_path: Path, monke
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
     monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
 
-    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace())
+    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace(), ContactMarker())
 
     assert result["ok"] is False
     assert handle.closed is True
@@ -598,7 +610,7 @@ def test_com_double_failure_keeps_raw_handle_reachable_for_retry(tmp_path: Path,
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: handle))
     monkeypatch.setattr("agentic_hil.comports.ComPortSession", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("construct failed")))
 
-    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace())
+    result = service._open_serial("dut", config.com_ports["dut"], str(tmp_path / "com.jsonl"), SimpleNamespace(), ContactMarker())
 
     assert result["ok"] is False
     assert provisional_handle_count(service.coordinator.owner_marker) == 1
@@ -2501,9 +2513,9 @@ def test_write_only_com_port_can_actually_be_written(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         service,
         "_open_serial",
-        lambda port_id, port_config, log_path, lease: {
+        lambda port_id, port_config, log_path, lease, contact: {
             "ok": True,
-            "session": ComPortSession(port_id, port_config, _RecordingSerial(written), log_path, lease, start_reader=False),
+            "session": ComPortSession(port_id, port_config, _RecordingSerial(written), log_path, lease, start_reader=False, contact=contact),
         },
     )
     try:

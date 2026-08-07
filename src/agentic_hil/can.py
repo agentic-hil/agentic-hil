@@ -42,11 +42,13 @@ from agentic_hil.provisional import (
     register_provisional_handle,
 )
 from agentic_hil.report import (
+    ContactMarker,
     append_jsonl_audited,
     audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
+    no_contact_refusal,
     overall_success,
     recommit_report_with_status,
     safe_filename,
@@ -54,7 +56,7 @@ from agentic_hil.report import (
     utc_now_iso,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, CanBusConfig, JsonObject, raised_errno
 
 SUPPORTED_CAN_ADAPTERS = ["peak", "socketcan", "process"]
 CAN_DRAIN_BATCH_LIMIT = 16
@@ -114,7 +116,7 @@ class CanAdapterSession(Protocol):
 
 
 class CanBusSession:
-    def __init__(self, bus_id: str, bus_config: CanBusConfig, adapter_session: CanAdapterSession, log_path: str, lease: HardwareLease | None = None):
+    def __init__(self, bus_id: str, bus_config: CanBusConfig, adapter_session: CanAdapterSession, log_path: str, lease: HardwareLease | None = None, contact: ContactMarker | None = None):
         self.bus_id = bus_id
         self.bus_config = bus_config
         self.adapter_session = adapter_session
@@ -125,6 +127,13 @@ class CanBusSession:
         self.lease = lease or DetachedHardwareLease()
         self.safe_state_confirmed = False
         self.process_reaped = False
+        # A session exists only downstream of an adapter that opened, so its
+        # marker is set by construction; the default is for the direct
+        # constructions in tests and keeps them describing an open bus, which is
+        # what they are.
+        self.contact = contact if contact is not None else ContactMarker()
+        if self.contact.at is None:
+            self.contact.record("can_adapter_opened")
 
 
 class CanBusService:
@@ -182,29 +191,41 @@ class CanBusService:
             lease = self.coordinator.acquire(can_device(self.config, bus_id))
         except CoordinationError as error:
             return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result})
+        contact = ContactMarker()
         try:
             with managed_process_owner(self.coordinator.owner_marker):
-                opened = open_adapter(self.config, bus_id, bus_config, False)
+                opened = open_adapter(self.config, bus_id, bus_config, False, contact)
         except BaseException as error:
-            lease.quarantine("can_open_interrupted", error)
+            # An interrupt that lands before the adapter joined the bus has
+            # nothing to contain, and the marker is what says so — including for
+            # a bridge, which answers "cannot tell" rather than "no" and keeps
+            # its quarantine on that basis. A release that will not confirm is an
+            # unknown of its own and quarantines too.
+            if not contact.proves_no_contact or not lease.release():
+                lease.quarantine("can_open_interrupted", error)
             raise
         if not opened["ok"]:
             if opened.get("cleanup_required") and isinstance(opened.get("session"), ProcessCanAdapterSession):
-                session = CanBusSession(bus_id, bus_config, opened["session"], log_path, lease)
+                session = CanBusSession(bus_id, bus_config, opened["session"], log_path, lease, contact)
                 session.active = False
                 self.sessions[bus_id] = session
                 lease.quarantine("can_open_cleanup_unconfirmed", opened.get("cleanup_error"))
             failure = {key: value for key, value in opened.items() if key != "session"}
+            # Consulted before the backend's own claim, and only ever widening
+            # the refusal: an open that never reached a controller is a refusal
+            # whatever ended it, and a `cleanup_required` bridge child keeps its
+            # quarantine because a process that is still running can still act.
+            failure = no_contact_refusal({**failure, **contact.report_fields()}, contact)
             if opened.get("cleanup_required"):
                 return self._write_report(failure)
-            safe_to_release = opened.get("side_effect_committed") is False or opened.get("cleanup_confirmed") is True
+            safe_to_release = failure.get("side_effect_committed") is False or failure.get("cleanup_confirmed") is True
             if not safe_to_release:
                 lease.quarantine("can_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
         adapter_session = opened["session"]
         adapter_provisional = register_provisional_handle(self.coordinator.owner_marker, f"can-adapter:{bus_id}", adapter_session.close)
         try:
-            session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease)
+            session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease, contact)
         except BaseException as error:
             try:
                 adapter_session.close()
@@ -465,9 +486,16 @@ class CanBusService:
         session = self.sessions.get(bus_id) if isinstance(bus_id, str) else None
         unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
         if session is not None and unsafe_effect and prepared.get("cleanup_confirmed") is not True:
+            # No marker consult here, and that is the intended asymmetry: a
+            # registered session exists only downstream of an adapter that
+            # opened, so every failure reaching this line is an after-contact
+            # failure and keeps precisely the quarantine it has always had.
             session.lease.quarantine("can_effect_unconfirmed")
         if session is not None:
-            prepared = {**prepared, **session.lease.status()}
+            # Published on every report this session writes, not only on the one
+            # that opened it, because the reader that needs it — the release of a
+            # dead owner's devices — sees whichever report was committed last.
+            prepared = {**prepared, **session.contact.report_fields(), **session.lease.status()}
         written = write_report(self.config, prepared)
         if session is not None and written.get("audit_ok") is False:
             session.audit_broken = True
@@ -491,10 +519,17 @@ class CanBusService:
         return result
 
 
-def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
+def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
+    """Open the configured adapter, recording contact into ``contact``.
+
+    The marker is optional so that a caller with no interest in it — and every
+    direct call in a test — still gets a working open; the caller that decides
+    between a refusal and a quarantine passes its own and reads it afterwards.
+    """
+    marker = contact if contact is not None else ContactMarker()
     if bus_config.adapter == "process":
-        return open_process_adapter(config, bus_id, bus_config, clear_rx_queue)
-    return open_python_can_adapter(config, bus_id, bus_config, clear_rx_queue)
+        return open_process_adapter(config, bus_id, bus_config, clear_rx_queue, marker)
+    return open_python_can_adapter(config, bus_id, bus_config, clear_rx_queue, marker)
 
 
 class PythonCanAdapterSession:
@@ -543,30 +578,6 @@ class PythonCanAdapterSession:
         return {"active": self.active, "backend": self.adapter_name}
 
 
-def _raised_errno(error: BaseException, target: int) -> bool:
-    """Whether ``target`` is the OS error number this exception was raised over.
-
-    Walked over ``__cause__`` and ``__context__`` rather than matched against the
-    message, because the message is the part python-can is free to reword: on the
-    SocketCAN path the number reaches us inside a wrapper's cause chain, and a
-    classifier that read `"No such device"` would answer differently under a
-    non-English libc and identically to a device whose *name* contains the words.
-    Both attributes are consulted for the same reason — `OSError.errno` is where
-    the kernel's number lives, and `can.CanError.error_code` is where python-can's
-    own wrappers copy it when they re-raise.
-
-    Bounded and cycle-safe: an exception chain is caller-supplied data here.
-    """
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if any(getattr(current, field, None) == target for field in ("errno", "error_code")):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
 def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
     """The refusal for a SocketCAN interface that does not exist, or ``None``.
 
@@ -592,7 +603,7 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     not there after a re-enumeration — quarantined a bench that nothing had
     touched.
     """
-    if bus_config.adapter == "peak" or not _raised_errno(error, errno_module.ENODEV):
+    if bus_config.adapter == "peak" or not raised_errno(error, errno_module.ENODEV):
         return None
     return {
         "ok": False,
@@ -615,7 +626,21 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     }
 
 
-def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
+def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
+    """Open a python-can bus, recording contact where it becomes provable.
+
+    What the marker means on this backend: the successful return of
+    ``can.Bus()``. Everything a python-can backend does to join a bus happens
+    inside that constructor — SocketCAN creates and binds its raw socket there,
+    PCAN runs `PCANBasic.Initialize` and its follow-up `SetValue` calls there —
+    so a constructor that returned is a controller that is on the bus, ACKing.
+    Nothing before it has addressed a controller at all.
+
+    The marker is optional here and on the bridge for the same reason it is on
+    ``open_adapter``: a caller that only wants the adapter still gets one. The
+    caller that decides between a refusal and a quarantine passes its own.
+    """
+    contact = contact if contact is not None else ContactMarker()
     if (
         bus_config.adapter == "peak"
         and not is_windows_peak_channel(bus_config.channel)
@@ -677,14 +702,23 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
                 return missing
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
-            # Provably never on the bus: refuse, do not quarantine
-            # (hardci-hq#97). Every other exception class, and every failure on
-            # a backend that is not in `initialization_errors`, keeps the
-            # markerless result — a partially initialized channel participates
-            # on the bus (it ACKs and can emit error frames at a wrong bitrate),
-            # and nothing here can disprove one was left behind.
+            # Provably never on the bus: refuse, do not quarantine. Every other
+            # exception class, and every failure on a backend that is not in
+            # `initialization_errors`, keeps the markerless result — a partially
+            # initialized channel participates on the bus (it ACKs and can emit
+            # error frames at a wrong bitrate), and nothing here can disprove one
+            # was left behind.
             failure.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+        else:
+            # And this is why the marker has a third state rather than being a
+            # flag. A constructor that raised somewhere other than the two places
+            # that prove innocence may have left a controller on the bus; an
+            # unset marker read as "no contact" would hand that bench straight
+            # back. The failure keeps its quarantine, and the marker says why it
+            # is not the one deciding.
+            contact.record_unproven("python_can_bus_constructor")
         return failure
+    contact.record("python_can_bus_constructed")
     shutdown = getattr(bus, "shutdown", None)
     try:
         provisional = register_provisional_handle(current_process_owner(), f"can:{bus_id}", shutdown if callable(shutdown) else lambda: None)
@@ -950,7 +984,21 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
 BRIDGE_OPEN_UNANSWERED = frozenset({"can_adapter_timeout", "can_adapter_invalid_response"})
 
 
-def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
+def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
+    """Open the bridge, recording contact from what the bridge itself said.
+
+    What the marker means on this backend: the bridge answered its open request
+    with ``ok: true``. That is the bridge's own claim to be on the bus, and it is
+    the only evidence available — this is code the project did not write, and
+    forwarding a request proves nothing about what the far side did with it.
+
+    The two unanswered outcomes get the third state instead. A request that was
+    written to the child and then timed out, or came back in a shape this
+    protocol cannot read, leaves the far side's state to the far side: neither
+    contact nor its absence can be shown, and reading silence as innocence is
+    what would give a bench back while a bridge is sitting on the bus.
+    """
+    contact = contact if contact is not None else ContactMarker()
     if not bus_config.executable:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "config_invalid", "field": f"can_buses.{bus_id}.executable", "summary": "adapter: process requires executable.", "side_effect_committed": False}
     executable = resolve_work_path(config, bus_config.executable)
@@ -965,11 +1013,19 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     try:
         opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
     except BaseException as primary_error:
+        # An interrupt raised across the request may have left the open request
+        # sitting with the child, which is the unanswered case again and not a
+        # proof of anything.
+        contact.record_unproven("can_bridge_open_interrupted")
         try:
             session.close()
         except BaseException as cleanup_error:
             primary_error.args = (*primary_error.args, f"Bridge cleanup error: {cleanup_error}")
         raise
+    if opened.get("ok") is True:
+        contact.record("can_bridge_open_confirmed")
+    elif opened.get("error_type") in BRIDGE_OPEN_UNANSWERED:
+        contact.record_unproven("can_bridge_open_unanswered")
     valid_open = (
         opened.get("ok") is True
         and opened.get("protocol_version") == BRIDGE_PROTOCOL_VERSION

@@ -575,6 +575,131 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
     }
 
 
+# What a session publishes about its own earliest hardware touch, and the field a
+# later reader — including the dead-owner release in the coordination layer —
+# consults instead of inferring one.
+CONTACT_MARKER_KEY = "first_contact_at"
+CONTACT_MARKER_SOURCE_KEY = "first_contact_by"
+
+
+class ContactMarker:
+    """Whether this session has provably touched its hardware yet.
+
+    Quarantine answers "I do not know what state the board is in", so the
+    question every failure handler actually has is whether there was anything to
+    not know about. That question used to be answered by classifying the
+    exception: a per-backend set of classes that prove no contact, and everything
+    outside the set treated as unknown. Three benches were held in one week by
+    failures nobody had enumerated — a socket bind, a missing interface, a port
+    another program was already holding — and every miss failed the same way,
+    because a set of known-innocent classes is only ever as complete as the last
+    incident.
+
+    The marker inverts the question. Contact is recorded at the one point in each
+    backend where it is *provable*, before anything downstream of it can fail, and
+    every handler asks the marker before it asks the exception. A failure with no
+    marker refuses by construction rather than by enumeration, so an exception
+    class nobody has ever seen produces the safe answer instead of the loud one.
+    The classifier sets stay exactly where they are: they can still turn an
+    after-contact failure into a refusal where the class genuinely proves
+    innocence, which is a narrowing the marker cannot make. What they are no
+    longer is the only line of defence.
+
+    Three states, and the third is the reason this is not a boolean:
+
+    ``made`` — contact is proven. Everything downstream keeps precisely the
+    behaviour it has today, quarantines included.
+
+    ``proves_no_contact`` — nothing was recorded, and the failure happened at or
+    before the point where contact would have been recorded had it occurred. This
+    is the state that licenses the refusal.
+
+    Neither — ``record_unproven`` was called. Some backends reach a place where
+    contact can be neither shown nor ruled out: a bridge process that was handed
+    an open request and never answered leaves its own side to itself. Reading that
+    as innocence is exactly the failure quarantine exists to prevent, so it
+    withholds both answers and keeps the containment it earns today.
+
+    Monotonic in that order. A recorded contact is never taken back, and
+    ``record_unproven`` never overwrites one.
+    """
+
+    __slots__ = ("_at", "_by", "_unproven_by")
+
+    def __init__(self) -> None:
+        self._at: str | None = None
+        self._by: str | None = None
+        self._unproven_by: str | None = None
+
+    def record(self, by: str) -> None:
+        """Note that the hardware was reached, naming the proof. First call wins."""
+        if self._at is None:
+            self._at = utc_now_iso()
+            self._by = by
+
+    def record_unproven(self, by: str) -> None:
+        """Note that contact can be neither shown nor ruled out from here on."""
+        if self._at is None and self._unproven_by is None:
+            self._unproven_by = by
+
+    @property
+    def made(self) -> bool:
+        return self._at is not None
+
+    @property
+    def proves_no_contact(self) -> bool:
+        return self._at is None and self._unproven_by is None
+
+    @property
+    def at(self) -> str | None:
+        return self._at
+
+    @property
+    def by(self) -> str | None:
+        return self._by
+
+    def report_fields(self) -> JsonObject:
+        """The marker as report fields, or nothing at all when no contact was made.
+
+        Absent rather than null, because a reader has to be able to tell "this
+        session never reached its hardware" from "this report predates the
+        marker", and only presence carries that difference forward.
+        """
+        if self._at is None:
+            return {}
+        return {CONTACT_MARKER_KEY: self._at, CONTACT_MARKER_SOURCE_KEY: self._by}
+
+
+def no_contact_refusal(result: JsonObject, contact: ContactMarker) -> JsonObject:
+    """``result`` restated as a no-contact refusal, where the marker allows it.
+
+    Returned unchanged whenever the marker does not positively say the hardware
+    was never reached, and unchanged for the two failures the marker has no
+    standing over:
+
+    An audit that could not be written keeps quarantining regardless. A bench
+    whose ledger cannot be written proves nothing about anything, including about
+    itself, and that rule predates the marker and outlives it.
+
+    A result already carrying ``cleanup_required`` keeps it. The marker speaks
+    about the hardware; ``cleanup_required`` is usually about something else still
+    live on this host — an unreaped bridge child, a handle that would not close —
+    and a process that is still running can still act, whatever the bus state was
+    when it started.
+
+    ``retry_safe`` is defaulted rather than overwritten: a backend that explicitly
+    said a retry cannot settle its own ambiguity is making a claim this layer has
+    no evidence against.
+    """
+    if not contact.proves_no_contact:
+        return result
+    if result.get("audit_ok") is False or result.get("cleanup_required") is True:
+        return result
+    refusal = {**result, "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started"}
+    refusal.setdefault("retry_safe", True)
+    return refusal
+
+
 # Tools whose device lease is taken inside the call they report and given back
 # inside it — unless the call reached the hardware, in which case a session start
 # keeps it for the session.

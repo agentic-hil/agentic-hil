@@ -118,6 +118,13 @@ LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
 # failure whose outcome is not merely unproven: the bind had nothing to bind to,
 # so no controller was addressed and the bench is untouched (hardci-hq#127).
 CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
+# A serial device another program is already holding. Its own error_type for the
+# same reason as the one above: the open was refused by the operating system
+# before this session had a handle, so the port kept whatever the other holder is
+# doing with it and this bench was not touched. It also answers a question
+# `com_port_open_failed` cannot — that the remedy is a process on this host and
+# not a cable, a driver or a configuration entry.
+COM_PORT_BUSY_ERROR = "com_port_busy"
 # What `hardware_recover` answers when the incident needs somebody at the bench
 # (hardci-hq#128). Not `permission_denied`: no grant on this or any bench opens
 # it, because the missing thing is a statement about a physical board and not an
@@ -760,6 +767,36 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "That turns the one check that noticed into agreement with whatever is plugged in, which is the silent "
             "wrong-board flash this refusal exists to prevent. Change the board or change `device`; the identity is not "
             "the thing to edit.",
+        ),
+    ),
+    COM_PORT_BUSY_ERROR: ErrorRemedy(
+        meaning=(
+            "The serial device named by `com_ports.<name>.device` is already held by another program, so the session "
+            "was refused where the operating system refused the open: no handle was created, nothing was written, and "
+            "the port kept doing whatever the other holder is doing with it. `configured_device` is the device name "
+            "that was tried. This is a refusal about which process owns the port right now, not a quarantine — the "
+            "bench was not touched and no incident was opened.\n\n"
+            "The session asks for the port exclusively rather than sharing it. Sharing was never a mode this could "
+            "work in: two writers on one line interleave their bytes, and the failure then surfaces much later as a "
+            "response that does not match the stimulus — which is an unknown board state, and an unknown board state "
+            "is a quarantine. Failing at the open turns that into this refusal."
+        ),
+        remediation=(
+            "Find the holder and stop it. On Linux, `fuser -v <device>` or `lsof <device>` names the process; on "
+            "Windows, close the terminal, IDE serial monitor or flashing tool that has the port open.",
+            "A second test runner, an open serial monitor and a modem manager are the three usual holders. On Linux, "
+            "`ModemManager` probes new serial adapters on its own and can hold one for several seconds after it is "
+            "plugged in; retrying shortly afterwards is enough, or exclude the adapter from it by udev rule.",
+            "Retry the session once the port is free. The bench was never blocked: `retry_safe` is true and there is "
+            "nothing to recover.",
+            "If the holder is a second Agentic HIL run on this host, let it finish. Two runs on one board is what the "
+            "device lock exists to prevent, and it reports that case as `device_busy` with the holder named.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. No lease was quarantined and no board state is in "
+            "question; signing for a physical state nobody disturbed teaches the signature to mean nothing.",
+            "Do not work around it by pointing the entry at a different device name. The other name is a different "
+            "board, and a stimulus sent to the wrong board is the failure the port identity check exists to prevent.",
         ),
     ),
     "undeclared_device": ErrorRemedy(
