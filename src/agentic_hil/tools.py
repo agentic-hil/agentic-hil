@@ -652,11 +652,17 @@ class AgenticHILToolService:
         # thing an automatic clearance must never read as "harmless".
         physical = sorted(set(reasons) - allowed) if reasons else ["unnamed_incident"]
         if physical:
-            refusal: JsonObject = {
+            # `quarantine_guidance` is attached by `call`, so the four facts the
+            # signer needs travel with the command they are needed for.
+            return {
                 "ok": False,
                 "tool": "hardware_recover",
                 "error_type": RECOVERY_PHYSICAL_CHECK_ERROR,
-                "summary": "This quarantine names a physical state only somebody at the bench can confirm, so it is not clearable from here.",
+                "summary": (
+                    "This quarantine names a physical state only somebody at the bench can confirm, so it is not clearable from here."
+                    if reasons
+                    else "This quarantine names no reason at all, so nothing here can classify it; an unnamed incident is the last thing to read as harmless."
+                ),
                 "quarantine_id": quarantine_id,
                 "cleanup_reasons": reasons,
                 "physical_check_reasons": physical,
@@ -674,9 +680,6 @@ class AgenticHILToolService:
                 "side_effect_committed": False,
                 **remediation_fields(RECOVERY_PHYSICAL_CHECK_ERROR),
             }
-            # `quarantine_guidance` is attached by `call`, so the four facts the
-            # signer needs travel with the command they are needed for.
-            return refusal
         recovered = self.coordinator.recover(
             safe_state_confirmed=True,
             quarantine_id=quarantine_id if isinstance(quarantine_id, str) else None,
