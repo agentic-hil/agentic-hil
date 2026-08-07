@@ -367,8 +367,14 @@ def test_the_stimulus_class_stays_behind_the_incident(tmp_path: Path, tool: str,
 def test_a_reset_during_an_incident_resolves_it(tmp_path: Path) -> None:
     """The agent asking for the remedy gets the same settlement the automatic
     path would have reached, because the evidence is the same: a confirmed reset
-    into halt. Same ledger line, so the audit does not care which asked."""
-    config = config_for(tmp_path)
+    into halt. Same ledger line, so the audit does not care which asked.
+
+    `readonly` policy on purpose: it stops the automatic attempt at the gate
+    from driving a reset of its own, so what clears the incident here is
+    unambiguously the call the agent made. The policy governs what this bench
+    does on its own initiative; `allow_reset` governs what it may be asked to
+    do, and an explicitly requested reset is not an automatic one."""
+    config = config_for(tmp_path, auto_recover="readonly")
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
         incident = quarantine(service, RESET_REASON)
@@ -388,8 +394,11 @@ def test_a_read_only_probe_does_not_settle_what_only_a_reset_can(tmp_path: Path)
     """A probe that answers says the probe answers. It does not say the core is
     halted, so it cannot settle a reason that names a target which may be
     running — the distinction the acquire path already draws between its two
-    predicates, held here too."""
-    config = config_for(tmp_path)
+    predicates, held here too.
+
+    `readonly` policy so the automatic attempt at the gate cannot drive a reset
+    of its own and settle the incident before the read-only probe is asked to."""
+    config = config_for(tmp_path, auto_recover="readonly")
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
         quarantine(service, RESET_REASON)

@@ -1340,6 +1340,12 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         unknown="Whether the recovery's own reset or probe read reached the target before failing.",
         physical_check="Treat the board as holding the original incident: reset it by its own controls, confirm the expected firmware state, then sign.",
     ),
+    "run_recovery_failed": QuarantineReasonGuide(
+        attempted="A run failed, and the recovery action its abort calls — process reap, a reset into halt where the policy and the probe's grants allow it, then a probe re-read — raised instead of finishing.",
+        confirmed="The run's own verdict stands and its reports are written. Nothing after the raise touched the device.",
+        unknown="How far the recovery got: whether the reset reached the target before it failed, and therefore whether the board is halted, running the code the failed run left on it, or somewhere between.",
+        physical_check="Treat the board as the failed run left it. Reset it by its own controls, confirm it holds the firmware you expect, then sign.",
+    ),
     "machine_recovery_audit_broken": _audit_guide("Machine recovery verified a safe state but could not persist the attestation record, so the quarantine stands."),
     "unknown_hardware_exception": QuarantineReasonGuide(
         attempted="A hardware tool call raised an exception the service could not classify.",

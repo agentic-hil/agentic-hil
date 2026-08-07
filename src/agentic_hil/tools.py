@@ -460,7 +460,7 @@ class AgenticHILToolService:
             if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
             blocked_before = self.coordinator.blocked
-            if blocked_before and name in audited_hardware_tools() and name not in containment_tools() and name not in recovery_class_tools():
+            if blocked_before and name in audited_hardware_tools() and name not in containment_tools():
                 try:
                     recovered = self._attempt_machine_recovery()
                 except Exception as error:
@@ -469,7 +469,13 @@ class AgenticHILToolService:
                     # stays exactly as it was and the operator still owns it.
                     self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
                     recovered = None
-                if recovered is None:
+                # The automatic attempt still runs for every tool — it is the
+                # cheapest way out and it costs a caller nothing. What the
+                # recovery class is exempt from is the *refusal* when that
+                # attempt did not settle the incident: those calls are the
+                # remedy, and refusing them was what left an incident with no
+                # way out but a person at a shell.
+                if recovered is None and name not in recovery_class_tools():
                     return {
                         "ok": False,
                         "tool": name,
@@ -1071,7 +1077,17 @@ class AgenticHILToolService:
         if not resolved:
             return result
         self._release_recovered_leases()
-        return {**result, "incident_resolved": True, "resolved_reason": reason, "resolved_quarantine_id": quarantine_id}
+        # The envelope was stamped while the incident still stood; saying
+        # `cleanup_required` on the call that just ended it would send a caller
+        # looking for a quarantine that is no longer there.
+        return {
+            **result,
+            "cleanup_required": False,
+            "quarantined": False,
+            "incident_resolved": True,
+            "resolved_reason": reason,
+            "resolved_quarantine_id": quarantine_id,
+        }
 
     def _machine_recovery_attempt_allowed(self) -> bool:
         """Bound recovery attempts per incident.
@@ -1144,19 +1160,30 @@ class AgenticHILToolService:
         one_shot = name in {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
+        for_recovery = name in recovery_class_tools() and self.coordinator.blocked
         if one_shot or starts_session:
-            if lease is not None:
+            # A recovery-class one-shot runs on whichever hold the incident left
+            # standing — the lease a quarantined session kept, or the one a
+            # quarantined one-shot kept. Both still hold the locks it needs, so
+            # asking for a second lease is refused as busy by the very hold the
+            # incident left; queueing the remedy behind the incident is what
+            # made the incident a padlock in the first place.
+            held = next((item for item in (lease, self._quarantined_lease) if item is not None and item.state == "cleanup_required"), None)
+            if one_shot and for_recovery and held is not None:
+                lease = held
+            elif lease is not None:
                 if starts_session:
                     result = callback()
                     if self._result_requires_quarantine(result):
                         lease.quarantine("debug_session_start_unconfirmed", audit_broken=result.get("audit_ok") is False)
                     return self._lease_result(result, lease)
                 return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
-            try:
-                resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
-                lease = self.coordinator.acquire(*resources, for_recovery=name in recovery_class_tools())
-            except CoordinationError as error:
-                return {"tool": name, "side_effect_committed": False, **error.result}
+            else:
+                try:
+                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
+                    lease = self.coordinator.acquire(*resources, for_recovery=for_recovery)
+                except CoordinationError as error:
+                    return {"tool": name, "side_effect_committed": False, **error.result}
         try:
             result = callback()
         except BaseException as error:
@@ -1483,7 +1510,12 @@ def recovery_class_settles(name: str, result: JsonObject) -> frozenset[str] | No
     target into a defined state and settles everything but the `audit_broken`
     families. Same distinction the acquire path draws between its two
     predicates, for the same reason: the evidence differs."""
-    if not overall_success(result):
+    # The call's own answer, not `overall_success` of the envelope: a
+    # recovery-class call runs on the incident's lease, so the result it comes
+    # back in is still stamped `cleanup_required` by the very incident this is
+    # deciding whether to clear. Asking the envelope would make the question
+    # answer itself, always with no.
+    if result.get("ok") is not True or result.get("audit_ok") is False:
         return None
     if name == "probe_target":
         return RETRYABLE_CLEANUP_REASONS if result.get("target_detected") is True else None

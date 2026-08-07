@@ -685,8 +685,14 @@ def test_a_timed_out_probe_is_not_cleared_by_a_successful_re_read(tmp_path: Path
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
         second = service.call("probe_target")
 
-        assert second["error_type"] == "resource_quarantined"
-        assert second["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        # Was: the re-read is refused with `resource_quarantined`. A probe is
+        # the recovery class now and runs during an incident — but running is
+        # not settling, and this test's tooth is the second half. The read-only
+        # re-read still cannot answer a reason about the core's run state, so
+        # the incident is exactly where it was.
+        assert second.get("error_type") != "resource_quarantined"
+        assert "incident_resolved" not in second
+        assert service.coordinator.status()["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
         assert service._attempt_machine_recovery() is None
     finally:
@@ -784,8 +790,14 @@ def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monk
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
         second = service.call("probe_target")
 
-        assert second["error_type"] == "resource_quarantined"
-        assert second["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        # Was: the re-read is refused with `resource_quarantined`. A probe is
+        # the recovery class now and runs during an incident — but running is
+        # not settling, and this test's tooth is the second half. The read-only
+        # re-read still cannot answer a reason about the core's run state, so
+        # the incident is exactly where it was.
+        assert second.get("error_type") != "resource_quarantined"
+        assert "incident_resolved" not in second
+        assert service.coordinator.status()["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
         assert service.coordinator.blocked is True
         assert service._attempt_machine_recovery() is None
     finally:
