@@ -5,9 +5,7 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
-import sysconfig
 import tempfile
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
@@ -16,7 +14,7 @@ from pathlib import Path, PurePath
 
 import yaml
 
-from agentic_hil import __version__
+from agentic_hil import __version__, upgrade
 from agentic_hil.adopt import project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
@@ -71,9 +69,7 @@ from agentic_hil.knowledge import (
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
     RUNNING_SERVER_COMPARISON,
-    remediation_fields,
 )
-from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
 from agentic_hil.stdio import run_stdio_server
@@ -86,6 +82,7 @@ from agentic_hil.tools import (
     unbound_debugger_error,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.upgrade import CLI_UPGRADE_TOOL, missing_configured_extras, replace_installation
 
 SKILL_NAME = "agentic-hil"
 # What `agentic-hil init`'s read of the board is called in the audit record it
@@ -93,11 +90,6 @@ SKILL_NAME = "agentic-hil"
 # though the two write the same file from the same read: a record that could not
 # say which of them touched the bench is the wrong record to hand an operator.
 CLI_INIT = "cli_init"
-# How far up the process tree the upgrade guard follows launchers before it
-# stops looking, and how many holding processes a refusal names before the
-# count carries the rest.
-_ANCESTOR_WALK_LIMIT = 16
-_REPORTED_HOLDER_LIMIT = 10
 # Earlier releases installed the same skill under these names. Leaving one in
 # place would offer the agent two skills for the same job.
 LEGACY_SKILL_NAMES = ("agentic-hil-config-setup",)
@@ -353,389 +345,63 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
 
 
-def _distribution_installer() -> str | None:
-    try:
-        from importlib.metadata import distribution
-
-        installer = distribution("agentic-hil").read_text("INSTALLER")
-    except Exception:
-        return None
-    return installer.strip().lower() if installer else None
-
-
-def _normalized_location(path: str | Path) -> str:
-    return os.path.normcase(str(Path(path).resolve())).replace("\\", "/").casefold()
-
-
-def _dedicated_environment_root() -> Path | None:
-    """The environment this distribution owns alone, or None when it shares one.
-
-    A uv tool environment and a pipx venv hold Agentic HIL and its dependencies
-    and nothing else, so every executable under them belongs to this
-    installation. A `pip install --user` prefix or a system Python holds every
-    other Python program on the machine as well, and reading its executables as
-    ours would refuse an upgrade because some unrelated script is running.
-    """
-    prefix = Path(sys.prefix)
-    location = _normalized_location(prefix)
-    if any(marker in location for marker in ("/uv/tools/agentic-hil", "/pipx/venvs/agentic-hil")):
-        return prefix
-    return None
-
-
-def _installed_extras() -> tuple[str, ...]:
-    """Declared extras whose every requirement is installed alongside this package.
-
-    `uv tool upgrade` and `pipx upgrade` reinstall from the requirement their
-    own receipt records, and that requirement already names the extras. The pip
-    and `uv pip` paths take the requirement from the command line instead, so
-    one that names the bare distribution re-resolves without the extras and
-    leaves whatever they installed pinned at whatever version it already had.
-    """
-    from importlib.metadata import PackageNotFoundError, distribution, version
-
-    try:
-        metadata = distribution("agentic-hil").metadata
-    except Exception:
-        return ()
-    declared = [name.strip() for name in metadata.get_all("Provides-Extra") or [] if isinstance(name, str) and name.strip()]
-    requirements = [item for item in metadata.get_all("Requires-Dist") or [] if isinstance(item, str)]
-    installed: list[str] = []
-    for extra in declared:
-        marker = re.compile(rf"""extra\s*==\s*['"]{re.escape(extra)}['"]""")
-        required = [_requirement_name(item) for item in requirements if ";" in item and marker.search(item.split(";", 1)[1])]
-        names = [name for name in required if name]
-        if not names:
-            continue
-        for name in names:
-            try:
-                version(name)
-            except PackageNotFoundError:
-                break
-        else:
-            installed.append(extra)
-    return tuple(sorted(installed))
-
-
-def _requirement_name(requirement: str) -> str | None:
-    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
-    return match.group(1) if match else None
-
-
-def _upgrade_requirement() -> str:
-    extras = _installed_extras()
-    return f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
-
-
-# `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
-# version pin in the requirement it recorded is one of the ways there is nothing
-# to do. It writes the reason on stderr in prose, so the pin is read out of the
-# text and never out of the return code. Measured on the reporter's box
-# (hardci-hq#99): "hint: `agentic-hil` is pinned to `0.7.1` (installed with an
-# exact version pin); reinstall with `uv tool install agentic-hil@latest` to
-# upgrade to a new version." A future wording that matches neither phrase falls
-# through to the already-current answer, which claims no upgrade happened —
-# never a false success, and never a refusal for a machine that is simply
-# up to date.
-_EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
-_PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
-
-
-def _manager_output(install_result: JsonObject) -> str:
-    return " ".join(str(install_result.get(stream, "")) for stream in ("stdout", "stderr"))
-
-
-def _manager_reports_exact_pin(install_result: JsonObject) -> bool:
-    text = _manager_output(install_result).lower()
-    return any(marker in text for marker in _EXACT_PIN_MARKERS)
-
-
-def _pinned_version(install_result: JsonObject) -> str | None:
-    match = _PINNED_AT.search(_manager_output(install_result))
-    return match.group(1) if match else None
-
-
-def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
-    """The command that clears a recorded exact pin and keeps the installed extras.
-
-    Only a manager that reinstalls from a requirement of its own can hold an
-    installation at one version, which is `uv tool` and `pipx`; the `uv pip` and
-    `pip` paths take the requirement from the command line this program builds,
-    and that one never pins. None for those, and a pin nobody can name a fix for
-    is reported as the plain unchanged outcome instead.
-
-    The extras come from `_installed_extras`, read off the distribution that is
-    actually installed. `uv`'s own hint names the bare distribution, and `uv`
-    records a requirement literally, so a reader who follows that hint loses
-    whatever `[can]` or `[pyocd]` brought in -- on a bench with a CAN adapter,
-    silently.
-    """
-    requirement = _upgrade_requirement()
-    if manager == "pipx":
-        return f'pipx install --force "{requirement}"'
-    if command[1:3] == ["tool", "upgrade"]:
-        return f'uv tool install "{requirement}@latest"'
-    return None
-
-
-def _upgrade_command() -> tuple[str, list[str]]:
-    """Select the manager that owns the running installation, never another PATH copy."""
-    prefix = _normalized_location(sys.prefix)
-    installer = _distribution_installer()
-    if "/uv/tools/agentic-hil" in prefix:
-        uv = shutil.which("uv")
-        if uv is None:
-            raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
-        return "uv", [uv, "tool", "upgrade", "agentic-hil"]
-    if "/pipx/venvs/agentic-hil" in prefix:
-        pipx = shutil.which("pipx")
-        if pipx is None:
-            raise ConfigError("upgrade_manager_not_found", "This installation is managed by pipx, but pipx is not on PATH.", {"manager": "pipx", "python": sys.executable})
-        return "pipx", [pipx, "upgrade", "agentic-hil"]
-    if installer == "uv":
-        uv = shutil.which("uv")
-        if uv is None:
-            raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
-        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", _upgrade_requirement()]
-    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade", _upgrade_requirement()]
-
-
-def _installation_console_scripts() -> tuple[str, ...]:
-    """Where this distribution's own console script can sit for this interpreter.
-
-    A virtual environment puts it beside the interpreter; a system or `--user`
-    installation puts it in that scheme's script directory instead. Only these
-    exact files are attributable to this distribution, which is what a shared
-    prefix needs: the interpreter there runs every other Python program on the
-    machine too.
-    """
-    name = "agentic-hil.exe" if os.name == "nt" else "agentic-hil"
-    directories = [Path(sys.executable).parent, Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")]
-    for scheme in (None, f"{os.name}_user"):
-        with suppress(KeyError, OSError):
-            directories.append(Path(sysconfig.get_path("scripts") if scheme is None else sysconfig.get_path("scripts", scheme)))
-    return tuple(dict.fromkeys(_normalized_location(directory / name) for directory in directories))
-
-
-def _belongs_to_installation(image: str, owned_prefix: str | None, scripts: tuple[str, ...]) -> bool:
-    location = _normalized_location(image)
-    if owned_prefix is not None and location.startswith(owned_prefix):
-        return True
-    return location in scripts
-
-
-def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefix: str | None, scripts: tuple[str, ...]) -> set[int]:
-    """This process, plus the parents inside the installation that started it.
-
-    `agentic-hil upgrade` runs out of the very installation it replaces, so it
-    would otherwise report itself and refuse every upgrade there is. Measured on
-    Windows: the interpreter executing this code has its image at the base
-    Python outside the environment, and the process that actually holds
-    `Scripts\\python.exe` open is its parent -- a launcher the environment
-    installs, with the console script another level above it. Excluding only
-    `os.getpid()` would therefore still find a holder every single time.
-
-    Walking up is what makes this safe rather than merely permissive. A second
-    Agentic HIL -- the MCP server the agent host started, which is the process
-    this check exists to find -- is a sibling of this one, never one of its
-    parents, so no ancestor walk can reach it.
-    """
-    excluded = {os.getpid()}
-    current = by_pid.get(os.getpid())
-    for _ in range(_ANCESTOR_WALK_LIMIT):
-        if current is None:
-            break
-        parent = by_pid.get(current.parent_pid)
-        if parent is None or parent.pid in excluded:
-            break
-        if not _belongs_to_installation(parent.image, owned_prefix, scripts):
-            break
-        if parent.created_ns > current.created_ns:
-            # A pid is reused once its process exits. Nothing can be younger
-            # than the child it started, so this entry is an unrelated process
-            # that inherited the number, not the launcher we came through.
-            break
-        excluded.add(parent.pid)
-        current = parent
-    return excluded
-
-
-def _processes_holding_installation() -> list[JsonObject]:
-    """Processes running out of the installation an upgrade is about to replace.
-
-    Empty on every platform but Windows, and deliberately so. Elsewhere a
-    package manager unlinks the old files while the processes using them keep
-    reading their own copies, so the upgrade completes and nothing is lost.
-    Windows refuses to delete a file that is mapped as a running image, and a
-    manager that removes the environment before it rebuilds it then leaves
-    neither the old installation nor the new one.
-    """
-    snapshot = snapshot_process_images()
-    if snapshot is None:
-        return []
-    owned_root = _dedicated_environment_root()
-    owned_prefix = _normalized_location(owned_root).rstrip("/") + "/" if owned_root is not None else None
-    scripts = _installation_console_scripts()
-    excluded = _upgrading_process_and_its_launchers({entry.pid: entry for entry in snapshot}, owned_prefix, scripts)
-    holders = [
-        {"pid": entry.pid, "image": entry.image}
-        for entry in snapshot
-        if entry.pid not in excluded and _belongs_to_installation(entry.image, owned_prefix, scripts)
-    ]
-    return sorted(holders, key=lambda holder: holder["pid"])
-
-
-def _run_upgrade_process(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=600, check=False)
-
-
-def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
-    result: JsonObject = {"returncode": completed.returncode}
-    if completed.stdout.strip():
-        result["stdout"] = completed.stdout.strip()
-    if completed.stderr.strip():
-        result["stderr"] = completed.stderr.strip()
-    return result
-
-
-def _upgrade_changed_nothing(
-    manager: str,
-    command: list[str],
-    previous_version: str,
-    current_version: str,
-    install_result: JsonObject,
-) -> JsonObject:
-    """The two outcomes a package manager reports with the same exit code as success.
-
-    `uv tool upgrade` returns 0 for "upgraded" and for "nothing to do" alike, so
-    the return code cannot tell them apart and the version can: this is reached
-    only when the installation still runs the version it ran before. Both
-    answers here are `ok: false` with `restart_required: false`, because there is
-    nothing new to load -- the reported defect was the opposite pair, which sent
-    an operator to a restart that reloaded the same release and left them
-    believing they had moved (hardci-hq#99).
-
-    Which of the two it is matters, because the next step differs: an
-    installation that is already current needs nothing, while one held at an
-    exact pin needs a reinstall the operator has to decide on and run.
-    """
-    base: JsonObject = {
-        # Set per branch below: an installation that is already current is a
-        # success — nothing to do and nothing wrong — while one held at a pin is
-        # not, because the operator wanted a newer release and did not get it.
-        # Refusing both would make `agentic-hil upgrade` exit non-zero on every
-        # up-to-date machine, which breaks the provisioning scripts that run it
-        # unconditionally. The defect in #99 was claiming an upgrade that never
-        # happened, not reporting that there was none to make.
-        "ok": False,
-        "tool": "agentic_hil_upgrade",
-        "manager": manager,
-        "command": command,
-        "python": sys.executable,
-        "previous_version": previous_version,
-        "version": current_version,
-        "install": install_result,
-        "restart_required": False,
-    }
-    reinstall_command = _unpinned_reinstall_command(manager, command)
-    if reinstall_command is not None and _manager_reports_exact_pin(install_result):
-        return {
-            **base,
-            "error_type": "upgrade_blocked_by_pin",
-            "summary": (
-                f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
-                f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
-                f"and keeps the installed extras; running it is the operator's decision."
-            ),
-            "pinned_version": _pinned_version(install_result) or current_version,
-            "installed_extras": list(_installed_extras()),
-            "reinstall_command": reinstall_command,
-            **remediation_fields("upgrade_blocked_by_pin"),
-        }
-    return {
-        **base,
-        "ok": True,
-        "summary": (
-            f"Agentic HIL is already at {current_version}; {manager} had nothing to replace. No restart is needed. "
-            f"If a newer release was expected, the installation's recorded requirement is what holds it here."
-        ),
-        "already_current": True,
-    }
-
-
 def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
-    """Upgrade the package owning this process, then run maintenance from new code."""
+    """Upgrade the package owning this process, then run maintenance from new code.
+
+    The manager half is `upgrade.replace_installation`, shared verbatim with the
+    `server_upgrade` MCP tool (hardci-hq#126). What is this command's alone is
+    what follows a swap that actually happened: a shell can refresh the agent
+    skills out of the new package, and an MCP server cannot — it is still the old
+    code until somebody restarts it.
+    """
     requested_agents = agents or []
     invalid = [agent for agent in requested_agents if resolve_skill_agent(agent) is None]
     if invalid:
         return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
 
-    holders = _processes_holding_installation()
-    if holders:
-        return {
-            "ok": False,
-            "error_type": "installation_in_use",
-            "summary": "Another process is running out of this installation, so upgrading it now would leave no working installation at all. Nothing was changed.",
-            "python": sys.executable,
-            "installation_root": str(Path(sys.prefix)),
-            "held_by": holders[:_REPORTED_HOLDER_LIMIT],
-            "held_by_count": len(holders),
-            "installed_version": __version__,
-            **remediation_fields("installation_in_use"),
-        }
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+    if not result.get("upgraded_on_disk"):
+        # Nothing was replaced, so refreshing the skills out of it would be work
+        # with no effect, and reporting it would put a list of things that
+        # happened under a result whose whole content is that nothing did.
+        return result
 
-    manager, command = _upgrade_command()
-    previous_version = __version__
-    try:
-        installed = _run_upgrade_process(command)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return {"ok": False, "error_type": "upgrade_failed", "summary": "Agentic HIL package upgrade could not run.", "manager": manager, "command": command, "previous_version": previous_version, "exception_type": type(error).__name__, "detail": str(error)}
-    install_result = _process_result(installed)
-    if installed.returncode != 0:
-        return {"ok": False, "error_type": "upgrade_failed", "summary": "Agentic HIL package manager reported an upgrade failure.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result}
-
-    version_command = [sys.executable, "-m", "agentic_hil", "--version"]
-    verified = _run_upgrade_process(version_command)
-    verification = _process_result(verified)
-    current_version = verified.stdout.strip() if verified.returncode == 0 else None
-    if verified.returncode != 0 or not current_version:
-        return {"ok": False, "error_type": "upgrade_verification_failed", "summary": "Package manager completed, but updated Agentic HIL could not be loaded by this installation's Python.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result, "verification": verification}
-
-    if current_version == previous_version:
-        # Before the skills are refreshed, because refreshing them out of a
-        # package that did not move is work with no effect, and reporting it
-        # would put a list of things that happened under a result whose whole
-        # content is that nothing did.
-        return _upgrade_changed_nothing(manager, command, previous_version, current_version, install_result)
-
+    previous_version = str(result["previous_version"])
+    current_version = str(result["version"])
     skill_results: JsonObject = {}
     with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
         for agent in requested_agents:
             skill_command = [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", agent]
-            refreshed = _run_upgrade_process(skill_command, cwd=maintenance_cwd)
-            child = _process_result(refreshed)
+            # Through the module rather than a name imported above: `upgrade` is
+            # the one place a test replaces the subprocess runner, and a second
+            # binding here would be the copy that kept running the real thing.
+            refreshed = upgrade._run_upgrade_process(skill_command, cwd=maintenance_cwd)
+            child = upgrade._process_result(refreshed)
             if refreshed.stdout.strip():
                 with suppress(json.JSONDecodeError):
                     child["result"] = json.loads(refreshed.stdout)
             skill_results[agent] = child
 
-    skills_ok = all(result.get("returncode") == 0 for result in skill_results.values())
+    skills_ok = all(child.get("returncode") == 0 for child in skill_results.values())
+    # hardci-hq#125's third hole, on the path the release notes actually send an
+    # operator down: an upgrade that came back without the extra this bench's
+    # configuration needs. Best effort by design — `upgrade` has to work on a
+    # machine that has no project configured yet, so a configuration that will
+    # not load is a reason to say nothing here rather than to fail the upgrade
+    # that just succeeded.
+    extras_warning = None
+    with suppress(ConfigError, OSError):
+        extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
     return {
+        **result,
         "ok": skills_ok,
-        "tool": "agentic_hil_upgrade",
+        **({"extras_warning": extras_warning} if extras_warning is not None else {}),
         "summary": (
             f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
             if skills_ok
             else f"Agentic HIL package upgraded from {previous_version} to {current_version}, but one or more agent skills could not be refreshed."
         ),
-        "manager": manager,
-        "command": command,
-        "python": sys.executable,
-        "previous_version": previous_version,
-        "version": current_version,
-        "install": install_result,
         "skills": skill_results,
-        "restart_required": True,
     }
 
 
@@ -2510,11 +2176,23 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # here rather than refused at load: `doctor` is where an operator looks
     # before a bench misbehaves, and the warning says what to run to fix it.
     identity_warnings = config_devices(config).warnings()
+    # The other thing that is already wrong before anything misbehaves, and which
+    # until hardci-hq#125 nothing said: an installation that lost the extra its
+    # own configuration needs. `uv tool install --upgrade` replaces the recorded
+    # requirement, so a bench installed as `agentic-hil[can]` came back without
+    # python-can, and the first `can_session_start` — hours later, in a result
+    # about a bus — was what found out. Named here with the exact reinstall line,
+    # for the same reason the identity warning is: this is where an operator
+    # looks first, and a warning that does not carry the command is a search.
+    missing_extras = missing_configured_extras(config)
+    if missing_extras is not None:
+        identity_warnings = [*identity_warnings, f"{missing_extras['summary']} Reinstall with: {missing_extras['reinstall_command']}"]
     if identity_warnings:
         report["warnings"] = identity_warnings
     return {
         **report,
         "config_path": config.config_path,
+        **({"missing_extras": missing_extras} if missing_extras is not None else {}),
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
         "target": {"name": config.target.name, "controller": config.target.controller},

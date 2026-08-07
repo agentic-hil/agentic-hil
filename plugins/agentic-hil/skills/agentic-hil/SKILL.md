@@ -28,6 +28,8 @@ serial, or CAN invocation bypasses that gate.
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
+| Hardware is quarantined and nothing physical was part of it | `hardware_recover` |
+| Update Agentic HIL itself to the newest release | `server_upgrade` |
 
 Declare a multi-step sequence before its first call: `bench_run_start` with
 `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds
@@ -80,6 +82,20 @@ board — and ask them to run `agentic-hil recover --confirm-safe-state
 --quarantine-id <id>` after that check. Never clear the server's own state
 files yourself.
 
+`hardware_recover` is the one part of that you can do, and only one part.
+It clears an incident whose every reason names a call that never reached the
+hardware — a release that could not persist its own record, an owner process
+that died before it touched the board — and it refuses everything else with
+`recovery_requires_physical_check` and the exact `operator_command` to relay.
+The refusal is not about permissions and no grant changes it: confirming that a
+board is still and runs the expected firmware is a statement about the physical
+world, which is why the tool has no confirmation argument for you to set. Call
+it before you retry a hardware call rather than after — taking a lease over a
+dead owner's record adds `owner_process_exited_without_release` to the incident,
+and that reason needs a person. If `permissions.allow_recover` is false, this
+bench has decided its incidents are the operator's, and the answer is the
+`operator_command` and nothing else.
+
 `com_port_identity_mismatch` is a refusal about *which board*, not about
 permissions. A serial device name — `/dev/ttyACM0`, `COM7` — is an enumeration
 order, so attaching a second adapter can leave a configured entry pointing at a
@@ -90,9 +106,14 @@ that name and refuses rather than connecting. Nothing was opened. Report
 present, it names where the configured board is now, and
 `agentic-hil adopt-hardware` rewrites the entry from the attached hardware;
 absent, the configured board is not attached and the operator has to plug it in.
-Never resolve it by writing the found serial into `serial_number` or by removing
-the key — that makes the one check that noticed agree with whatever is plugged
-in, which is the silent wrong-board flash it exists to prevent.
+When the entry also names `vid`/`pid`, the same refusal carries
+`expected_vid`/`expected_pid` and `found_vid`/`found_pid`, and report those too:
+a USB serial number is unique only within a vendor, so a matching serial under a
+foreign device type is refused as well, and an adapter that publishes no serial
+at all is compared on the type alone. Never resolve any of it by writing the
+found values into `serial_number`, `vid` or `pid`, or by removing those keys —
+that makes the one check that noticed agree with whatever is plugged in, which is
+the silent wrong-board flash it exists to prevent.
 
 `can_listen_only_unsupported` and `can_listen_only_unconfirmed` are a third kind
 again, and the one most likely to look like an obstacle worth removing. The bus

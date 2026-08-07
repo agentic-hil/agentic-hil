@@ -1166,9 +1166,11 @@ DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. 
 # allow_probe / allow_read.
 version: 2
 
-# What may be done to this file itself. All three start true, so an agent can
-# describe the bench, regenerate it from hardware discovery, and narrow any
-# permission here on your say-so — without you opening YAML first.
+# What may be done to this project, beside its hardware. All start true, so an
+# agent can describe the bench, regenerate it from hardware discovery, clear an
+# incident nothing physical was part of, narrow any permission here on your
+# say-so, and lift this installation onto the current release — without you
+# opening YAML first.
 #
 # Over MCP an agent can only ever narrow. `project_config_set` writes `false`
 # into a permission and no other value, so every one of these can go from true to
@@ -1176,10 +1178,22 @@ version: 2
 # allow_config_permissions_write is therefore the last one it can close: after
 # that it cannot change any permission again. Regenerating is yours —
 # `agentic-hil init --force` writes this file again at the defaults below.
+#
+# allow_recover is not about this file. It lets an agent clear a quarantine over
+# MCP for the reasons that name no hardware contact — a dead owner that never
+# reached the board, a host-side persistence fault. Confirming that a board is
+# still and holds the firmware you expect is a statement about the physical
+# world, so those reasons refuse over MCP whatever this says, and name
+# `agentic-hil recover --confirm-safe-state` for you instead.
+# allow_upgrade is the odd one out: it is not about this file but about the
+# package. The tool it opens takes no version and can only lift to the newest
+# release, so it is no way around anything you close here.
 permissions:
   allow_config_write: true
   allow_config_description_write: true
   allow_config_permissions_write: true
+  allow_recover: true
+  allow_upgrade: true
 
 target:
   name: "example-target"
@@ -1332,10 +1346,13 @@ def generated_permissions(section: str) -> dict[str, bool]:
     than each deciding for itself. That is deliberate: the defect this closes was
     three paths that agreed by coincidence until one of them was edited."""
     return {flag: flag not in EXCLUSIVE_FLASH_PERMISSIONS for flag in GENERATED_WRITE_PERMISSIONS.get(section, ())}
-# The project-scoped grants, all three of them. A generated configuration writes
-# every one true and a regenerated one carries every one over: whichever list is
-# short is the one that hands out a grant nobody set or drops one somebody did.
-GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+# Every project-scoped grant. A generated configuration writes every one true and
+# a regenerated one carries every one over: whichever list is short is the one
+# that hands out a grant nobody set or drops one somebody did. Three of them are
+# about this file; `allow_recover` is about this bench's incidents and
+# `allow_upgrade` about the installation serving it — both here because they are
+# scoped to the project rather than to a device.
+GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_recover", "allow_upgrade")
 # The two grants the schema puts directly on a fixed section rather than inside a
 # `permissions` block. A generation writes both true, so they belong in every
 # list that claims to say what a generated configuration grants — and in the key
@@ -2413,6 +2430,8 @@ def project_permissions(raw: JsonObject) -> ProjectPermissions:
         allow_config_write=bool(raw.get("allow_config_write", False)),
         allow_config_description_write=bool(raw.get("allow_config_description_write", False)),
         allow_config_permissions_write=bool(raw.get("allow_config_permissions_write", False)),
+        allow_recover=bool(raw.get("allow_recover", False)),
+        allow_upgrade=bool(raw.get("allow_upgrade", False)),
     )
 
 
@@ -2567,6 +2586,8 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         assert_dtr=bool(raw.get("assert_dtr", True)),
         assert_rts=bool(raw.get("assert_rts", True)),
         serial_number=optional_string(raw.get("serial_number")),
+        vid=usb_id_config(raw.get("vid"), f"com_ports.{name}.vid"),
+        pid=usb_id_config(raw.get("pid"), f"com_ports.{name}.pid"),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )
@@ -2674,7 +2695,7 @@ REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
 # the schema declares belongs in this set; a test compares the two, because a
 # grant added to the schema and forgotten here would make every file that uses it
 # unloadable with a migration error about a block from three releases ago.
-SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write", "allow_config_description_write", "allow_config_permissions_write"}}
+SURVIVING_SECTION_KEYS = {"permissions": set(GENERATED_PROJECT_PERMISSIONS)}
 
 
 def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
@@ -2860,6 +2881,56 @@ def positive_integer_config(value: Any, default_value: int, field: str) -> int:
     if parsed < 1:
         raise ConfigError("config_invalid", f"{field} must be a finite integer >= 1.", {"field": field, "value": value})
     return parsed
+
+
+# A USB vendor or product id is a 16-bit number, and it has two spellings in the
+# wild: pyserial hands out `1155`, while `lsusb`, the `hwid` string pyserial
+# itself builds (`VID:PID=0483:374F`) and every vendor datasheet print `0483`.
+# Both are accepted and both mean the same device, because the alternative is an
+# operator transcribing hex into decimal by hand at exactly the moment they are
+# writing down which board a write may reach.
+#
+# The rule is one line and has no middle: a number in the file is decimal — the
+# spelling `adopt-hardware` writes — and a *quoted* value is hex, with or
+# without the `0x` marker. A file therefore cannot say `0483` unquoted and mean
+# 1155, and it does not have to: YAML would already read a leading zero as
+# something else. Both normalise to the integer here, so nothing downstream sees
+# two spellings, and refusals print the hex back (`types.format_usb_id`) so a
+# value entered under the wrong rule is visible rather than merely wrong.
+USB_ID_HEX = re.compile(r"^(?:0[xX])?[0-9A-Fa-f]{1,4}$")
+USB_ID_MAX = 0xFFFF
+
+
+def usb_id_config(value: Any, field: str) -> int | None:
+    """One USB vendor or product id, in either spelling, as an integer."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if not USB_ID_HEX.match(text):
+            raise ConfigError(
+                "config_invalid",
+                f"{field} is written as text, which is the hexadecimal spelling `lsusb` prints, so it must be one to "
+                "four hex digits such as \"0483\" (a plain number is read as decimal instead).",
+                {"field": field, "value": value},
+            )
+        return int(text, 16)
+    # `bool` is an `int` in Python and `pid: true` is not a product id.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            "config_invalid",
+            f"{field} must be a whole number (the decimal id pyserial reports) or the hexadecimal spelling in quotes.",
+            {"field": field, "value": value},
+        )
+    if not 0 <= value <= USB_ID_MAX:
+        raise ConfigError(
+            "config_invalid",
+            f"{field} must be a 16-bit USB id between 0 and {USB_ID_MAX}.",
+            {"field": field, "value": value},
+        )
+    return value
 
 
 def positive_timeout_config(value: Any, default_value: float, field: str) -> float:

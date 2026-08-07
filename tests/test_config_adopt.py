@@ -39,7 +39,7 @@ from conftest import FAKE_STLINK, write_authoritative_config
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, is_unset, plan_adoption, project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import adopt_hardware, doctor, init_config
-from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, load_authoritative_config
+from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, GENERATED_PROJECT_PERMISSIONS, load_authoritative_config
 from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
 from agentic_hil.coordination import HardwareCoordinator, HardwareLease
@@ -427,14 +427,11 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert filled["provenance"]["last_modified_by"] == ACTOR_HUMAN
     assert filled["provenance"]["last_modified_via"] == "cli:adopt-hardware"
-    # No grant was needed and none moved. The skeleton names all three project
-    # permissions granted, and they are still exactly what it named: this path
+    # No grant was needed and none moved. The skeleton names every project
+    # permission granted, and they are still exactly what it named: this path
     # carries hardware identity and touches no permission in either direction.
-    assert filled["permissions"] == {
-        CONFIG_WRITE_RIGHT: True,
-        CONFIG_DESCRIPTION_RIGHT: True,
-        CONFIG_PERMISSIONS_RIGHT: True,
-    }
+    assert filled["permissions"] == dict.fromkeys(GENERATED_PROJECT_PERMISSIONS, True)
+    assert {CONFIG_WRITE_RIGHT, CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT} <= set(GENERATED_PROJECT_PERMISSIONS)
 
     checked = doctor()
     assert checked["ok"] is True, checked

@@ -129,6 +129,27 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # No arguments, and the missing one is the contract. There is no
+    # `confirm_safe_state` here and there will not be: that flag attests that a
+    # physical board is still and holds the expected firmware, and a flag the
+    # caller sets for itself is not a confirmation of anything. The reasons that
+    # need it are refused with the operator's command line instead, whatever the
+    # configuration grants. A schema test pins the absence, the way #126 pins the
+    # absent version argument on the upgrade tool.
+    {
+        "name": "hardware_recover",
+        "description": (
+            "Clear this bench's quarantine when every reason it is held for names a call that never reached the "
+            "hardware — a lease release that could not persist its own record, an owner process that died before its "
+            "call touched a board. Takes no arguments. A reason that needs somebody to look at the board is refused "
+            "with recovery_requires_physical_check and the exact `agentic-hil recover --confirm-safe-state "
+            "--quarantine-id <id>` line to relay to the operator, because confirming that a board is still and runs "
+            "the expected firmware is a statement about the physical world that nothing here can make. Needs "
+            "permissions.allow_recover. Safe to call when nothing is quarantined; it answers was_quarantined: false. "
+            "Use this instead of deleting the server's state files, which is never the fix."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
     # No parameters, and that is the contract. The configuration is generated for
     # the workspace this server is bound to, out of what is attached to this
     # machine: a workspace_root argument would let a caller provision a project
@@ -223,6 +244,30 @@ MCP_TOOLS: list[JsonObject] = [
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # No arguments, and here the empty schema is the security property rather
+    # than a convenience (hardci-hq#126). There is deliberately no way to name a
+    # version: this tool lifts the installation to the newest release and can do
+    # nothing else. A `version` argument would put the whole permission model
+    # behind it — an agent that can install 0.7.x installs a release that reads
+    # `permissions:` under weaker rules, and every narrowing an operator made is
+    # undone by a downgrade rather than by a permission change. Downgrades and
+    # exact versions stay at the shell, with the operator, and
+    # `additionalProperties: false` is what refuses one that arrives anyway.
+    {
+        "name": "server_upgrade",
+        "description": (
+            "Replace this Agentic HIL installation with the newest release, gated by permissions.allow_upgrade. Takes "
+            "no arguments: it can only lift to the latest release, never to a version you name, so it cannot be used "
+            "to install a build that reads this bench's permissions differently. It replaces the package on disk and "
+            "does not change the code this server is running — a successful call answers upgraded_on_disk with "
+            "previous_version, version, running_version and restart_required: true, and the operator restarting the "
+            "MCP server is what loads it; the agentic-hil command line reads the new code straight away. Refused "
+            "while a run or a session holds this bench, and refused on Windows, where the files of a running process "
+            "are locked and only `agentic-hil upgrade` at a shell can replace them. Use this instead of running uv, "
+            "pipx or pip yourself."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -280,16 +325,23 @@ MCP_TOOLS: list[JsonObject] = [
 # distinction the host needs would not exist. The carve-out is for the trail
 # only, and it is the sole carve-out.
 #
-# `openWorldHint` is `false` on every tool, which is the one answer this surface
-# can give for all of them. A bench is a closed, named set: the target and the
-# probe, the COM ports and CAN buses the authoritative configuration declares,
-# the artifact store under the workspace, and that configuration itself. Nothing
-# here reaches the network or an unbounded set of entities. The four tools that
+# `openWorldHint` is `false` on every tool that acts on the bench, which is all
+# of them but one. A bench is a closed, named set: the target and the probe, the
+# COM ports and CAN buses the authoritative configuration declares, the artifact
+# store under the workspace, and that configuration itself. The four tools that
 # read what is physically attached rather than what is configured —
 # `debugger_probes_list`, `com_ports_list`, `project_config_adopt_hardware` and
 # `project_config_create` — are bounded by one machine's hardware, which is
 # still a closed domain and not the open world the schema contrasts a web search
 # against.
+#
+# `server_upgrade` is the exception and the first honest `openWorldHint: true`
+# here (hardci-hq#126). It hands the installation to `uv`, `pipx` or `pip`, which
+# resolve against a package index over the network: what arrives is whatever the
+# newest release is at that moment, from an entity outside this machine and
+# outside this configuration. That is the open world exactly as the schema means
+# it, and a `false` there would be the one place this table told a host the
+# opposite of what the code does.
 TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # Runs `<backend executable> --version` and reads the configuration. No
     # probe is opened and no board is contacted.
@@ -432,6 +484,15 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     "bench_run_stop": {"title": "End the bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # In-memory only; it does not even read the holder files.
     "bench_run_status": {"title": "Bench run status", "readOnlyHint": True, "openWorldHint": False},
+    # Not read-only: it rewrites this project's lease records and appends to the
+    # recovery ledger, and what that changes is which calls the bench will accept
+    # next. Not destructive, and that is a claim about what it reaches rather
+    # than a comfortable default — it never drives the target, never opens a
+    # port or a bus, and only ever clears reasons that name no hardware contact;
+    # the ones that might have left a board somewhere are exactly the ones it
+    # refuses. Idempotent: a second call finds nothing quarantined and answers
+    # `ok` with `was_quarantined: false`.
+    "hardware_recover": {"title": "Clear a bench quarantine", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # Rewrites the authoritative configuration with no backup on disk, and
     # carries over the permissions of the document *this server loaded at
     # startup* — so a narrowing made with project_config_set in this session is
@@ -465,6 +526,15 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # at startup. A second call against the same file reports that nothing
     # moved.
     "project_config_reload_description": {"title": "Reload the bench description", "readOnlyHint": True, "openWorldHint": False},
+    # Not read-only: it replaces the installed package on disk. Not destructive
+    # either, and the distinction is the point — nothing is erased that this
+    # server holds, the configuration and the bench are untouched, and the
+    # previous release is a `uv tool install "agentic-hil==X.Y.Z"` away because
+    # the index still has it. Idempotent: it can only lift to the newest release,
+    # so a second call finds the installation already there and answers
+    # `already_current` without replacing anything. `openWorldHint: true` because
+    # the package comes off a network index — see the note above.
+    "server_upgrade": {"title": "Upgrade this Agentic HIL installation", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 }
 
 # Attached here rather than written into each literal above so that the
