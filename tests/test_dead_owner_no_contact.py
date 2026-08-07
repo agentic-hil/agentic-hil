@@ -1,6 +1,6 @@
 """A dead owner that provably never touched the bench is released, not quarantined.
 
-hardci-hq#127. `coordination.status()` adopted any exited owner whose project
+`coordination.status()` adopted any exited owner whose project
 record still said `active` as a quarantine, without ever asking what the dead
 session had done. The reclassification of 0.8.0 — a quarantine needs the
 *possibility* of an effect — had been applied to call failures and never to the
@@ -35,7 +35,7 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, config_in_force, write_report
 
-# Machine-wide device locks contend across sibling clones (hardci-hq#116), so
+# Machine-wide device locks contend across sibling clones, so
 # every resource here is named for this file alone.
 RESOURCE = "physical:dead-owner-no-contact-probe"
 OTHER_RESOURCE = "physical:dead-owner-no-contact-uart"
@@ -270,7 +270,7 @@ def test_a_second_open_lease_is_not_answered_for_by_one_report(tmp_path: Path) -
 
 
 def test_a_report_written_under_another_configuration_is_not_evidence(tmp_path: Path) -> None:
-    """hardci-hq#114 put `config_in_force` into every report so a record could
+    """Every report carries `config_in_force` so a record can
     say which document it was decided by. A report from a different one cannot
     answer for this lease, and the comparison is the reason the field exists."""
     config = leave_dead_owner(tmp_path, report=None)

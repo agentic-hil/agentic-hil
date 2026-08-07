@@ -1,6 +1,6 @@
 """`listen_only: true` reaches the driver, or the session is refused saying so.
 
-The defect these tests exist for (hardci-hq#103): the direct python-can path
+The defect these tests exist for: the direct python-can path
 built its bus without `listen_only`, so a bus an operator had declared
 must-not-be-disturbed was joined by a node that sends dominant ACK bits — while
 the shipped catalogue called the flag "the way to prove a reading did not touch

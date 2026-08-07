@@ -3,8 +3,7 @@
 `/dev/ttyACM0` and `COM7` say which device the host happened to enumerate first.
 Attaching a second ST-Link renumbers them, and the failure that matters is not
 the run that breaks — it is the run that keeps working against the wrong board,
-because an unchanged configuration now names hardware nobody meant
-(hardci-hq#100).
+because an unchanged configuration now names hardware nobody meant.
 
 Everything here fakes the platform: the host inventory, the udev directory and
 the serial handle. Nothing needs a probe attached, which is the only way these
@@ -44,7 +43,7 @@ BOARD_A = "0669FF534948717867012345"
 BOARD_B = "0670FF534948717867054321"
 # What the bench's own adopt log carries for the ST-Link behind those boards:
 # `"vid": 1155, "pid": 14159`, which is `VID:PID=0483:374F` in the same record's
-# `hwid`. The CH340 is the other half of hardci-hq#124 — a different vendor, and
+# `hwid`. The CH340 is the other half of the identity check — a different vendor, and
 # an adapter that often publishes no serial number at all.
 STLINK_VID, STLINK_PID = 1155, 14159
 CH340_VID, CH340_PID = 0x1A86, 0x7523
@@ -398,7 +397,7 @@ def test_a_declared_identity_that_cannot_be_checked_is_refused_not_guessed(tmp_p
     A pseudo-terminal, a port that reports no serial, and a host whose serial
     backend is missing are all "unknown" — and for an entry that named a board so
     its name would be proved to still reach it before use, unknown is not
-    permission to open (hardci-hq#100). Reporting the gap in the result does not
+    permission to open. Reporting the gap in the result does not
     protect the hardware once the connection has already been allowed. The port
     is never touched, so every one is retry-safe and no side effect committed."""
     config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
@@ -601,11 +600,11 @@ def test_a_successful_open_carries_the_identity_it_was_opened_on(tmp_path: Path,
 # A USB serial number is unique within a vendor and nowhere else, so a serial
 # that matches proves the right *unit* only once the vendor and product agree
 # too. The same two keys are the whole identity an adapter that publishes no
-# serial can have (hardci-hq#124).
+# serial can have.
 
 
 def test_a_matching_serial_under_a_foreign_device_type_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The core of hardci-hq#124: serials are vendor-scoped, not global.
+    """The core of the vid/pid check: serials are vendor-scoped, not global.
 
     The entry names board A's serial and the adapter behind the name reports
     exactly that serial — and is a CH340 rather than the ST-Link the entry was

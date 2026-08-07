@@ -3,7 +3,7 @@
 The finding behind these tests: a pyOCD target type that only a CMSIS pack
 provides failed at flash time with no mention of packs, and an agent hunting for
 the value escalated into pyOCD's own sources and hand-downloaded a vendor
-``.pdsc`` twice (hardci-hq #66).
+``.pdsc`` twice.
 
 The tests that matter most here are the negative ones: a host that cannot answer
 the target-support question must report "undetermined" rather than "broken". A

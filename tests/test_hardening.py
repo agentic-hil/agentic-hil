@@ -115,7 +115,7 @@ def test_relative_state_root_is_rejected(tmp_path: Path) -> None:
 
 # --- What a configured path is still checked for, and what it is not --------
 #
-# The Windows ACL walk and the POSIX mode/sticky-bit walk are gone (hardci-hq#95):
+# The Windows ACL walk and the POSIX mode/sticky-bit walk are gone:
 # they only ever defended against a different account on the same machine, which
 # was never a requirement here, and they could not defend against the operator's
 # own processes, which own these objects. What survives is structural — a path
@@ -285,7 +285,7 @@ def test_the_suite_does_not_divert_its_own_scaffolding_into_the_real_profile(tmp
 
     `tests/conftest.py` and `tests/support.py` once diverted into the real Local
     AppData because the removed trust check refused the standard per-user Temp —
-    the strongest single argument in hardci-hq#91 was that the tool's own tests
+    the strongest single argument against that check was that the tool's own tests
     had to evade its rule. The config sandbox stays beside `tmp_path`; the
     launcher stays under the real home, because the MCP executable check still
     walks its parent chain.
@@ -1442,7 +1442,7 @@ def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path
 
     This is the other half of the rule above. Autodetection used to resolve
     `openocd` off PATH for the starter entry too, so on such a host `agentic-hil
-    init` left behind an entry that granted everything (hardci-hq#96), had a real
+    init` left behind an entry that granted everything, had a real
     program behind it, and drove a board with the skeleton's two relative script
     names — exempt from validation and skipped by `doctor`, because both keyed on
     it being the starter entry. It names no toolchain and nothing finds it one."""

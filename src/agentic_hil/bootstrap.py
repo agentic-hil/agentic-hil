@@ -17,7 +17,7 @@ PROJECT_PROFILE = "agentic-hil.config.example.yaml"
 # each, both read from `generated_permissions` — the one place that also drives
 # `grant_every_permission` and the skeleton. A second list here would be the one
 # that quietly stops deciding a flag somebody added to the schema, and a second
-# set of *defaults* here was hardci-hq#107.
+# set of *defaults* here is what once left a generated bench unable to flash.
 
 # The profile a generated configuration is filled from when the workspace has no
 # `agentic-hil.config.example.yaml` of its own. Names and transport defaults, and
@@ -251,7 +251,7 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             #
             # Each flag defaults to what the skeleton this fills in states, which
             # is granted except for the two that block flashing while they are
-            # true (hardci-hq#96, corrected by hardci-hq#107). The default comes
+            # true. The default comes
             # from `generated_permissions` rather than being written here, so
             # this path cannot disagree with the skeleton again — it did, and the
             # discovery path is the one a bench with a board attached takes, so
@@ -286,12 +286,12 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
                 # The port was correlated by this serial in the first place, so
                 # recording it costs nothing and is what makes the entry survive
                 # a replug: `device` is how the port is opened, this is which
-                # board it is (hardci-hq#100).
+                # board it is.
                 "serial_number": str(matched_port.get("serial_number") or discovery["probe_id"]),
-                # And the vendor and product ids from the same record, because a
-                # USB serial is unique only within a vendor: without them a
-                # matching serial on another kind of adapter passes the check
-                # (hardci-hq#124). Written only when the host reported them.
+                # And the vendor and product ids from the same record, because
+                # a USB serial is unique only within a vendor: without them a
+                # matching serial on another kind of adapter passes the check.
+                # Written only when the host reported them.
                 **{field: value for field in ("vid", "pid") if isinstance(value := matched_port.get(field), int) and not isinstance(value, bool)},
                 # `allow_read` went the same way as `allow_probe`: reading a
                 # port needs no grant at version 2, and the key is refused there.

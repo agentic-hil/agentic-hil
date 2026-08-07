@@ -223,7 +223,7 @@ def test_discovery_applies_project_requirements() -> None:
         # narrowing — it has to be a flag the default leaves *true*, or the test
         # passes without the profile being consulted at all. The version 1 read
         # grant beside it is the request that is dropped, and allow_mass_erase is
-        # a profile agreeing with a default that is already false (hardci-hq#107).
+        # a profile agreeing with a default that is already false.
         "debuggers": {"dut": {"timeout_s": 30, "permissions": {"allow_probe": True, "allow_flash": True, "allow_reset": False, "allow_mass_erase": False}}},
         "com_ports": {"uart": {"baudrate": 115200, "permissions": {"allow_read": True, "allow_write": False}}},
     }
@@ -321,7 +321,7 @@ def test_cube_clt_programmer_paths_find_versioned_install(tmp_path: Path) -> Non
 def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A profile may narrow, and the result has to say when it did.
 
-    The profile path is the operator's own, and hardci-hq#96's owner left it
+    The profile path is the operator's own, and the open generated default left it
     theirs: a flag a project's `agentic-hil.config.example.yaml` sets to `false`
     is honoured. What must not survive that is a summary claiming every
     permission was granted — an operator who wrote `allow_mass_erase: false`
@@ -357,8 +357,7 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert written["com_ports"]["dut_uart"]["permissions"]["allow_write"] is False
     # allow_mass_erase is false here too, and is deliberately *not* in this list:
     # the generated default writes it false on every bench, so reporting it as
-    # something the profile narrowed would be a standing false positive
-    # (hardci-hq#107). `permissions` below still carries its actual value.
+    # something the profile narrowed would be a standing false positive. `permissions` below still carries its actual value.
     assert result["narrowed_permissions"] == ["com_ports.dut_uart.permissions.allow_write"]
     assert "the project profile set to false" in result["summary"]
     assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is False
@@ -395,7 +394,7 @@ def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Pa
 
 
 # ---------------------------------------------------------------------------
-# hardci-hq#104: one machine, one bench, and every path that reads it agreeing.
+# One machine, one bench, and every path that reads it agreeing.
 
 
 def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLINK123", controller: str = "STM32F446RE", device: str = "COM7") -> list[list[str]]:
@@ -506,7 +505,7 @@ def test_init_and_the_server_describe_one_bench(tmp_path: Path, monkeypatch: pyt
     `agentic-hil init` at a shell and `project_config_create` over MCP both write
     a workspace's authoritative configuration out of what is attached, and an
     operator moves between them within one session: `setup` runs the first, the
-    agent runs the second. hardci-hq#104 is precisely this pair disagreeing about
+    agent runs the second. The defect is precisely this pair disagreeing about
     a board that was plugged in the whole time, so what the two files say about the
     board is pinned here rather than left to two call sites to keep in step. What
     they may still differ in is stated by omission: permissions, provenance and the
@@ -552,16 +551,16 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
         "debuggers.dut.probe_id",
         "debuggers.dut.executable",
         "com_ports.dut_uart.device",
-        # The port's own identity (hardci-hq#100), which `init` now writes for
+        # The port's own identity, which `init` now writes for
         # the same reason it writes the device: it read it off the same board.
         "com_ports.dut_uart.serial_number",
     }
 
 
 # ---------------------------------------------------------------------------
-# hardci-hq#113: `init --force` is the reset, and it names what the reset cost.
+# `init --force` is the reset, and it names what the reset cost.
 
-# The sentences the issue was filed over. Every one was true of
+# The sentences that had to go. Every one was true of
 # `project_config_create`, which calls `carry_over_permissions`, and false of
 # `agentic-hil init --force`, which never has — and every one shipped.
 RETIRED_CARRY_OVER_CLAIMS = (
@@ -579,7 +578,7 @@ RETIRED_CARRY_OVER_CLAIMS = (
 def _narrow_by_hand(target: Path, *closures: str) -> None:
     """Close permissions in a written configuration the way an operator does.
 
-    In the file, with an editor, which is the state hardci-hq#113 is about: a
+    In the file, with an editor, which is the state this is about: a
     bench somebody narrowed weeks ago and has not thought about since."""
     text = target.read_text(encoding="utf-8")
     for flag in closures:
@@ -679,7 +678,7 @@ def test_init_force_restores_a_non_utf8_original_when_the_new_file_fails(tmp_pat
     after the replacement fails. The rollback snapshot used to be the decoded
     text, and a file that would not decode was recorded as absence — so when the
     regenerated file failed its final validation, `_restore_file_snapshots`
-    removed the original it reported having restored (hardci-hq#106). The
+    removed the original it reported having restored. The
     snapshot is the exact bytes now, so the file that could not be read is the
     file that comes back, byte for byte, rather than a deleted path under a
     result that says "was rolled back"."""
@@ -718,7 +717,7 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
     home keyed on the device, reachable with no shared config. So the read takes
     it in `before_connect` — the last point before the HOTPLUG connect — and a
     held board comes back `device_busy` with nothing said to it, exactly as the
-    leased path answers (hardci-hq#108). Against the previous behaviour this
+    leased path answers. Against the previous behaviour this
     connected regardless."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -776,7 +775,7 @@ def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_pat
     here can derive the serial from enumerating the attached ST-Link but never
     that alias, so it locks `probe:<serial>` and nothing else. The debugger now
     holds `probe:<serial>` alongside its `resource_id`, which is the whole fix:
-    the two collide on the one name both sides can name (hardci-hq#108). Before it,
+    the two collide on the one name both sides can name. Before it,
     the first `init` took `probe:<serial>` unopposed and connected to a board the
     other workspace was holding under `physical:bench-a`."""
     other_workspace_dir = tmp_path / "other"
@@ -910,7 +909,7 @@ def test_init_force_over_a_file_that_narrowed_nothing_reports_nothing(tmp_path: 
 def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The claim and the behaviour, asserted in one place, which is the point.
 
-    hardci-hq#113 was not a bug beside a documentation error. It was the two
+    This was not a bug beside a documentation error. It was the two
     drifting apart with nothing holding them together: three places in the
     shipped tree promised `init --force` carried a narrowing over, `init_config`
     never called `carry_over_permissions`, and the whole suite passed either way.
@@ -948,7 +947,7 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
     assert not hasattr(agentic_hil.cli, "carry_over_permissions")
     assert hasattr(agentic_hil.tools, "carry_over_permissions")
 
-# hardci-hq#108: `init` reads a board, so `init` is held to what a board read is
+# `init` reads a board, so `init` is held to what a board read is
 # held to.
 #
 # Enumerating probes and connecting in HOTPLUG mode is a hardware read whichever

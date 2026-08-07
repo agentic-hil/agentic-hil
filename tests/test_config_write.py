@@ -1,7 +1,7 @@
 """Field-wise configuration writes, and the boundary the two grants draw.
 
-The invariant #71 established was that an agent can enable itself up to
-observation and never up to modification. hardci-hq#80 opens a door in that wall
+The invariant the ratchet established was that an agent can enable itself up to
+observation and never up to modification. Field-wise writes open a door in that wall
 and the owner decided the shape of it: **two** grants, not one. A single
 ``allow_config_write`` would have been a master key — set to let an agent enter a
 probe serial, it would have handed over, in the same motion and without saying
@@ -76,7 +76,7 @@ def bench(
     gets a chance to run.
 
     Device grants start false unless `device_permissions` says otherwise. That is
-    no longer what a *generated* configuration looks like — since hardci-hq#96 a
+    no longer what a *generated* configuration looks like — since 0.8.0 a
     generation grants everything — but a bench a person narrowed is exactly the
     state most of these tests are about, and a test that needs something to take
     away asks for it."""
@@ -849,7 +849,7 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
 
     An agent reads this before it decides what it may do, and it said the file
     could only ever narrow — while `project_config_create` on the same surface
-    can regenerate it open. The owner's clarification on hardci-hq#96 keeps
+    can regenerate it open. The owner's decision on the generated default keeps
     regeneration outside the ratchet deliberately, so the resource has to say
     which call the direction belongs to and what the other one does."""
     document = (read_resource(CONFIG_SHAPE_URI) or {})["text"]
@@ -858,7 +858,7 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
     assert "### What the ratchet does not cover" in document
     assert "the MCP permission-write path can only narrow" in document
     # Regeneration, described as it behaves rather than as the ratchet — and at
-    # the generated defaults, which since hardci-hq#107 are not "everything".
+    # the generated defaults, which are not "everything".
     assert "arrives at the generated defaults" in document
     assert "is at those same defaults" in document
     assert "`permissions.allow_config_write` to false" in document
@@ -870,7 +870,7 @@ def test_the_description_grant_remedy_gives_the_reason_that_is_still_true() -> N
     It told an agent that reopening `allow_config_description_write` through
     `project_config_set` fails because no configuration hands out
     `allow_config_permissions_write` — and a generated configuration grants
-    exactly that (hardci-hq#96). On a bench where the description grant was
+    exactly that. On a bench where the description grant was
     narrowed and the permissions grant is still open, the resource gave a
     factually wrong reason for a correct refusal. The reason is the false-only
     ratchet, and it holds whether or not the gating grant is true."""
@@ -1016,7 +1016,7 @@ def test_setup_still_denies_the_agents_own_file_tools_on_the_configuration(tmp_p
 # ---------------------------------------------------------------------------
 # The `false`-only rule, and the surface it is about.
 #
-# hardci-hq#96's owner drew this line explicitly: the rule nails the MCP surface
+# The owner drew this line explicitly: the rule nails the MCP surface
 # shut and nothing else. So there are two things to prove — that the MCP surface
 # writes `false` and nothing else at all, including a `true` that would move
 # nothing, and that a person at the command line is not held to it.
@@ -1069,7 +1069,7 @@ def test_a_permission_already_true_cannot_be_sent_true_again(tmp_path: Path, mon
 def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator's own shell is not the surface this ratchet was decided for.
 
-    The owner's clarification on hardci-hq#96: "we only nail the MCP shut, the
+    The owner's own words: "we only nail the MCP shut, the
     rest is left to the user and the agent CLI". So the human actor keeps the
     authorization check — `allow_config_permissions_write` still gates the
     permissions half for everybody — and is not held to the direction."""
@@ -1122,7 +1122,7 @@ def test_the_section_grants_a_generation_writes_can_be_narrowed(tmp_path: Path, 
     A generation writes both `true` like every other permission. Leaving them out
     of the key model left two things a generated bench grants that an operator
     could take back only by opening the YAML — which is the single thing
-    hardci-hq#96 exists to stop."""
+    the ratchet exists to stop."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
     opened = document_of(path)
     opened["debug"]["allow_all_symbols"] = True

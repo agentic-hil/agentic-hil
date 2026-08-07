@@ -155,7 +155,7 @@ class GdbDebugSessions:
             # The spawn itself raised: no server process ever existed, so
             # nothing was started that could have touched the target. Marked as
             # such so the failed call refuses instead of quarantining a board
-            # it provably never reached (hardci-hq#97).
+            # it provably never reached.
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)

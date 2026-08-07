@@ -47,7 +47,7 @@ Nothing here says what a restart would do either. That claim used to be made —
 candidate validation that matched startup exactly: two code paths that have to
 stay congruent, where every difference between them is a defect, and four were
 found in four review rounds. The claim was cut back to the observation that
-carries no such obligation (hardci-hq#95). The operator restarts; if the document
+carries no such obligation. The operator restarts; if the document
 does not load, startup says why, with the message it already produces.
 """
 

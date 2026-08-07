@@ -51,7 +51,7 @@ def test_this_tree_agrees_with_itself() -> None:
 
 
 def test_the_release_carries_its_version_where_the_release_that_exposed_this_carried_it() -> None:
-    """Every position issue hardci-hq#75 counted, including the five it found missing."""
+    """Every position the version gate counted, including the five it found missing."""
     covered = {location.path for location in locations(REPOSITORY_ROOT)}
 
     assert covered >= {
@@ -83,8 +83,8 @@ def test_the_troubleshooting_pins_are_all_of_them() -> None:
     """Five `agentic-hil>=` pins and one `@vX.Y.Z` git-tag pin.
 
     Two entries for one file, because they are two claims: the requirement
-    pins the fix instructions hand a reader, and the git-tag pin hardci-hq#86
-    found drifting by hand while `_requirement_pins` could not see it.
+    pins the fix instructions hand a reader, and the git-tag pin that drifted
+    by hand while `_requirement_pins` could not see it.
     """
     entries = [location for location in locations(REPOSITORY_ROOT) if location.path == "TROUBLESHOOTING.md"]
 
@@ -193,7 +193,7 @@ def test_the_copied_tree_is_a_fair_starting_point(tree: Path) -> None:
             lambda text, version: text.replace(f"agentic-hil>={version}", "agentic-hil>=9.9.9", 1),
             "TROUBLESHOOTING.md",
         ),
-        # The pin hardci-hq#86 found: a git tag in an install URL, which is not
+        # The pin that was found drifting: a git tag in an install URL, which is not
         # a requirement pin and went unchecked while the file counted as covered.
         (
             "TROUBLESHOOTING.md",
@@ -279,7 +279,7 @@ def test_a_deliberate_mention_is_declared_rather_than_forgotten(tree: Path) -> N
 
 
 def test_a_current_tag_pin_is_recognised_and_passes(tree: Path) -> None:
-    """The other half of the hardci-hq#86 test: a correct pin is not noise."""
+    """The other half of the tag-pin test: a correct pin is not noise."""
     version = package_version(tree)
     path = tree / "TROUBLESHOOTING.md"
     path.write_text(
@@ -292,7 +292,7 @@ def test_a_current_tag_pin_is_recognised_and_passes(tree: Path) -> None:
 
 
 def test_a_tag_pin_in_a_covered_file_whose_entry_does_not_claim_it_fails(tree: Path) -> None:
-    """The class, not the instance, of hardci-hq#86.
+    """The class, not the instance, of that defect.
 
     evals/install/README.md is covered, but its entry extracts expected_version
     fields — a git-tag pin there would again be a mention nothing checks, and

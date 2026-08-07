@@ -639,7 +639,7 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     that cannot create this directory fails later, at the first lease or report,
     somewhere with much less context than here. Who else on the machine could
     write it is not asked — the operator's own processes always can, so an answer
-    to that question never bound anything (hardci-hq#95)."""
+    to that question never bound anything."""
     lexical = validated_state_root_paths(value, workspace, config_path)
     return safe_writable_directory(lexical, field="state_root", config_path=config_path)
 
@@ -691,7 +691,7 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # relative script names, and those two facts have to travel together:
     # autodetection used to resolve `openocd` off PATH for it as well, so on any
     # host with OpenOCD installed `agentic-hil init` left behind an entry that
-    # granted everything (hardci-hq#96), had a real program behind it, and drove
+    # granted everything, had a real program behind it, and drove
     # a board with `interface/stlink.cfg` — skipped by `doctor` and exempt from
     # the absolute-and-outside-the-workspace rule, because both keyed on it being
     # the starter entry. It stays inert until somebody names an executable in it.
@@ -801,7 +801,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     # Every named debugger MUST be pinned and validated: a named entry could
     # otherwise point a backend at an unvalidated executable. An entry whose
     # toolchain does not resolve is not a load failure — a generated
-    # configuration grants everything it can (hardci-hq#96), so that would refuse to
+    # configuration grants everything it can, so that would refuse to
     # load on any host that has not installed the backend yet. It becomes the
     # placeholder instead: `doctor` says the check was skipped and names why, and
     # the entry drives nothing until it has a toolchain.
@@ -1059,8 +1059,7 @@ def secure_atomic_write_text(file_path: str | Path, text: str, *, encoding: str 
     # the refusal is the guarded open and not the decode: reading this as text
     # made a file that is not UTF-8 unwritable rather than replaceable, so
     # `agentic-hil init --force` over a truncated or UTF-16 configuration failed
-    # with a decode error on the one command whose job is to replace it
-    # (hardci-hq#113).
+    # with a decode error on the one command whose job is to replace it.
     secure_optional_read_bytes(path)
     atomic_write_text(path, text, encoding=encoding)
     written = secure_optional_read_text(path, encoding=encoding)
@@ -1074,8 +1073,7 @@ def secure_atomic_write_bytes(file_path: str | Path, data: bytes) -> None:
     The byte twin of ``secure_atomic_write_text``, for a rollback that has to put
     the original back exactly — bytes that are not UTF-8 text included, which a
     text write cannot express and which ``agentic-hil init --force`` must restore
-    rather than delete when a regenerated file fails its final validation
-    (hardci-hq#106)."""
+    rather than delete when a regenerated file fails its final validation."""
     path = absolute_without_symlinks(Path(file_path))
     safe_directory(path.parent)
     # Refuse an existing alias before atomic replacement, exactly as the text
@@ -1092,8 +1090,7 @@ def secure_remove_file(file_path: str | Path) -> None:
     path = absolute_without_symlinks(Path(file_path))
     safe_directory(path.parent)
     # Bytes, not text: a rollback may remove a file whose bytes are not UTF-8, and
-    # deciding whether it is there must not raise a decode error on the way
-    # (hardci-hq#106).
+    # deciding whether it is there must not raise a decode error on the way.
     if secure_optional_read_bytes(path) is None:
         return
     if os.name == "nt":
@@ -1150,7 +1147,7 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
 # honest.
 #
 # Every permission in it is true but the two that refuse flashing while they are
-# true (hardci-hq#96, hardci-hq#107). The previous skeleton granted
+# true. The previous skeleton granted
 # nothing and left opening it as hand work on YAML, which cost this project's
 # owner a working day; the property that survives is not the closed start but the
 # direction of travel: an agent may write `false` into a permission and never
@@ -1222,7 +1219,7 @@ debuggers:
       # access are mutually exclusive policies: while either of these is true,
       # flash_firmware on this probe is refused and so is a debug session. When
       # they shipped true the two rules collided and a freshly generated bench
-      # could not flash at all (hardci-hq#107).
+      # could not flash at all.
       #
       # Nothing is withheld by this. Neither flag grants a tool — there is no MCP
       # call for raw debugger commands and none for mass erase — so turning
@@ -1292,7 +1289,7 @@ recovery:
 #
 # An agent that finds no configuration may generate one, and the file it
 # generates is workable: every permission true but the two that refuse flashing
-# while they are true (hardci-hq#96, hardci-hq#107). The ratchet did
+# while they are true. The ratchet did
 # not disappear with the closed start, it turned around. It used to be "an agent
 # enables itself up to observation and never up to modification"; it is now "an
 # agent can only ever reduce its own authority", because nothing on this surface
@@ -1339,7 +1336,7 @@ def generated_permissions(section: str) -> dict[str, bool]:
     Open for everything that can actually do something, and false for the
     `EXCLUSIVE_FLASH_PERMISSIONS` pair, which cannot: neither has an MCP tool
     behind it, so every read of either is a deny site, and leaving them true only
-    withheld flashing (hardci-hq#107).
+    withheld flashing.
 
     Every generation path goes through here — the skeleton above states the same
     values in YAML, and `bootstrap` and `grant_every_permission` ask this rather
@@ -1459,7 +1456,7 @@ def grant_every_permission(document: JsonObject) -> JsonObject:
     `generated_permissions`, which is where that is decided for every path that
     generates. This function used to write `True` across the board and so had its
     own opinion; that is what let the skeleton be corrected without the two paths
-    that bypass it changing at all (hardci-hq#107).
+    that bypass it changing at all.
 
     The name is kept, and so is the property it is named for: a generation decides
     the permission state *completely* rather than half. Whatever a workspace
@@ -1502,7 +1499,7 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
     Servers do not reload, by decision, so a `project_config_set` narrowing made
     since startup is on disk and not in this object, and a regeneration in that
     same session puts the loaded grant back. That is accepted: regeneration is
-    creation and belongs to the operator (hardci-hq#96), and the ratchet it is not
+    creation and belongs to the operator, and the ratchet it is not
     bound by is the MCP *write* path. Restarting the server onto the narrowed file
     is what makes the narrowing bind here too — and it is the same restart a
     `config_stale` result already asks for.
@@ -1618,7 +1615,7 @@ def trusted_persistent_executable(
         # delete of any component for the duration, which is what stops the
         # command that gets written into an agent's configuration from being a
         # different object than the one that was checked. Who else the ACLs let
-        # write it is no longer asked — see hardci-hq#95.
+        # write it is no longer asked — that check was removed in 0.8.0.
         handles = _windows_hold_directory_chain(path.parent)
         try:
             with safe_open_binary(path):
@@ -2498,7 +2495,7 @@ def debugger_is_placeholder(debugger: DebuggerConfig) -> bool:
     answer survive pinning, which replaces an unresolved executable with a path
     under the configuration directory that deliberately does not exist.
 
-    It has to be asked because hardci-hq#96 made every permission true by
+    It has to be asked because a generation makes every permission true by
     default, bar the two the flash interlock refuses on. Two rules key on "this bench is meant to drive hardware": config
     load insists such an entry's toolchain resolves and, for OpenOCD, that its
     scripts are absolute files outside the workspace, and `doctor` probes it. A

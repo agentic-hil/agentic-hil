@@ -5,7 +5,7 @@ No hardware is faked here. What is faked is the one rule that took the bench out
 of service in 0.7.0: OpenOCD registers `reset`, `targets`, `halt` and the rest of
 the target commands while `init` runs, so a script that reaches one of them
 earlier is refused by the Tcl interpreter with `invalid command name "<command>"`
-and the adapter is never opened (hardci-hq#83, seen on OpenOCD 0.12). `program`
+and the adapter is never opened (seen on OpenOCD 0.12). `program`
 needs no `init` because OpenOCD's own proc runs `init` and `reset init` itself.
 
 A fake that answers every command line the same way is why a command line nothing

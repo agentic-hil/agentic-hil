@@ -245,7 +245,7 @@ MCP_TOOLS: list[JsonObject] = [
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
     # No arguments, and here the empty schema is the security property rather
-    # than a convenience (hardci-hq#126). There is deliberately no way to name a
+    # than a convenience. There is deliberately no way to name a
     # version: this tool lifts the installation to the newest release and can do
     # nothing else. A `version` argument would put the whole permission model
     # behind it — an agent that can install 0.7.x installs a release that reads
@@ -288,7 +288,7 @@ MCP_TOOLS: list[JsonObject] = [
 # appearance: `project_config_reload_description` sits beside
 # `project_config_set` and `project_config_create`, which do write, so a host
 # blocked the one call that re-reads the file and the operator reconnected twice
-# instead (hardci-hq#101). The description says the reload writes nothing — in
+# instead. The description says the reload writes nothing — in
 # prose, in the middle of a paragraph, not in the field a machine reads.
 #
 # Three rules govern what may be written here, and two definitions decide the
@@ -336,7 +336,7 @@ MCP_TOOLS: list[JsonObject] = [
 # against.
 #
 # `server_upgrade` is the exception and the first honest `openWorldHint: true`
-# here (hardci-hq#126). It hands the installation to `uv`, `pipx` or `pip`, which
+# here. It hands the installation to `uv`, `pipx` or `pip`, which
 # resolve against a package index over the network: what arrives is whatever the
 # newest release is at that moment, from an entity outside this machine and
 # outside this configuration. That is the open world exactly as the schema means
@@ -357,7 +357,7 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # pyOCD `status`, ST-Link `-HOTPLUG` — which is exactly why recovery is
     # allowed to use it as a predicate (docs/security-design.md). But connecting
     # is not nothing, and this repository has already said so twice, in the
-    # quarantine inventory (hardci-hq#97, knowledge.py) and in
+    # quarantine inventory (knowledge.py) and in
     # docs/security-design.md: "being read-only is not being passive: an SWD
     # attach halts the core". Bringing a running core under debug control is a
     # change to the target's execution state, and the failure path treats it as
@@ -517,9 +517,9 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # apply every key matches, so the second call proposes nothing, never
     # reaches the write, and answers "Nothing was written."
     "project_config_adopt_hardware": {"title": "Adopt attached hardware", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-    # The tool hardci-hq#101 is about, and the claim holds: it writes nothing.
-    # No configuration write, no report, no audit record — configreload.py
-    # contains no write call of any kind and the tool is not in
+    # The tool the annotations were written for, and the claim holds: it writes
+    # nothing. No configuration write, no report, no audit record —
+    # configreload.py contains no write call of any kind and the tool is not in
     # `audited_hardware_tools()`. It contacts no hardware. What it changes is
     # this process's own view: it re-reads the authoritative file and swaps in
     # the device description, leaving every permission byte-for-byte as parsed

@@ -509,7 +509,7 @@ class PyOCDBackend:
             # built, before anything is driven; and a connect sequence pyOCD says
             # failed — no ACK, not responding, unable to connect — never brought
             # a core under debug control. A failed call over a channel that never
-            # carried anything must refuse, not quarantine (hardci-hq#97). All
+            # carried anything must refuse, not quarantine. All
             # three are pyOCD's own words about its own run, which is what makes
             # them evidence rather than this layer's inference.
             result.update(NOT_CONTACTED)

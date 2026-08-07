@@ -354,7 +354,7 @@ steps:
     # UART named by two steps is a single lock, and the executable-identified
     # debugger is two names rather than two devices — its `probe-exe:` key and the
     # legacy `probe:` twin it also holds so an unupgraded process cannot take it
-    # out from under this run (hardci-hq#106). Two devices, three lock names.
+    # out from under this run. Two devices, three lock names.
     assert sum(1 for item in devices if item.startswith("com:")) == 1
     assert len(devices) == 3
     assert any(item.startswith("com:") or item.startswith("physical:") for item in devices)

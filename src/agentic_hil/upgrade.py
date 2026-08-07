@@ -1,8 +1,8 @@
 """Replacing this installation with the newest release, once, for two front ends.
 
-`agentic-hil upgrade` (hardci-hq#99) and the `server_upgrade` MCP tool
-(hardci-hq#126) ask the same question of the same machine: which package manager
-owns this installation, what does it answer, and did the version actually move.
+`agentic-hil upgrade` and the `server_upgrade` MCP tool ask the same question
+of the same machine: which package manager owns this installation, what does it
+answer, and did the version actually move.
 Everything that decides those three lives here and nowhere else. The two callers
 add only what is theirs — the CLI refreshes agent skills afterwards, the MCP tool
 checks a permission, a bench hold and the platform first — and neither of them
@@ -10,7 +10,7 @@ owns a second copy of the manager logic. A fork here is how one surface learns
 about a pin the other still reports as success.
 
 What the two front ends may do also differs, and the difference is the whole of
-hardci-hq#126:
+the MCP tool's design:
 
 **Forward only.** Nothing in this module takes a version. `_upgrade_command`
 builds `uv tool upgrade` / `pipx upgrade` / a bare `--upgrade` requirement, all
@@ -132,15 +132,14 @@ def _upgrade_requirement() -> str:
 
 
 # `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
-# version pin in the requirement it recorded is one of the ways there is nothing
-# to do. It writes the reason on stderr in prose, so the pin is read out of the
-# text and never out of the return code. Measured on the reporter's box
-# (hardci-hq#99): "hint: `agentic-hil` is pinned to `0.7.1` (installed with an
-# exact version pin); reinstall with `uv tool install agentic-hil@latest` to
-# upgrade to a new version." A future wording that matches neither phrase falls
-# through to the already-current answer, which claims no upgrade happened —
-# never a false success, and never a refusal for a machine that is simply
-# up to date.
+# version pin in the requirement it recorded is one of the ways there is
+# nothing to do. It writes the reason on stderr in prose, so the pin is read
+# out of the text and never out of the return code. Measured on the reporter's
+# box: "hint: `agentic-hil` is pinned to `0.7.1` (installed with an exact
+# version pin); reinstall with `uv tool install agentic-hil@latest` to upgrade
+# to a new version." A future wording that matches neither phrase falls through
+# to the already-current answer, which claims no upgrade happened — never a
+# false success, and never a refusal for a machine that is simply up to date.
 _EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
 _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
 
@@ -242,7 +241,7 @@ def configured_extra_requirements(config: AgenticHILConfig) -> dict[str, list[st
 
 
 def missing_configured_extras(config: AgenticHILConfig) -> JsonObject | None:
-    """The contradiction hardci-hq#125 was filed over, or None when there is none.
+    """The contradiction between an installation and its own configuration, or None.
 
     A configuration that declares CAN buses on an installation without
     python-can is a bench that cannot do what it says it does, and until now the
@@ -394,7 +393,7 @@ def _upgrade_changed_nothing(
     answers here are `ok: false` with `restart_required: false`, because there is
     nothing new to load -- the reported defect was the opposite pair, which sent
     an operator to a restart that reloaded the same release and left them
-    believing they had moved (hardci-hq#99).
+    believing they had moved.
 
     Which of the two it is matters, because the next step differs: an
     installation that is already current needs nothing, while one held at an
@@ -505,7 +504,7 @@ def replace_installation(*, tool: str) -> JsonObject:
 
 
 # ---------------------------------------------------------------------------
-# The MCP tool (hardci-hq#126).
+# The MCP tool.
 #
 # Three gates before the shared implementation above, in this order and for this
 # reason. The permission is first because it is the operator's standing policy
@@ -587,13 +586,13 @@ def _upgrade_cli_only_on_host() -> JsonObject:
 
 
 def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
-    """hardci-hq#80's rule, applied to the code rather than to the permissions.
+    """The open-run refusal, applied to the code rather than to the permissions.
 
     A run's holds were taken under the release that is running, and replacing
     that release mid-run moves the rules during the run they govern — the same
     move a permission change makes, and refused for the same reason. Read off
     `HardwareCoordinator.status()`'s `bench_held`, which is true for a declared
-    run and for a lease alike (hardci-hq#105): a declared run takes the device
+    run and for a lease alike: a declared run takes the device
     locks and leaves the project lock alone, so asking only about the owner would
     call a held bench free.
     """
