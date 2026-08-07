@@ -126,7 +126,7 @@ CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
 # not a cable, a driver or a configuration entry.
 COM_PORT_BUSY_ERROR = "com_port_busy"
 # What `hardware_recover` answers when the incident needs somebody at the bench
-# (hardci-hq#128). Not `permission_denied`: no grant on this or any bench opens
+#. Not `permission_denied`: no grant on this or any bench opens
 # it, because the missing thing is a statement about a physical board and not an
 # What `hardware_recover` answers when the incident needs somebody at the
 # bench. Not `permission_denied`: no grant on this or any bench opens it,
