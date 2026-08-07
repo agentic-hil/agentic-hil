@@ -23,7 +23,7 @@ Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or 
 Fix — all user-local, never with admin rights. Start with the PyPI/pip package:
 
 ```bash
-python -m pip install --user --upgrade "agentic-hil>=0.8.0"
+python -m pip install --user --upgrade "agentic-hil>=0.9.0"
 agentic-hil --version
 agentic-hil setup --help
 ```
@@ -31,12 +31,12 @@ agentic-hil setup --help
 If that fails, use `uv` or `pipx` instead:
 
 ```bash
-uvx --from "agentic-hil>=0.8.0" agentic-hil --version                           # transient diagnostic only
-uvx --from git+https://github.com/agentic-hil/agentic-hil@v0.8.0 agentic-hil --version # transient repository check
-uv tool install --upgrade "agentic-hil>=0.8.0"                                  # persistent user-local install
+uvx --from "agentic-hil>=0.9.0" agentic-hil --version                           # transient diagnostic only
+uvx --from git+https://github.com/agentic-hil/agentic-hil@v0.9.0 agentic-hil --version # transient repository check
+uv tool install --upgrade "agentic-hil>=0.9.0"                                  # persistent user-local install
 ```
 
-`pipx run --spec "agentic-hil>=0.8.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.8.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+`pipx run --spec "agentic-hil>=0.9.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.9.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
 Two Linux failures leave no installation behind and are not a broken machine. `error: externally-managed-environment` is PEP 668: Debian and Ubuntu mark the system Python as owned by the distribution and `pip` refuses it, `--user` included, so the pip block above does not apply on those hosts — `uv` and `pipx` install into environments of their own and need no exception. `invalid peer certificate: UnknownIssuer` from `uv`, or `self-signed certificate in certificate chain`, is a TLS-intercepting proxy: `uv` validates against roots bundled in its binary, while `curl` and `apt` on the same host read the system trust store and keep working, which is what makes the difference recognisable. `uv tool install --system-certs` (older releases: `--native-tls`) points `uv` at that same store. Prefer `UV_SYSTEM_CERTS=1` in the operator's environment over the flag on a single command line: `agentic-hil upgrade` shells out to `uv tool upgrade` and passes no TLS flags of its own, so a proxied host that fixed only the install command loses the upgrade path. If `--system-certs` does not help, the proxy's CA is missing from the system trust store itself; installing it there is the fix, and `--allow-insecure-host` or any other switch that disables verification is not a fallback.
 
@@ -50,7 +50,7 @@ Symptom: `agentic-hil doctor` returns one of these `error_type` values.
 
 Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
-Fix: run `agentic-hil init`, review the file it writes outside the repository — every permission in it is granted — then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
+Fix: run `agentic-hil init`, review the file it writes outside the repository — every permission in it is granted except `allow_raw_debugger_commands` and `allow_mass_erase`, which are false so that flashing works — then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
 `init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
@@ -119,12 +119,20 @@ Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.c
 
 Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders — the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (hardci-hq#104: it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery` — check that first, because a probe that was attached and refused reads differently from one that was not there.
 
-Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since.
+Fix: attach the board and carry it in. Do not retype the values, and do not reach for `init --force`, which discards whatever a person has set since — every narrowed permission included, which it then lists in its result.
 
 ```bash
 agentic-hil adopt-hardware --dry-run   # what it would fill in
 agentic-hil adopt-hardware
 agentic-hil doctor
+```
+
+Three commands, three rules, and that is the whole model:
+
+```text
+adopt-hardware   refresh the hardware, everything else stays
+grant / revoke   move one permission, everything else stays
+init --force     start over, everything goes
 ```
 
 It fills in the probe serial, the backend's executable, the detected controller and the COM device the probe exposes — only where the file has nothing there. A key that already holds a value comes back under `kept` with what the hardware says beside it, never overwritten, and no permission is touched. With more than one probe attached it refuses and lists the serials; name one with `--probe-id`. With more than one debugger or COM port configured, `--debugger` and `--com-port` say which entry this is about.
@@ -163,11 +171,11 @@ Likely cause: the authoritative config disables that action or does not name the
 
 Fix: stop and ask the human operator to review the authoritative config. Do not work around the result with raw OpenOCD, direct COM-port tools, direct CAN access, or shell commands.
 
-## 8a. A Permission Is `false` And Nothing Turns It Back On
+## 8a. A Permission Is `false` And The Agent Cannot Reopen It
 
-Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and every route out looks shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value. `agentic-hil init --force` regenerates the file and the `false` is still there afterwards.
+Symptom: a permission in the configuration is `false` — `can_buses.<name>.allow_write`, `debuggers.<name>.allow_flash`, `permissions.allow_config_permissions_write` — and the only route out that an agent can reach is shut. `project_config_set` refuses with `permission_widening_denied`, because it writes `false` into a permission and no other value.
 
-Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. Regeneration carries every existing grant over by name, which is exactly why `--force` does not clear it.
+Likely cause: the configuration was generated before permissions became open by default, or somebody narrowed it since. `agentic-hil init --force` does clear it — it regenerates the whole file with every permission granted — but it is a reset rather than a repair, and it takes the baudrate, the `resource_id`, the `state_root` and every artifact root with it. It names every permission it reopened this way in its own result, so a `--force` run for some unrelated reason cannot reopen a narrowed bench silently (hardci-hq#113).
 
 Fix, in your own terminal in the project root:
 
@@ -177,7 +185,15 @@ agentic-hil grant can_buses.dut.allow_write
 
 That opens the one permission it names and touches nothing else in the file — the baudrate, the `resource_id`, the `state_root`, the artifact roots and every other setting stay as they were. `agentic-hil revoke <key>` closes one again. Several keys may be named in one command and are applied together or not at all.
 
-* **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file. Removing that trap is what this command is for.
+Three commands, three rules, and that is the whole model:
+
+```text
+adopt-hardware   refresh the hardware, everything else stays
+grant / revoke   move one permission, everything else stays
+init --force     start over, everything goes
+```
+
+* **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file — the same bill `init --force` comes with. Removing that trap is what this command is for.
 * **Which key?** Name anything that is not a permission and the refusal prints every permission key your configuration actually has, entry names included. Both `can_buses.dut.allow_write` and the long `can_buses.dut.permissions.allow_write` are accepted.
 * **Restart the MCP server afterwards.** A running server parses permissions once, at startup, and `project_config_reload_description` re-reads devices and deliberately no permission. Until that restart the agent keeps being refused with the old value — the command's own result says so.
 * **`permission_change_in_open_run`** means something on this machine is holding the bench: a run, a COM or CAN session, another terminal. Permissions do not move under an active hold. `agentic-hil lease-status` names the holder; wait or ask for it to be closed, then repeat the command.

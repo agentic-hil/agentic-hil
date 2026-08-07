@@ -67,6 +67,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 
@@ -95,16 +96,20 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
     # Born on the read-free model: reading has no key to set, so every
     # permission line a fresh config carries is about writing — and since
-    # hardci-hq#96 every one of them is granted, so the bench this writes is
-    # workable without anybody opening it.
+    # hardci-hq#96 every one of them that grants a capability is granted, so the
+    # bench this writes is workable without anybody opening it.
     assert "version: 2" in config_text
     assert "allow_probe: " not in config_text
     assert "allow_flash: true" in config_text
     assert "allow_reset: true" in config_text
     assert "allow_upload: true" in config_text
-    assert "allow_mass_erase: true" in config_text
     assert "allow_config_permissions_write: true" in config_text
-    # And nothing in the file it wrote is off, whatever the key is called: a
+    # The two exceptions, and the reason the bench above is workable: either one
+    # true refuses flash_firmware on that probe, and neither has a tool behind it
+    # to trade for that (hardci-hq#107).
+    assert "allow_raw_debugger_commands: false" in config_text
+    assert "allow_mass_erase: false" in config_text
+    # And nothing else in the file it wrote is off, whatever the key is called: a
     # generation decides the permission state completely rather than half.
     document = yaml.safe_load(config_text)
 
@@ -119,7 +124,10 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
             found += denied(value, path)
         return found
 
-    assert denied(document) == []
+    assert denied(document) == [
+        "debuggers.dut.permissions.allow_raw_debugger_commands",
+        "debuggers.dut.permissions.allow_mass_erase",
+    ]
     assert initialized_config_path(workspace) == config_path
 
 
@@ -1931,6 +1939,25 @@ def test_gateway_tool_descriptions_name_what_they_replace() -> None:
 SKILL_TOOL_COLUMN = "The tools"
 
 
+def _table_column(text: str, header: str) -> list[str]:
+    """Every filled cell under a named column, in document order."""
+    cells_under: list[str] = []
+    column: int | None = None
+    for line in text.splitlines():
+        row = line.strip()
+        if not row.startswith("|"):
+            column = None  # A table ends where its rows do; the next one names its own column.
+            continue
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if column is None:
+            if header in cells:
+                column = cells.index(header)
+            continue
+        if column < len(cells) and set(cells[column]) - set("-: "):
+            cells_under.append(cells[column])
+    return cells_under
+
+
 def _skill_routing_table(text: str) -> list[str]:
     """The tools the skill declares, read out of the routing table's tool column.
 
@@ -1944,21 +1971,7 @@ def _skill_routing_table(text: str) -> list[str]:
     Reading the column reads the document's own structure instead of guessing
     at its prose.
     """
-    names: list[str] = []
-    column: int | None = None
-    for line in text.splitlines():
-        row = line.strip()
-        if not row.startswith("|"):
-            column = None  # A table ends where its rows do; the next one names its own column.
-            continue
-        cells = [cell.strip() for cell in row.strip("|").split("|")]
-        if column is None:
-            if SKILL_TOOL_COLUMN in cells:
-                column = cells.index(SKILL_TOOL_COLUMN)
-            continue
-        if column < len(cells) and set(cells[column]) - set("-: "):
-            names.extend(re.findall(r"`([a-z][a-z0-9_]*)`", cells[column]))
-    return names
+    return [name for cell in _table_column(text, SKILL_TOOL_COLUMN) for name in re.findall(r"`([a-z][a-z0-9_]*)`", cell)]
 
 
 def test_skill_only_names_tools_the_server_exposes() -> None:
@@ -2006,6 +2019,163 @@ def test_the_skill_tool_check_reads_the_table_and_not_the_prose() -> None:
     )
 
     assert set(_skill_routing_table("\n".join(lines))) - exposed == {"flash_firmware_v2"}
+
+
+README_TOOL_COLUMN = "Tools"
+AGENTS_CONFIG_COLUMN = "Call"
+AGENTS_CONFIG_FAMILY = "project_config_"
+# The one configuration tool that table leaves out on purpose: it creates a
+# configuration rather than changing an existing one, and both documents make
+# that split — README gives it a "Project setup" row of its own, apart from the
+# "Project config" group. Excluded from the table, not from the document: the
+# check below still requires AGENTS.md to name it somewhere.
+AGENTS_CONFIG_TABLE_OMITS = frozenset({"project_config_create"})
+
+
+def _documented_tools(text: str, header: str) -> list[str]:
+    """Every backticked token in a document's tool column, verbatim.
+
+    Verbatim because a token that is not a tool name has to be visible to the
+    caller. Matching the shape of a name here would drop `debug_*` on the floor
+    and report a table that names 26 of 37 tools as complete.
+    """
+    return [token for cell in _table_column(text, header) for token in re.findall(r"`([^`]+)`", cell)]
+
+
+def _not_tool_names(names: list[str]) -> list[str]:
+    return [name for name in names if not re.fullmatch(r"[a-z][a-z0-9_]*", name)]
+
+
+def _repository_tool_contract() -> set[str]:
+    contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
+    return set(contract.read_text(encoding="utf-8").split())
+
+
+def _repository_document(name: str) -> str:
+    return (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+
+
+def test_readme_tool_table_is_the_whole_tool_inventory() -> None:
+    """README's `Tools` column is an inventory, so it holds the contract both ways.
+
+    The same shape as the skill's routing table and for the same reason
+    (hardci-hq#90): the column is read, the prose is not. README's notes column
+    alone writes `set`, `describe`, `adopt_hardware` and `reload_description` in
+    backticks, none of which is a tool name, and a scan of the document would
+    have to exclude them by hand for as long as anybody keeps writing notes.
+    """
+    exposed = _repository_tool_contract()
+    declared = _documented_tools(_repository_document("README.md"), README_TOOL_COLUMN)
+
+    assert declared, f"README has no `{README_TOOL_COLUMN}` column to read"
+    assert len(set(declared)) == len(declared), "the tool table names a tool twice"
+    assert set(declared) == exposed, (
+        f"documented but not exposed: {sorted(set(declared) - exposed)}; "
+        f"exposed but not documented: {sorted(exposed - set(declared))}"
+    )
+
+
+def test_readme_tool_table_spells_out_every_tool_rather_than_a_prefix() -> None:
+    """No wildcards in that column: `debug_*` stood for eleven tools and checked none.
+
+    Expanding a prefix against the contract would have passed today and left the
+    completeness direction blind exactly where the wildcard sits — a twelfth
+    session tool would be absorbed by `debug_*` and README would never have to
+    mention it, which is the drift this check exists to catch. Spelling the
+    names out costs one long cell and holds all 37.
+    """
+    declared = _documented_tools(_repository_document("README.md"), README_TOOL_COLUMN)
+
+    assert not _not_tool_names(declared), (
+        f"the `{README_TOOL_COLUMN}` column must name each tool in full: {_not_tool_names(declared)}"
+    )
+    assert "debug_start_session" in declared and "debug_dump_symbol_ihex" in declared
+
+
+def test_agents_configuration_table_holds_the_configuration_family() -> None:
+    """AGENTS.md's table is a partial inventory, and partial does not mean unchecked.
+
+    It claims the configuration tools, not all 37, so it is held to exactly
+    that: every `project_config_*` tool this server serves has a row, and every
+    row names one. Demanding the whole contract here would be a false claim
+    about a table that never made it; demanding nothing would let a new
+    configuration tool arrive unmentioned, which is the drift hardci-hq#111 is
+    about.
+    """
+    exposed = _repository_tool_contract()
+    agents = _repository_document("AGENTS.md")
+    declared = _documented_tools(agents, AGENTS_CONFIG_COLUMN)
+    family = {name for name in exposed if name.startswith(AGENTS_CONFIG_FAMILY)} - AGENTS_CONFIG_TABLE_OMITS
+
+    assert declared, f"AGENTS.md has no `{AGENTS_CONFIG_COLUMN}` column to read"
+    assert not _not_tool_names(declared), _not_tool_names(declared)
+    assert set(declared) == family, (
+        f"documented but not a configuration tool this server serves: {sorted(set(declared) - family)}; "
+        f"served but not documented: {sorted(family - set(declared))}"
+    )
+    # The omission is a placement, not an exemption: a tool kept out of the
+    # table has to be covered by the document that keeps it out.
+    for omitted in AGENTS_CONFIG_TABLE_OMITS:
+        assert omitted in exposed and f"`{omitted}`" in agents, omitted
+
+
+def test_the_document_tool_tables_fail_in_both_directions() -> None:
+    """The proof hardci-hq#111 asks for, run against the shipped documents.
+
+    A tool added to the contract fails until the documents name it, and a name
+    in a document the server does not serve fails too — for the whole inventory
+    in README and for the configuration family in AGENTS.md.
+    """
+    exposed = _repository_tool_contract()
+    readme = _repository_document("README.md")
+    agents = _repository_document("AGENTS.md")
+
+    # A tool this server gains has no row anywhere until somebody writes one.
+    assert (exposed | {"flash_firmware_v2"}) - set(_documented_tools(readme, README_TOOL_COLUMN)) == {
+        "flash_firmware_v2"
+    }
+    gained_config = {
+        name for name in exposed | {"project_config_freeze"} if name.startswith(AGENTS_CONFIG_FAMILY)
+    } - AGENTS_CONFIG_TABLE_OMITS
+    assert gained_config - set(_documented_tools(agents, AGENTS_CONFIG_COLUMN)) == {"project_config_freeze"}
+
+    # A name a document invents is caught in the other direction.
+    invented_readme = _with_extra_row(readme, README_TOOL_COLUMN, "| Invented | `flash_firmware_v2` | no such tool |")
+    assert set(_documented_tools(invented_readme, README_TOOL_COLUMN)) - exposed == {"flash_firmware_v2"}
+    invented_agents = _with_extra_row(agents, AGENTS_CONFIG_COLUMN, "| `project_config_freeze` | nothing |")
+    assert set(_documented_tools(invented_agents, AGENTS_CONFIG_COLUMN)) - exposed == {"project_config_freeze"}
+
+    # A served tool in the wrong table is caught as well: AGENTS.md's is the
+    # configuration family, so a real tool from outside it is still a lie.
+    misfiled = _with_extra_row(agents, AGENTS_CONFIG_COLUMN, "| `flash_firmware` | not a configuration tool |")
+    assert "flash_firmware" in set(_documented_tools(misfiled, AGENTS_CONFIG_COLUMN)) - {
+        name for name in exposed if name.startswith(AGENTS_CONFIG_FAMILY)
+    }
+
+    # And the wildcard this check ruled out is caught rather than skipped: the
+    # reader hands it back as written, so it fails the shape it does not have.
+    wildcarded = _with_extra_row(readme, README_TOOL_COLUMN, "| Debug sessions | `debug_*` | a prefix |")
+    assert _not_tool_names(_documented_tools(wildcarded, README_TOOL_COLUMN)) == ["debug_*"]
+
+
+def _with_extra_row(text: str, header: str, row: str) -> str:
+    """The same table the check reads, one row longer.
+
+    By header rather than by the document's last table row: README and AGENTS.md
+    both carry tables after the one under test, and appending to the wrong one
+    would prove nothing.
+    """
+    lines = text.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip().startswith("|") and header in [cell.strip() for cell in line.strip().strip("|").split("|")]
+    )
+    end = start
+    while end + 1 < len(lines) and lines[end + 1].startswith("|"):
+        end += 1
+    lines.insert(end + 1, row)
+    return "\n".join(lines)
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "opencode"])
@@ -2840,6 +3010,108 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
     assert "debuggers.<name>.flash_address" in result["summary"]
+
+
+# What each backend puts on the wire for each mode it supports, which is the
+# only place the three can be compared. `run` and `halt` are two different
+# commands on both; `init` is OpenOCD's alone, and OPENOCD_RESET_COMMANDS above
+# holds the third line neither of these two can write.
+BACKEND_RESET_COMMANDS = {
+    ("stlink", "run"): "-rst",
+    ("stlink", "halt"): "-halt",
+    ("pyocd", "run"): "--command reset",
+    ("pyocd", "halt"): '--command "reset halt"',
+}
+
+
+def reset_probe_id(backend: str) -> str:
+    return "STLINK123" if backend == "stlink" else "PYOCD123"
+
+
+@pytest.mark.parametrize(("backend", "mode"), sorted(BACKEND_RESET_COMMANDS))
+def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_path: Path, backend: str, mode: str) -> None:
+    """One command line per backend per mode, which is the only comparable thing.
+
+    hardci-hq#58 survived three releases because nothing here compared the
+    backends: the OpenOCD parametrization above pinned all three of its command
+    lines, stlink and pyocd had no mode coverage at all, and `init` quietly
+    borrowing the halt argument was invisible from inside either one. Two modes
+    that share a command line within one backend now fail here, whichever pair
+    it is.
+
+    This asserts what went on the wire rather than `ok`, deliberately: mode
+    `halt` on stlink cannot be confirmed today, because STLINK_SUCCESS_CONFIRMATION
+    wants the two lines `-rst` prints and `-halt` prints neither. That is a
+    different defect from this one and is not fixed here - what this test has to
+    hold is that the argument reaching the CLI is the one the mode names."""
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert result["mode"] == mode
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert BACKEND_RESET_COMMANDS[(backend, mode)] in logged
+    other = "halt" if mode == "run" else "run"
+    assert BACKEND_RESET_COMMANDS[(backend, other)] not in logged
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_reset_init_is_refused_where_it_cannot_run_instead_of_halting_quietly(tmp_path: Path, backend: str) -> None:
+    """The effect that changed, not the string that changed (hardci-hq#58).
+
+    Through 0.8.0 this call spawned the backend's CLI with the same plain halt
+    argument mode `halt` sends, so the reset-init script a caller asked for -
+    clock tree, wait states, watchdog - never ran on either of these two, and on
+    pyocd the result said `Target reset with mode 'init'.` over it. The
+    assertion that matters is therefore not the error_type but the empty log
+    directory: no process ran at all, and the board is where the last call that
+    did reach it left it. The `halt` that follows still reaches the CLI, which
+    is what separates a refusal of one mode from a backend that stopped
+    working."""
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
+    service = AgenticHILToolService(config)
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "init"})
+        logs_after_refusal = sorted(Path(logs_directory(config)).glob("*"))
+        still_reaches_the_cli = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "not_supported"
+    assert refused["mode"] == "init"
+    assert refused["supported_modes"] == ["run", "halt"]
+    assert "OpenOCD" in refused["summary"]
+    # Nothing was sent: the refusal precedes the spawn, so it has no log to name.
+    assert "log_path" not in refused, refused
+    assert logs_after_refusal == []
+    # A refusal the caller may act on, not a bench somebody has to go and look at.
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_committed"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["hardware_state"] == "unchanged"
+    assert refused.get("quarantined") is not True, refused
+    assert refused.get("cleanup_required") is not True, refused
+    logged = json.loads((tmp_path / still_reaches_the_cli["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert BACKEND_RESET_COMMANDS[(backend, "halt")] in logged
+
+
+def test_the_reset_mode_schema_tells_a_caller_init_is_openocd_only(tmp_path: Path) -> None:
+    """The schema is where an agent reads the enum, so it is where the caveat goes.
+
+    A backend that refuses `init` and a schema that offers all three values
+    without comment is the same defect one layer up: the caller still has to
+    call to find out."""
+    schema = next(tool for tool in MCP_TOOLS if tool["name"] == "reset_target")["inputSchema"]
+    described = schema["properties"]["mode"]["description"]
+
+    assert schema["properties"]["mode"]["enum"] == ["run", "halt", "init"]
+    assert "OpenOCD-only" in described
+    assert "not_supported" in described
+    assert "reset-init" in described
 
 
 def test_artifact_validation_computes_sha256(tmp_path: Path) -> None:

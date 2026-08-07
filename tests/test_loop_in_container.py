@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -202,7 +203,7 @@ def test_the_image_tag_follows_the_recipe(tmp_path: Path, monkeypatch: pytest.Mo
 def test_a_machine_without_docker_is_told_rather_than_traced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(loop_in_container.shutil, "which", lambda _command: None)
 
-    assert loop_in_container.main(["--task", "anything"]) == loop_in_container.EXIT_NO_DOCKER
+    assert loop_in_container.main(["--task", "anything"]) == loop_in_container.EXIT_WRAPPER_FAILED
 
 
 def test_the_inner_loop_runs_codex_without_a_second_sandbox() -> None:
@@ -640,7 +641,7 @@ def test_a_home_volume_that_survives_the_run_fails_it(
 
     monkeypatch.setattr(loop_in_container, "remove_volume", stuck)
 
-    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_CLEANUP_FAILED
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
     captured = capsys.readouterr()
     assert "still exists after removal" in captured.err
     assert "-home" in captured.err
@@ -662,8 +663,76 @@ def test_an_interrupted_run_that_cannot_clean_up_says_so(
         lambda _docker, name: (_ for _ in ()).throw(RuntimeError(f"could not remove {name}")),
     )
 
-    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_CLEANUP_FAILED
-    assert "could not remove" in capsys.readouterr().err
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+    captured = capsys.readouterr()
+    assert "could not remove" in captured.err
+    # The loop never returned a code, so there is none to report.
+    assert "review loop exit code" not in captured.err
+
+
+def test_no_failure_of_the_wrapper_can_be_read_as_a_result_of_the_review() -> None:
+    """The collision this replaces: EXIT_NO_DOCKER=2 sat on EXIT_STALLED, EXIT_REFUSED=3 on EXIT_FAILED."""
+    loop_codes = {
+        agent_review_loop.EXIT_CLEAN,
+        agent_review_loop.EXIT_ROUNDS_EXHAUSTED,
+        agent_review_loop.EXIT_STALLED,
+        agent_review_loop.EXIT_FAILED,
+        agent_review_loop.EXIT_NO_PROGRESS,
+    }
+
+    assert loop_in_container.EXIT_WRAPPER_FAILED not in loop_codes
+    assert max(loop_codes) < loop_in_container.EXIT_WRAPPER_FAILED
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        agent_review_loop.EXIT_CLEAN,
+        agent_review_loop.EXIT_ROUNDS_EXHAUSTED,
+        agent_review_loop.EXIT_STALLED,
+        agent_review_loop.EXIT_FAILED,
+        agent_review_loop.EXIT_NO_PROGRESS,
+    ],
+)
+def test_every_code_the_loop_returns_reaches_the_caller_unchanged(
+    inner: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Transparency is the point of the wrapper; the container is not supposed to be visible in the code."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (inner, {}, None))
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == inner
+    assert loop_in_container.INNER_EXIT.format(code=inner) in capsys.readouterr().err
+
+
+def test_a_review_that_plateaued_and_a_container_that_leaked_are_told_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both used to arrive as a bare 2 or 4, and a caller had nothing else to read."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        loop_in_container, "stream", lambda _command, _repository: (agent_review_loop.EXIT_STALLED, {}, None)
+    )
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+
+    plateaued = loop_in_container.main(["--image", "loop:test", "--task", "x"])
+    capsys.readouterr()
+
+    def stuck(_docker: str, name: str) -> None:
+        raise RuntimeError(f"Docker volume {name} still exists after removal")
+
+    monkeypatch.setattr(loop_in_container, "remove_volume", stuck)
+    leaked = loop_in_container.main(["--image", "loop:test", "--task", "x"])
+    captured = capsys.readouterr()
+
+    assert plateaued == agent_review_loop.EXIT_STALLED
+    assert leaked == loop_in_container.EXIT_WRAPPER_FAILED
+    assert plateaued != leaked
+    # The volume has to take the exit status -- it is where a copy of a login can
+    # be -- but the review still plateaued, and that is still readable.
+    assert loop_in_container.INNER_EXIT.format(code=agent_review_loop.EXIT_STALLED) in captured.err
+    assert "still exists after removal" in captured.err
 
 
 def test_a_clean_run_reports_where_a_custom_review_directory_landed(
@@ -720,6 +789,17 @@ def _in(repository: Path, *arguments: str) -> str:
     ).stdout
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process still exists, without signalling it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _cut_short(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
     monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
     monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
@@ -757,11 +837,11 @@ def test_a_round_the_timeout_cuts_short_is_committed_rather_than_discarded(
     assert "ran out of time" in body
     assert "exceeded --timeout" in body
     assert "half-done.py" in _in(repository, "show", "--name-only", "--format=", "HEAD").split()
-    # Nothing of the round is left in the tree. What remains untracked is this
-    # run's own paperwork, which is deliberately not part of the commit and is
-    # gitignored in the repository this loop was written for.
+    # Nothing of the round is left in the tree, and this run's own paperwork is
+    # not left in it either: the loop's directory carries a .gitignore of its
+    # own, so it is invisible here as it is in a repository that ignores it.
     left = [line for line in _in(repository, "status", "--porcelain").splitlines() if line.strip()]
-    assert left == ["?? .agentic-loop/"]
+    assert left == []
 
 
 def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
@@ -775,6 +855,130 @@ def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
     assert ".agentic-loop" not in _in(repository, "show", "--name-only", "--format=", "HEAD")
     # The transcripts are still there to read; they are just not part of the commit.
     assert list((repository / ".agentic-loop" / "logs").rglob("round-01-claude.log"))
+
+
+def test_the_loops_own_directory_ignores_itself_where_the_repository_ignores_nothing(tmp_path: Path) -> None:
+    """`*` covers the directory holding it, that .gitignore included, so nothing is left to report."""
+    repository = _repository(tmp_path)
+    root = repository / ".agentic-loop" / "reviews"
+
+    directory = agent_review_loop.paperwork_dir(repository, root, "20260101-000000")
+    (directory / "round-01.md").write_text("four findings\n", encoding="utf-8")
+
+    assert (root / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
+    # Neither of the two ways the paperwork used to escape: a status the next
+    # run's preflight refuses, and an agent's `git add -A`.
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    assert _in(repository, "diff", "--cached", "--name-only").strip() == ""
+
+
+def test_a_repository_that_already_ignores_the_path_is_not_disturbed(tmp_path: Path) -> None:
+    """Git does not descend into an ignored directory, so its own rule keeps answering."""
+    repository = _repository(tmp_path)
+    (repository / ".gitignore").write_text(".agentic-loop/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "ignore the loop"], check=True)
+    before = _in(repository, "ls-files")
+
+    agent_review_loop.paperwork_dir(repository, repository / ".agentic-loop" / "reviews", "20260101-000000")
+
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    assert _in(repository, "ls-files") == before
+    rule = _in(repository, "check-ignore", "-v", ".agentic-loop/reviews/20260101-000000")
+    assert rule.startswith(".gitignore:1:.agentic-loop/")
+
+
+def test_a_paperwork_directory_an_earlier_run_left_behind_is_ignored_from_now_on(tmp_path: Path) -> None:
+    """Every repository the loop has already visited has one of these sitting in it, un-ignored."""
+    repository = _repository(tmp_path)
+    root = repository / ".agentic-loop" / "reviews"
+    (root / "20251231-235959").mkdir(parents=True)
+    (root / "20251231-235959" / "round-01.md").write_text("a run from before this existed\n", encoding="utf-8")
+
+    agent_review_loop.paperwork_dir(repository, root, "20260101-000000")
+
+    assert (root / ".gitignore").is_file()
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+
+def test_a_paperwork_directory_the_operator_tracks_is_left_alone(tmp_path: Path) -> None:
+    """`*` in a directory somebody committed would hide their files rather than the loop's."""
+    repository = _repository(tmp_path)
+    notes = repository / "notes"
+    notes.mkdir()
+    (notes / "index.md").write_text("mine\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "notes/index.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "notes"], check=True)
+
+    directory = agent_review_loop.paperwork_dir(repository, notes, "20260101-000000")
+
+    assert directory.is_dir()
+    assert not (notes / ".gitignore").exists()
+
+
+def _sweeping_agent(tmp_path: Path) -> Path:
+    """An agent that commits the way agents do: everything the tree happens to hold."""
+    script = tmp_path / "sweeping_agent.py"
+    script.write_text(
+        "import pathlib, subprocess, uuid\n"
+        "name = 'change-%s.py' % uuid.uuid4().hex[:8]\n"
+        "pathlib.Path(name).write_text('x\\n', encoding='utf-8')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-q', '-m', 'feat: ' + name], check=True)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _clean_verdict(
+    setup: agent_review_loop.ReviewSetup,
+    record: agent_review_loop.RoundRecord,
+    number: int,
+    _range: str,
+    _previous: Path | None,
+    _commit: str,
+) -> tuple[agent_review_loop.Verdict, Path]:
+    review = setup.review_dir / f"round-{number:02d}.md"
+    review.write_text("REVIEW_STATUS: CLEAN\n", encoding="utf-8")
+    record.findings = 0
+    record.status = agent_review_loop.CLEAN
+    return agent_review_loop.Verdict(agent_review_loop.CLEAN, 0, str(review), ""), review
+
+
+def test_a_repository_that_ignores_nothing_stays_clean_across_two_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second run is the one that used to be impossible: preflight refused the tree the first left."""
+    repository = _repository(tmp_path)  # no .gitignore at all, unlike this repository
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(
+        agent_review_loop, "claude_command", lambda _options: [sys.executable, str(_sweeping_agent(tmp_path))]
+    )
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+
+    def run() -> int:
+        return agent_review_loop.main(
+            # No --allow-dirty: a tree the last run dirtied stops this outright.
+            ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"]
+            + ["--review-checkout", "none"]
+        )
+
+    first = run()
+    assert first == agent_review_loop.EXIT_CLEAN
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+    second = run()
+
+    assert second == agent_review_loop.EXIT_CLEAN
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    # Both rounds committed, and neither commit carries a line of the loop's own
+    # paperwork -- which is what the agent's `git add -A` swept in before.
+    assert _in(repository, "rev-list", "--count", "HEAD").strip() == "3"
+    assert ".agentic-loop" not in _in(repository, "log", "--name-only", "--format=")
+    # Ignored, not withheld: the reviews are on disk for a human to read.
+    assert list((repository / ".agentic-loop" / "reviews").rglob("round-01.md"))
+    assert (repository / ".agentic-loop" / "logs" / ".gitignore").is_file()
 
 
 def test_a_tree_with_nothing_in_it_produces_no_salvage_commit(tmp_path: Path) -> None:
@@ -808,6 +1012,276 @@ def test_an_agent_that_says_nothing_for_minutes_still_reports_that_it_is_running
     assert heartbeats, "an agent that printed nothing for its whole run printed nothing about itself either"
     assert all(line.startswith("[claude r1] ... ") for line in heartbeats)
     assert "no output yet" in heartbeats[0]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the process-group kill is the POSIX path; Windows walks the tree by pid with taskkill /T",
+)
+def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_path: Path) -> None:
+    """A timeout leaves no descendant running and no late write in the tree.
+
+    An agent blocked at the timeout is usually blocked inside a shell whose own
+    children are still writing. Killing only the agent left them running, and
+    `salvage_commit` runs the moment `run_agent` raises: a surviving descendant
+    then races that commit and edits the tree after the round was recorded. The
+    agent now leads its own process group and `_terminate_tree` signals the whole
+    group and waits for it to be gone, so this delayed writer -- a grandchild of
+    the loop -- is dead before the timeout is raised. Its stdout is redirected off
+    the agent's pipe so the drain thread cannot mistake it for the agent still
+    talking; the point under test is the kill, not the plumbing."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    marker = workdir / "late-write.txt"
+    child_pid_file = workdir / "child.pid"
+    script = tmp_path / "agent_with_child.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys, time\n"
+        "devnull = open(os.devnull, 'w')\n"
+        # A grandchild that would write to the tree only after the timeout, then
+        # stay alive -- so a survivor is both a late write and a live process.
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c',\n"
+        "     \"import pathlib, time; time.sleep(2.0); \"\n"
+        "     \"pathlib.Path('late-write.txt').write_text('a descendant wrote after the timeout', encoding='utf-8'); \"\n"
+        "     \"time.sleep(120)\"],\n"
+        "    stdout=devnull, stderr=devnull,\n"
+        ")\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "sys.stdout.write('spawned\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(agent_review_loop.AgentTimeout):
+        agent_review_loop.run_agent(
+            [sys.executable, str(script)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=1,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    child_pid = int(child_pid_file.read_text())
+    # Past when the descendant's write would have landed had it lived, so an
+    # absent marker is the kill beating it rather than the check merely being early.
+    time.sleep(1.5)
+    assert not marker.exists(), "a descendant wrote to the working tree after the timeout"
+    assert not _pid_alive(child_pid), "a descendant survived the timeout"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_path: Path) -> None:
+    """A reaped leader is not an empty group; its descendants must still be killed.
+
+    The agent leads its own process group, and a POSIX process group outlives its
+    leader: the descendants that inherited it stay in it after the leader exits.
+    When the leader has already exited and been reaped by the time
+    `_terminate_tree` runs -- the agent quitting a moment after the timeout fired --
+    `os.getpgid(leader_pid)` raises `ProcessLookupError` even while those
+    descendants are still alive and writing the tree. The old code read the group
+    that way and returned on that error as if it were empty, so `salvage_commit`
+    ran against a tree a survivor was still editing. `_terminate_tree` now signals
+    the group by the pid-as-pgid fixed at launch, so the survivor is killed even
+    with the leader already gone (or, failing that, cleanup is reported unconfirmed
+    so salvage is skipped -- the one thing it must never do is return clean here)."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    child_pid_file = workdir / "child.pid"
+    script = tmp_path / "leader_that_exits.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys\n"
+        "devnull = open(os.devnull, 'w')\n"
+        # A child left in the leader's own process group (no start_new_session), so
+        # it stays in the group whose id is the leader's pid once the leader exits.
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    stdout=devnull, stderr=devnull,\n"
+        ")\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        # The leader returns here, leaving the child alive behind it.
+        ,
+        encoding="utf-8",
+    )
+
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        cwd=str(workdir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Reap the leader before cleanup runs, reproducing the race exactly: the leader
+    # is gone, so os.getpgid(leader_pid) now raises ProcessLookupError -- the lookup
+    # the old code returned early on -- while its child lives on in the group whose
+    # id is the leader's pid, which the kernel keeps reserved while a member remains.
+    process.wait(timeout=30)
+    child_pid = int(child_pid_file.read_text())
+    assert _pid_alive(child_pid), "the child must outlive its leader for this test to mean anything"
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(process.pid)
+
+    try:
+        agent_review_loop._terminate_tree(process, grace_s=5.0)
+    except agent_review_loop.CleanupUnconfirmed:
+        # Acceptable: reporting cleanup unconfirmed skips salvage. The bug under
+        # test was returning as if the group were empty while the child still ran.
+        return
+
+    assert not _pid_alive(child_pid), "a descendant survived after its group leader had been reaped"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_reports_cleanup_unconfirmed_when_the_group_never_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure the previous version returned from instead of reporting.
+
+    After the SIGKILL pass `_group_gone` can still be false -- a member is wedged
+    in an uninterruptible syscall, or the deadline was simply too short. The old
+    `_terminate_tree` fell off the end of its loop and returned as if the tree were
+    gone, and `salvage_commit` then ran against a tree a survivor might still be
+    editing. It must raise instead, so the caller knows cleanup did not finish."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+    )
+    # The real SIGTERM/SIGKILL still go out; only the liveness answer is forced, so
+    # this pins the decision `_terminate_tree` makes when the group looks unclear.
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+    try:
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+            agent_review_loop._terminate_tree(process, grace_s=0.1)
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_reports_cleanup_unconfirmed_when_a_signal_cannot_be_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGKILL that cannot be delivered leaves the group's state unknown.
+
+    `_terminate_tree` used to suppress every signalling error, so a killpg that
+    failed with EPERM was indistinguishable from one that worked. A signal that
+    did not land means the members are still there and were not stopped, which is
+    the one thing that must not be read as a clean kill."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
+    )
+    monkeypatch.setattr(agent_review_loop, "_signal_group", lambda pgid, sig: False)
+    try:
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+            agent_review_loop._terminate_tree(process, grace_s=0.1)
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+def test_group_gone_treats_an_unclearable_group_as_not_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a group with no members left counts as gone.
+
+    `killpg(pgid, 0)` raising `ProcessLookupError` is the group being empty --
+    the one positive answer. A `PermissionError` is a member still there but not
+    ours to signal, and the old code returned True for it, calling a group that
+    demonstrably still had a process 'gone'. It has to keep waiting and then
+    report not-gone, or an unkillable descendant would be reported as cleaned up."""
+    monkeypatch.setattr(agent_review_loop.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError()))
+    assert agent_review_loop._group_gone(4321, deadline=time.monotonic() + 0.05) is False
+
+    monkeypatch.setattr(agent_review_loop.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert agent_review_loop._group_gone(4321, deadline=time.monotonic() + 5.0) is True
+
+
+def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows tree walk, faced the same way: a taskkill that did not confirm.
+
+    `taskkill /T` returns 0 on a kill and 128 when the pid is already gone; any
+    other code means it did not confirm the tree was killed. Exercised on every
+    platform by forcing the Windows branch, because that is the half a POSIX CI
+    never runs and where an unconfirmed kill would otherwise pass silently."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    monkeypatch.setattr(
+        agent_review_loop.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 1, "", "the process could not be terminated"),
+    )
+
+    class _FakeProcess:
+        pid = 4242
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_run_agent_surfaces_cleanup_unconfirmed_rather_than_a_plain_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distinct failure the loop reads to skip salvage.
+
+    When the timeout fires and the tree cannot be confirmed gone, `run_agent` must
+    raise `CleanupUnconfirmed`, not the ordinary `AgentTimeout`: the two are the
+    same event but a different situation, and only the distinct type tells the
+    caller a descendant may still be editing the tree."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    script = tmp_path / "slow.py"
+    script.write_text("import sys, time\nsys.stdout.write('go\\n')\nsys.stdout.flush()\ntime.sleep(120)\n", encoding="utf-8")
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        agent_review_loop.run_agent(
+            [sys.executable, str(script)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=1,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_a_round_whose_cleanup_is_unconfirmed_is_not_salvaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Salvage is the working-tree mutation that must not run over live survivors.
+
+    `salvage_commit` `git add -A`s the tree and commits it. If the killed agent's
+    processes were not confirmed gone, one may still be writing, so committing now
+    would capture a half-written tree as the round's work -- the very race salvage
+    exists to avoid, arriving through cleanup that could not finish. The loop must
+    leave the tree exactly as it is and fail, not commit it."""
+    repository = _repository(tmp_path)
+    # The kill still happens; only the confirmation is withheld, so the loop takes
+    # the unconfirmed-cleanup path with a tree that is in fact quiescent -- which
+    # is what lets the test assert on it without racing a real survivor.
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+
+    exit_code = _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    # No salvage commit: HEAD is still the repository's one initial commit.
+    assert _in(repository, "log", "--oneline").strip().count("\n") == 0
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "initial"
+    # The round's work is left in the tree, uncommitted, for an operator to resolve
+    # once the survivors are dealt with -- not swept into a commit underneath them.
+    assert "half-done.py" in _in(repository, "status", "--porcelain")
 
 
 def test_each_agent_gets_a_scratch_directory_no_round_has_used_before(tmp_path: Path) -> None:

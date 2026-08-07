@@ -104,7 +104,8 @@ class DebuggerPermissions:
 
     The defaults here are ``False`` and stay that way, which is not the same
     question as what a *generated* file says. A generation writes every flag
-    true (hardci-hq#96); these defaults decide what an existing file means where
+    true but the two the flash interlock refuses on (hardci-hq#96,
+    hardci-hq#107); these defaults decide what an existing file means where
     it says nothing, and turning them over would have widened every configuration
     already on disk at the moment of an update — the one thing a permission
     change may not do.

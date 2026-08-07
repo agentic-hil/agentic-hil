@@ -15,15 +15,18 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template, discover_attached_hardware
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
+    GENERATED_WRITE_PERMISSIONS,
     ConfigError,
     authoritative_config_target,
     carry_over_permissions,
+    generated_permissions,
     grant_every_permission,
     load_authoritative_config,
     permission_summary,
@@ -69,7 +72,7 @@ from agentic_hil.report import (
     read_last_report,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject, fold_hardware_id
 
 
 def _backend_kind(config: AgenticHILConfig | None) -> str | None:
@@ -1231,32 +1234,59 @@ GENERATED_CONFIG_HEADER_CLOSING = """#
 # while permissions.allow_config_write is true, write this file again from
 # attached hardware: entries already in it keep the permissions of the
 # configuration the writing server loaded, an entry the discovery finds for the
-# first time arrives with everything granted, and a file that has been deleted
-# comes back granting everything. That loaded state is the one it parsed at
+# first time arrives at the skeleton's defaults, and a file that has been deleted
+# comes back at those defaults. That loaded state is the one it parsed at
 # startup — a narrowing made over MCP since then is in this file and not in what
 # that server holds, so a regeneration before it is restarted writes the older,
 # wider value back. Set allow_config_write to false if this bench should not be
 # regenerated from the agent side at all.
 #
-# One combination is worth knowing before the first flash: validated flashing and
-# unrestricted debugger access are mutually exclusive, so while
+# One combination is worth knowing before you widen anything: validated flashing
+# and unrestricted debugger access are mutually exclusive, so while
 # allow_raw_debugger_commands or allow_mass_erase is true on a probe,
-# flash_firmware on that probe is refused. Take away whichever of the two a bench
-# does not need — or ask the agent to — and flashing works.
+# flash_firmware on that probe is refused. That is why this file leaves both
+# false. Set one true only if something outside these tools drives the probe that
+# way, and expect flashing through them to stop while it is.
 """
 
 
+def generated_default_narrowings(document: JsonObject) -> set[str]:
+    """The paths a generation writes false itself, by dotted path.
+
+    The `EXCLUSIVE_FLASH_PERMISSIONS` pair on every debugger entry, in practice —
+    read from `generated_permissions` so it stays the same answer as the values
+    actually written, for whatever set of sections and flags that covers."""
+    expected: set[str] = set()
+    for section in GENERATED_WRITE_PERMISSIONS:
+        entries = document.get(section)
+        if not isinstance(entries, dict):
+            continue
+        withheld = [flag for flag, granted in generated_permissions(section).items() if not granted]
+        for name, entry in entries.items():
+            if isinstance(entry, dict):
+                expected.update(f"{section}.{name}.permissions.{flag}" for flag in withheld)
+    return expected
+
+
 def narrowed_permissions(document: JsonObject) -> list[str]:
-    """Every permission this document does *not* grant, by dotted path.
+    """Every permission this document withholds *beyond the generated default*.
 
     Read off the document that is about to be written, which is the only place
-    the answer is. A generation grants everything; a regeneration puts the
-    permissions of the file it replaces back on the entries that were already
-    there, so a document leaving this list empty and one leaving it long are both
-    ordinary outcomes of the same call — and a result that claimed the first
-    while writing the second would be telling an operator their narrowed bench
-    had just been reopened."""
-    return sorted(path for path, granted in permission_surface(document).items() if not granted)
+    the answer is. A regeneration puts the permissions of the file it replaces
+    back on the entries that were already there, so a document leaving this list
+    empty and one leaving it long are both ordinary outcomes of the same call —
+    and a result that claimed the first while writing the second would be telling
+    an operator their narrowed bench had just been reopened.
+
+    "Beyond the generated default" rather than "every false value", because since
+    hardci-hq#107 a generation writes two of them false itself, and those two are
+    not a narrowing: nobody chose them for this bench and there is nothing for an
+    operator to restore. Reporting them here would answer the question this list
+    exists to answer — did anything survive, or get taken away? — with a standing
+    yes on every fresh file. They are stated in the generated header instead, and
+    `permissions` in the same result still carries the full true/false surface."""
+    by_default = generated_default_narrowings(document)
+    return sorted(path for path, granted in permission_surface(document).items() if not granted and path not in by_default)
 
 
 def _generated_config_header(document: JsonObject) -> str:
@@ -1265,22 +1295,30 @@ def _generated_config_header(document: JsonObject) -> str:
     Not a fixed sentence. `# every permission below is true` was written on a
     regeneration that had just carried a narrowing over, and a header that
     contradicts the document under it is worse than no header: it is the one part
-    a person reads before the keys."""
-    narrowed = narrowed_permissions(document)
-    if not narrowed:
-        middle = (
-            "# Every permission below is true: probing, resetting, raw debugger commands,\n"
-            "# mass erase, and the serial and CAN writes of every entry here. Flashing is\n"
-            "# granted too and is the one action that does not follow from its permission\n"
-            "# alone — see the interlock at the end of this header.\n"
-        )
+    a person reads before the keys.
+
+    Two things can put a `false` in the document and they read differently, so
+    they are stated apart: the pair a generation writes false on purpose, which is
+    fixed text, and a permission carried over from what the writing server had
+    loaded, which is listed."""
+    carried = narrowed_permissions(document)
+    opening = (
+        "# Every permission below is true — probing, resetting, flashing, and the serial\n"
+        "# and CAN writes of every entry here — except the two that are false so that\n"
+        "# flashing works: allow_raw_debugger_commands and allow_mass_erase. Neither has\n"
+        "# a tool behind it, and either one being true refuses flash_firmware on that\n"
+        "# probe. See the interlock at the end of this header.\n"
+    )
+    if not carried:
+        middle = opening
     else:
-        listed = "\n".join(f"#   {path}" for path in narrowed)
+        listed = "\n".join(f"#   {path}" for path in carried)
         middle = (
-            f"# {len(narrowed)} permission(s) below are false, carried over from the configuration\n"
-            "# the writing server had loaded rather than reset to the skeleton's open default:\n"
+            opening + "#\n"
+            f"# {len(carried)} further permission(s) below are false, carried over from the\n"
+            "# configuration the writing server had loaded rather than reset to the\n"
+            "# skeleton's open default:\n"
             f"{listed}\n"
-            "# Everything else below is true.\n"
         )
     return GENERATED_CONFIG_HEADER_OPENING + middle + GENERATED_CONFIG_HEADER_CLOSING
 
@@ -1345,7 +1383,7 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal = _discover_for_generation(current, coordinator)
+        discovery, refusal = discover_for_generation(current, coordinator)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -1435,22 +1473,23 @@ def _project_config_create(
 def _generated_summary(*, created: bool, narrowed: list[str]) -> str:
     if created:
         return (
-            "Project configuration generated from attached hardware with every permission granted; this server can probe, "
-            "reset and erase the bench from it and write to its serial and CAN entries, and can narrow any of those on the "
-            "operator's request. `flash_firmware` is granted and still refused until one of the two conflicting grants it "
-            "is interlocked against is taken away — see `next_steps`."
+            "Project configuration generated from attached hardware; this server can probe, reset and flash the bench "
+            "from it and write to its serial and CAN entries, and can narrow any of those on the operator's request. "
+            "The two permissions `flash_firmware` is interlocked against — allow_raw_debugger_commands and "
+            "allow_mass_erase — are false, which is what makes flashing work; see `next_steps`."
         )
     if not narrowed:
         return (
-            "Project configuration regenerated from attached hardware; every permission in it is granted. The "
-            "permissions come from the configuration this server loaded at startup, so a narrowing made over MCP since "
-            "then is not among them."
+            "Project configuration regenerated from attached hardware; every permission in it is granted except the two "
+            "that are false so that flashing works. The permissions come from the configuration this server loaded at "
+            "startup, so a narrowing made over MCP since then is not among them."
         )
     return (
         f"Project configuration regenerated from attached hardware; {len(narrowed)} permission(s) were carried over as "
-        "false from the configuration this server loaded at startup, and every other permission in it is granted. "
+        "false from the configuration this server loaded at startup, and every other permission in it is granted "
+        "except the two that are false so that flashing works. "
         "`narrowed_permissions` names them; anything this regeneration discovered for the first time is not among them "
-        "and starts open, and so is anything narrowed over MCP since this server started."
+        "and starts at the generated defaults, and so is anything narrowed over MCP since this server started."
     )
 
 
@@ -1474,8 +1513,23 @@ def _create_in_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObje
     }
 
 
-def _discover_for_generation(current: AgenticHILConfig | None, coordinator: HardwareCoordinator | None) -> tuple[JsonObject, JsonObject | None]:
+def discover_for_generation(
+    current: AgenticHILConfig | None,
+    coordinator: HardwareCoordinator | None,
+    *,
+    tool: str = PROJECT_CONFIG_CREATE,
+    reason_prefix: str = "config_create",
+    frontend: str = "mcp",
+) -> tuple[JsonObject, JsonObject | None]:
     """Read what is attached, holding everything a probe read holds.
+
+    Public because `agentic-hil init` writes the same file out of the same read
+    and so is held to the same lifecycle (hardci-hq#108). ``tool``,
+    ``reason_prefix`` and ``frontend`` are the whole of what a caller varies:
+    which name the audit record and every refusal carry, which name an incident
+    is filed under, and which frontend an owned coordinator announces itself as.
+    What is read, what is locked and what happens when any of it fails are not
+    a caller's to vary — that was the defect.
 
     Not a partial copy of the adoption path any more but the same function:
     `discover_under_hardware_lease` proves the audit trail writable before the
@@ -1496,9 +1550,20 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
 
     A workspace with no configuration at all has none of that machinery — no
     policy to audit against, no `state_root` under which a lease could be
-    recorded — and it is also the one case where nothing on this machine can be
-    holding a board on this project's behalf. That call reads directly, as it
-    always has.
+    recorded. It is the first `init` and the first `project_config_create` of a
+    workspace, so refusing it outright would leave no way to reach a configured
+    one at all; the audit trail and the lease record are what it goes without,
+    and the caller says so in its own result rather than letting the read pass
+    unremarked. But "this project holds no lease" was never "nobody holds this
+    board": another workspace, another server, or an `adopt-hardware` in a
+    different project can be mid-HOTPLUG on the same physical ST-Link right now.
+    The enumeration pseudo-resource and the probe lock live under the user's
+    home, keyed on the device and reachable with no configuration
+    (`agentic_hil.bench`), so the bootstrap read still takes them — the host-wide
+    enumeration before it enumerates, `probe:<serial>` before it says the first
+    word to the selected board — and answers `device_busy` without connecting
+    when either is held. Physical-device exclusion is not the part that needed a
+    policy (hardci-hq#108).
 
     ``current`` decides that, and ``coordinator`` never does. An unprovisioned
     server has no coordinator and hands None, and the in-lock reread is exactly
@@ -1511,11 +1576,11 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
     function every other caller uses.
     """
     if current is None:
-        return discover_attached_hardware(), None
+        return _discover_without_policy(tool=tool, frontend=frontend)
     if coordinator is None:
-        owned = HardwareCoordinator(current, frontend="mcp")
+        owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -1525,9 +1590,68 @@ def _discover_for_generation(current: AgenticHILConfig | None, coordinator: Hard
             # than an exception out of an MCP call.
             cleanup_error = _closed_cleanly(owned)
         if refusal is None and cleanup_error is not None:
-            return {}, _lock_cleanup_refusal(cleanup_error)
+            return {}, _lock_cleanup_refusal(cleanup_error, tool)
         return discovery, refusal
-    return _discover_under_lease(current, coordinator)
+    return _discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix)
+
+
+def _discover_without_policy(*, tool: str, frontend: str) -> tuple[JsonObject, JsonObject | None]:
+    """Bootstrap discovery with machine-wide physical exclusion but no lease.
+
+    The one caller is a workspace with no loadable configuration — the first
+    `init` or `project_config_create` — so there is no `state_root` to record a
+    lease under and no policy to audit against. What is *not* absent is the risk
+    the mutex exists for: the enumeration and the HOTPLUG connect are the same
+    hardware read they are under a lease, and the same ST-Link can be held by
+    another workspace on this machine. So the two device locks are taken directly
+    through `BenchMutex` — the host-wide enumeration pseudo-resource around the
+    whole read, and `probe:<serial>` in `before_connect`, which is the last point
+    before anything is said to the selected board — and a board another owner is
+    holding comes back `device_busy` here exactly as it would through
+    `discover_under_hardware_lease`, with nothing said to it.
+
+    Returns the discovery and, when a lock refused, the refusal that is the whole
+    answer. A refusal from `before_connect` is surfaced as that refusal rather
+    than as the discovery result: `discover_attached_hardware` would otherwise
+    hand it back as an unsuccessful read, which the caller would write a
+    placeholder file from instead of refusing.
+    """
+    bench = BenchMutex(frontend=frontend)
+    try:
+        try:
+            bench.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+        except DeviceBusyError as busy:
+            return {}, _bootstrap_device_busy(busy.result, tool)
+
+        refused: JsonObject = {}
+
+        def before_connect(selected: str) -> JsonObject | None:
+            resource = f"probe:{fold_hardware_id(selected)}"
+            try:
+                bench.acquire([resource])
+            except DeviceBusyError as busy:
+                refusal = _bootstrap_device_busy(busy.result, tool)
+                refused.update(refusal)
+                return refusal
+            return None
+
+        discovery = discover_attached_hardware(before_connect=before_connect)
+        if refused:
+            return {}, refused
+        return discovery, None
+    finally:
+        bench.release_all()
+
+
+def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:
+    """A bootstrap read refused because the physical probe is held elsewhere.
+
+    The machine-wide lock answered — another workspace or server is on this
+    board — before anything was said to it. `discover_attached_hardware` reads
+    the device directly here because there is no configuration to lease against,
+    but "no lease" was never "no exclusion": the refusal names the holder and is
+    retry-safe, exactly as the leased path's `device_busy` is."""
+    return {**busy, "tool": tool, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 
 def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
@@ -1538,10 +1662,10 @@ def _closed_cleanly(coordinator: HardwareCoordinator) -> Exception | None:
     return None
 
 
-def _lock_cleanup_refusal(error: Exception) -> JsonObject:
+def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     return {
         "ok": False,
-        "tool": PROJECT_CONFIG_CREATE,
+        "tool": tool,
         "error_type": "resource_quarantined",
         "summary": (
             "The attached probe was read and the coordination locks taken for that read could not all be given back, so "
@@ -1556,13 +1680,13 @@ def _lock_cleanup_refusal(error: Exception) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator) -> tuple[JsonObject, JsonObject | None]:
-    resources = [resource for name in current.debuggers if (resource := configured_probe_resource(current, name)) is not None]
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
+    resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
         coordinator,
-        tool=PROJECT_CONFIG_CREATE,
-        reason_prefix="config_create",
+        tool=tool,
+        reason_prefix=reason_prefix,
         resources=resources,
     )
 
@@ -1621,9 +1745,13 @@ def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject
 
 def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: list[str]) -> list[str]:
     granted = (
-        "that every permission in it is granted"
+        "that every permission in it is granted except the two that are false so that flashing works"
         if not narrowed
-        else f"that every permission in it is granted except the {len(narrowed)} listed in `narrowed_permissions`, which were carried over from the configuration this server loaded at startup"
+        else (
+            f"that every permission in it is granted except the two that are false so that flashing works and the "
+            f"{len(narrowed)} listed in `narrowed_permissions`, which were carried over from the configuration this "
+            "server loaded at startup"
+        )
     )
     steps = [
         f"Report where this configuration is, that an agent generated it, and {granted} — read `permissions` for the "
@@ -1634,14 +1762,15 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
     if created:
         steps.append(
             "Hardware tools read this configuration from now on; `debugger_info` confirms the bench is reachable, and "
-            "probing, resetting and COM and CAN writes work as written."
+            "probing, resetting, flashing and COM and CAN writes work as written."
         )
         steps.append(
-            "`flash_firmware` is the one exception, and it is not a missing permission: validated flashing and "
-            "unrestricted debugger access are mutually exclusive policies, and this file grants both. Set "
+            f"Two permissions are false in it on purpose: "
             f"`debuggers.{config.debugger_id or '<name>'}.permissions.allow_raw_debugger_commands` and "
-            "`.allow_mass_erase` to false with `project_config_set` — a narrowing, which is a change you may make — and "
-            "flashing works. Say which of the two the operator wants kept before you take it away."
+            "`.allow_mass_erase`. Validated flashing and unrestricted debugger access are mutually exclusive policies, "
+            "so either one being true refuses `flash_firmware` on that probe. Neither has a tool behind it here, so "
+            "nothing is unavailable to you because of them. Do not ask the operator to turn them on to make flashing "
+            "work — that is the one change that would stop it."
         )
     else:
         steps.append(
@@ -1686,8 +1815,9 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
         "workspace_root": str(workspace),
         "next_step": (
             f"Call `{PROJECT_CONFIG_CREATE}`. It takes no arguments and writes a configuration from what is attached to "
-            "this machine, with every permission granted, so the bench is workable straight away. Report what it granted "
-            "and ask the operator which permissions to take back."
+            "this machine, with every permission granted but the two that refuse flashing while they are true, so the "
+            "bench is workable straight away, flashing included. Report what it granted and ask the operator which "
+            "permissions to take back."
         ),
         **remediation_fields("config_file_not_found"),
         "side_effect_committed": False,
