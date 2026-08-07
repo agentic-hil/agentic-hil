@@ -127,12 +127,17 @@ class CanBusSession:
         self.lease = lease or DetachedHardwareLease()
         self.safe_state_confirmed = False
         self.process_reaped = False
-        # A session exists only downstream of an adapter that opened, so its
-        # marker is set by construction; the default is for the direct
-        # constructions in tests and keeps them describing an open bus, which is
-        # what they are.
+        # A supplied marker is authoritative and is never written over here. One
+        # caller builds a session around a bridge that refused honestly and then
+        # would not close — a live child process, and no bus contact — and a
+        # constructor that "helpfully" recorded contact for it would put a time
+        # into that report for something that never happened.
+        #
+        # Only the marker-less case is filled in, which is the direct
+        # construction in tests: those describe an open bus, so that is what
+        # their marker says.
         self.contact = contact if contact is not None else ContactMarker()
-        if self.contact.at is None:
+        if contact is None:
             self.contact.record("can_adapter_opened")
 
 

@@ -552,11 +552,12 @@ class ComPortSession:
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
-        # A session only exists downstream of a successful open, so its marker is
-        # set by construction; the default is for the direct constructions in
-        # tests and keeps them describing an open port, which is what they are.
+        # A supplied marker is authoritative and is never written over here — the
+        # open that produced it is the evidence, and a constructor is not. Only
+        # the marker-less case is filled in, which is the direct construction in
+        # tests: those describe an open port, so that is what their marker says.
         self.contact = contact if contact is not None else ContactMarker()
-        if self.contact.at is None:
+        if contact is None:
             self.contact.record("serial_open")
         self.log_path = log_path
         self.started_at = utc_now_iso()

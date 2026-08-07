@@ -39,8 +39,8 @@ from types import SimpleNamespace
 import pytest
 from conftest import write_config
 
-from agentic_hil.can import CanBusService
-from agentic_hil.comports import PORT_BUSY_ERRNOS, ComPortService, serial_port_busy
+from agentic_hil.can import CanBusService, CanBusSession
+from agentic_hil.comports import PORT_BUSY_ERRNOS, ComPortService, ComPortSession, serial_port_busy
 from agentic_hil.config import load_config
 from agentic_hil.knowledge import COM_PORT_BUSY_ERROR, catalogue_entry
 from agentic_hil.report import (
@@ -456,6 +456,41 @@ def test_a_refused_open_publishes_no_moment_of_contact(tmp_path: Path, monkeypat
         assert CONTACT_MARKER_KEY in started, started
     finally:
         service.close()
+
+
+def test_a_session_never_records_contact_on_a_marker_it_was_handed(tmp_path: Path) -> None:
+    """A session object is bookkeeping, not evidence.
+
+    Both session classes fill in a marker for the direct constructions in tests,
+    and one production caller hands them a marker that says no contact on
+    purpose: a CAN bridge that refused its open honestly and then would not close
+    is a live child process on this host and nothing on the bus. A constructor
+    that recorded contact for it would write a time into that report for
+    something that never happened.
+    """
+    config = com_config(tmp_path)
+    handed = ContactMarker()
+
+    session = ComPortSession(PORT_ID, config.com_ports[PORT_ID], SimpleNamespace(), "log.jsonl", contact=handed, start_reader=False)
+
+    assert session.contact is handed
+    assert handed.proves_no_contact is True
+    assert session.contact.report_fields() == {}
+
+    # And the marker-less construction still describes the open port it is for.
+    assert ComPortSession(PORT_ID, config.com_ports[PORT_ID], SimpleNamespace(), "log.jsonl", start_reader=False).contact.made is True
+
+
+def test_a_can_session_never_records_contact_on_a_marker_it_was_handed(tmp_path: Path) -> None:
+    """The same rule on the bus side, where the caller that relies on it lives."""
+    config = can_config(tmp_path)
+    handed = ContactMarker()
+
+    session = CanBusSession(BUS_ID, config.can_buses[BUS_ID], SimpleNamespace(), "log.jsonl", None, handed)
+
+    assert session.contact is handed
+    assert handed.proves_no_contact is True
+    assert CanBusSession(BUS_ID, config.can_buses[BUS_ID], SimpleNamespace(), "log.jsonl").contact.made is True
 
 
 # ---------------------------------------------------------------------------
