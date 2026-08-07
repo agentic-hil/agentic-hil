@@ -71,30 +71,46 @@ backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
 anything else when the backend named no abort point — a call killed at its
 deadline, an exit without complete confirmation — because an SWD attach halts the core
 and nothing there says whether it got that far. `quarantined: true` means the
-physical state is genuinely unknown. Stop
-effects there and retry the hardware call once: an incident the bench's
-recovery policy can verify clears itself on that retry. A refusal carrying
-`auto_recovery_attempted: true` means that already ran and did not confirm the
-safe state — do not retry again. Relay the result's `quarantine_guidance`
+physical state is genuinely unknown. An incident is not a padlock on the bench:
+a failed run aborts with its verdict, the abort drives a recovery action, and
+the calls that *are* the remedy — `probe_target`, `reset_target`,
+`flash_firmware` — keep working while the incident stands. What waits for it is
+the stimulus class: `com_write`, `can_send`, session starts, new runs. So put
+the target back into a known state and carry on. A recovery action that answers
+the reason the incident names clears it, with a ledger line. A refusal carrying
+`auto_recovery_attempted: true` means the automatic attempt already ran and did
+not confirm the safe state, so drive the reset yourself or ask. Relay the result's `quarantine_guidance`
 entries to the operator instead — per reason: what was attempted, what is
 confirmed, what remains unknown, and the `physical_check` to perform on the
 board — and ask them to run `agentic-hil recover --confirm-safe-state
 --quarantine-id <id>` after that check. Never clear the server's own state
 files yourself.
 
-`hardware_recover` is the one part of that you can do, and only one part.
-It clears an incident whose every reason names a call that never reached the
-hardware — a release that could not persist its own record, an owner process
-that died before it touched the board — and it refuses everything else with
-`recovery_requires_physical_check` and the exact `operator_command` to relay.
-The refusal is not about permissions and no grant changes it: confirming that a
-board is still and runs the expected firmware is a statement about the physical
-world, which is why the tool has no confirmation argument for you to set. Call
-it before you retry a hardware call rather than after — taking a lease over a
-dead owner's record adds `owner_process_exited_without_release` to the incident,
-and that reason needs a person. If `permissions.allow_recover` is false, this
-bench has decided its incidents are the operator's, and the answer is the
-`operator_command` and nothing else.
+`hardware_recover` is how you clear what is left. With no arguments it clears
+an incident whose every reason names a call that never reached the hardware — a
+release that could not persist its own record, an owner process that died before
+it touched the board. Everything else is refused with
+`recovery_requires_physical_check`, and that refusal tells you what to do:
+**ask the operator, in chat, and pass back what they say** as
+`operator_statement`. Show them the result's `quarantine_guidance` while you
+ask, then call again with their answer in their words. It goes into the recovery
+ledger verbatim, recorded as their statement relayed by you.
+
+Never write an `operator_statement` you were not given, and never strengthen one
+on the way through. The ledger names you as the actor who cleared the bench, so
+a line that reflects no actual operator utterance is a false record with your
+name on it — and nobody reading it later can tell it from one somebody said.
+"It should be fine" is not "the board is powered down". If there is nobody to
+ask, relay the `operator_command` instead and stop there; that is the operator's
+own route and it stays open. The boundary has not moved — a claim about a
+physical board still comes from a person — what moved is that you may carry
+their sentence instead of sending them hunting for a shell.
+
+Call it before you retry a hardware call rather than after — taking a lease over
+a dead owner's record adds `owner_process_exited_without_release` to the
+incident. If `permissions.allow_recover` is false, this bench has decided its
+incidents are the operator's, and the answer is the `operator_command` and
+nothing else.
 
 `com_port_identity_mismatch` is a refusal about *which board*, not about
 permissions. A serial device name — `/dev/ttyACM0`, `COM7` — is an enumeration
