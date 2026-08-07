@@ -96,7 +96,7 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
     # Born on the read-free model: reading has no key to set, so every
     # permission line a fresh config carries is about writing — and since
-    # hardci-hq#96 every one of them that grants a capability is granted, so the
+    # 0.8.0 every one of them that grants a capability is granted, so the
     # bench this writes is workable without anybody opening it.
     assert "version: 2" in config_text
     assert "allow_probe: " not in config_text
@@ -106,7 +106,7 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     assert "allow_config_permissions_write: true" in config_text
     # The two exceptions, and the reason the bench above is workable: either one
     # true refuses flash_firmware on that probe, and neither has a tool behind it
-    # to trade for that (hardci-hq#107).
+    # to trade for that.
     assert "allow_raw_debugger_commands: false" in config_text
     assert "allow_mass_erase: false" in config_text
     # And nothing else in the file it wrote is off, whatever the key is called: a
@@ -341,8 +341,7 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
 
 
 # The line `uv tool upgrade` wrote on the reporter's Linux box, beside the exit
-# code 0 that was read as success while the installation stayed on 0.7.1
-# (hardci-hq#99).
+# code 0 that was read as success while the installation stayed on 0.7.1.
 _UV_EXACT_PIN_HINT = (
     "hint: `agentic-hil` is pinned to `0.7.1` (installed with an exact version pin); "
     "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version."
@@ -425,7 +424,7 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     operator: this one costs nothing, while a pin means the release they wanted
     is not the one they are running. Refusing both would make
     `agentic-hil upgrade` exit non-zero on every up-to-date machine and break
-    the provisioning scripts that run it unconditionally -- hardci-hq#99 was
+    the provisioning scripts that run it unconditionally -- the defect was
     about claiming an upgrade that never happened, not about reporting that
     there was none to make.
     """
@@ -812,7 +811,7 @@ def _default_state_root() -> Path:
 
 
 def _refuse_the_config_location(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the profile of hardci-hq#64.
+    """Stand in for the profile that refuses the config location.
 
     There, `%APPDATA%` carries an app-capability ACE and the authoritative
     config's own location fails the ancestor trust check before anything is
@@ -892,7 +891,7 @@ def test_agent_install_completes_where_the_config_location_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """hardci-hq#64: a refused config location is not the skill's problem.
+    """A refused config location is not the skill's problem.
 
     Before the split both halves shared one transaction, so this refusal took
     the skill installation and the MCP registration with it and the operator was
@@ -1614,7 +1613,7 @@ def test_the_claude_deny_rules_use_only_the_form_that_host_evaluates(
     and a single leading slash "anchors at the settings source, not the
     filesystem root" — which in user settings is `~/.claude`, not `/`.
 
-    Both halves were written from expectation once already (hardci-hq#81), so
+    Both halves were written from expectation once already, so
     the absence of the `Write` form is asserted explicitly rather than implied.
     """
     _isolated_workspace(tmp_path, monkeypatch)
@@ -1810,7 +1809,7 @@ def test_a_repeat_setup_takes_back_the_inert_opencode_patterns(
     """What earlier releases wrote has to go, now that nothing replaces it.
 
     Left alone those patterns read as protection and are none — the silent half
-    of hardci-hq#81 on a second host. An operator's own pattern over one of these
+    of the same defect on a second host. An operator's own pattern over one of these
     trees is not ours to drop, and neither is one of ours they have since set to
     something other than `deny`.
     """
@@ -1857,7 +1856,7 @@ def test_the_opencode_cleanup_settles_after_one_run(
 
 
 def test_the_absolute_opencode_pattern_matched_nothing() -> None:
-    """Why those patterns are removed rather than corrected (hardci-hq#84).
+    """Why those patterns are removed rather than corrected.
 
     opencode matches `permission.edit` against the worktree-relative path, so the
     absolute form earlier releases wrote could not match anything. Its own
@@ -1967,7 +1966,7 @@ def _skill_routing_table(text: str) -> list[str]:
     the whole document cannot tell the two apart, so it took every underscored
     identifier for a tool and every documented field had to be excluded by
     hand before the suite went green. That list grew with the documentation,
-    and on one merge two branches extended it independently: hardci-hq#90.
+    and on one merge two branches extended it independently.
     Reading the column reads the document's own structure instead of guessing
     at its prose.
     """
@@ -1995,7 +1994,7 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
 
 
 def test_the_skill_tool_check_reads_the_table_and_not_the_prose() -> None:
-    """Both directions of hardci-hq#90, against the shipped document.
+    """Both directions of the routing-table contract, against the shipped document.
 
     Prose is out of scope whatever an identifier there is called — a result
     field, and equally a name shaped like a tool, which is the deliberate half
@@ -2058,8 +2057,7 @@ def _repository_document(name: str) -> str:
 def test_readme_tool_table_is_the_whole_tool_inventory() -> None:
     """README's `Tools` column is an inventory, so it holds the contract both ways.
 
-    The same shape as the skill's routing table and for the same reason
-    (hardci-hq#90): the column is read, the prose is not. README's notes column
+    The same shape as the skill's routing table and for the same reason: the column is read, the prose is not. README's notes column
     alone writes `set`, `describe`, `adopt_hardware` and `reload_description` in
     backticks, none of which is a tool name, and a scan of the document would
     have to exclude them by hand for as long as anybody keeps writing notes.
@@ -2099,7 +2097,7 @@ def test_agents_configuration_table_holds_the_configuration_family() -> None:
     that: every `project_config_*` tool this server serves has a row, and every
     row names one. Demanding the whole contract here would be a false claim
     about a table that never made it; demanding nothing would let a new
-    configuration tool arrive unmentioned, which is the drift hardci-hq#111 is
+    configuration tool arrive unmentioned, which is the drift this check is
     about.
     """
     exposed = _repository_tool_contract()
@@ -2120,7 +2118,7 @@ def test_agents_configuration_table_holds_the_configuration_family() -> None:
 
 
 def test_the_document_tool_tables_fail_in_both_directions() -> None:
-    """The proof hardci-hq#111 asks for, run against the shipped documents.
+    """The proof the inventory contract asks for, run against the shipped documents.
 
     A tool added to the contract fails until the documents name it, and a name
     in a document the server does not serve fails too — for the whole inventory
@@ -2479,7 +2477,7 @@ def test_setup_leaves_configured_path_modes_exactly_as_it_found_them(
     `init`/`setup` used to chmod group/other write off every user-owned ancestor
     of `state_root`, the authoritative config and the agent's policy file,
     because the configured-path trust check refused those directories for their
-    mode. That check was removed whole (hardci-hq#95) and the mutation outlived
+    mode. That check was removed whole and the mutation outlived
     it — invisible on Windows, where the tightening is a no-op, and a real loss
     of access on POSIX for a validator that no longer exists. Setup succeeds on
     the same tree it used to rewrite, and rewrites none of it."""
@@ -3032,7 +3030,7 @@ def reset_probe_id(backend: str) -> str:
 def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_path: Path, backend: str, mode: str) -> None:
     """One command line per backend per mode, which is the only comparable thing.
 
-    hardci-hq#58 survived three releases because nothing here compared the
+    The mode defect survived three releases because nothing here compared the
     backends: the OpenOCD parametrization above pinned all three of its command
     lines, stlink and pyocd had no mode coverage at all, and `init` quietly
     borrowing the halt argument was invisible from inside either one. Two modes
@@ -3060,7 +3058,7 @@ def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_pa
 
 @pytest.mark.parametrize("backend", ["stlink", "pyocd"])
 def test_reset_init_is_refused_where_it_cannot_run_instead_of_halting_quietly(tmp_path: Path, backend: str) -> None:
-    """The effect that changed, not the string that changed (hardci-hq#58).
+    """The effect that changed, not the string that changed.
 
     Through 0.8.0 this call spawned the backend's CLI with the same plain halt
     argument mode `halt` sends, so the reset-init script a caller asked for -

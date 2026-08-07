@@ -1,6 +1,6 @@
 """Clearing a quarantine over MCP, and the class boundary that stays.
 
-hardci-hq#128. `hardware_lease_status` has distinguished `auto_recoverable` from
+`hardware_lease_status` has distinguished `auto_recoverable` from
 the rest since 0.8.0, but `recover` lived only at the shell — so on a host with no
 shell an agent could see an incident, explain it, and do nothing about it, even
 when the incident had provably never touched a board.
@@ -33,7 +33,7 @@ from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry
 from agentic_hil.tools import AgenticHILToolService
 
 TOOL = "hardware_recover"
-# Machine-wide device locks contend across sibling clones (hardci-hq#116).
+# Machine-wide device locks contend across sibling clones.
 RESOURCE = "physical:recover-tool-probe"
 
 
@@ -173,7 +173,7 @@ def test_a_hardware_call_that_adopted_the_incident_first_widens_its_reasons(tmp_
     Taking a lease over a record a dead owner left behind stamps
     `owner_process_exited_without_release` onto the incident, on top of whatever
     reason it already carried — `acquire`'s adoption path predates the
-    hardci-hq#127 evidence check and still fires on any unreleased record. So an
+    no-contact evidence check and still fires on any unreleased record. So an
     incident that was clearable from here stops being clearable once a hardware
     call has been tried against it, and this tool belongs before that retry
     rather than after it.
@@ -300,7 +300,7 @@ def test_allow_recover_false_refuses_on_the_permission(tmp_path: Path) -> None:
 
 
 def test_a_generated_configuration_grants_it() -> None:
-    """Open by default like every grant since hardci-hq#96."""
+    """Open by default like every grant since 0.8.0."""
     import yaml
 
     from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, GENERATED_PROJECT_PERMISSIONS

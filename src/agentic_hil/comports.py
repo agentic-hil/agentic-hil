@@ -79,13 +79,13 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 # ---------------------------------------------------------------------------
 # Which board is behind this entry.
 #
-# `device` says how to reach a port, not which one it is. On both platforms that
-# name is an enumeration order — plug a second ST-Link into a Linux host and the
-# UART that was ttyACM0 can come up as ttyACM1, and the board that takes the
-# vacated name is opened in its place with nothing in the result saying so
-# (hardci-hq#100). The entry is therefore asked what hardware it means, and the
-# answer is compared against what is actually behind that name before the port is
-# opened.
+# `device` says how to reach a port, not which one it is. On both platforms
+# that name is an enumeration order — plug a second ST-Link into a Linux host
+# and the UART that was ttyACM0 can come up as ttyACM1, and the board that
+# takes the vacated name is opened in its place with nothing in the result
+# saying so. The entry is therefore asked what hardware it means, and the
+# answer is compared against what is actually behind that name before the port
+# is opened.
 
 COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
 # A declared identity that could not be confirmed before opening — the host has
@@ -93,7 +93,7 @@ COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
 # reports no serial, or it reports no vendor and product ids while the entry
 # names them. Distinct from a mismatch: the name may still lead to
 # the right board, but nothing proved it does, and an entry that asked for the
-# guarantee is not opened on a check that did not run (hardci-hq#100).
+# guarantee is not opened on a check that did not run.
 COM_PORT_IDENTITY_UNVERIFIED = "com_port_identity_unverified"
 
 
@@ -166,8 +166,7 @@ def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdenti
     ``vid``/``pid`` ride along with whichever of those answered, and stand on
     their own when neither did: an adapter that publishes no serial can still say
     what kind of adapter it is, and a check that refuses a CH340 answering to a
-    name written for an ST-Link is worth more than no check at all
-    (hardci-hq#124).
+    name written for an ST-Link is worth more than no check at all.
 
     What is deliberately absent is a guess. A project with one debugger and one
     COM port is *probably* one board, and probably is exactly what must not
@@ -294,7 +293,7 @@ def _identity_mismatch(
     is another *unit*, the vendor and product ids say it is another *kind* of
     device — and the second is not the weaker of the two, since a USB serial
     number is unique only within a vendor and a matching one across vendors
-    proves nothing at all (hardci-hq#124). Both sides of the comparison are in
+    proves nothing at all. Both sides of the comparison are in
     the payload, whichever ran: ``expected_*`` from the configuration,
     ``found_*`` from the host."""
     identity["status"] = "mismatch"
@@ -333,7 +332,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     device is not enumerated exactly once (`port_not_enumerated`), the matched
     port reports no serial (`serial_unknown`), or it reports no USB ids while the
     entry names them (`usb_ids_unknown`) — are refusals too, not opens with
-    a note (hardci-hq#100). The entry asked that this name be proved to still
+    a note. The entry asked that this name be proved to still
     reach its board before use, and "the check could not run" does not prove it;
     reporting the gap in a result the caller reads *after* it has already written
     to whatever the name now reaches is no protection at all. Every one is
@@ -436,7 +435,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     # serial number is unique within a vendor and nowhere else. For an adapter
     # that publishes no serial this is the whole check, and it is honest about
     # being one — it separates a CH340 from an ST-Link, not one CH340 from
-    # another (hardci-hq#124).
+    # another.
     declared = [(claimed, seen) for claimed, seen in ((expectation.vid, found_vid), (expectation.pid, found_pid)) if claimed is not None]
     if any(seen is None for _, seen in declared):
         identity["status"] = "usb_ids_unknown"
@@ -862,8 +861,7 @@ class ComPortService:
         except Exception as error:
             # No OS handle exists before open(): configuring the unopened
             # object cannot touch the device, so this failure proves the port
-            # was never reached and must refuse rather than quarantine
-            # (hardci-hq#97).
+            # was never reached and must refuse rather than quarantine.
             return {**open_failure(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         try:
             serial_handle.open()

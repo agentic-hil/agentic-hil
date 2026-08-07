@@ -9,7 +9,6 @@ including the runner CLI's own default — aborted on every tree newer than the
 0.4.0 they still pinned. That went unnoticed across two releases, because the
 only thing that enforced version agreement ran on `release: published`: after
 the point of no return, since a PyPI version cannot be re-uploaded.
-Implements hardci-hq#74 and hardci-hq#75.
 
 So this is one module rather than a step in a release job. It reads files and
 compares strings — no secret, no OIDC, no tag — which is exactly the shape that
@@ -24,9 +23,9 @@ other half — any file carrying the release version that no entry accounts for
 is an error, so a new home for the version cannot appear unnoticed. That sweep
 skips covered files, so a mention shape an entry's extractor cannot see is a
 mention nothing checks: the `agentic-hil@vX.Y.Z` git-tag pin in
-TROUBLESHOOTING.md drifted by hand through four releases that way
-(hardci-hq#86). Tag pins are now an entry of their own, and `unclaimed_pins`
-refuses a covered file whose project-tied `@v` pins its entries do not state.
+TROUBLESHOOTING.md drifted by hand through four releases that way. Tag pins are
+now an entry of their own, and `unclaimed_pins` refuses a covered file whose
+project-tied `@v` pins its entries do not state.
 
 tomllib is deliberately absent: it is stdlib only from 3.11 and this project
 still supports 3.10, so importing it would make the gate itself the thing that
@@ -110,7 +109,7 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
     "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
     # NOT_CONTACTED's comment names the release that introduced the shape it
-    # generalizes (hardci-hq#97). History, not a pin.
+    # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",
     # One release changed what the tool refuses, so several documents and the
     # code itself state *from which release* a rule applies: the standard Windows
@@ -212,7 +211,7 @@ def _tag_pins(root: Path, relative: str) -> tuple[str, ...]:
     version, a tag pin states a git reference that happens to be one. The
     first release after this gate shipped proved the difference matters —
     `_requirement_pins` counted five occurrences in TROUBLESHOOTING.md and the
-    sixth, `agentic-hil@v0.7.0` in a git URL, was invisible (hardci-hq#86).
+    sixth, `agentic-hil@v0.7.0` in a git URL, was invisible.
     """
     text = _read(root, relative)
     return tuple(match.group(2) for match in TAG_PIN.finditer(text) if "agentic-hil" in match.group(1))
@@ -283,7 +282,7 @@ def locations(root: Path) -> list[Location]:
             _requirement_pins(root, "TROUBLESHOOTING.md"),
         ),
         # A second entry for the same file, because it is a different claim: a
-        # git-tag pin, not a version requirement (hardci-hq#86).
+        # git-tag pin, not a version requirement.
         Location(
             "TROUBLESHOOTING.md",
             "the agentic-hil@vX.Y.Z git-tag pin: the documented install route while PyPI is unreachable",
@@ -382,7 +381,7 @@ def unclaimed_pins(root: Path) -> list[str]:
     """Project-tied `@vX.Y.Z` pins in covered files that no entry states.
 
     `uncovered_files` deliberately skips a covered file, so a mention shape the
-    file's extractors cannot see is checked by nothing — the gap hardci-hq#86
+    file's extractors cannot see is checked by nothing — the gap that was
     found, where a file counted as covered while a pin in it drifted by hand
     through four releases. This is the closing half: every pin of this shape in
     a covered file must carry a version the file's own entries state, which

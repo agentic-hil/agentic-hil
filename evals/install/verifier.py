@@ -55,7 +55,7 @@ PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_writ
 # The two debugger permissions an install must write *false*, listed here for the
 # same reason and mattering more: while either is true the flash interlock refuses
 # flash_firmware on that probe, so an install that granted them shipped a bench
-# that cannot flash (hardci-hq#107). Spelled out rather than imported, so that a
+# that cannot flash. Spelled out rather than imported, so that a
 # release which reopened them could not also move this expectation.
 EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
 VERIFIER_PYTHON = Path("/opt/install-eval-verifier/bin/python")
@@ -842,7 +842,7 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
         return False, detail
     # The project-scoped block, and exactly the three keys it has. It used to be
     # absent from what `init` writes and its presence was read as the *removed*
-    # flat block of a much older release; since hardci-hq#96 `init` writes it,
+    # flat block of a much older release; since 0.8.0 `init` writes it,
     # granted, so what has to be checked is its shape rather than its absence.
     project_permissions = data.get("permissions", {})
     if not isinstance(project_permissions, dict):
@@ -887,15 +887,14 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
             if read_free and forbidden_flag in permissions:
                 return False, f"{section}.{name}.permissions carries the removed {forbidden_flag}"
             # An install decides the permission state completely rather than
-            # half, and since hardci-hq#96 it decides it open: every flag that
+            # half, and since 0.8.0 it decides it open: every flag that
             # IS declared has to be on, whichever model the file uses. What this
             # still catches is the thing it always caught — an install that left
             # some flags to a template's memory and some to chance.
             #
             # The exception is the pair the flash interlock refuses on. An
             # install that granted those wrote a bench that cannot flash, so
-            # `true` there is the failure and `false` is the requirement
-            # (hardci-hq#107) — checked in both directions, because an install
+            # `true` there is the failure and `false` is the requirement — checked in both directions, because an install
             # silently reopening them is exactly what this eval exists to catch.
             expected_false = set(EXCLUSIVE_FLASH_PERMISSIONS) & set(permissions)
             withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and flag not in expected_false and value is not True)
@@ -915,7 +914,7 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
         return False, f"top-level permissions were not all granted by the install: {ungranted}"
     # The check is "the agent added no hardware while installing", not "the
     # template is empty": `init` writes one starter probe, so `debuggers` must
-    # hold exactly that entry and nothing else. Since hardci-hq#104 it also reads
+    # hold exactly that entry and nothing else. It also reads
     # the attached bench on a workspace with no profile, so on a host with a board
     # plugged in it writes the one COM port carrying that probe's serial. That is
     # discovery, not an agent configuring hardware, and the entry it writes is
@@ -953,8 +952,7 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
     The third element is the names whose `tools/list` entry carries no
     annotations. A host reads those to decide what passes without a prompt, so
     a build that ships the tool table without them is a regression this eval
-    sees from outside the package, on the wire, where the unit tests cannot
-    (hardci-hq#101).
+    sees from outside the package, on the wire, where the unit tests cannot.
     """
     process = subprocess.Popen(
         trusted_command(arguments),

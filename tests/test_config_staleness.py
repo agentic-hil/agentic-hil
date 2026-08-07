@@ -1,6 +1,6 @@
 """A running server says which configuration it is answering out of.
 
-The session behind hardci-hq#77: an operator switched a debugger from `stlink`
+The session behind this: an operator switched a debugger from `stlink`
 to `pyocd`, and within the same minute `agentic-hil doctor` reported `pyocd`
 while `debugger_info` over MCP reported `stlink`. Both were telling the truth
 about different documents, and neither said so. It cost two round trips, and it
@@ -658,7 +658,7 @@ def test_every_agent_facing_copy_names_the_states_this_module_has() -> None:
     absent from another is an agent acting on a rule this server does not follow.
     `invalid` is the case in point: it was a sixth state asserting that a restart
     onto the file would fail, it was removed with the candidate validation that
-    was the only thing that could establish it (hardci-hq#95), and a copy still
+    was the only thing that could establish it, and a copy still
     naming it would send an operator looking for a state no answer can carry."""
     from agentic_hil.mcp import SERVER_INSTRUCTIONS
 

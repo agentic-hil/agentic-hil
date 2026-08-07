@@ -193,11 +193,11 @@ def test_the_questions_that_sent_agents_into_the_installed_package_are_answered(
 
 
 def test_a_refused_path_names_the_component_and_a_location_that_works() -> None:
-    """#64: the refusal named the field and the path and no way forward.
+    """The refusal named the field and the path and no way forward.
 
     The refusal itself has changed — an ACL no longer decides anything, and what
     remains is a path that is not the object it claims to be — but the property
-    that made #64 a defect has not: a caller told "no" has to be told what to do
+    that made it a defect has not: a caller told "no" has to be told what to do
     next, in the place they are already reading.
     """
     refusal = ConfigError(

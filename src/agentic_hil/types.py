@@ -116,11 +116,10 @@ class DebuggerPermissions:
 
     The defaults here are ``False`` and stay that way, which is not the same
     question as what a *generated* file says. A generation writes every flag
-    true but the two the flash interlock refuses on (hardci-hq#96,
-    hardci-hq#107); these defaults decide what an existing file means where
-    it says nothing, and turning them over would have widened every configuration
-    already on disk at the moment of an update — the one thing a permission
-    change may not do.
+    true but the two the flash interlock refuses on; these defaults decide what
+    an existing file means where it says nothing, and turning them over would
+    have widened every configuration already on disk at the moment of an update
+    — the one thing a permission change may not do.
 
     ``allow_probe`` exists only for version 1 files. From version 2 on there is
     no read permission: exclusivity replaced it, and a version 2 config that
@@ -149,7 +148,7 @@ class ProjectPermissions:
 
     Every flag belongs to the write class of decision 0018: reading the
     configuration needs no grant, writing it does. A generated configuration
-    carries all of them true (hardci-hq#96), so an agent can describe the bench,
+    carries all of them true, so an agent can describe the bench,
     narrow it on the operator's request, clear an incident nothing physical was
     part of, and lift the server onto the current release — without anyone
     opening YAML. The dataclass defaults stay ``False`` for the same reason the
@@ -179,7 +178,7 @@ class ProjectPermissions:
         taking-away and not the granting: only ``false`` may be written.
     ``allow_recover``
         clear a quarantine over MCP (``hardware_recover``), for the reasons that
-        name no hardware contact and for those only (hardci-hq#128). Not about
+        name no hardware contact and for those only. Not about
         the configuration at all, which is why the class docstring above no
         longer says three: it sits here because it is project-scoped rather than
         device-scoped, and because a bench that wants an agent kept away from its
@@ -189,7 +188,7 @@ class ProjectPermissions:
 
     ``allow_upgrade``
         replace this installation with the newest release over MCP
-        (``server_upgrade``, hardci-hq#126). Not about this file at all, and here
+        (``server_upgrade``). Not about this file at all, and here
         anyway because it is the same class of decision and the same ratchet: an
         agent may close it and can never open it. The tool it gates takes no
         version and can only lift to latest, so closing this key cannot be
@@ -270,11 +269,10 @@ class ComPortConfig:
     #
     # What they buy is the thing a serial alone cannot: a USB serial number is
     # unique only within a vendor, so `serial_number` matching proves the right
-    # unit only once the type agrees too, and an adapter that publishes no serial
-    # at all (the cheap CH340 clones) gets a named type check instead of nothing
-    # (hardci-hq#124). Optional and independent of each other, like
-    # `serial_number` and unset in every configuration written before they
-    # existed.
+    # unit only once the type agrees too, and an adapter that publishes no
+    # serial at all (the cheap CH340 clones) gets a named type check instead of
+    # nothing. Optional and independent of each other, like `serial_number` and
+    # unset in every configuration written before they existed.
     vid: int | None = None
     pid: int | None = None
     resource_id: str | None = None
@@ -298,7 +296,7 @@ class CanBusConfig:
     # preference but the claim that observing this bus sends nothing. It is
     # enforced per adapter in `can.LISTEN_ONLY_ENFORCEMENT` — the three obtain
     # the mode three different ways — and an adapter that cannot be held to it
-    # refuses the session rather than listening anyway (hardci-hq#103).
+    # refuses the session rather than listening anyway.
     listen_only: bool
     max_buffer_frames: int
     max_frame_data_bytes: int

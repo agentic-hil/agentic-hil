@@ -3,7 +3,7 @@
 Discovery used to happen exactly once, at ``init`` time. The most common way to
 set a bench up — install the tool, then plug the board in — therefore produced a
 placeholder file (``probe_id: null``, ``executable: null``, a placeholder target)
-and no way back into it. In the session behind hardci-hq#76 that ended with an
+and no way back into it. In the session that produced this, that ended with an
 agent printing a 24-character probe serial for a person to retype, which is the
 one value nobody can guess and nobody transcribes correctly twice.
 
@@ -12,8 +12,8 @@ This is the way back, and it is narrow on purpose:
 **It carries identity, and only identity.** ``probe_id``, ``executable``,
 ``target.controller`` and a COM device — precisely what an attached probe hands
 you and what the file cannot know without it. Every one of them falls in the
-description half of hardci-hq#80, so this path cannot reach a ``permissions:``
-block at all.
+description half of the configuration write, so this path cannot reach a
+``permissions:`` block at all.
 
 **It takes no values from its caller.** Arguments *select* — which probe of
 several, which entry receives them — and never supply. The values come from
@@ -500,7 +500,7 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
             # same device, written down so it survives the next replug — so it
             # goes to `carried` rather than to `kept`, which is where the "keeps
             # working, and gets fixed on the next adopt-hardware" half of
-            # hardci-hq#100 is actually implemented.
+            # the serial-port identity rule is actually implemented.
             carried.append(
                 {
                     "key": f"com_ports.{port_name}.device",
@@ -536,7 +536,7 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
             )
         # The same record already carries the vendor and product ids, so they
         # cost nothing to write and they are what makes the serial mean a unit:
-        # a USB serial is unique within a vendor and nowhere else (hardci-hq#124).
+        # a USB serial is unique within a vendor and nowhere else.
         # Reported exactly like the serial — carried, already current, or left
         # alone — because they are the same kind of fact about the same entry.
         for field, discovered in (("vid", port_vid), ("pid", port_pid)):
@@ -811,7 +811,7 @@ def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> l
     Every key the device carries, not just its primary: an entry naming both a
     ``resource_id`` and a probe serial is leased under both, so the read holds the
     serial another workspace's bootstrap `init` derives from enumeration as well
-    as the alias only this workspace knows (hardci-hq#108)."""
+    as the alias only this workspace knows."""
     entry = existing.debuggers.get(debugger_id)
     if entry is None:
         return []
@@ -854,7 +854,7 @@ def discover_under_hardware_lease(
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
     names it in a quarantine reason — the callers are `project_config_adopt_hardware`,
-    `project_config_create` and `agentic-hil init` (hardci-hq#108), and an incident
+    `project_config_create` and `agentic-hil init`, and an incident
     has to say which one left it.
 
     Returns the discovery result and, when the read never got that far or did not

@@ -1,6 +1,6 @@
 """Quarantine is the answer to "I do not know what state the hardware is in".
 
-It is not the answer to "something went wrong" (hardci-hq#97). Quarantine is
+It is not the answer to "something went wrong". Quarantine is
 the one state a human must physically resolve — walk to the bench, inspect,
 type `agentic-hil recover --confirm-safe-state` — so every trigger has to pass
 one test: can the failure prove it never reached the hardware (or that the
@@ -615,7 +615,7 @@ REASON_PREFIXES = ("config_adopt", "config_create")
 
 
 def test_every_quarantine_trigger_in_the_source_has_signer_guidance() -> None:
-    """The inventory that hardci-hq#97 demanded, kept honest going forward: a
+    """The inventory the reclassification demanded, kept honest going forward: a
     new trigger without catalogue guidance fails here by name."""
     reasons: set[str] = set(INDIRECT_REASONS)
     for path in SRC_ROOT.rglob("*.py"):

@@ -1,6 +1,6 @@
 """What a refused CAN bridge open is allowed to claim about the bus.
 
-The defect these tests exist for (hardci-hq#112): `open_process_adapter` answered
+The defect these tests exist for: `open_process_adapter` answered
 `side_effect_committed: False` on the protocol-shape refusal even when the bridge
 had already answered `ok: true` to `open`. A bridge that has opened is on the bus;
 whether it sent anything only the bridge knows. `False` there was not a finding
@@ -80,7 +80,7 @@ def bridge_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, response: dic
 def test_a_bridge_that_opened_then_answered_in_the_wrong_shape_does_not_claim_nothing_happened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The proof hardci-hq#112 asked for: `ok: true`, then a response in the wrong shape."""
+    """The case as it was reported: `ok: true`, then a response in the wrong shape."""
     result, bridge = bridge_result(tmp_path, monkeypatch, {"ok": True, "protocol_version": 2, "channels_open": 1})
 
     assert result["ok"] is False

@@ -3,7 +3,7 @@
 The finding behind these tests: a pyOCD target type that only a CMSIS pack
 provides failed at flash time with no mention of packs, and an agent hunting for
 the value escalated into pyOCD's own sources and hand-downloaded a vendor
-``.pdsc`` twice (hardci-hq #66).
+``.pdsc`` twice.
 
 The tests that matter most here are the negative ones: a host that cannot answer
 the target-support question must report "undetermined" rather than "broken". A
@@ -181,7 +181,7 @@ def test_pack_install_commands_never_run_anything() -> None:
 
 
 def test_the_probe_refusal_carries_the_pack_command(tmp_path: Path) -> None:
-    """#66 stage 2: the fix belongs in the answer, not only in `doctor`.
+    """Stage 2: the fix belongs in the answer, not only in `doctor`.
 
     Driven through the real backend against a pyOCD that emits the real message,
     so the classifier, the catalogue lookup and the substituted command are

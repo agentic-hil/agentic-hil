@@ -1,6 +1,6 @@
 """A changed device description does not need the MCP server restarted.
 
-The reported session (hardci-hq#98) is one sentence long: *"ich musste den
+The reported session is one sentence long: *"ich musste den
 MCP-Server auch manuell neustarten, wenn ich etwas an der Konfiguration der
 Geraete geaendert habe"*. A board was plugged in, written into the authoritative
 file, and stayed invisible to the running server until somebody restarted the
@@ -97,8 +97,8 @@ def add_second_board(document: dict) -> None:
         "type": "stlink",
         "executable": FAKE_STLINK.as_posix(),
         "probe_id": "SPARE-0002",
-        # A hand-widened entry, wider than any generation writes: since
-        # hardci-hq#107 the last two are generated false. That is exactly what
+        # A hand-widened entry, wider than any generation writes: the
+        # last two are generated false. That is exactly what
         # must not reach a running server through a reload.
         "permissions": {"allow_flash": True, "allow_reset": True, "allow_raw_debugger_commands": True, "allow_mass_erase": True},
     }

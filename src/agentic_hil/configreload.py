@@ -7,7 +7,7 @@ server may not widen them. It also hit the **description** half — probe serial
 COM devices, baudrates, ``target.*`` — for which it was never meant, and that is
 what an operator hit every time a board was plugged in after the file was
 written: the file said the right thing, the server said the old thing, and the
-only way across was a restart of the agent's MCP server (hardci-hq#98).
+only way across was a restart of the agent's MCP server.
 
 This module is the description-only reload, and every restriction the original
 decision put on a reload still holds:

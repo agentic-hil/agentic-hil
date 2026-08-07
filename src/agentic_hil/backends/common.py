@@ -17,14 +17,14 @@ from agentic_hil.process import (
 from agentic_hil.types import JsonObject
 
 # The markers a failure carries when it can prove it never reached the bench:
-# no target contact, no side effect, the board where the last call that did reach
-# it left it, safe to retry. 0.7.1's `debugger_command_rejected` fix introduced
-# this shape for one OpenOCD case; every backend failure that can prove its abort
-# point reuses it, because the alternative — quarantining hardware a call
-# provably never touched — demands a physical inspection nothing justifies
-# (hardci-hq#97). It is the whole of the claim the service layer will act on: a
-# result without these fields is not the opposite claim, it is no claim, and
-# read-only one-shots quarantine on it rather than infer one.
+# no target contact, no side effect, the board where the last call that did
+# reach it left it, safe to retry. 0.7.1's `debugger_command_rejected` fix
+# introduced this shape for one OpenOCD case; every backend failure that can
+# prove its abort point reuses it, because the alternative — quarantining
+# hardware a call provably never touched — demands a physical inspection
+# nothing justifies. It is the whole of the claim the service layer will act
+# on: a result without these fields is not the opposite claim, it is no claim,
+# and read-only one-shots quarantine on it rather than infer one.
 NOT_CONTACTED: JsonObject = {
     "target_contacted": False,
     "side_effect_committed": False,
@@ -53,7 +53,7 @@ def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
     `halt` - so the reset-init script never ran and the mode was the same call
     twice under two names. pyOCD then reported `Target reset with mode 'init'.`
     over it, which told a caller that asked for an initialised core that it had
-    one (hardci-hq#58). One enum, three values, and the third meant a different
+    one. One enum, three values, and the third meant a different
     machine depending on which debugger the project happened to configure;
     nothing shipped said so.
 

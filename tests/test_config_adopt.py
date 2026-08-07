@@ -1,6 +1,6 @@
 """Carrying an attached board into a configuration that was written without it.
 
-hardci-hq#76: `setup` ran with nothing plugged in, so `init` wrote placeholders,
+`setup` ran with nothing plugged in, so `init` wrote placeholders,
 and after plugging the board in there was no way back into the file. The agent
 stopped correctly and printed a 24-character probe serial for a person to retype.
 
@@ -149,7 +149,7 @@ def granted(node: object, prefix: str = "") -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# The four boxes hardci-hq#76 asks to be ticked.
+# The four boxes this has to tick.
 
 
 def test_a_placeholder_configuration_is_completed_without_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,7 +438,7 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     assert checked["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert checked["target"]["controller"] == "stm32f446re"
     assert checked["com_ports"]["dut_uart"]["device"] == "COM9"
-    # Green, and the check really ran — this is the whole of hardci-hq#96 in one
+    # Green, and the check really ran — this is the whole of the open generated default in one
     # assertion. The skeleton granted everything, so the board this command just
     # entered is one this bench drives, and nobody opened a YAML file between the
     # empty directory and here. Under the closed default the same run reached a
@@ -696,7 +696,7 @@ def test_without_the_description_grant_the_agent_gets_the_values_and_not_the_wri
 
     The grant belongs to the operator and this call does not argue with it. What
     it does is hand back the exact keys and values rather than a probe listing
-    somebody has to correlate by hand — which is the whole complaint in #76,
+    somebody has to correlate by hand — which is the whole complaint,
     answered even where the write is shut."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch)
     before = path.read_text(encoding="utf-8")

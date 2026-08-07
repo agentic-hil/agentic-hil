@@ -528,7 +528,7 @@ class PythonCanAdapterSession:
         except Exception as error:
             # recv() transmits nothing: a failed direct-adapter read proves no
             # frame was sent by this call, so it refuses instead of reporting
-            # an unknown bus effect (hardci-hq#97). The process-bridge adapter
+            # an unknown bus effect. The process-bridge adapter
             # stays markerless — a broken bridge process is an unknown.
             return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
@@ -584,7 +584,7 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     what the controller did with the frame; both keep the markerless result and
     the quarantine it earns.
 
-    Why this exists at all (hardci-hq#127): the SocketCAN classifier above admits
+    Why this exists at all: the SocketCAN classifier above admits
     only `CanInitializationError` as proof of no contact, and python-can never
     raises that class for a failed bind — 4.6.1 re-raises the bare `OSError`, and
     the wrapper it uses elsewhere is `CanOperationError`, which is not a subclass
@@ -677,12 +677,12 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
                 return missing
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
-            # Provably never on the bus: refuse, do not quarantine
-            # (hardci-hq#97). Every other exception class, and every failure on
-            # a backend that is not in `initialization_errors`, keeps the
-            # markerless result — a partially initialized channel participates
-            # on the bus (it ACKs and can emit error frames at a wrong bitrate),
-            # and nothing here can disprove one was left behind.
+            # Provably never on the bus: refuse, do not quarantine. Every other
+            # exception class, and every failure on a backend that is not in
+            # `initialization_errors`, keeps the markerless result — a
+            # partially initialized channel participates on the bus (it ACKs
+            # and can emit error frames at a wrong bitrate), and nothing here
+            # can disprove one was left behind.
             failure.update({"side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
         return failure
     shutdown = getattr(bus, "shutdown", None)
@@ -995,7 +995,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         # assume the reading that looks better, and `mark_side_effect` renders
         # the absence as `side_effect_status: unknown`. `cleanup_confirmed` still
         # releases the lease, so what changes is what the report claims and not
-        # whether a bench goes into recovery (hardci-hq#112).
+        # whether a bench goes into recovery.
         bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED
         if opened.get("ok") is True:
             opened = (

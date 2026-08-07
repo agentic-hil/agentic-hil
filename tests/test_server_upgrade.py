@@ -1,6 +1,6 @@
 """Upgrading over MCP: what it may do, what it may not, and what it may claim.
 
-hardci-hq#126 reversed hardci-hq#99 for the MCP surface. Upgrading was CLI-only —
+`server_upgrade` reverses the CLI-only rule. Upgrading was CLI-only —
 the command was named and never run — and on a host that is only an MCP client
 there is then no way at all for the main surface to perform the basic maintenance
 of its own server. The tool exists now, and it keeps three teeth:
@@ -50,7 +50,7 @@ SOCKETCAN_BUS = """can_buses:
 
 # The line `uv tool upgrade` writes on stderr beside exit code 0 when the
 # installation it was asked to move is recorded with an exact pin — measured on
-# the reporter's box in hardci-hq#99, and the reason the pin is read out of the
+# the reporter's box, and the reason the pin is read out of the
 # text rather than out of the return code.
 UV_EXACT_PIN_HINT = (
     "hint: `agentic-hil` is pinned to `0.8.1` (installed with an exact version pin); "
@@ -146,7 +146,7 @@ def test_the_configuration_can_close_this_tool_and_the_refusal_names_the_key(
 def test_the_upgrade_is_refused_while_a_run_holds_the_bench(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """hardci-hq#80's rule, applied to the code instead of to the permissions.
+    """The open-run refusal, applied to the code instead of to the permissions.
 
     A declared run took its locks under the release that is running. Replacing
     that release mid-run moves the rules during the run they govern, which is the
@@ -215,7 +215,7 @@ def test_a_host_that_locks_running_files_is_told_the_upgrade_is_the_command_line
 def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The hardci-hq#99 pin case, reached through the MCP tool this time.
+    """The CLI's pin case, reached through the MCP tool this time.
 
     `uv tool upgrade` exits 0 for a pin it cannot move and writes the reason on
     stderr, so success is decided by the version and not by the return code. The
@@ -254,7 +254,7 @@ def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
 def test_a_swap_on_disk_names_both_versions_and_does_not_claim_to_be_running_the_new_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The honesty tooth of hardci-hq#126.
+    """The honesty tooth of this tool.
 
     Files were replaced; this interpreter has already imported the old ones and
     goes on executing them. A result that reported the new number as this
@@ -294,8 +294,8 @@ def test_an_installation_that_is_already_current_is_not_reported_as_an_upgrade(
     """`uv tool upgrade` exits 0 with nothing to do, and this is that outcome.
 
     A success, because nothing is wrong — and not an upgrade, because nothing
-    moved. No restart is asked for, which is the whole of what hardci-hq#99 was
-    filed about at the other end."""
+    moved. No restart is asked for, which is the whole of what the CLI fix was
+    about at the other end."""
     fake_manager(
         monkeypatch,
         installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
@@ -361,14 +361,13 @@ def test_the_upgrade_is_the_one_tool_that_reaches_the_open_world(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# Extras the configuration needs and the installation does not have
-# (hardci-hq#125).
+# Extras the configuration needs and the installation does not have.
 
 
 def test_the_result_warns_when_the_installation_lost_an_extra_the_configuration_needs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bench in hardci-hq#125: `can_buses` configured, python-can gone.
+    """The bench behind it: `can_buses` configured, python-can gone.
 
     `uv tool install --upgrade` replaces the recorded requirement rather than
     raising it, so an installation created as `agentic-hil[can]` comes back
@@ -425,7 +424,7 @@ def test_no_extras_warning_when_the_configuration_needs_nothing_the_installation
 def test_doctor_names_the_extra_the_configuration_needs_and_the_installation_lacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The first hole in hardci-hq#125: until now the first CAN call found this.
+    """The first hole: until now the first CAN call found this.
 
     `doctor` is where an operator looks before a bench misbehaves, so the
     contradiction belongs there — with the exact reinstall line, because a

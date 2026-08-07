@@ -1,6 +1,6 @@
 """A SocketCAN channel that is not on this host refuses; it does not quarantine.
 
-hardci-hq#127. The bench report was `[Errno 19] No such device` on a `can0` that
+The bench report was `[Errno 19] No such device` on a `can0` that
 had vanished after a PCAN re-enumeration, and the result was a quarantine an
 operator had to sign off with `recover --confirm-safe-state`. ENODEV at bind time
 is the one open failure that is not merely unproven: there is no netdev, so the
@@ -28,7 +28,7 @@ from agentic_hil.config import load_config
 from agentic_hil.knowledge import CAN_INTERFACE_NOT_FOUND_ERROR, catalogue_entry
 from agentic_hil.tools import AgenticHILToolService
 
-# Distinctive per hardci-hq#116: device locks are machine-wide, so a bus id and
+# Distinctive by design: device locks are machine-wide, so a bus id and
 # channel shared with another clone's tests would contend across checkouts.
 BUS_ID = "enodev_probe_bus"
 MISSING_CHANNEL = "can127missing"
@@ -199,7 +199,7 @@ def test_a_self_referential_exception_chain_terminates(tmp_path: Path) -> None:
 
 
 def test_a_missing_socketcan_interface_refuses_and_frees_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bench case (hardci-hq#127). Fails on the state before this change:
+    """The bench case. Fails on the state before this change:
     the open ran into the markerless branch, the lease was quarantined
     `can_open_cleanup_unconfirmed`, and an operator had to sign the incident off.
     """
