@@ -33,7 +33,14 @@ from agentic_hil.coordination import (
     RECOVERY_ACTOR_SERVER,
     HardwareCoordinator,
 )
-from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, config_in_force, write_report
+from agentic_hil.report import (
+    CALL_SCOPED_LEASE_TOOLS,
+    CONFIG_IN_FORCE_KEY,
+    CONTACT_MARKER_KEY,
+    CONTACT_MARKER_SOURCE_KEY,
+    config_in_force,
+    write_report,
+)
 
 # Machine-wide device locks contend across sibling clones, so
 # every resource here is named for this file alone.
@@ -249,6 +256,56 @@ def test_a_report_that_does_not_answer_the_question_still_quarantines(tmp_path: 
 
     assert status["blocked"] is True, why
     assert status["cleanup_reasons"] == ["owner_process_exited_without_release"], why
+
+
+def test_a_session_that_opened_its_port_still_quarantines(tmp_path: Path) -> None:
+    """The gap between "this call did nothing" and "this session did nothing".
+
+    `side_effect_committed: false` is a truthful claim about the call that wrote
+    the report, and a session start writes several. One that opened the port and
+    then failed on the reader thread, or on a receive buffer that would not
+    clear, closes the port again and reports its own failure as never begun —
+    while the open that preceded it drove DTR and RTS, and on a board that wires
+    DTR to reset, reset it.
+
+    So the pair alone would release a bench whose board had just been restarted.
+    The contact marker is what tells the two apart, and this is the case where it
+    does work the existing conditions cannot: everything else about this report
+    is exactly the evidence the release asks for.
+    """
+    config = leave_dead_owner(tmp_path, report=None)
+    setup = HardwareCoordinator(config, "dead-owner-setup")
+    write_report(
+        config,
+        no_contact_report(
+            setup,
+            tool="com_session_start",
+            error_type="com_reader_start_failed",
+            summary="COM port reader could not be started; the port was closed.",
+            cleanup_confirmed=True,
+            **{CONTACT_MARKER_KEY: "2026-08-07T09:00:00Z", CONTACT_MARKER_SOURCE_KEY: "serial_open"},
+        ),
+    )
+    observer = HardwareCoordinator(config, "second-coordinator")
+
+    status = observer.status()
+
+    assert status["blocked"] is True
+    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
+    assert "released_dead_owner" not in status
+    assert recovery_ledger(config) == []
+
+
+def test_the_release_names_the_contact_question_it_asked(tmp_path: Path) -> None:
+    """A release is signed evidence, so it has to say which questions were put to
+    the report — including the one whose answer was an absence."""
+    config = leave_dead_owner(tmp_path)
+    observer = HardwareCoordinator(config, "second-coordinator")
+
+    evidence = observer.status()["released_dead_owner"]["evidence"]
+
+    assert CONTACT_MARKER_KEY in evidence
+    assert evidence[CONTACT_MARKER_KEY] is None
 
 
 def test_a_second_open_lease_is_not_answered_for_by_one_report(tmp_path: Path) -> None:

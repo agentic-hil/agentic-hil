@@ -37,7 +37,7 @@ from agentic_hil.devices import (
 )
 from agentic_hil.knowledge import attach_quarantine_guidance
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive
-from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, read_report_state
+from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, CONTACT_MARKER_KEY, read_report_state
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 LEASE_VERSION = 2
@@ -912,6 +912,23 @@ class HardwareCoordinator:
         — plus an intact audit trail, plus a ``config_in_force`` naming the exact
         configuration bytes the lease record was stamped with. A
         report written under a different document is not evidence about this one.
+
+        And, since the session backends record one, an absent contact marker.
+        This is not a restatement of the pair above it: the pair is a claim about
+        the *call* that wrote the report, and the marker is a claim about the
+        *session*, so where a session start opened its port and then failed
+        afterwards the two disagree — and the report that says `not_started` while
+        the marker says the line was driven is exactly the case this must not read
+        as innocence. The two session starts in `CALL_SCOPED_LEASE_TOOLS` can both
+        produce such a report today: a reader that would not start and a receive
+        buffer that would not clear each close the port again and report their own
+        failure truthfully as never begun. The marker is what tells that apart
+        from an open that never happened at all.
+
+        Absence is read as "no contact" rather than "no answer" only because
+        nothing in this repository can now open a session without setting it. A
+        report that predates the marker is a report from an older version, and
+        `config_in_force` and the version stamp are the fields that speak to that.
         """
         if record.get("reason") or record.get("quarantine_id"):
             return None
@@ -944,6 +961,8 @@ class HardwareCoordinator:
             return None
         if report.get("side_effect_committed") is not False or report.get("side_effect_status") != "not_started":
             return None
+        if report.get(CONTACT_MARKER_KEY) is not None:
+            return None
         if report.get("audit_ok") is False:
             return None
         if sorted({item for item in report.get("resources", []) if isinstance(item, str)}) != resources:
@@ -966,6 +985,9 @@ class HardwareCoordinator:
                 "last_report_tool": report.get("tool"),
                 "side_effect_committed": False,
                 "side_effect_status": "not_started",
+                # Named even though it is an absence, because a reader auditing
+                # this release has to be able to see which questions were asked.
+                CONTACT_MARKER_KEY: None,
                 "config_in_force_digest": in_force.get("digest"),
             },
         }

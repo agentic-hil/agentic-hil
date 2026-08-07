@@ -77,7 +77,7 @@ def test_python_can_never_raises_an_initialization_error_for_a_failed_bind() -> 
     assert not issubclass(can.CanOperationError, can.CanInitializationError)
     assert not issubclass(OSError, can.CanInitializationError)
     # python-can copies the OS number onto its own wrapper, which is the second
-    # place `_raised_errno` looks.
+    # place `raised_errno` looks.
     assert can.CanOperationError("failed to bind", errno.ENODEV).error_code == errno.ENODEV
 
 

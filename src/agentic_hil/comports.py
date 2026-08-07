@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import math
 import os
 import re
@@ -17,18 +18,21 @@ from agentic_hil.coordination import (
     HardwareLease,
 )
 from agentic_hil.devices import VOLATILE_SERIAL_DEVICE_WARNING, uart_device
+from agentic_hil.knowledge import COM_PORT_BUSY_ERROR, remediation_fields
 from agentic_hil.provisional import (
     cleanup_provisional_handles,
     discharge_provisional_handle,
     register_provisional_handle,
 )
 from agentic_hil.report import (
+    ContactMarker,
     append_jsonl,
     append_jsonl_audited,
     audit_unavailable,
     logs_directory,
     mark_audit_failure,
     mark_side_effect,
+    no_contact_refusal,
     overall_success,
     recommit_report_with_status,
     safe_filename,
@@ -45,6 +49,7 @@ from agentic_hil.types import (
     fold_hardware_id,
     format_usb_id,
     is_stable_device_name,
+    raised_errno,
 )
 
 
@@ -483,11 +488,80 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     return {"ok": True, "identity": identity}
 
 
+# The OS numbers that mean "another program is holding this port", and nothing
+# else. `EWOULDBLOCK`/`EAGAIN` is what a non-blocking exclusive lock answers when
+# the lock is already taken — one number on Linux, not necessarily one number
+# everywhere, so both are named. `EBUSY` is what a driver answers when the kernel
+# is holding the line exclusively on somebody else's behalf.
+#
+# `EACCES` is deliberately absent. On a serial device it is far more often a
+# missing group membership than a second holder, and answering "busy" to a
+# permissions problem sends the reader hunting for a process that does not exist.
+PORT_BUSY_ERRNOS = (errno.EWOULDBLOCK, errno.EAGAIN, errno.EBUSY)
+
+
+def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortConfig) -> JsonObject | None:
+    """The refusal for a port another program already holds, or ``None``.
+
+    Open time only and by OS number only, and both halves of that are the
+    contract — the same shape the SocketCAN missing-interface refusal is cut to,
+    for the same reason. A refused open leaves no handle behind: the port keeps
+    doing whatever its holder is doing with it, this session put nothing on the
+    line, and the failure is about which process owns a device name rather than
+    about a board whose state is in doubt.
+
+    Reachable at all only because the handle is opened exclusively. Without that
+    the second open succeeds on POSIX, two processes interleave bytes on one
+    line, and the failure surfaces much later as a response that does not match
+    the stimulus — an unknown board state, which is a quarantine. The whole point
+    of asking for exclusivity is to move that failure to here, where it is a
+    refusal nobody has to walk to the bench for.
+
+    ``None`` on Windows even for a busy port, and that is a limit rather than an
+    oversight: the Win32 open refusal arrives as a message-only exception with no
+    number anywhere in its chain, and classifying on the message would answer
+    differently under a translated system. That case keeps
+    `com_port_open_failed`, whose likely causes already name a second program
+    holding the port, and loses only the specific name for it.
+    """
+    if not any(raised_errno(error, number) for number in PORT_BUSY_ERRNOS):
+        return None
+    return {
+        "ok": False,
+        "tool": "com_session_start",
+        "port_id": port_id,
+        "error_type": COM_PORT_BUSY_ERROR,
+        # `configured_device`, and deliberately no `field`. A `field` names the
+        # configuration key that is wrong, and here nothing in the configuration
+        # is: the entry reaches exactly the port it means, and somebody else has
+        # it. Naming a key invites the one repair the remediation warns against —
+        # pointing the entry at whichever device is free, which is another board.
+        "configured_device": port_config.device,
+        "summary": (
+            f"COM port {port_config.device} is held by another program, so the session was refused at the open: no "
+            "handle was created and nothing was written to the line."
+        ),
+        "backend_error": str(error),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+        **remediation_fields(COM_PORT_BUSY_ERROR),
+    }
+
+
 class ComPortSession:
-    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True):
+    def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True, contact: ContactMarker | None = None):
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
+        # A supplied marker is authoritative and is never written over here — the
+        # open that produced it is the evidence, and a constructor is not. Only
+        # the marker-less case is filled in, which is the direct construction in
+        # tests: those describe an open port, so that is what their marker says.
+        self.contact = contact if contact is not None else ContactMarker()
+        if contact is None:
+            self.contact.record("serial_open")
         self.log_path = log_path
         self.started_at = utc_now_iso()
         self.active = True
@@ -642,12 +716,26 @@ class ComPortService:
             lease = self.coordinator.acquire(uart_device(self.config, port_id))
         except CoordinationError as error:
             return self._write_report({"tool": "com_session_start", "port_id": port_id, "side_effect_committed": False, **error.result})
+        contact = ContactMarker()
         try:
-            opened = self._open_serial(port_id, port["port_config"], log_path, lease)
+            opened = self._open_serial(port_id, port["port_config"], log_path, lease, contact)
         except BaseException as error:
-            lease.quarantine("com_open_interrupted", error)
+            # An interrupt that lands before the open has nothing to contain: the
+            # port was never reached, so the lease goes back instead of holding a
+            # bench for a physical inspection of a board this call never touched.
+            # A release that will not confirm is itself an unknown and keeps the
+            # quarantine, as does an interrupt after contact.
+            if not contact.proves_no_contact or not lease.release():
+                lease.quarantine("com_open_interrupted", error)
             raise
         if not opened["ok"]:
+            # The marker is consulted before the backend's own claim about its
+            # side effect, and it can only ever widen the refusal: an open that
+            # never reached the port is a refusal whatever exception class ended
+            # it, including one nothing here has ever seen. Where contact was
+            # made, or cannot be ruled out, the fields the backend wrote decide
+            # exactly as they did before.
+            opened = no_contact_refusal({**opened, **contact.report_fields()}, contact)
             safe_to_release = opened.get("side_effect_committed") is False or opened.get("cleanup_confirmed") is True
             if not safe_to_release:
                 lease.quarantine("com_open_cleanup_unconfirmed", opened.get("backend_error"))
@@ -833,7 +921,27 @@ class ComPortService:
             details = "; ".join(f"{port_id}: {type(error).__name__}: {error}" for port_id, error in errors)
             raise RuntimeError(f"COM port cleanup failed: {details}") from errors[0][1]
 
-    def _open_serial(self, port_id: str, port_config: ComPortConfig, log_path: str, lease: HardwareLease) -> JsonObject:
+    def _open_serial(self, port_id: str, port_config: ComPortConfig, log_path: str, lease: HardwareLease, contact: ContactMarker) -> JsonObject:
+        """Open the port, recording contact the moment it becomes provable.
+
+        ``contact`` is created by the caller rather than here, because the caller
+        also has to be able to read it when this method does not return at all: a
+        `KeyboardInterrupt` between the constructor and the open leaves a marker
+        that says, truthfully, that nothing was reached.
+
+        What the marker means on this backend: the successful return of
+        ``open()``. pyserial applies the configured DTR and RTS states inside
+        ``open()``, so by the time it returns the modem lines have been driven and
+        a board that wires DTR to reset has been reset — the marker is exactly the
+        line between "that may have happened" and "it cannot have".
+
+        A failed ``open()`` stays a refusal, and deliberately, even though on
+        POSIX the descriptor is created before the parts of the open that can
+        fail. That reading has not changed: a failed open does at most what a
+        normal open/close cycle does, and that cycle has never needed a physical
+        inspection. The marker draws its line where the *session* begins, not
+        where the first syscall does.
+        """
         try:
             import serial
         except ImportError:
@@ -858,6 +966,22 @@ class ComPortService:
             serial_handle.write_timeout = port_config.write_timeout_s
             serial_handle.dtr = port_config.assert_dtr
             serial_handle.rts = port_config.assert_rts
+            # Asked for exclusively, because sharing a line was never a mode this
+            # could work in. Two processes on one port interleave their bytes,
+            # and what a caller then sees is a reply that does not answer the
+            # stimulus — an unknown board state, which is a quarantine, arriving
+            # mid-session and blaming the wrong thing. The machine-wide device
+            # lock never covered this: it binds the runs that take it, and a
+            # foreign test runner or serial monitor does not.
+            #
+            # Windows opens serial devices exclusively whatever this says — the
+            # handle is created with a share mode of zero — so there the flag is
+            # a declaration of what is already true. On POSIX it is the whole
+            # difference: without it a second open succeeds and nothing refuses
+            # anything. A handle that will not accept the flag is not opened, and
+            # falls to the pre-open refusal below with the rest of the
+            # configuration failures.
+            serial_handle.exclusive = True
         except Exception as error:
             # No OS handle exists before open(): configuring the unopened
             # object cannot touch the device, so this failure proves the port
@@ -876,13 +1000,27 @@ class ComPortService:
             # The port never carried a byte of this session either way — a
             # failed open does at most what a normal open/close cycle does, and
             # that cycle never needed a physical inspection.
+            busy = serial_port_busy(error, port_id, port_config)
+            failure = busy if busy is not None else open_failure(error)
             if not getattr(serial_handle, "is_open", False):
-                return {**open_failure(error), "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+                return {**failure, "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            # A handle that says it is open after the open that failed
+            # contradicts the contract, and a descriptor on the device is the
+            # thing that contradiction would mean. That is not proof of contact —
+            # a flag left standing by an object that mismanaged its own state is
+            # not evidence of a syscall — but it is squarely not proof of the
+            # absence of it either, so the marker withholds both answers and the
+            # handling below decides on the close exactly as it always has.
+            contact.record_unproven("serial_open_left_a_handle")
             try:
                 serial_handle.close()
             except Exception as close_error:
+                # A handle that contradicts the contract and then will not close
+                # is the one unknown here, and it outranks any classification of
+                # why the open failed.
                 return {**open_failure(error), "cleanup_error": str(close_error)}
-            return {**open_failure(error), "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            return {**failure, "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        contact.record("serial_open")
         try:
             provisional = register_provisional_handle(self.coordinator.owner_marker, f"com:{port_id}", serial_handle.close)
         except BaseException as register_error:
@@ -900,7 +1038,7 @@ class ComPortService:
                 raise
             return {**open_failure(register_error), "cleanup_confirmed": True}
         try:
-            session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False)
+            session = ComPortSession(port_id, port_config, serial_handle, log_path, lease, start_reader=False, contact=contact)
         except BaseException as primary_error:
             try:
                 serial_handle.close()
@@ -1048,9 +1186,17 @@ class ComPortService:
         session = self.sessions.get(port_id) if isinstance(port_id, str) else None
         unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
         if session is not None and unsafe_effect:
+            # Nothing consults the marker here, and that is the intended
+            # asymmetry: a registered session exists only downstream of a
+            # successful open, so every failure that reaches this line is an
+            # after-contact failure and keeps precisely the quarantine it has
+            # always had.
             session.lease.quarantine("com_effect_unconfirmed")
         if session is not None:
-            prepared = {**prepared, **session.lease.status()}
+            # Published on every report this session writes, not only on the one
+            # that opened it, because the reader that needs it — the release of a
+            # dead owner's devices — sees whichever report was committed last.
+            prepared = {**prepared, **session.contact.report_fields(), **session.lease.status()}
         written = write_report(self.config, prepared)
         if session is not None and written.get("audit_ok") is False:
             session.audit_broken = True

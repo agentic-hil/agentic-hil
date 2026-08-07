@@ -7,6 +7,33 @@ from typing import Any, Literal
 JsonObject = dict[str, Any]
 
 
+def raised_errno(error: BaseException, target: int) -> bool:
+    """Whether ``target`` is the OS error number this exception was raised over.
+
+    Walked over ``__cause__`` and ``__context__`` rather than matched against the
+    message, because the message is the part a backend is free to reword: on the
+    SocketCAN path the number reaches the caller inside a wrapper's cause chain,
+    and a classifier that read `"No such device"` would answer differently under a
+    non-English libc and identically to a device whose *name* contains the words.
+    Both attributes are consulted for the same reason — `OSError.errno` is where
+    the kernel's number lives, and a library wrapper such as `can.CanError` copies
+    it onto `error_code` when it re-raises.
+
+    A leaf-module helper because both hardware adapters classify this way and
+    neither should have to import the other to do it.
+
+    Bounded and cycle-safe: an exception chain is caller-supplied data here.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if any(getattr(current, field_name, None) == target for field_name in ("errno", "error_code")):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 # --- how a device identity folds case ------------------------------------
 #
 # Two rules, because a device's identity is built from two different kinds of
