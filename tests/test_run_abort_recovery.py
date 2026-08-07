@@ -27,7 +27,7 @@ from agentic_hil.coordination import (
     LEASE_RELEASE_RETRY_REASON,
     HardwareCoordinator,
 )
-from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+from agentic_hil.test_reactor import TestReactor
 from agentic_hil.tools import AgenticHILToolService
 
 # Machine-wide device locks contend across sibling clones, so this name is this
@@ -104,7 +104,12 @@ def ledger(config) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def failing_flash_plan(tmp_path: Path) -> TestConfig:
+def failing_flash_plan(tmp_path: Path):
+    # Imported here rather than at module scope: pytest tries to collect any
+    # module-level name starting with `Test` and warns about these two, which
+    # are a plan and a step and not test classes.
+    from agentic_hil.test_reactor import TestConfig, TestStep
+
     firmware = tmp_path / "build" / "app.elf"
     firmware.parent.mkdir(parents=True, exist_ok=True)
     firmware.write_bytes(b"\x7fELF" + b"\x00" * 12)
