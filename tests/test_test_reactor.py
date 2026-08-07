@@ -1265,8 +1265,16 @@ steps:
     devices = declared_devices(config, load_test_config(str(plan_path), str(tmp_path)))
 
     assert can_device(config, "dut_can").lock_key in devices
-    # One entry per physical unit, not one per step.
-    assert len(devices) == 2
+    # One entry per physical unit, not one per step — where a unit is every key
+    # its device holds, not one: an executable debugger carries its legacy
+    # `probe:<path>` alias beside `probe-exe:` so old and new processes collide
+    # during an upgrade window, and counting keys would break each time a
+    # device gains an alias. The set equality is the real claim.
+    from agentic_hil.devices import debugger_device
+
+    expected = {can_device(config, "dut_can").lock_key}
+    expected.update(debugger_device(config).lock_keys)
+    assert set(devices) == expected
 
 
 def test_every_device_kind_answers_for_its_own_actions() -> None:
