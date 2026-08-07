@@ -543,35 +543,41 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "`hardware_recover` was allowed to run and refused on the class of the incident, not on a permission. At "
             "least one reason this bench is quarantined for names a physical state — a flash whose outcome was never "
-            "confirmed, a session that died mid-call, cleanup nobody could verify — and clearing it means attesting "
-            "that the board is still and holds the firmware somebody expects. That is a claim about the world, and "
-            "only a person at the bench can make it. `physical_check_reasons` names the ones that need it and "
-            "`agent_clearable_reasons` the ones that would not have; no grant on any bench moves that line, which is "
-            "why this tool has no confirmation argument to pass. A reason this bench's `recovery.auto_recover` policy "
-            "could settle is refused here too and for a different reason — settling it means running a predicate "
-            "against the board, and the automatic path does that on the next hardware call while this call runs "
-            "nothing. `auto_recoverable` on the refusal says which of the two situations this is."
+            "confirmed, a session that died mid-call, cleanup nobody could verify — and clearing it means saying that "
+            "the board is still and holds the firmware somebody expects. That is a claim about the world, and only a "
+            "person can make it. You cannot make it; you can ask for it and carry it. Pass what the operator answers "
+            "as `operator_statement` and it goes into the recovery ledger as their words, relayed by you. "
+            "`physical_check_reasons` names the reasons that need one, `agent_clearable_reasons` the ones that clear "
+            "with no arguments at all. No grant on any bench moves that line, which is why the argument is a sentence "
+            "and not a flag: a flag you could set for yourself, and a confirmation one gives oneself is not one. A "
+            "reason this bench's `recovery.auto_recover` policy could settle needs neither — the automatic path runs "
+            "its predicate against the board on the next hardware call. `auto_recoverable` says which case this is."
         ),
         remediation=(
             "Read `auto_recoverable` first. When it is true this bench's own recovery policy can settle the incident "
             "by running a predicate against the board — a re-read of the probe, or a verified reset into halt — and it "
             "does that on the next hardware call, not here: this tool runs no predicate, so it will not assert an "
             "unconfirmed board is fine. Retry the hardware call once and read the result.",
-            "Otherwise relay `operator_command` verbatim. It is the exact command, with this incident's "
-            "`quarantine_id` already in it, and it is what the operator runs after the check.",
-            "Relay `quarantine_guidance` with it, per reason: what was attempted, what is still confirmed, what nobody "
-            "on this host can know, and the `physical_check` to perform on the board. A signature over a claim the "
-            "signer was not shown is worth nothing.",
-            "Say plainly that hardware effects stay blocked until then, and stop there. This refusal is the answer to "
-            "the request, not an obstacle in front of it.",
+            "Otherwise ask the operator, in chat, and show them `quarantine_guidance` while you ask: what was "
+            "attempted, what is still confirmed, what nobody on this host can know, and the `physical_check` to "
+            "perform on the board. A statement about a claim the speaker was never shown is worth nothing.",
+            "Call `hardware_recover` again with `operator_statement` set to what they answered, in their words. Do "
+            "not compress it into a verdict — the ledger keeps the sentence, and a sentence can be audited in a way "
+            "that 'the operator confirmed' cannot.",
+            "When there is nobody to ask, relay `operator_command` verbatim instead. It is the exact command, with "
+            "this incident's `quarantine_id` already in it, and it is what the operator runs at the bench. Say "
+            "plainly that hardware effects stay blocked until then, and stop there.",
         ),
         do_not=(
-            "Do not call `hardware_recover` again hoping for a different class. The reasons are read from the "
-            "incident record and repeating the call cannot change them.",
+            "Never invent an `operator_statement`. A line that reflects no actual operator utterance is a false "
+            "ledger record with you named in it as the actor who cleared the bench, and the next person to read that "
+            "ledger has no way to tell it from one somebody really said.",
+            "Do not strengthen what you were told on the way through. 'It should be fine' is not 'the board is "
+            "powered down and still', and the ledger has to carry the difference.",
             "Do not retry the hardware call to 'clear' the incident. The bench's own recovery policy already tried "
             "whatever it could verify without an operator, before this refusal existed.",
-            "Do not clear the state files under `state_root` by hand, and do not ask the operator to. The command "
-            "above is the supported route and it keeps the ledger line that says who signed for what.",
+            "Do not clear the state files under `state_root` by hand, and do not ask the operator to. The routes "
+            "above are the supported ones and they keep the ledger line saying who cleared what, and on what.",
         ),
     ),
     CONFIG_WIDENING_ERROR: ErrorRemedy(

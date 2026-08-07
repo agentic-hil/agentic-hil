@@ -398,6 +398,13 @@ class HardwareCoordinator:
             self._require_open()
             if self.run_active:
                 raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False})
+            if self.blocked:
+                # A new run is the stimulus class, so it waits. The recovery
+                # class does not need a run to reach the board, which is what
+                # makes refusing here safe: the way out of the incident is still
+                # open, and results gathered across an unresolved one would be
+                # results nobody could stand behind afterwards.
+                raise CoordinationError(self._quarantined_result(sorted(self.incident_resources), "This bench has an unresolved incident; recover it before declaring a run."))
             given = resources.devices if isinstance(resources, DeviceSet) else tuple(resources)
             device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of([item for item in given if isinstance(item, Device)])
             declared = physical_resources(lock_keys(given))
@@ -514,12 +521,21 @@ class HardwareCoordinator:
             return []
         return [resource for resource in resources if is_physical_resource(resource) and resource not in declared]
 
-    def acquire(self, *resources: Device | str) -> HardwareLease:
+    def acquire(self, *resources: Device | str, for_recovery: bool = False) -> HardwareLease:
         """Take a lease on the named devices for the length of one call.
 
         Backends hand devices, not derived names: the lock reference belongs in
         one place, and a backend that spelled its own key could disagree with
-        the run that declared it."""
+        the run that declared it.
+
+        ``for_recovery`` is how a call that is the *remedy* for the open incident
+        gets a lease at all. Refusing it here was what made an incident a
+        padlock: the reset that settles the incident could not take the probe,
+        because the incident held it. Exclusivity is untouched — the lease is
+        still a lease, so nothing else reaches the board while it runs — and the
+        caller carries the authorization, which is the tool class (see
+        `tools.recovery_class_tools`) and not a flag anything can set for itself
+        on the way past."""
         normalized = sorted(set(resource for resource in lock_keys(resources) if resource))
         if not normalized:
             raise ValueError("At least one physical resource is required.")
@@ -539,7 +555,7 @@ class HardwareCoordinator:
                         "side_effect_committed": False,
                     }
                 )
-            if self.blocked:
+            if self.blocked and not for_recovery:
                 raise CoordinationError(self._quarantined_result(normalized, "Current owner has unresolved cleanup or audit state."))
             acquired_project = False
             if self.project_lock is None:

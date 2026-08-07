@@ -676,7 +676,12 @@ class AgenticHILToolService:
         # It goes to the operator with the rest, because "unnamed" is the one
         # thing an automatic clearance must never read as "harmless".
         physical = sorted(set(reasons) - allowed) if reasons else ["unnamed_incident"]
-        if physical and operator_statement:
+        # No sentence settles a broken audit. The reason names a ledger that
+        # could not be written, and clearing it on a statement would put the
+        # attestation into the very file whose failure raised the incident —
+        # so this one family keeps the operator's own route, as it did before.
+        audit_broken = sorted(reason for reason in reasons if "audit_broken" in reason)
+        if physical and operator_statement and not audit_broken:
             # The operator answered, and the agent is relaying what they said.
             # This is not the agent attesting anything — it holds no opinion
             # about the board and the ledger does not record one. It records a
@@ -715,10 +720,6 @@ class AgenticHILToolService:
                     "Ask the operator, in chat: is the board powered, still, and holding the firmware you expect? "
                     "Call hardware_recover again with operator_statement set to what they answered, in their words. "
                     "It is written to the recovery ledger verbatim, recorded as their statement relayed by you."
-                ),
-                "do_not": (
-                    "Never write an operator_statement you were not given. A ledger line that reflects no actual "
-                    "operator utterance is a false record, with you recorded as the actor who cleared the bench."
                 ),
                 "missing_argument": "operator_statement",
                 "quarantine_id": quarantine_id,
@@ -1153,7 +1154,7 @@ class AgenticHILToolService:
                 return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
             try:
                 resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
-                lease = self.coordinator.acquire(*resources)
+                lease = self.coordinator.acquire(*resources, for_recovery=name in recovery_class_tools())
             except CoordinationError as error:
                 return {"tool": name, "side_effect_committed": False, **error.result}
         try:
