@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno as errno_module
 import importlib
 import json
 import math
@@ -23,6 +24,7 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.devices import can_device
 from agentic_hil.knowledge import (
+    CAN_INTERFACE_NOT_FOUND_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
     LISTEN_ONLY_UNSUPPORTED_ERROR,
     remediation_fields,
@@ -541,6 +543,78 @@ class PythonCanAdapterSession:
         return {"active": self.active, "backend": self.adapter_name}
 
 
+def _raised_errno(error: BaseException, target: int) -> bool:
+    """Whether ``target`` is the OS error number this exception was raised over.
+
+    Walked over ``__cause__`` and ``__context__`` rather than matched against the
+    message, because the message is the part python-can is free to reword: on the
+    SocketCAN path the number reaches us inside a wrapper's cause chain, and a
+    classifier that read `"No such device"` would answer differently under a
+    non-English libc and identically to a device whose *name* contains the words.
+    Both attributes are consulted for the same reason — `OSError.errno` is where
+    the kernel's number lives, and `can.CanError.error_code` is where python-can's
+    own wrappers copy it when they re-raise.
+
+    Bounded and cycle-safe: an exception chain is caller-supplied data here.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if any(getattr(current, field, None) == target for field in ("errno", "error_code")):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
+    """The refusal for a SocketCAN interface that does not exist, or ``None``.
+
+    Constructor time only, ENODEV only, and both halves of that are the contract.
+
+    ``SocketcanBus()`` creates a raw socket and binds it to the named interface.
+    `ENODEV` there means the kernel has no such netdev: the bind never happened,
+    no controller was addressed, and contact was not merely unproven but
+    impossible. That is a refusal about the host's configuration, in the same
+    class as a missing toolchain — the bench stays in service.
+
+    Not widened past the constructor, and not past this one number. `ENETDOWN`
+    on a bound socket is an interface that exists and went down under a session
+    that may already have been on the bus, and a send failure says nothing about
+    what the controller did with the frame; both keep the markerless result and
+    the quarantine it earns.
+
+    Why this exists at all (hardci-hq#127): the SocketCAN classifier above admits
+    only `CanInitializationError` as proof of no contact, and python-can never
+    raises that class for a failed bind — 4.6.1 re-raises the bare `OSError`, and
+    the wrapper it uses elsewhere is `CanOperationError`, which is not a subclass
+    of it. So the one failure that is provably harmless — a `can0` that is simply
+    not there after a re-enumeration — quarantined a bench that nothing had
+    touched.
+    """
+    if bus_config.adapter == "peak" or not _raised_errno(error, errno_module.ENODEV):
+        return None
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "error_type": CAN_INTERFACE_NOT_FOUND_ERROR,
+        "field": f"can_buses.{bus_id}.channel",
+        "channel": bus_config.channel,
+        "summary": (
+            f"SocketCAN interface {bus_config.channel} does not exist on this host, so the session was refused before "
+            "any controller was addressed: the socket had nothing to bind to."
+        ),
+        "backend_error": str(error),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+        **remediation_fields(CAN_INTERFACE_NOT_FOUND_ERROR),
+    }
+
+
 def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool) -> JsonObject:
     if (
         bus_config.adapter == "peak"
@@ -593,6 +667,14 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         bus = can.Bus(**bus_kwargs)
     except Exception as error:
+        if interface == "socketcan":
+            # Asked before the class check below, because it answers a stronger
+            # question than that check can: the class says which failures
+            # *cannot* have joined the bus, and this says the interface the bind
+            # would have joined is not on this host at all.
+            missing = socketcan_interface_missing(error, bus_id, bus_config)
+            if missing is not None:
+                return missing
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
             # Provably never on the bus: refuse, do not quarantine

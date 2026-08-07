@@ -37,6 +37,7 @@ from agentic_hil.devices import (
 )
 from agentic_hil.knowledge import attach_quarantine_guidance
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive
+from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, read_report_state
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 LEASE_VERSION = 2
@@ -84,6 +85,46 @@ RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
         DEBUGGER_READONLY_TARGET_STATE_REASON,
     }
 )
+# What `status` names when it gives a dead owner's devices back instead of
+# quarantining them (hardci-hq#127). A release reason, not a quarantine reason:
+# it appears in a status result and in the recovery ledger, and by construction
+# never in `cleanup_reasons`, because the incident it would have keyed was never
+# opened. It is in the agent-clearable class below all the same — the class is
+# the statement "no hardware was contacted under this reason", and an incident
+# that somehow carries it is one nothing touched.
+DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
+# Reason classes whose members are provably free of hardware contact, and which
+# therefore need no attestation from anybody — not an operator's, and not a
+# predicate run against the board. This is the boundary the `hardware_recover`
+# tool may clear on its own (hardci-hq#128).
+#
+# Deliberately narrower than `recoverable_reasons`, and the difference is what
+# each kind of recovery actually *does*. Machine recovery is allowed the wider
+# set because it earns it: it reaps this owner's leftover processes, re-reads the
+# probe through `probe_target`, and under `reset_halt` drives the target into a
+# defined state first — every reason in that set is settled by performing
+# something. This tool performs nothing. It rewrites lease records and appends a
+# ledger line, which is the entire settlement for a reason that names no hardware
+# at all, and would be a blind assertion for one that names an unconfirmed board.
+# Handing the wider set to a call that runs no predicate would quietly turn "the
+# machine can check this" into "nobody needs to check this", and those reasons
+# lose nothing by staying out: the automatic path still attempts them, with its
+# predicate, on the next hardware call.
+NO_CONTACT_RECOVERABLE_REASONS = frozenset({DEAD_OWNER_NO_CONTACT_REASON, LEASE_RELEASE_RETRY_REASON})
+# Who a recovery ledger line records as having cleared the incident. Spelled
+# exactly as `agentic_hil.configwrite`'s provenance actors rather than imported
+# from it — coordination sits below the configuration writer — and a test
+# compares the two so the two spellings cannot drift apart. `server` is neither:
+# it is the coordination layer's own adoption decision, which no person and no
+# agent asked for.
+RECOVERY_ACTOR_HUMAN = "human"
+RECOVERY_ACTOR_AGENT = "agent"
+RECOVERY_ACTOR_SERVER = "server"
+# What established the safe state, beside who acted. An operator signature and a
+# reason class are different kinds of evidence and a ledger that spelled them the
+# same way could not be audited afterwards.
+ATTESTATION_OPERATOR = "operator_confirmation"
+ATTESTATION_NO_CONTACT_CLASS = "no_contact_reason_class"
 def _public_record(record: JsonObject | None) -> JsonObject | None:
     if not isinstance(record, dict):
         return record
@@ -665,6 +706,24 @@ class HardwareCoordinator:
             return RESET_RECOVERABLE_CLEANUP_REASONS
         return RETRYABLE_CLEANUP_REASONS
 
+    def agent_recoverable_reasons(self) -> frozenset[str]:
+        """The reasons an agent may clear over MCP without anybody at the bench.
+
+        The no-contact classes, and only those. `NO_CONTACT_RECOVERABLE_REASONS`
+        carries the argument for why this is narrower than what machine recovery
+        may settle; the short version is that machine recovery runs a predicate
+        and this runs none.
+
+        Everything outside it stays with the operator, and that boundary is not
+        about trust: `--confirm-safe-state` attests that a physical board is
+        still and holds the firmware somebody expects, and that is a claim about
+        the world, which no process on this host can make. A flag an agent sets
+        for itself would not be a confirmation of it, which is why the tool that
+        reads this set has no such flag to set. It is a method rather than a
+        constant so a bench policy could narrow it further without the tool
+        learning about policies."""
+        return NO_CONTACT_RECOVERABLE_REASONS
+
     def retryable_incident(self, allowed: frozenset[str] | None = None) -> str | None:
         """The single reason this owner's whole incident consists of, if recoverable.
 
@@ -727,6 +786,7 @@ class HardwareCoordinator:
         with self._guard:
             owner_active = self.project_lock is not None
             snapshot_atomic = True
+            released_dead_owner: JsonObject | None = None
             if owner_active:
                 record = self._read_record(self.project_key)
             else:
@@ -746,10 +806,16 @@ class HardwareCoordinator:
                         record = self._read_record(self.project_key)
                         if record is not None and record.get("state") == "active":
                             stale_resources = [item for item in record.get("resources", []) if isinstance(item, str)]
-                            self._adopt_incident(record, stale_resources)
-                            record = {**record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
-                            self._write_record(self.project_key, record)
-                            self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
+                            finding = self._dead_owner_made_no_contact(record)
+                            released = self._release_dead_owner(finding) if finding is not None else None
+                            if released is not None and finding is not None:
+                                record = released
+                                released_dead_owner = finding
+                            else:
+                                self._adopt_incident(record, stale_resources)
+                                record = {**record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
+                                self._write_record(self.project_key, record)
+                                self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
@@ -788,6 +854,12 @@ class HardwareCoordinator:
                 "record": _public_record(record),
                 "leases": [lease.status() for lease in self.leases.values()],
             }
+            if released_dead_owner is not None:
+                # Named, not silent. A bench that was quarantined yesterday and is
+                # free today has to say which of the two answers this is and on
+                # what evidence, or the difference is invisible to the operator
+                # who would otherwise have signed for it.
+                result["released_dead_owner"] = released_dead_owner
             if blocked:
                 # The signature `recover --confirm-safe-state` asks for is only
                 # as good as what the signer was told: name what was attempted,
@@ -796,6 +868,172 @@ class HardwareCoordinator:
                 # the record itself carries reasons, never versioned prose.
                 result = attach_quarantine_guidance({**result, "cleanup_required": True})
             return result
+
+    def _dead_owner_made_no_contact(self, record: JsonObject) -> JsonObject | None:
+        """What the dead owner's own last record proves about its hardware, or ``None``.
+
+        The reclassification of 0.8.0 — a quarantine needs the *possibility* of an
+        effect — was applied to call failures and never to the owner's death, so a
+        session that provably never reached a board was held all the same
+        (hardci-hq#127). The bench-mutex layer has behaved the other way round
+        since it existed, and by construction rather than by policy: the machine-
+        wide device lock is an OS lock, the operating system drops it when the
+        process ends, and `bench.py` hands the device to the next run with
+        `reclaimed` and no incident. This is the project layer catching up to its
+        own sibling, and the asymmetry was the defect.
+
+        Returns the finding when the evidence positively says *no contact*, and
+        ``None`` for everything else — including every case where the evidence is
+        merely absent. That direction is the whole design. A missing report, a
+        report that names another lease, a second lease nothing can answer for, a
+        configuration that has moved since: each of those is a bench nobody can
+        vouch for, and an unknown rounded down to safe is exactly the failure
+        quarantine exists to prevent.
+
+        The evidence is the dead session's own last committed report, under the
+        trusted ``state_root`` beside these records, and it has to answer three
+        questions before it counts:
+
+        *Is it this lease's report?* ``lease_id`` matches the one open lease in
+        the record, and so do the resources. A report from a lease that has been
+        released describes a call that ended.
+
+        *Was that call the last thing that happened?* Only for a tool whose lease
+        does not outlive its own call (``CALL_SCOPED_LEASE_TOOLS``). For those, a
+        lease still open on disk after a no-contact report means the owner died
+        between committing the report and releasing the lease, and nothing runs
+        in that window. Under a session lease the same report would be truthful
+        about its own call and silent about the open that preceded it, which is
+        the case this refuses to answer.
+
+        *Did it reach the hardware?* ``side_effect_committed: false`` and
+        ``side_effect_status: not_started`` — the backend's own claim, the same
+        pair `_readonly_failure_is_settled` requires, never this layer's inference
+        — plus an intact audit trail, plus a ``config_in_force`` naming the exact
+        configuration bytes the lease record was stamped with (hardci-hq#114). A
+        report written under a different document is not evidence about this one.
+        """
+        if record.get("reason") or record.get("quarantine_id"):
+            return None
+        if not self._record_matches_config(record):
+            return None
+        leases = record.get("leases")
+        if not isinstance(leases, list) or len(leases) != 1 or not isinstance(leases[0], dict):
+            return None
+        lease = leases[0]
+        lease_id = lease.get("lease_id")
+        if not isinstance(lease_id, str) or not lease_id:
+            return None
+        if lease.get("lease_state") != "active" or lease.get("audit_ok") is not True or lease.get("cleanup_reasons") or lease.get("quarantine_id"):
+            return None
+        resources = sorted({item for item in lease.get("resources", []) if isinstance(item, str)})
+        if not resources or resources != sorted({item for item in record.get("resources", []) if isinstance(item, str)}):
+            return None
+        try:
+            state = read_report_state(self.config)
+        except (ConfigError, OSError, ValueError):
+            # An unreadable report state answers nothing, which is not the same
+            # as answering "no contact".
+            return None
+        report = (state or {}).get("last_report")
+        if not isinstance(report, dict):
+            return None
+        if report.get("lease_id") != lease_id or report.get("lease_state") != "active":
+            return None
+        if report.get("tool") not in CALL_SCOPED_LEASE_TOOLS:
+            return None
+        if report.get("side_effect_committed") is not False or report.get("side_effect_status") != "not_started":
+            return None
+        if report.get("audit_ok") is False:
+            return None
+        if sorted({item for item in report.get("resources", []) if isinstance(item, str)}) != resources:
+            return None
+        in_force = report.get(CONFIG_IN_FORCE_KEY)
+        if not isinstance(in_force, dict):
+            return None
+        # `config_in_force` publishes the algorithm-prefixed spelling and a lease
+        # record the bare hex; both name the same parsed bytes, so the comparison
+        # is on the digest and not on the string.
+        _, _, digest = str(in_force.get("digest") or "").rpartition(":")
+        if not digest or digest != record.get("config_sha256"):
+            return None
+        return {
+            "reason": DEAD_OWNER_NO_CONTACT_REASON,
+            "lease_id": lease_id,
+            "resources": resources,
+            "summary": "The exited owner's last call ended before it reached the hardware, so its devices were released instead of quarantined.",
+            "evidence": {
+                "last_report_tool": report.get("tool"),
+                "side_effect_committed": False,
+                "side_effect_status": "not_started",
+                "config_in_force_digest": in_force.get("digest"),
+            },
+        }
+
+    def _release_dead_owner(self, finding: JsonObject) -> JsonObject | None:
+        """Hand the dead owner's devices back, or ``None`` and let it quarantine.
+
+        Every failure here is a non-answer rather than a partial release: the
+        caller falls back to the quarantine it would have written anyway, which
+        is the state a half-finished release must never be able to skip.
+
+        Evidence first, exactly as ``recover`` does it. The ledger line is
+        appended before any marker moves, so a release that is not durably
+        recorded does not happen at all.
+        """
+        resources = [item for item in finding.get("resources", []) if isinstance(item, str)]
+        if not resources:
+            return None
+        locks: list[_LifetimeLock] = []
+        try:
+            for resource in sorted(set(resources)):
+                locks.append(self._acquire_lock(resource, resources))
+                marker = self._read_record(resource)
+                if marker is None or marker.get("state") in {None, "released"}:
+                    continue
+                # A marker that is not this lease's active hold is a state this
+                # finding did not examine and cannot speak for.
+                if marker.get("state") != "active" or marker.get("lease_id") != finding.get("lease_id") or not self._record_matches_config(marker):
+                    return None
+            audit_event = {
+                "event": "recovery",
+                "recovery": "dead_owner_no_contact",
+                "reason": DEAD_OWNER_NO_CONTACT_REASON,
+                "actor": RECOVERY_ACTOR_SERVER,
+                "via": f"coordination:{self.frontend}",
+                "attestation": ATTESTATION_NO_CONTACT_CLASS,
+                "resources": resources,
+                "lease_id": finding.get("lease_id"),
+                "evidence": finding.get("evidence"),
+                "workspace": self.config.workspace_root,
+                "config_path": self.config.config_path,
+                "recorded_config_sha256": self.config_sha256,
+                "current_config_sha256": self.config_sha256,
+                "resumed": False,
+                "time": utc_now_iso(),
+            }
+            safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
+            released = self._base_record("released", resources)
+            released.update(
+                {
+                    "recovered_at": utc_now_iso(),
+                    # True because no effect was possible, not because anybody
+                    # inspected a board; `released_reason` in the same record is
+                    # what says which of those it was, and the ledger line above
+                    # carries the attestation in full.
+                    "safe_state_confirmed": True,
+                    "released_reason": DEAD_OWNER_NO_CONTACT_REASON,
+                }
+            )
+            for resource in resources:
+                self._write_record(resource, released)
+            self._write_record(self.project_key, released)
+            return released
+        except (CoordinationError, ConfigError, OSError, ValueError):
+            return None
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
     def _project_probe_lock(self) -> _LifetimeLock:
         return _LifetimeLock(self.lock_directory / f"{resource_digest(self.project_key)}.lock")
@@ -842,7 +1080,27 @@ class HardwareCoordinator:
                 probe.release([key])
         return holds
 
-    def recover(self, *, safe_state_confirmed: bool, quarantine_id: str | None = None, accept_config_change: bool = False) -> JsonObject:
+    def recover(
+        self,
+        *,
+        safe_state_confirmed: bool,
+        quarantine_id: str | None = None,
+        accept_config_change: bool = False,
+        actor: str = RECOVERY_ACTOR_HUMAN,
+        via: str = "cli:recover",
+        attestation: str = ATTESTATION_OPERATOR,
+    ) -> JsonObject:
+        """Clear a quarantine and give its resources back.
+
+        ``actor``/``via``/``attestation`` travel into the ledger line and say who
+        cleared it and on what evidence. They default to the operator at the CLI
+        because that was this method's only caller and remains its only caller
+        that can attest a physical state; the MCP tool passes the agent and the
+        reason class it was allowed to clear by, and the authorization for that
+        happens in the caller (`agent_recoverable_reasons`), never here. This
+        performs the transition, and the transition is the same one either way —
+        which is the point of there being one implementation of it.
+        """
         if not safe_state_confirmed:
             return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state."}
         if not quarantine_id:
@@ -905,6 +1163,9 @@ class HardwareCoordinator:
                         return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine resource markers changed; recovery remains blocked.", "resource": resource}
                 audit_event = {
                     "event": "recovery",
+                    "actor": actor,
+                    "via": via,
+                    "attestation": attestation,
                     "quarantine_id": quarantine_id,
                     "resources": resources,
                     "workspace": self.config.workspace_root,
@@ -935,7 +1196,25 @@ class HardwareCoordinator:
                 self.blocked = False
                 self.quarantine_id = None
                 self.incident_resources.clear()
-                return {"ok": True, "tool": "hardware_recover", "resources": resources, "safe_state_confirmed": True, "recovered_quarantine_id": quarantine_id, "resumed": resuming, "config_change_accepted": audit_event["config_change_accepted"], "summary": "Quarantined hardware resources were released after operator-confirmed recovery."}
+                return {
+                    "ok": True,
+                    "tool": "hardware_recover",
+                    "resources": resources,
+                    "safe_state_confirmed": True,
+                    "recovered_quarantine_id": quarantine_id,
+                    "resumed": resuming,
+                    "config_change_accepted": audit_event["config_change_accepted"],
+                    # The same two fields the ledger line carries, so a caller can
+                    # tell an operator's signature from a reason class without
+                    # opening the ledger.
+                    "actor": actor,
+                    "attestation": attestation,
+                    "summary": (
+                        "Quarantined hardware resources were released after operator-confirmed recovery."
+                        if attestation == ATTESTATION_OPERATOR
+                        else "Quarantined hardware resources were released: every reason it was held for names a call that never reached the hardware."
+                    ),
+                }
             finally:
                 for lock in reversed(locks):
                     lock.release()

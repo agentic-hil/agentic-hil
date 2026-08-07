@@ -203,6 +203,7 @@ def test_generated_configuration_grants_everything_at_all(tmp_path: Path, monkey
             "allow_config_write": True,
             "allow_config_description_write": True,
             "allow_config_permissions_write": True,
+            "allow_recover": True,
         }
         assert document["debuggers"]["dut"]["permissions"] == {
             "allow_flash": True,
@@ -353,6 +354,7 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
         "allow_config_write": True,
         "allow_config_description_write": True,
         "allow_config_permissions_write": True,
+        "allow_recover": True,
     }
     assert {key: value for key, value in regenerated.items() if key != "provenance"} == {
         key: value for key, value in original.items() if key != "provenance"

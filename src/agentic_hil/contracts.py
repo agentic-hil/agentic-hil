@@ -129,6 +129,27 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # No arguments, and the missing one is the contract. There is no
+    # `confirm_safe_state` here and there will not be: that flag attests that a
+    # physical board is still and holds the expected firmware, and a flag the
+    # caller sets for itself is not a confirmation of anything. The reasons that
+    # need it are refused with the operator's command line instead, whatever the
+    # configuration grants. A schema test pins the absence, the way #126 pins the
+    # absent version argument on the upgrade tool.
+    {
+        "name": "hardware_recover",
+        "description": (
+            "Clear this bench's quarantine when every reason it is held for names a call that never reached the "
+            "hardware — a lease release that could not persist its own record, an owner process that died before its "
+            "call touched a board. Takes no arguments. A reason that needs somebody to look at the board is refused "
+            "with recovery_requires_physical_check and the exact `agentic-hil recover --confirm-safe-state "
+            "--quarantine-id <id>` line to relay to the operator, because confirming that a board is still and runs "
+            "the expected firmware is a statement about the physical world that nothing here can make. Needs "
+            "permissions.allow_recover. Safe to call when nothing is quarantined; it answers was_quarantined: false. "
+            "Use this instead of deleting the server's state files, which is never the fix."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
     # No parameters, and that is the contract. The configuration is generated for
     # the workspace this server is bound to, out of what is attached to this
     # machine: a workspace_root argument would let a caller provision a project
@@ -432,6 +453,15 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     "bench_run_stop": {"title": "End the bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # In-memory only; it does not even read the holder files.
     "bench_run_status": {"title": "Bench run status", "readOnlyHint": True, "openWorldHint": False},
+    # Not read-only: it rewrites this project's lease records and appends to the
+    # recovery ledger, and what that changes is which calls the bench will accept
+    # next. Not destructive, and that is a claim about what it reaches rather
+    # than a comfortable default — it never drives the target, never opens a
+    # port or a bus, and only ever clears reasons that name no hardware contact;
+    # the ones that might have left a board somewhere are exactly the ones it
+    # refuses. Idempotent: a second call finds nothing quarantined and answers
+    # `ok` with `was_quarantined: false`.
+    "hardware_recover": {"title": "Clear a bench quarantine", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # Rewrites the authoritative configuration with no backup on disk, and
     # carries over the permissions of the document *this server loaded at
     # startup* — so a narrowing made with project_config_set in this session is

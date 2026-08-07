@@ -132,11 +132,11 @@ class IoPermissions:
 
 @dataclass(frozen=True)
 class ProjectPermissions:
-    """What may be done to this project's configuration itself.
+    """What may be done to this project, beside its hardware.
 
     Every flag belongs to the write class of decision 0018: reading the
     configuration needs no grant, writing it does. A generated configuration
-    carries all three true (hardci-hq#96), so an agent can describe the bench and
+    carries all of them true (hardci-hq#96), so an agent can describe the bench and
     narrow it on the operator's request without anyone opening YAML. The
     dataclass defaults stay ``False`` for the same reason the per-device ones do:
     they say what a file that names nothing means, and widening that would widen
@@ -162,11 +162,21 @@ class ProjectPermissions:
         bench *is*. Never reaches a ``permissions:`` block.
     ``allow_config_permissions_write``
         take permissions away field-wise, this key included. It hands over the
-        taking-away and not the granting: only ``false`` may be written."""
+        taking-away and not the granting: only ``false`` may be written.
+    ``allow_recover``
+        clear a quarantine over MCP (``hardware_recover``), for the reasons that
+        name no hardware contact and for those only (hardci-hq#128). Not about
+        the configuration at all, which is why the class docstring above no
+        longer says three: it sits here because it is project-scoped rather than
+        device-scoped, and because a bench that wants an agent kept away from its
+        incidents narrows it in the same block as the rest. What it cannot hand
+        over is the physical attestation — that boundary is in the tool, not in
+        this flag, and granting this does not move it."""
 
     allow_config_write: bool = False
     allow_config_description_write: bool = False
     allow_config_permissions_write: bool = False
+    allow_recover: bool = False
 
 
 @dataclass(frozen=True)

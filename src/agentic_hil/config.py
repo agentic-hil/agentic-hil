@@ -1166,9 +1166,10 @@ DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. 
 # allow_probe / allow_read.
 version: 2
 
-# What may be done to this file itself. All three start true, so an agent can
-# describe the bench, regenerate it from hardware discovery, and narrow any
-# permission here on your say-so — without you opening YAML first.
+# What may be done to this project, beside its hardware. All start true, so an
+# agent can describe the bench, regenerate it from hardware discovery, clear an
+# incident nothing physical was part of, and narrow any permission here on your
+# say-so — without you opening YAML first.
 #
 # Over MCP an agent can only ever narrow. `project_config_set` writes `false`
 # into a permission and no other value, so every one of these can go from true to
@@ -1176,10 +1177,18 @@ version: 2
 # allow_config_permissions_write is therefore the last one it can close: after
 # that it cannot change any permission again. Regenerating is yours —
 # `agentic-hil init --force` writes this file again at the defaults below.
+#
+# allow_recover is not about this file. It lets an agent clear a quarantine over
+# MCP for the reasons that name no hardware contact — a dead owner that never
+# reached the board, a host-side persistence fault. Confirming that a board is
+# still and holds the firmware you expect is a statement about the physical
+# world, so those reasons refuse over MCP whatever this says, and name
+# `agentic-hil recover --confirm-safe-state` for you instead.
 permissions:
   allow_config_write: true
   allow_config_description_write: true
   allow_config_permissions_write: true
+  allow_recover: true
 
 target:
   name: "example-target"
@@ -1332,10 +1341,12 @@ def generated_permissions(section: str) -> dict[str, bool]:
     than each deciding for itself. That is deliberate: the defect this closes was
     three paths that agreed by coincidence until one of them was edited."""
     return {flag: flag not in EXCLUSIVE_FLASH_PERMISSIONS for flag in GENERATED_WRITE_PERMISSIONS.get(section, ())}
-# The project-scoped grants, all three of them. A generated configuration writes
-# every one true and a regenerated one carries every one over: whichever list is
-# short is the one that hands out a grant nobody set or drops one somebody did.
-GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write")
+# Every project-scoped grant. A generated configuration writes every one true and
+# a regenerated one carries every one over: whichever list is short is the one
+# that hands out a grant nobody set or drops one somebody did. Three of them are
+# about this file; `allow_recover` is about this bench's incidents, and is here
+# because it is scoped to the project rather than to a device.
+GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_recover")
 # The two grants the schema puts directly on a fixed section rather than inside a
 # `permissions` block. A generation writes both true, so they belong in every
 # list that claims to say what a generated configuration grants — and in the key
@@ -2413,6 +2424,7 @@ def project_permissions(raw: JsonObject) -> ProjectPermissions:
         allow_config_write=bool(raw.get("allow_config_write", False)),
         allow_config_description_write=bool(raw.get("allow_config_description_write", False)),
         allow_config_permissions_write=bool(raw.get("allow_config_permissions_write", False)),
+        allow_recover=bool(raw.get("allow_recover", False)),
     )
 
 
@@ -2674,7 +2686,7 @@ REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
 # the schema declares belongs in this set; a test compares the two, because a
 # grant added to the schema and forgotten here would make every file that uses it
 # unloadable with a migration error about a block from three releases ago.
-SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write", "allow_config_description_write", "allow_config_permissions_write"}}
+SURVIVING_SECTION_KEYS = {"permissions": {"allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_recover"}}
 
 
 def reject_removed_sections(raw: JsonObject, config_path: str) -> None:

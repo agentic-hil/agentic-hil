@@ -113,6 +113,25 @@ EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase"
 # to "listening anyway" is the defect these exist to prevent.
 LISTEN_ONLY_UNSUPPORTED_ERROR = "can_listen_only_unsupported"
 LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
+# A SocketCAN channel that is not a netdev on this host. Its own error_type
+# rather than a shade of `can_adapter_open_failed`, because it is the one open
+# failure whose outcome is not merely unproven: the bind had nothing to bind to,
+# so no controller was addressed and the bench is untouched (hardci-hq#127).
+CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
+# What `hardware_recover` answers when the incident needs somebody at the bench
+# (hardci-hq#128). Not `permission_denied`: no grant on this or any bench opens
+# it, because the missing thing is a statement about a physical board and not an
+# authorization. The refusal carries the command the person runs instead.
+RECOVERY_PHYSICAL_CHECK_ERROR = "recovery_requires_physical_check"
+
+
+def recovery_operator_command(quarantine_id: str | None) -> str:
+    """The exact line the operator types, with this incident's id in it.
+
+    One spelling, built in one place: a refusal that named the command with a
+    placeholder left the reader to find the id, and a refusal that spelled the
+    flags differently from the CLI's own parser sent them to a usage error."""
+    return f"agentic-hil recover --confirm-safe-state --quarantine-id {quarantine_id or '<id>'}"
 
 
 def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | None) -> str:
@@ -410,6 +429,65 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "and after every write, so it fails, and it is the thing this grant exists to prevent.",
             "Do not carry out the action the permission would have allowed by another route. A debugger, serial "
             "device or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
+        ),
+    ),
+    "permission_denied:allow_recover": ErrorRemedy(
+        meaning=(
+            "`hardware_recover` was called and `permissions.allow_recover` is false, so this bench does not let an "
+            "agent clear its incidents at all. The quarantine is unchanged and every hardware effect stays blocked "
+            "until an operator recovers it from the command line. This is a bench that has decided its incidents are "
+            "a person's business, and the refusal is that decision working."
+        ),
+        remediation=(
+            "Relay `operator_command` to the operator — it is the whole line, with this incident's id already in it — "
+            "together with the `quarantine_guidance` from `get_last_report` or the refusal that quarantined the bench: "
+            "what was attempted, what is confirmed, what is unknown, and what to check on the board.",
+            "Read the incident out with `get_last_report` and `classify_last_error` while you wait. Explaining what "
+            "happened is the part of the task that is still possible.",
+            "If this bench should let an agent clear the no-contact class, that is an operator's change to "
+            "`permissions.allow_recover` and not one you can make: `project_config_set` writes only `false` into a "
+            "permission.",
+        ),
+        do_not=(
+            "Do not delete or edit the lease records, the quarantine markers or the recovery ledger under "
+            "`state_root`. That is not recovery, it is erasing the record that a bench needs checking.",
+            "Do not drive the probe, the serial port or the CAN adapter outside Agentic HIL to 'get on with it'. The "
+            "quarantine exists because the physical state is unknown, and the tools are not what makes it so.",
+        ),
+    ),
+    RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
+        meaning=(
+            "`hardware_recover` was allowed to run and refused on the class of the incident, not on a permission. At "
+            "least one reason this bench is quarantined for names a physical state — a flash whose outcome was never "
+            "confirmed, a session that died mid-call, cleanup nobody could verify — and clearing it means attesting "
+            "that the board is still and holds the firmware somebody expects. That is a claim about the world, and "
+            "only a person at the bench can make it. `physical_check_reasons` names the ones that need it and "
+            "`agent_clearable_reasons` the ones that would not have; no grant on any bench moves that line, which is "
+            "why this tool has no confirmation argument to pass. A reason this bench's `recovery.auto_recover` policy "
+            "could settle is refused here too and for a different reason — settling it means running a predicate "
+            "against the board, and the automatic path does that on the next hardware call while this call runs "
+            "nothing. `auto_recoverable` on the refusal says which of the two situations this is."
+        ),
+        remediation=(
+            "Read `auto_recoverable` first. When it is true this bench's own recovery policy can settle the incident "
+            "by running a predicate against the board — a re-read of the probe, or a verified reset into halt — and it "
+            "does that on the next hardware call, not here: this tool runs no predicate, so it will not assert an "
+            "unconfirmed board is fine. Retry the hardware call once and read the result.",
+            "Otherwise relay `operator_command` verbatim. It is the exact command, with this incident's "
+            "`quarantine_id` already in it, and it is what the operator runs after the check.",
+            "Relay `quarantine_guidance` with it, per reason: what was attempted, what is still confirmed, what nobody "
+            "on this host can know, and the `physical_check` to perform on the board. A signature over a claim the "
+            "signer was not shown is worth nothing.",
+            "Say plainly that hardware effects stay blocked until then, and stop there. This refusal is the answer to "
+            "the request, not an obstacle in front of it.",
+        ),
+        do_not=(
+            "Do not call `hardware_recover` again hoping for a different class. The reasons are read from the "
+            "incident record and repeating the call cannot change them.",
+            "Do not retry the hardware call to 'clear' the incident. The bench's own recovery policy already tried "
+            "whatever it could verify without an operator, before this refusal existed.",
+            "Do not clear the state files under `state_root` by hand, and do not ask the operator to. The command "
+            "above is the supported route and it keeps the ledger line that says who signed for what.",
         ),
     ),
     CONFIG_WIDENING_ERROR: ErrorRemedy(
@@ -809,6 +887,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
     ),
     # -- The one flag whose whole value is that it is never silently degraded ---
+    CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
+        meaning=(
+            "The SocketCAN interface named by `can_buses.<name>.channel` does not exist on this host. The session was "
+            "refused where the socket would have been bound, so no CAN controller was addressed and nothing was put on "
+            "any bus — this is a refusal about the host's network configuration, not a quarantine. The usual cause is "
+            "that the interface was never brought up, or that a USB adapter was re-enumerated and its `canN` name "
+            "moved."
+        ),
+        remediation=(
+            "Read `channel` on the result: that is the interface name that was looked for.",
+            "List what the host actually has with `ip link show type can`. An adapter that is plugged in but unnamed "
+            "there needs its driver loaded; one under a different `canN` number needs that number in the "
+            "configuration, which `project_config_set` writes into `can_buses.<name>.channel`.",
+            "Bring a real interface up with `sudo ip link set <dev> type can bitrate <bitrate>`, then `sudo ip link "
+            "set <dev> up`. For a bench without hardware, `sudo modprobe vcan`, `sudo ip link add dev vcan0 type "
+            "vcan`, then `sudo ip link set vcan0 up`.",
+            "Retry the session afterwards. The bench was never blocked: `retry_safe` is true and no incident was "
+            "opened.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. There is nothing to recover — no lease was "
+            "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
+            "Do not point the entry at whichever `canN` happens to be up. That is the wrong-bus mistake the channel "
+            "name exists to prevent; confirm which interface belongs to this bench first.",
+        ),
+    ),
     LISTEN_ONLY_UNSUPPORTED_ERROR: ErrorRemedy(
         meaning=(
             "`can_buses.<name>.listen_only: true` is configured and this adapter cannot be held to it, so the session "
@@ -1763,7 +1867,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "version": "Which permission model the file is read under. A new file should say `2`.",
     "workspace_root": "The project this configuration authorizes, and nothing else. A server started elsewhere refuses it.",
     "state_root": "Where leases, quarantine incidents and canonical reports live. Outside `workspace_root`, so repository content cannot forge them.",
-    "permissions": "What may be done to this file itself.",
+    "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
@@ -1796,6 +1900,9 @@ permissions:
   allow_config_permissions_write: true
   # Taken back: this bench is not to be regenerated from hardware discovery.
   allow_config_write: false
+  # Also still true: the agent may clear an incident that names no hardware
+  # contact. The ones that need somebody at the board refuse regardless of it.
+  allow_recover: true
 
 target:
   name: "thermostat-dut"

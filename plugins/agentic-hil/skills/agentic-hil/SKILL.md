@@ -28,6 +28,7 @@ serial, or CAN invocation bypasses that gate.
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
+| Hardware is quarantined and nothing physical was part of it | `hardware_recover` |
 
 Declare a multi-step sequence before its first call: `bench_run_start` with
 `devices: [{"kind": "debugger"|"uart"|"can", "id": "<config entry>"}]` holds
@@ -79,6 +80,20 @@ confirmed, what remains unknown, and the `physical_check` to perform on the
 board — and ask them to run `agentic-hil recover --confirm-safe-state
 --quarantine-id <id>` after that check. Never clear the server's own state
 files yourself.
+
+`hardware_recover` is the one part of that you can do, and only one part.
+It clears an incident whose every reason names a call that never reached the
+hardware — a release that could not persist its own record, an owner process
+that died before it touched the board — and it refuses everything else with
+`recovery_requires_physical_check` and the exact `operator_command` to relay.
+The refusal is not about permissions and no grant changes it: confirming that a
+board is still and runs the expected firmware is a statement about the physical
+world, which is why the tool has no confirmation argument for you to set. Call
+it before you retry a hardware call rather than after — taking a lease over a
+dead owner's record adds `owner_process_exited_without_release` to the incident,
+and that reason needs a person. If `permissions.allow_recover` is false, this
+bench has decided its incidents are the operator's, and the answer is the
+`operator_command` and nothing else.
 
 `com_port_identity_mismatch` is a refusal about *which board*, not about
 permissions. A serial device name — `/dev/ttyACM0`, `COM7` — is an enumeration

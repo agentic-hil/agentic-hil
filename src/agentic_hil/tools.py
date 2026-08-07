@@ -49,9 +49,11 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.contracts import MCP_TOOL_NAMES, validate_tool_arguments
 from agentic_hil.coordination import (
+    ATTESTATION_NO_CONTACT_CLASS,
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    RECOVERY_ACTOR_AGENT,
     RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
     HardwareCoordinator,
@@ -60,7 +62,12 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, resolve_devices
-from agentic_hil.knowledge import attach_quarantine_guidance, remediation_fields
+from agentic_hil.knowledge import (
+    RECOVERY_PHYSICAL_CHECK_ERROR,
+    attach_quarantine_guidance,
+    recovery_operator_command,
+    remediation_fields,
+)
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
@@ -408,6 +415,11 @@ class AgenticHILToolService:
             "bench_run_start": lambda: self.bench_run_start(args),
             "bench_run_stop": lambda: self.bench_run_stop(),
             "bench_run_status": lambda: self.bench_run_status(),
+            # Deliberately not in `audited_hardware_tools`: it is the one call
+            # that exists to answer a blocked bench, so the gate above — which
+            # refuses every hardware tool while an incident is open — must not
+            # stand in front of it.
+            "hardware_recover": lambda: self.hardware_recover(),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it. It also reads a
@@ -568,6 +580,113 @@ class AgenticHILToolService:
 
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
+
+    def hardware_recover(self) -> JsonObject:
+        """Clear this bench's quarantine, for the reasons that need no bench visit.
+
+        Until hardci-hq#128 a quarantine could be seen and explained over MCP and
+        cleared nowhere but at a shell, so on a host that has no shell an agent
+        watched a bench it could not return to service — including for incidents
+        that had provably never touched a board.
+
+        Two things gate it, and they are different in kind. `permissions
+        .allow_recover` is authorization: this bench's operator decides whether an
+        agent is in the recovery business at all, open by default like every grant
+        since hardci-hq#96 and narrowable to false and not back, through the same
+        one-way `project_config_set` as the rest.
+
+        The class boundary is not authorization and no grant reaches it.
+        `--confirm-safe-state` attests that a physical board is still and holds
+        the firmware somebody expects; that is a claim about the world, and the
+        only entity that can make it is a person standing at the bench. So a
+        reason that requires it is refused here whatever the configuration says,
+        and the refusal carries the command line for the person to run. This is
+        also why this tool takes no arguments at all: a `confirm_safe_state`
+        parameter would be a flag the agent sets for itself, and a confirmation
+        one gives oneself is not one.
+
+        The transition, when it is allowed, is the same `coordinator.recover`
+        the CLI performs — one implementation, one set of marker-consistency
+        checks, one ledger — with the actor and the attestation saying which of
+        the two ways in was taken.
+
+        Idempotent, and honestly so: a bench with no open incident answers `ok`
+        with `was_quarantined: false` rather than failing, the way `bench_run_stop`
+        and `com_session_stop` do, so a second call after a successful one is
+        free.
+        """
+        # Read first, refuse second, and deliberately in that order. Reading this
+        # bench's state needs no grant anywhere in this project, nothing is
+        # cleared before the grant is checked, and a refusal that could not name
+        # the incident would send the operator hunting for an id — on a host that
+        # has no shell to run `lease-status` in, which is the situation this tool
+        # exists for.
+        status = self.coordinator.status()
+        quarantine_id = status.get("quarantine_id")
+        reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
+        if not self.config.permissions.allow_recover:
+            return {
+                "ok": False,
+                "tool": "hardware_recover",
+                "error_type": "permission_denied",
+                "permission": "permissions.allow_recover",
+                "summary": "Clearing a quarantine over MCP is disabled by the authoritative config; the operator recovers this bench from the command line.",
+                "quarantine_id": quarantine_id,
+                "cleanup_reasons": reasons,
+                "operator_command": recovery_operator_command(quarantine_id),
+                "side_effect_committed": False,
+                "retry_safe": False,
+                **remediation_fields("permission_denied", "allow_recover"),
+            }
+        if not status.get("blocked"):
+            return {
+                "ok": True,
+                "tool": "hardware_recover",
+                "was_quarantined": False,
+                "resources": [],
+                "summary": "This bench has no unresolved incident; nothing needed clearing.",
+            }
+        allowed = self.coordinator.agent_recoverable_reasons()
+        # An incident with no named reason is not a reason class this can judge.
+        # It goes to the operator with the rest, because "unnamed" is the one
+        # thing an automatic clearance must never read as "harmless".
+        physical = sorted(set(reasons) - allowed) if reasons else ["unnamed_incident"]
+        if physical:
+            refusal: JsonObject = {
+                "ok": False,
+                "tool": "hardware_recover",
+                "error_type": RECOVERY_PHYSICAL_CHECK_ERROR,
+                "summary": "This quarantine names a physical state only somebody at the bench can confirm, so it is not clearable from here.",
+                "quarantine_id": quarantine_id,
+                "cleanup_reasons": reasons,
+                "physical_check_reasons": physical,
+                "agent_clearable_reasons": sorted(allowed),
+                # Said outright, because a reason this bench's own policy can
+                # settle would otherwise read as needing a person: it does not,
+                # it needs the predicate run, and the next hardware call runs it.
+                "auto_recover_policy": status.get("auto_recover_policy"),
+                "auto_recoverable": bool(status.get("auto_recoverable")),
+                # The whole line, with this incident's id already in it.
+                "operator_command": recovery_operator_command(quarantine_id),
+                "cleanup_required": True,
+                "quarantined": True,
+                "retry_safe": False,
+                "side_effect_committed": False,
+                **remediation_fields(RECOVERY_PHYSICAL_CHECK_ERROR),
+            }
+            # `quarantine_guidance` is attached by `call`, so the four facts the
+            # signer needs travel with the command they are needed for.
+            return refusal
+        recovered = self.coordinator.recover(
+            safe_state_confirmed=True,
+            quarantine_id=quarantine_id if isinstance(quarantine_id, str) else None,
+            actor=RECOVERY_ACTOR_AGENT,
+            via="mcp:hardware_recover",
+            attestation=ATTESTATION_NO_CONTACT_CLASS,
+        )
+        if recovered.get("ok") is not True:
+            return {**recovered, "cleanup_reasons": reasons, "operator_command": recovery_operator_command(quarantine_id)}
+        return {**recovered, "was_quarantined": True, "cleared_reasons": reasons}
 
     def open_hardware_holds(self) -> JsonObject | None:
         """What this server is holding, or None when it holds nothing.

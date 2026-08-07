@@ -575,6 +575,34 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
     }
 
 
+# Tools whose device lease is taken inside the call they report and given back
+# inside it — unless the call reached the hardware, in which case a session start
+# keeps it for the session.
+#
+# Read by the coordination layer to decide whether a report can speak for a lease
+# that is still open on disk (hardci-hq#127). For a tool in this set, a report
+# saying `side_effect_status: not_started` beside a still-active lease says the
+# owner died between committing that report and releasing the lease — and in that
+# window nothing can have touched the bench, because the next call would have
+# written the next report. Every other tool runs under a lease an earlier call
+# opened, and that earlier call — the session start that did reach the hardware —
+# is no longer in the report state at all; a `can_read` failure on an open bus
+# reports `not_started` truthfully about itself and says nothing about the open.
+# That is the distinction this set exists to make, and widening it past the tools
+# that own their own lease would erase it.
+CALL_SCOPED_LEASE_TOOLS = frozenset(
+    {
+        "debugger_probes_list",
+        "probe_target",
+        "flash_firmware",
+        "reset_target",
+        "debug_start_session",
+        "com_session_start",
+        "can_session_start",
+    }
+)
+
+
 def mark_side_effect(result: JsonObject) -> JsonObject:
     if result.get("tool") not in {
         "flash_firmware", "reset_target", "debug_start_session", "debug_set_breakpoint", "debug_continue",
