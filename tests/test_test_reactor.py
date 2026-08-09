@@ -2162,6 +2162,71 @@ steps:
     assert read["bytes_received"] == 13
 
 
+def test_comparator_equals_matches_a_banner_printed_in_a_loop(tmp_path: Path) -> None:
+    # What the demo firmware actually does: prints its banner over and over, so
+    # the whole buffer is never one value. Any one complete line of it is, which
+    # is why `equals` reads both ways.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: looping-banner
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "Hello World"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Hello World\nHello World\nHello Wo"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][1]["result"]["reads"] == 1
+
+
+def test_comparator_equals_waits_for_a_line_to_be_complete(tmp_path: Path) -> None:
+    # The other half of the same rule: a fragment that starts with the value is
+    # not the value, so a longer line still to come cannot pass early.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: partial-line
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "Hello"}, timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Hello", b" World\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["steps"][1]["result"]["error_type"] == "comparator_unmet"
+
+
+def test_comparator_equals_judges_unterminated_output_when_time_runs_out(tmp_path: Path) -> None:
+    # A board that answers once and stops sends no terminator, so the whole of
+    # what was received is judged on the last pass — and only there, which is
+    # what the test above holds.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: unterminated
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "READY"}, timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"READY"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][1]["result"]["comparator"] == {"equals": "READY"}
+
+
 def test_comparator_equals_refuses_a_line_that_merely_contains_the_value(tmp_path: Path) -> None:
     # The difference between `equals` and the v2 `text:`: a banner that says more
     # than the expected value does not equal it, and the step says so with the
@@ -2534,3 +2599,21 @@ def test_a_version_2_plan_cannot_reach_for_version_3(tmp_path: Path, step: str, 
     assert refused.value.details["plan_version"] == 2
     assert refused.value.details["requires_plan_version"] == 3
     assert "version: 3" in refused.value.details["migration"]
+
+
+def test_every_plan_this_repository_ships_loads(tmp_path: Path) -> None:
+    # A reader copies these. A plan that does not load is documentation of a
+    # format that does not exist, and a migration is exactly when that happens.
+    repository_root = Path(__file__).resolve().parents[1]
+    shipped = sorted(repository_root.glob("examples/**/testconfig*.yaml")) + sorted(repository_root.glob("evals/**/testconfig*.yaml"))
+
+    assert len(shipped) >= 4, shipped
+    for plan_path in shipped:
+        loaded = load_test_config(str(plan_path), str(repository_root))
+        assert loaded.steps, plan_path
+    # The demo plan is the one a reader runs first: v3 idiom, no close step, and
+    # the read makes a claim rather than merely reading.
+    demo = load_test_config(str(repository_root / "examples" / "nucleo-f446re_demo" / "testconfig.yaml"), str(repository_root))
+    assert [step.action for step in demo.steps] == ["flash", "uart_open", "reset", "uart_read"]
+    assert [step.device for step in demo.steps] == ["dut", "dut_uart", "dut", "dut_uart"]
+    assert demo.steps[3].arguments["comparator"] == {"equals": "Hello World"}

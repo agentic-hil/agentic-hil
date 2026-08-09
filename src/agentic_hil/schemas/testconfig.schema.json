@@ -54,7 +54,7 @@
       ],
       "dependentRequired": { "range": ["pattern"] },
       "properties": {
-        "equals": { "type": "string", "minLength": 1, "description": "The value the output must equal — not merely contain. A serial line has no end, so either reading counts: the whole of what has been received, or any one complete line of it, once surrounding whitespace is removed. Mutually exclusive with `pattern`." },
+        "equals": { "type": "string", "minLength": 1, "description": "The value the output must equal — not merely contain. A serial line has no end, so this is read two ways: any one complete line of what was received matches as soon as its terminator arrives, and the whole of what was received matches on the last pass, once the step's timeout has run out and nothing further is coming. Surrounding whitespace is removed either way. A value the board never terminates therefore costs the full timeout, because until then it cannot be told apart from a value still arriving. Mutually exclusive with `pattern`." },
         "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. A pattern that does not compile is refused before the run starts. Mutually exclusive with `equals`." },
         "range": {
           "type": "object",

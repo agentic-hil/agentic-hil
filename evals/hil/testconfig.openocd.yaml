@@ -1,5 +1,9 @@
 # OpenOCD reactor plan: flash, open UART, and prove execution reached `delay`
 # through a typed GDB/MI debug session before closing every session.
+#
+# Deliberately left at `version: 2`, with its explicit closes: this is the one
+# place a v2 plan is still driven end to end against real hardware, and that is
+# worth more here than the shorter v3 spelling. The examples/ plans show v3.
 version: 2
 name: nucleo-f446re-openocd
 steps:

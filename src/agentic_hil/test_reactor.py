@@ -96,15 +96,21 @@ COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
 DELAY_MAX_MS = 600_000
 
 
-def decoded_equals(decoded: str, expected: str) -> bool:
+def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
     """True when what the line said equals `expected` — not merely contains it.
 
-    A serial line has no end, so "the whole thing" is read two ways and either
-    counts: the whole of what has been received so far, or any one complete line
-    of it, once surrounding whitespace is removed. The first is what a board that
-    answers once and stops looks like; the second is what a board that prints its
-    banner in a loop looks like, where the whole buffer is never one value."""
-    if decoded.strip() == expected:
+    A serial line has no end, so "the whole thing" is read two ways. Any one
+    complete line of what was received counts at once: a terminator is the board
+    saying that value is finished, which is what a board printing its banner in a
+    loop looks like, where the whole buffer is never one value.
+
+    The whole of what was received counts too — a board that answers once and
+    stops sends no terminator — but only on the last pass, once the step's
+    deadline has run out and nothing further is coming. Accepting it earlier
+    would pass `equals: "Hello"` on a board halfway through printing "Hello
+    World", and a framework answering green to a value that was still arriving is
+    worse than one that waits out its own timeout to be sure."""
+    if final and decoded.strip() == expected:
         return True
     lines = decoded.splitlines()
     if lines and not decoded.endswith(("\n", "\r")):
@@ -154,9 +160,12 @@ class StepComparator:
         """The plan's own string, which sizes the read window."""
         return self.equals or self.pattern or ""
 
-    def matches(self, decoded: str) -> bool:
+    def matches(self, decoded: str, final: bool) -> bool:
+        """Whether what has been received meets this claim. `final` is true on
+        the pass the step's deadline has run out on — the last look at the line,
+        where a value that never carried a terminator can still be judged."""
         if self.equals is not None:
-            return decoded_equals(decoded, self.equals)
+            return decoded_equals(decoded, self.equals, final)
         if self._finditer is None:
             return False
         if self.bounds is None:
@@ -1095,17 +1104,18 @@ class UartRunner(SessionDevice):
     # --- reading the line ------------------------------------------------
 
     @staticmethod
-    def _matcher(field_name: str, expected: str) -> Callable[[str], bool]:
+    def _matcher(field_name: str, expected: str) -> Callable[[str, bool], bool]:
         """What counts as a match for one of the two v2 expectation kinds.
 
         A pattern is `re.search`, so it is anchored where it is written and
         nowhere else: a plan that means "the line starts this way" writes the
         `^` itself. Compiled once per step rather than per read — the pattern
-        already compiled cleanly at preflight, so this cannot raise."""
+        already compiled cleanly at preflight, so this cannot raise. Neither kind
+        judges the last pass differently, so both ignore `final`."""
         if field_name == "text":
-            return lambda decoded: expected in decoded
+            return lambda decoded, final: expected in decoded
         search = re.compile(expected).search
-        return lambda decoded: search(decoded) is not None
+        return lambda decoded, final: search(decoded) is not None
 
     def _expect(self, field_name: str, expected: str, timeout_s: float) -> JsonObject:
         """The v2 `uart_expect`, reported under the names a v2 report already
@@ -1152,7 +1162,7 @@ class UartRunner(SessionDevice):
             return {"ok": True, "tool": "test_reactor", "summary": met, **common}
         return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
 
-    def _read_until(self, timeout_s: float, written: str, matches: Callable[[str], bool]) -> UartReadOutcome:
+    def _read_until(self, timeout_s: float, written: str, matches: Callable[[str, bool], bool]) -> UartReadOutcome:
         """Read this line until `matches` is satisfied or the deadline passes.
 
         The plan's own read path and nothing else: each pass is one `com_read` —
@@ -1193,9 +1203,13 @@ class UartRunner(SessionDevice):
             received_bytes += len(chunk)
             received.extend(chunk)
             del received[:-window]
-            if matches(decode_bytes(bytes(received), encoding)):
+            # Asked before the match, so the pass the deadline has run out on is
+            # the one that gets the last look — where a claim that can only be
+            # settled by "nothing more is coming" is allowed to settle.
+            expired = time.monotonic() >= deadline
+            if matches(decode_bytes(bytes(received), encoding), expired):
                 return UartReadOutcome(True, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
-            if time.monotonic() >= deadline:
+            if expired:
                 return UartReadOutcome(False, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
             if not chunk:
                 # A read that returned nothing while time was left had its own
