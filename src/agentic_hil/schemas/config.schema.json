@@ -571,6 +571,53 @@
           },
           "permissions": {
             "$ref": "#/$defs/io_permissions"
+          },
+          "listen_only_enforcement": {
+            "type": "string",
+            "enum": ["controller", "service"],
+            "default": "controller",
+            "description": "What listen_only above is worth on this bus. `controller` is the per-controller proof the adapter itself provides. `service` is the CAN broker filtering frames in software for the participants attached to it, which is a weaker and different claim: it is reported as software filtering wherever it is reported, and never as the controller proof."
+          },
+          "shares": {
+            "type": "object",
+            "description": "Named participant views of this physical bus. Present means the bus is brokered: one process owns the adapter and holds the machine-wide bus lock, and runs attach to a named share instead of racing for the device. Absent - the default - means the single-owner bus this project has always had, unchanged.",
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "filter": {
+                  "type": "array",
+                  "description": "Identifier acceptance terms. A frame reaches this participant, and may be sent by it, when (frame_id & mask) == (id & mask) for any term. An empty list accepts every identifier.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": { "type": "integer", "minimum": 0, "default": 0 },
+                      "mask": { "type": "integer", "minimum": 0, "default": 2047 },
+                      "extended": { "type": "boolean", "default": false }
+                    }
+                  }
+                },
+                "max_frames": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1024,
+                  "description": "Frame budget for one attachment of this participant. Exhausting it aborts that participant's run and leaves the bus and the other participants running."
+                },
+                "requires_listen_only": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether this view is only meaningful while nothing on the bus transmits. Such a participant and a participant with allow_write cannot be attached at the same time; the refusal names the bus listen_only_enforcement level."
+                },
+                "permissions": {
+                  "$ref": "#/$defs/io_permissions"
+                }
+              }
+            },
+            "default": {}
           }
         }
       },

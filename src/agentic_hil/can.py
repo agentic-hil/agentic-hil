@@ -416,6 +416,26 @@ class CanBusService:
         # before a session is started rather than only in the refusal that
         # follows one.
         result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "listen_only": bus_config.listen_only, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter], "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
+        # Only for a brokered bus. A bus with no `shares:` is the single-owner bus
+        # this tool has always described, and it keeps describing it in exactly
+        # the same words — the participant vocabulary appears where participants
+        # exist and nowhere else.
+        if bus_config.shares:
+            from agentic_hil.canbroker import listen_only_proof, share_view
+
+            result["shares"] = {name: share_view(share) for name, share in bus_config.shares.items()}
+            result["listen_only_enforcement_level"] = bus_config.listen_only_enforcement
+            result["listen_only_proof"] = listen_only_proof(bus_config)
+            if bus_config.listen_only_enforcement == "service":
+                # The adapter's own evidence is not what backs the flag on this
+                # bus, so it does not get to answer "how is listen-only enforced
+                # here". `driver_verified` sitting above a proof of
+                # `software_filter` is the exact misreading the configuration key
+                # exists to prevent: an operator acting on the first line would
+                # believe a controller had been put in a state nobody put it in.
+                # The capability is not lost, only renamed to what it is.
+                result["listen_only_adapter_capability"] = result["listen_only_enforcement"]
+                result["listen_only_enforcement"] = listen_only_proof(bus_config)
         if session is not None:
             result.update(self._session_status(session))
         return result
