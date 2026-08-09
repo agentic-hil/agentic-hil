@@ -2021,3 +2021,516 @@ steps:
     assert failed["bytes_received"] == 9
     # The plan never closed the port, so cleanup did.
     assert [record["action"] for record in result["cleanup"]] == ["uart_close"]
+
+
+# --- format v3 ------------------------------------------------------------
+
+
+def uart_config(tmp_path: Path, *, allow_write: bool = True):
+    permissions = {**DEFAULT_TEST_PERMISSIONS, "allow_com_write": allow_write}
+    return load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n', permissions=permissions)))
+
+
+def test_v3_routes_every_kind_by_one_device_key(tmp_path: Path) -> None:
+    # The whole point of v3's routing: one key, three sections, and the config
+    # is what knows which section a name is in.
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n',
+                can_buses_yaml=CAN_BUS_YAML,
+            )
+        )
+    )
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: one-key
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_can, action: can_open}
+  - {device: dut, action: reset, mode: run}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["route"] for step in result["steps"]] == ["dut", "dut_uart", "dut_can", "dut"]
+    # Each call reached the entry the one key named, in that entry's own scope.
+    assert service.calls[1] == ("com_session_start", {"clear_buffer": True, "port_id": "dut_uart"})
+    assert service.calls[2] == ("can_session_start", {"clear_rx_queue": True, "bus_id": "dut_can"})
+    # Nothing was closed by the plan, so cleanup closed both sessions.
+    assert sorted(record["action"] for record in result["cleanup"]) == ["can_close", "uart_close"]
+
+
+def test_v3_accepts_the_version_2_keys_as_aliases(tmp_path: Path) -> None:
+    # `debugger:` / `port_id:` stay readable in a v3 plan: they say the same
+    # thing `device:` says, and a plan may mix them.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: aliases
+steps:
+  - {debugger: dut, action: flash, image_path: build/app.elf}
+  - {port_id: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["route"] for step in result["steps"]] == ["dut", "dut_uart", "dut_uart"]
+
+
+def test_a_step_naming_its_device_twice_is_refused(tmp_path: Path) -> None:
+    # `device:` and its alias mean one entry, so a step carrying both has not
+    # decided which board it drives. Refused rather than resolved by precedence.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: two-keys
+steps:
+  - {device: dut_uart, port_id: other_uart, action: uart_open}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[0].port_id"
+    assert result["validation_error"]["route_keys"] == ["device", "port_id"]
+    assert service.calls == []
+
+
+def test_v3_plans_need_no_close_because_cleanup_closes(tmp_path: Path) -> None:
+    # The idiom v3 makes explicit: a plan that never closes is complete, and the
+    # session is provably shut by the run's own cleanup rather than left open.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: no-close
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "Hello World"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Hello World\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["uart_open", "uart_read"]
+    assert [record["action"] for record in result["cleanup"]] == ["uart_close"]
+    assert result["cleanup"][0]["result"]["ok"] is True
+    assert result["cleanup_ok"] is True
+    assert ("com_session_stop", {"port_id": "dut_uart"}) in service.calls
+
+
+def test_comparator_equals_matches_a_value_split_across_reads(tmp_path: Path) -> None:
+    # `equals` is the whole value, not a substring — and the value still arrives
+    # in pieces, so the claim is judged against everything read so far.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: equals
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "Hello World"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Hel", b"lo Wo", b"rld\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["ok"] is True
+    assert read["summary"] == "The COM port output equalled the expected value."
+    assert read["comparator"] == {"equals": "Hello World"}
+    assert read["reads"] == 3
+    assert read["bytes_received"] == 13
+
+
+def test_comparator_equals_refuses_a_line_that_merely_contains_the_value(tmp_path: Path) -> None:
+    # The difference between `equals` and the v2 `text:`: a banner that says more
+    # than the expected value does not equal it, and the step says so with the
+    # tail of what the port did say.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: equals-red
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "Hello World"}, timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Hello World and then some\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "comparator_unmet"
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["summary"] == "The COM port output never equalled the expected value before this step's timeout."
+    assert read["comparator"] == {"equals": "Hello World"}
+    assert read["received_tail"]["text"] == "Hello World and then some\r\n"
+    assert read["received_tail_truncated"] is False
+
+
+def test_comparator_range_passes_a_captured_value_inside_the_bounds(tmp_path: Path) -> None:
+    # The reading, not merely the fact that the board answered: the pattern says
+    # where the number is and the range says which numbers are acceptable.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-green
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=", b"24C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "A value captured from the COM port output fell inside the expected range."
+    assert read["captured_value"] == 24.0
+    assert read["captured_text"] == "24"
+    assert read["comparator"] == {"pattern": "temp=(\\d+)C", "range": {"min": 20, "max": 30}}
+
+
+def test_comparator_range_fails_naming_the_value_it_did_capture(tmp_path: Path) -> None:
+    # A reading that was merely out of range and a board that said nothing are
+    # different failures, so the red result carries the number it did read.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-red
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 0.05
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=91C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["summary"] == "No value captured from the COM port output fell inside the expected range before this step's timeout."
+    assert read["captured_value"] == 91.0
+    assert read["comparator"]["range"] == {"min": 20, "max": 30}
+    assert read["received_tail"]["text"] == "temp=91C\r\n"
+
+
+def test_comparator_range_takes_the_later_reading_when_the_bench_settles(tmp_path: Path) -> None:
+    # An out-of-range reading followed by an in-range one is a bench that
+    # settled, so the step passes on the later value rather than answering
+    # forever with the earliest occurrence in the window.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: settles
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=91C\r\n", b"temp=25C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][1]["result"]["captured_value"] == 25.0
+
+
+def test_a_range_without_a_capture_group_is_refused_before_the_run(tmp_path: Path) -> None:
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: no-capture
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "temp=\\\\d+C", range: {min: 20, max: 30}}, timeout_s: 5}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].comparator.pattern"
+    assert refusal["capture_groups"] == 0
+    # Refused before the bench was touched at all.
+    assert service.calls == []
+
+
+def test_a_range_without_a_pattern_is_refused_by_the_schema(tmp_path: Path) -> None:
+    path = write_test_config(
+        tmp_path,
+        'version: 3\nsteps:\n  - {device: dut_uart, action: uart_read, comparator: {equals: "hi", range: {min: 1, max: 2}}, timeout_s: 5}\n',
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+
+
+def test_a_comparator_saying_two_things_at_once_is_refused(tmp_path: Path) -> None:
+    path = write_test_config(
+        tmp_path,
+        'version: 3\nsteps:\n  - {device: dut_uart, action: uart_read, comparator: {equals: "hi", pattern: "hi"}, timeout_s: 5}\n',
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["exactly_one_of"] == ["equals", "pattern"]
+
+
+def test_uart_read_without_a_comparator_is_a_plain_read(tmp_path: Path) -> None:
+    # No claim, no waiting for one: the step is `com_read` and answers exactly
+    # as `com_read` answers.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: plain
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, timeout_s: 0.5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"whatever\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["tool"] == "com_read"
+    assert read["data"]["text"] == "whatever\r\n"
+    # Exactly one read, and the plan's own deadline is what it waited.
+    assert [arguments for name, arguments in service.calls if name == "com_read"] == [{"port_id": "dut_uart", "wait_timeout_s": 0.5}]
+
+
+def test_uart_write_sends_stimulus_through_the_com_write_tool(tmp_path: Path) -> None:
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: stimulus
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_write, text: "ping\\n"}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "pong"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"pong\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["uart_open", "uart_write", "uart_read"]
+    # The same tool an agent driving the line by hand would call, addressed to
+    # the port the step routed to rather than to whatever the plan wrote.
+    assert ("com_write", {"text": "ping\n", "port_id": "dut_uart"}) in service.calls
+
+
+def test_uart_write_is_refused_by_name_when_the_port_denies_writing(tmp_path: Path) -> None:
+    # The permission is the config's, and the refusal is the plan's: named
+    # before the run, so the line is never half driven.
+    config = uart_config(tmp_path, allow_write=False)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: denied
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_write, text: "ping"}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].action"
+    assert refusal["summary"] == "Writing to this COM port is disabled by the authoritative config."
+    assert refusal["permission"] == "allow_write"
+    assert service.calls == []
+
+
+def test_an_action_a_kind_does_not_declare_answers_not_supported(tmp_path: Path) -> None:
+    # By construction, not by a forgotten special case: dispatch looks the string
+    # up among the declarations and there is nothing else to look in.
+    from agentic_hil.test_reactor import CanRunner, TestStep
+
+    config = can_config(tmp_path)
+    reactor = TestReactor(config, RecordingService())  # type: ignore[arg-type]
+    device = reactor.device_for(CanRunner, "dut_can")
+
+    result = device.execute(TestStep("uart_write", {"text": "ping"}, device="dut_can"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert result["summary"] == "The can device kind does not serve this test reactor action."
+    assert result["bus_id"] == "dut_can"
+    assert result["action"] == "uart_write"
+    assert "can_send" in result["supported_actions"]
+
+
+def test_dispatch_holds_a_step_to_its_own_actions_schema(tmp_path: Path) -> None:
+    # The second half of dispatch: a step some other caller assembled cannot
+    # reach a device method carrying arguments the format never allowed.
+    from agentic_hil.test_reactor import CanRunner, TestStep
+
+    config = can_config(tmp_path)
+    reactor = TestReactor(config, RecordingService())  # type: ignore[arg-type]
+    device = reactor.device_for(CanRunner, "dut_can")
+
+    result = device.execute(TestStep("can_send", {"frame_id": -1}, device="dut_can"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert result["summary"] == "Test step does not satisfy its action's schema."
+    assert result["field"] == "frame_id"
+
+
+def test_delay_waits_on_two_different_device_kinds_and_is_in_the_result(tmp_path: Path) -> None:
+    # One declaration on the base, so both kinds serve it; and it is a step, so
+    # it appears in the record of what the run did.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: waiting
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut, action: delay, duration_ms: 1}
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: delay, duration_ms: 1}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["flash", "delay", "uart_open", "delay"]
+    assert [step["route"] for step in result["steps"]] == ["dut", "dut", "dut_uart", "dut_uart"]
+    assert result["steps"][1]["result"] == {
+        "ok": True,
+        "tool": "test_reactor",
+        "summary": "Test plan waited.",
+        "debugger": "dut",
+        "action": "delay",
+        "duration_ms": 1,
+    }
+    assert result["steps"][3]["result"]["port_id"] == "dut_uart"
+    # It drove nothing: no tool call sits between the flash and the open.
+    assert [name for name, _ in service.calls] == ["flash_firmware", "com_session_start", "com_session_stop"]
+
+
+def test_delay_before_the_session_it_waits_on_is_opened(tmp_path: Path) -> None:
+    # An action that drives no hardware is in no session, so the session-order
+    # refusals of the kind it routes to are about a step this one is not.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: wait-first
+steps:
+  - {device: dut_uart, action: delay, duration_ms: 1}
+  - {device: dut_uart, action: uart_open}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+
+
+def test_a_delay_naming_no_device_is_refused_by_the_schema(tmp_path: Path) -> None:
+    path = write_test_config(tmp_path, "version: 3\nsteps:\n  - {action: delay, duration_ms: 10}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["field"] == "steps[0]"
+
+
+def test_a_delay_longer_than_the_cap_is_refused(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import DELAY_MAX_MS
+
+    path = write_test_config(tmp_path, f"version: 3\nsteps:\n  - {{device: dut, action: delay, duration_ms: {DELAY_MAX_MS + 1}}}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].duration_ms"
+
+
+@pytest.mark.parametrize(
+    ("step", "named"),
+    [
+        ("{device: dut_uart, action: uart_open}", "device"),
+        ("{port_id: dut_uart, action: uart_read, timeout_s: 1}", "uart_read"),
+        ("{port_id: dut_uart, action: uart_write, text: hi}", "uart_write"),
+        ("{port_id: dut_uart, action: delay, duration_ms: 5}", "delay"),
+    ],
+)
+def test_a_version_2_plan_cannot_reach_for_version_3(tmp_path: Path, step: str, named: str) -> None:
+    # The version a plan declares is what tells another install whether it can
+    # run it, so a v2 plan using a v3 action or key is refused by name rather
+    # than working here and failing there for no stated reason.
+    path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["value"] == named
+    assert refused.value.details["plan_version"] == 2
+    assert refused.value.details["requires_plan_version"] == 3
+    assert "version: 3" in refused.value.details["migration"]
