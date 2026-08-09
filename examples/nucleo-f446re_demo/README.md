@@ -45,9 +45,17 @@ The loop is a declared test plan, and running it is one command:
 agentic-hil test-reactor --test-config testconfig.yaml
 ```
 
-[testconfig.yaml](testconfig.yaml) is the whole loop in five steps — flash, open the port with a clean buffer, reset, wait for `Hello World`, close. This is the path to reach for, including from an agent: the reactor validates every device name, permission and session order *before* the first hardware action, and closes the UART session even when a step fails. A banner that never arrives fails the run and reports the tail of what the port did say, so a silent board and a wrong banner read differently.
+[testconfig.yaml](testconfig.yaml) is the whole loop in four steps — flash, open the port with a clean buffer, reset, read `Hello World`. This is the path to reach for, including from an agent: the reactor validates every device name, permission and session order *before* the first hardware action, and closes the UART session even when a step fails. A banner that never arrives fails the run and reports the tail of what the port did say, so a silent board and a wrong banner read differently.
 
-Waiting on a fixed substring is `text:`; when the check is that the board answered with the *right* value — a counter, a measurement, a version string — a step writes `pattern:` instead and gets a Python regular expression (`re.search`, so it is anchored only where the pattern says). Exactly one of the two per step.
+There is no close step, and that is the idiom rather than an omission: end-of-run cleanup closes every session the run opened. Each step names what it drives with one key, `device:`, and the configuration is what knows whether `dut` is a debugger and `dut_uart` a COM port.
+
+What the read is claiming is a `comparator:`. `equals:` is the whole value rather than a substring: a complete line of the output matches as soon as its terminator arrives — which is what this firmware's `printf("Hello World\n")` sends — and output the board never terminates is judged once the timeout runs out, so a value still being printed cannot pass early. When the check is that the board answered with the *right* value, `pattern:` gives a Python regular expression (`re.search`, so it is anchored only where the pattern says), and `range:` beside it holds a captured number to bounds:
+
+```yaml
+comparator: {pattern: "temp=(\\d+)C", range: {min: 20, max: 30}}
+```
+
+A range reads its value out of the pattern's one capture group, and a step that times out names the value it did capture against the bounds — so a reading that was merely out of range and a board that said nothing read differently.
 
 ## Drive the loop tool by tool (MCP)
 

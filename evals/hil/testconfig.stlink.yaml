@@ -1,5 +1,8 @@
 # STM32CubeProgrammer plan. This backend supports flash/verify/reset and UART,
 # but deliberately contains no typed debug action (those require OpenOCD).
+#
+# Deliberately left at `version: 2`, with its explicit closes, for the same
+# reason as the OpenOCD plan beside it: a v2 plan driven against real hardware.
 version: 2
 name: nucleo-f446re-stlink
 steps:

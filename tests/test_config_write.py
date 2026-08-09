@@ -800,14 +800,22 @@ def test_every_project_grant_the_schema_declares_is_known_to_the_loader() -> Non
     assert {entry["key"] for entry in config_key_catalogue() if entry["key"].startswith("permissions.")} == {f"permissions.{name}" for name in declared}
 
 
-def test_the_can_bus_half_of_the_decision_covers_every_field_but_the_permissions() -> None:
+def test_the_can_bus_half_of_the_decision_covers_every_scalar_field_but_the_permissions() -> None:
     """`can_buses.<n>.*` in the decision is derived, not transcribed.
 
-    A field added to the schema becomes settable without a second edit, and
-    cannot be silently left out of one either."""
+    A scalar field added to the schema becomes settable without a second edit,
+    and cannot be silently left out of one either. A field whose value is a
+    subtree is the exception, and is one by construction rather than by being
+    remembered: this surface sets one value at a time, so an object or an array
+    would be the agent authoring structure. `shares:` is the standing case — a
+    bus's participant views are the operator's, edited in the file."""
     entry_schema = config_schema()["properties"]["can_buses"]["additionalProperties"]["properties"]
+    subtrees = {name for name, node in entry_schema.items() if str(node.get("type")) in {"object", "array"}}
+    settable = set(config_rule_fields(_rule("can_buses", under_permissions=False)))
 
-    assert set(config_rule_fields(_rule("can_buses", under_permissions=False))) == set(entry_schema) - {"permissions"}
+    assert "shares" in subtrees, "the case this rule exists for is still in the schema"
+    assert settable == set(entry_schema) - {"permissions"} - subtrees
+    assert not settable & subtrees
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,9 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "steps"],
+  "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "const": 2, "description": "Format version. Version 1 addressed a `device:` that no longer exists; steps now name a `debuggers` entry, a `com_ports` entry or a `can_buses` entry directly." },
+    "version": { "enum": [2, 3], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions, `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional." },
     "name": { "type": "string", "minLength": 1 },
     "steps": {
       "type": "array",
@@ -17,6 +18,8 @@
           { "$ref": "#/$defs/flash" },
           { "$ref": "#/$defs/reset" },
           { "$ref": "#/$defs/uartOpen" },
+          { "$ref": "#/$defs/uartWrite" },
+          { "$ref": "#/$defs/uartRead" },
           { "$ref": "#/$defs/uartExpect" },
           { "$ref": "#/$defs/uartClose" },
           { "$ref": "#/$defs/canOpen" },
@@ -26,18 +29,45 @@
           { "$ref": "#/$defs/debugStart" },
           { "$ref": "#/$defs/runUntilBreakpoint" },
           { "$ref": "#/$defs/dumpMemory" },
-          { "$ref": "#/$defs/debugStop" }
+          { "$ref": "#/$defs/debugStop" },
+          { "$ref": "#/$defs/delay" }
         ]
       }
     }
   },
   "$defs": {
+    "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 3, "description": "Name of the configured entry this step drives — a `debuggers`, `com_ports` or `can_buses` entry. The one routing key of format version 3: the configuration knows which section a name belongs to, so the step does not have to spell it. The version 2 keys below stay valid as readable aliases; a step writes one or the other, never both." },
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
     "path": { "type": "string", "minLength": 1 },
     "timeout": { "type": "number", "minimum": 0 },
     "positiveTimeout": { "type": "number", "exclusiveMinimum": 0, "description": "A deadline a step waits out. Zero is refused rather than read as 'do not wait': a step whose whole purpose is to wait has no useful reading of no time at all." },
+    "comparator": {
+      "type": "object",
+      "additionalProperties": false,
+      "x-since-version": 3,
+      "description": "What a feedback step claims about what it received. An object rather than a bare value on purpose: the preprocessing a bench eventually needs — scaling a raw count into a unit, converting a base — is addable here as further keys without invalidating a plan written today. None of that exists yet. Exactly one of `equals` and `pattern` says what to look for; `range` narrows a `pattern` capture to a numeric interval. The claim is judged against everything read so far, so output that arrives in pieces still counts, and a step whose claim is never met fails with the tail of what the port did say.",
+      "oneOf": [
+        { "required": ["equals"], "not": { "required": ["pattern"] } },
+        { "required": ["pattern"], "not": { "required": ["equals"] } }
+      ],
+      "dependentRequired": { "range": ["pattern"] },
+      "properties": {
+        "equals": { "type": "string", "minLength": 1, "description": "The value the output must equal — not merely contain. A serial line has no end, so this is read two ways: any one complete line of what was received matches as soon as its terminator arrives, and the whole of what was received matches on the last pass, once the step's timeout has run out and nothing further is coming. Surrounding whitespace is removed either way. A value the board never terminates therefore costs the full timeout, because until then it cannot be told apart from a value still arriving. Mutually exclusive with `pattern`." },
+        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. A pattern that does not compile is refused before the run starts. Mutually exclusive with `equals`." },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "description": "Inclusive bounds the number captured by `pattern`'s one capture group must fall inside. The pattern must have exactly one capture group, which is refused before the run starts when it does not. A step that times out reports the last value it did capture against these bounds, so a reading that was merely out of range and a board that said nothing read differently.",
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          }
+        }
+      }
+    },
     "location": {
       "oneOf": [
         { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
@@ -73,6 +103,7 @@
       "additionalProperties": false,
       "required": ["action", "image_path"],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "flash" },
         "image_path": { "$ref": "#/$defs/path" },
@@ -85,6 +116,7 @@
       "required": ["action"],
       "description": "Reset the target through the named debugger, exactly as the `reset_target` tool does. A backend that cannot run the requested mode refuses it with its own `not_supported`; the step reports that refusal unchanged.",
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "reset" },
         "mode": { "type": "string", "enum": ["run", "halt", "init"], "default": "run", "description": "How the target is left afterwards. 'run' resets and lets the target execute. 'halt' leaves the core stopped. 'init' additionally runs the target's reset-init event script and is OpenOCD-only." }
@@ -93,23 +125,67 @@
     "uartOpen": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "port_id"],
+      "required": ["action"],
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
-        "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later `uart_expect` matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
+        "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later read matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
+      }
+    },
+    "uartWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "x-since-version": 3,
+      "description": "Serial stimulus on a line this plan opened, exactly as the `com_write` tool sends it. Requires permissions.allow_write on the port, which is refused by name before the run starts. Exactly one of `text` and `hex` says what to send.",
+      "oneOf": [
+        { "required": ["text"], "not": { "required": ["hex"] } },
+        { "required": ["hex"], "not": { "required": ["text"] } }
+      ],
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
+        "action": { "const": "uart_write" },
+        "text": { "type": "string", "description": "Text to send, encoded with the port's configured encoding. Write the line ending the firmware expects — nothing is appended for you." },
+        "hex": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "description": "Raw bytes to send, as hexadecimal. Use this when the stimulus is a protocol frame rather than text." }
+      }
+    },
+    "uartRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "x-since-version": 3,
+      "description": "Read a serial line this plan has opened. With a `comparator:` the step reads until the claim is met or its timeout passes, reporting the tail of what the port did say when it is not. Without one it is a plain read of whatever the session has, answered exactly as `com_read` answers it.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
+        "action": { "const": "uart_read" },
+        "comparator": { "$ref": "#/$defs/comparator" },
+        "timeout_s": { "$ref": "#/$defs/timeout" }
+      },
+      "dependentSchemas": {
+        "comparator": {
+          "required": ["timeout_s"],
+          "properties": { "timeout_s": { "$ref": "#/$defs/positiveTimeout" } }
+        }
       }
     },
     "uartExpect": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "port_id", "timeout_s"],
-      "description": "Wait for output on a serial line this plan has opened. Reads the port the same way `com_read` does and matches against everything read so far, so output that arrives in pieces still counts. A step whose expectation never appears fails with the tail of what the port did say. Exactly one of `text` and `pattern` says what to wait for: a step carrying both, or neither, is refused before the run starts.",
+      "required": ["action", "timeout_s"],
+      "description": "Wait for output on a serial line this plan has opened. Reads the port the same way `com_read` does and matches against everything read so far, so output that arrives in pieces still counts. A step whose expectation never appears fails with the tail of what the port did say. Exactly one of `text` and `pattern` says what to wait for: a step carrying both, or neither, is refused before the run starts. Version 3 spells the same thing as `uart_read` with a `comparator:`, which also carries ranges; this action stays valid.",
       "oneOf": [
         { "required": ["text"], "not": { "required": ["pattern"] } },
         { "required": ["pattern"], "not": { "required": ["text"] } }
       ],
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_expect" },
         "text": { "type": "string", "minLength": 1, "description": "The substring the port's output must contain. Mutually exclusive with `pattern`." },
@@ -120,8 +196,11 @@
     "uartClose": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "port_id"],
+      "required": ["action"],
+      "description": "Close a serial line this plan opened. Optional from version 3 on: end-of-run cleanup closes every session the run opened, whether the plan said so or not. Keep an explicit close where the plan means to close, reconfigure and reopen the line mid-run.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_close" }
       }
@@ -129,8 +208,10 @@
     "canOpen": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "bus_id"],
+      "required": ["action"],
+      "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_open" },
         "clear_rx_queue": { "type": "boolean", "default": true, "description": "Drain the receive queue before the plan reads. Requires permissions.allow_read on the bus." }
@@ -139,8 +220,11 @@
     "canClose": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "bus_id"],
+      "required": ["action"],
+      "description": "Close a CAN bus session this plan opened. Optional from version 3 on, for the same reason `uart_close` is.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_close" }
       }
@@ -148,9 +232,11 @@
     "canSend": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "bus_id", "frame_id"],
+      "required": ["action", "frame_id"],
       "description": "One classic CAN frame on a bus this plan opened. Refused before the run on a bus configured `listen_only: true`, which is the claim that observing it sends nothing.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_send" },
         "frame_id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }] },
@@ -162,8 +248,10 @@
     "canRead": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "bus_id"],
+      "required": ["action"],
+      "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_read" },
         "max_frames": { "type": "integer", "minimum": 1, "description": "Defaults to the bus's configured max_buffer_frames, which is also the ceiling." },
@@ -175,6 +263,7 @@
       "additionalProperties": false,
       "required": ["action", "image_path"],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "debug_start" },
         "image_path": { "$ref": "#/$defs/path" },
@@ -187,6 +276,7 @@
       "additionalProperties": false,
       "required": ["action", "location"],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "run_until_breakpoint" },
         "location": { "$ref": "#/$defs/location" },
@@ -198,6 +288,7 @@
       "additionalProperties": false,
       "required": ["action", "symbol", "output_path"],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "dump_memory" },
         "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
@@ -209,9 +300,31 @@
       "additionalProperties": false,
       "required": ["action"],
       "properties": {
+        "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "debug_stop" },
         "timeout_s": { "$ref": "#/$defs/timeout" }
+      }
+    },
+    "delay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "duration_ms"],
+      "x-since-version": 3,
+      "description": "Wait, driving nothing. Served by every device kind, so the step names the device the plan is waiting on and appears in the run's result like any other step — a wait that left no trace would be a gap in the record of what a test did. Prefer a read with a `comparator:` wherever the plan is really waiting for the board to say something: a delay long enough to be safe is a delay that makes every run slower.",
+      "anyOf": [
+        { "required": ["device"] },
+        { "required": ["debugger"] },
+        { "required": ["port_id"] },
+        { "required": ["bus_id"] }
+      ],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
+        "port_id": { "$ref": "#/$defs/portId" },
+        "bus_id": { "$ref": "#/$defs/busId" },
+        "action": { "const": "delay" },
+        "duration_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "description": "How long to wait, in milliseconds. Capped at ten minutes: a plan that must wait longer than that is waiting for something it should be reading instead, and an unbounded wait is how a bench ends up held by a run nobody is watching." }
       }
     }
   }

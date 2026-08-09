@@ -8,6 +8,18 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- A CAN broker lets several runs share one physical bus: a `shares:` section under a `can_buses` entry names participant views (identifier filter, permissions, frame budget), and one broker process owns the adapter and the machine-wide bus lock for all of them. An entry without `shares:` is the single-owner bus it always was, unchanged (#146)
+- Test reactor step actions are declared on the methods that serve them (`@step_action`): dispatch is written once in the base class, adding a capability is one decorated method, and an action a device kind does not declare answers `not_supported` naming the kind by construction (#168)
+- Test plan format v3: `device:` as the one routing key (the v2 route keys stay valid as aliases), a `comparator:` object on `uart_read` with `equals`, `pattern` and `pattern`+`range`, the new `uart_write` and universal `delay` actions, and optional close steps — `version: 2` plans load and behave unchanged (#168)
+- `docs/test-plan-contract.md` writes down the plan/bench-configuration/run-report contract, including what a plan still cannot express; `docs/github-action-design.md` designs the official `agentic-hil/run` GitHub Action — pinned action and version, self-hosted-only bench, an evidence bundle of job summary, JUnit XML, event log and JSON run summary, and remote execution stated as unavailable by design
+
+### Fixed
+
+- A CAN bus with `listen_only_enforcement: service` no longer reports its adapter's `driver_verified` as the enforcement in effect, which read as a controller proof for a claim that is software filtering (#146)
+- The documentation site's navigation follows reading order, its diagrams follow the theme toggle instead of the operating system, dead configuration behind the edit action was removed, and the one broken example link on the testing page points at the repository
+
+### Added
+
 - `uart_expect` steps can wait on a `pattern:` regular expression instead of a `text:` substring, matched across read boundaries with the same bounded `received_tail` on timeout, and `uart_open` steps can start from a clean buffer with `clear_buffer:`; the nucleo demo now leads with the declarative plan and keeps its pytest file as the CI-embedding variant (#159)
 - The `docs/` directory builds as an MkDocs Material site on Read the Docs (`mkdocs.yml`, `.readthedocs.yaml`, `docs/index.md`); the markdown files in the repository stay canonical (#161)
 

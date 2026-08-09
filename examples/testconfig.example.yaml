@@ -1,53 +1,70 @@
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override.
-# Steps address configured devices by their names: `debugger` names a
-# `debuggers` entry, `port_id` names a `com_ports` entry, `bus_id` names a
-# `can_buses` entry. `debugger` may be omitted while the config declares exactly
-# one probe; with several, name it — e.g. a second board as
-#   - {debugger: dut_b, action: flash, image_path: build/sensor.elf}
+# Every step names the configured entry it drives with `device:` — the
+# configuration knows whether that name is a `debuggers`, a `com_ports` or a
+# `can_buses` entry, so the plan does not have to spell it. The version 2 keys
+# `debugger:`, `port_id:` and `bus_id:` stay valid as readable aliases; a step
+# writes one or the other, never both. `device:` may be omitted on a debugger
+# step while the config declares exactly one probe; with several, name it — e.g.
+# a second board as
+#   - {device: dut_b, action: flash, image_path: build/sensor.elf}
 # The CAN steps below only read: the example configuration's `dut_can` is
 # `listen_only: true`, which is the claim that observing that bus sends nothing,
 # and a `can_send` step on such a bus is refused before the run starts.
-version: 2
+# There are no close steps: end-of-run cleanup closes every session this run
+# opened. Write an explicit close only where the plan means to close,
+# reconfigure and reopen a line or a bus mid-run.
+version: 3
 name: capture-state
 steps:
-  - debugger: dut
+  - device: dut
     action: flash
     image_path: build/app.elf
 
-  - port_id: dut_uart
+  - device: dut_uart
     action: uart_open
     clear_buffer: true
 
-  - bus_id: dut_can
+  - device: dut_can
     action: can_open
     clear_rx_queue: true
 
-  - debugger: dut
+  # Serial stimulus, through the same permission-gated tool an agent driving the
+  # line by hand would call. Requires permissions.allow_write on the port; a
+  # port that denies it refuses this step by name before the run starts.
+  - device: dut_uart
+    action: uart_write
+    text: "capture\n"
+
+  # What the read is claiming, not merely that something arrived. `equals:` is
+  # the whole value; `pattern:` with `range:` holds a captured number to bounds
+  # and names the value it did read when it falls outside them.
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\d+)C"
+      range: { min: 20, max: 30 }
+    timeout_s: 5
+
+  - device: dut
     action: debug_start
     image_path: build/app.elf
     mode: attach
 
-  - debugger: dut
+  - device: dut
     action: run_until_breakpoint
     location: capture_done
     timeout_s: 5
 
-  - bus_id: dut_can
+  - device: dut_can
     action: can_read
     max_frames: 64
     wait_timeout_s: 1
 
-  - debugger: dut
+  - device: dut
     action: dump_memory
     symbol: capture_buffer
     output_path: build/capture.hex
 
-  - debugger: dut
+  - device: dut
     action: debug_stop
-
-  - bus_id: dut_can
-    action: can_close
-
-  - port_id: dut_uart
-    action: uart_close
