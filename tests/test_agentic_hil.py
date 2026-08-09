@@ -1490,6 +1490,17 @@ def _packaged_skill_text() -> str:
     return (skill / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8")
 
 
+def _plugin_skill_text() -> str:
+    plugin = Path(__file__).resolve().parents[1] / "plugins" / "agentic-hil" / "skills"
+    return (plugin / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _skill_description(text: str) -> str:
+    """The frontmatter line a host decides to load this skill on."""
+    frontmatter = text.split("---\n", 2)[1]
+    return next(line for line in frontmatter.splitlines() if line.startswith("description:"))
+
+
 def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     text = _packaged_skill_text()
 
@@ -1498,6 +1509,28 @@ def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     # The skill is worthless if it does not name what it replaces.
     for raw in ("openocd", "gdb", "minicom", "candump"):
         assert raw in text, raw
+
+
+def test_the_skill_description_scopes_to_operating_the_bench() -> None:
+    """The description is the routing decision, so it has to state its own limits.
+
+    "Use for any embedded firmware or hardware request" was taken at its word:
+    PCB layout, schematic capture and mechanical design are hardware requests,
+    so hosts loaded the skill on turns where no tool here can contribute
+    anything. The line therefore names what the bench does *and* says the
+    negative out loud, and both installed copies say it, because an agent reads
+    whichever one its host put there.
+    """
+    for name, text in (("packaged", _packaged_skill_text()), ("plugin", _plugin_skill_text())):
+        description = _skill_description(text)
+        for scope in ("connected target board", "flashing", "resetting", "probing", "debugging", "UART", "CAN", "test reports"):
+            assert scope in description, f"{name} description does not name {scope}"
+        for outside in ("PCB layout", "schematic capture", "EDA", "mechanical design", "never touches a board"):
+            assert outside in description, f"{name} description does not exclude {outside}"
+        # Rescoping must not drop what the skill exists to displace.
+        assert "instead of invoking a debugger, serial device, or CAN adapter directly" in description, name
+        # And the body repeats the boundary for a session routed here anyway.
+        assert "The gate is the whole of the scope." in text, name
 
 
 def test_skill_frontmatter_survives_a_windows_checkout() -> None:
@@ -1516,8 +1549,7 @@ def test_plugin_skill_carries_the_packaged_guidance() -> None:
     # A plugin install is an alternative to setup, not a lesser one: it has to
     # deliver the same routing rules, so the bodies may not drift apart.
     packaged = _packaged_skill_text()
-    plugin_path = Path(__file__).resolve().parents[1] / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md"
-    plugin = plugin_path.read_text(encoding="utf-8")
+    plugin = _plugin_skill_text()
     body = packaged.split("---\n", 2)[2].strip()
 
     assert body in plugin
