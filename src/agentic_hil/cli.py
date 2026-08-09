@@ -56,6 +56,7 @@ from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOA
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     ACTOR_HUMAN,
+    NOT_STARTED,
     PERMISSION_COMMAND_VALUES,
     authoritative_write_target,
     load_config_document,
@@ -69,6 +70,7 @@ from agentic_hil.knowledge import (
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
     RUNNING_SERVER_COMPARISON,
+    remediation_fields,
 )
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -946,6 +948,17 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     either. So this goes through `discover_for_generation`, which is the function
     `project_config_create` uses, under this command's own coordinator.
 
+    The open-run refusal comes first, before a word is said to any board. Every
+    other write of this file has one — `project_config_create`,
+    `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all refuse
+    while a run, a lease or another terminal holds the bench — and `init --force`
+    had none. What stopped it was incidental: a run that declared the probe owns
+    the lock the read takes, so the read answered `device_busy`. A run that
+    declared only a COM port or only a CAN bus holds no probe, and that
+    regeneration went through and replaced the permissions, the baudrate and the
+    device bindings underneath live measurements. `bench_open_holds` already
+    answers the question the other write sites ask, so this asks it too.
+
     Returns the discovery, the refusal that is the whole answer when the read did
     not happen or did not end cleanly, and — when the board was read without a
     lease — the reason it could not be leased.
@@ -961,9 +974,16 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         # either would leave no way to reach a configured bench at all, which is
         # worse than what this fixes. Named in the result instead of inferred
         # from a record that is not there.
+        #
+        # It is also why the holds question below is asked only of a
+        # configuration that loaded: the devices a hold would be on are the ones
+        # this file names, and a file that does not load names none.
         current, unleased = None, error.error_type
     else:
         unleased = None
+        holds = bench_open_holds(current)
+        if holds is not None:
+            return {}, _init_open_run_refusal(current, holds), unleased
     discovery, refusal = discover_for_generation(
         current,
         None,
@@ -972,6 +992,45 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         frontend="operator-cli",
     )
     return discovery, refusal, unleased
+
+
+def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
+    """Somebody holds this bench, so `init --force` does not regenerate it.
+
+    The same rule and the same error type as `project_config_create`, which
+    writes this file from the same read over MCP: what is held was taken under
+    the policy this file states, and a regeneration replaces every permission,
+    every baudrate and every device binding in it. The holder here is usually
+    another process — an MCP server, another terminal — so the next step names
+    `agentic-hil lease-status`, which says whose bench it is, rather than a run
+    this caller could close.
+
+    Nothing was read either. The refusal is raised before the board is touched,
+    so a `--force` typed by accident during somebody's run costs neither a
+    HOTPLUG connect nor a line in the audit trail.
+    """
+    return {
+        "ok": False,
+        "tool": CLI_INIT,
+        "error_type": "config_write_in_open_run",
+        "summary": (
+            "Something on this machine is holding this bench's hardware right now, and those holds were taken under "
+            "the policy this configuration states. Regenerating reads the attached probe and replaces that policy, so "
+            "nothing was read and nothing was written."
+        ),
+        "open_holds": open_holds,
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        **remediation_fields("config_write_in_open_run"),
+        "next_step": (
+            "`agentic-hil lease-status` names the holder — which devices are held, which frontend took them and under "
+            "which process — and `open_holds` here carries the same. Let the run finish or ask whoever holds it to "
+            f"close it, then run `{CONFIG_REOPEN_COMMAND}` again. `agentic-hil adopt-hardware` is the command that "
+            "refreshes the hardware and leaves the rest of the file standing."
+        ),
+        **NOT_STARTED,
+        "retry_safe": True,
+    }
 
 
 def _init_lease_note(unleased: str | None) -> JsonObject:
@@ -1016,14 +1075,22 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     profile = load_project_profile(workspace)
     discovery, refusal, unleased = _init_bench_read(workspace)
     if refusal is not None:
-        # The read is what was refused, so there is nothing to write a file from
-        # and nothing was written. The refusal is the whole answer.
+        # Either the read was refused or it was never reached, and both leave
+        # nothing to write a file from. Nothing was written; the refusal is the
+        # whole answer.
         return {**refusal, "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
         assert isinstance(template, dict)
-        configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        try:
+            # The profile is a hand-written file in the repository and the only
+            # untrusted input this template filling has. A value it cannot use is
+            # a refusal that names the key, not a traceback out of `init` after
+            # the board was already read; nothing has been written at this point.
+            configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        except ConfigError as error:
+            return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
         document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
