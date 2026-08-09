@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **The pyOCD wording that unlocks the CMSIS-pack remediation is held against the installed pyOCD.** The backend decides that a call failed on an unresolvable `target_type` by matching pyOCD's console prose, and that match is the only thing that reaches the `pyocd pack find` / `pyocd pack install` remediation. An earlier phrase list matched nothing pyOCD prints, so the remediation was unreachable and every such failure fell through to `unknown_debugger_error` with no mention of CMSIS packs — and the only proof that the current phrases fare better was a stand-in reproducing the sentence by hand, which cannot notice a reworded release. The sentence under test is now made by the installed pyOCD, the way the python-can facts behind the CAN classifier are asserted against the installed library, and the two markers the classifier matches on — the `target type` / `not recognized` pair and the `target_support.html` link — are pinned separately so a failure names which one went. The classification is asserted on the phrase path alone: a run applies the `pyocd json --targets` cross-check afterwards, which reclassifies a message the phrases missed and would hide exactly this drift, so the end-to-end half drives a pyOCD whose target enumeration is unavailable and leaves nothing to rescue a match that stopped matching. Where the optional extra is absent — which is the canonical development environment — the module skips and the skip names the extra. One assumption did not survive contact with the tool and is recorded where it was made: pyOCD's command line does not reject an unresolvable target type before it goes looking for a probe, but waits for one, and with `-W` refuses on `No connected debug probes` without ever reaching the type. What makes a boardless test possible is narrower — `Board.__init__` reaches its refusal from session options alone, over the probeless session pyOCD documents as an options container. (#135)
+
 ## [0.10.0] - 2026-08-09
 
 ### Added

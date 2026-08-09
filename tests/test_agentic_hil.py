@@ -559,15 +559,22 @@ def test_upgrade_asks_for_the_extras_that_are_installed(
 def test_installed_extras_names_only_the_extras_whose_requirements_are_present() -> None:
     """Read against the real distribution metadata, not a fixture of it.
 
-    `can` is installed for the test suite and `pyocd` is not, so this also
-    proves the two are told apart rather than both being reported.
+    `can` is a requirement of this suite, so it must be reported. `pyocd` is what
+    tells the two apart on the canonical development environment, which does not
+    install it — but an environment that does is legitimate, and is the only one
+    where the pyOCD phrase tests run at all, so pinning its absence outright
+    would make installing the extra fail the suite. What is pinned instead is
+    that the answer tracks what is installed, asked here through the import
+    system rather than through the metadata the function itself reads.
     """
+    from importlib.util import find_spec
+
     from agentic_hil.upgrade import _installed_extras
 
     extras = _installed_extras()
 
     assert "can" in extras
-    assert "pyocd" not in extras
+    assert ("pyocd" in extras) is (find_spec("pyocd") is not None)
 
 
 def _fake_process(pid: int, parent_pid: int, image: str, created_ns: int = 100) -> ProcessImage:
