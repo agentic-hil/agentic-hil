@@ -30,7 +30,7 @@ from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import debugger_device
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import project_config_create
-from agentic_hil.types import JsonObject, fold_hardware_id
+from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -240,9 +240,9 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["debuggers"]["dut"]["type"] == "stlink"
     assert configured["debuggers"]["dut"]["probe_id"] == "STLINK123"
     # The profile above still requests the version 1 read grants. The document
-    # this writes is version 2, where reading needs none and the keys are
-    # refused by name, so the request is satisfied by dropping it.
-    assert configured["version"] == 2
+    # this writes is the current version, where reading needs none and the keys
+    # are refused by name, so the request is satisfied by dropping it.
+    assert configured["version"] == CURRENT_CONFIG_VERSION
     # Granted unless the profile said otherwise: a flag it does not name follows
     # the generated default, and one it names is honoured — which can only
     # narrow, because the default it would have to beat is already true wherever
@@ -289,9 +289,10 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     assert written["debuggers"]["dut"]["type"] == "stlink"
     assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert written["com_ports"]["dut_uart"]["device"] == "COM3"
-    # A bootstrapped config is a version 2 config: it loads, which it could not
-    # do while carrying a read permission this version refuses by name.
-    assert written["version"] == 2
+    # A bootstrapped config is written at the current version: it loads, which it
+    # could not do while carrying a read permission that version refuses by name,
+    # nor with a COM port entry naming no hardware.
+    assert written["version"] == CURRENT_CONFIG_VERSION
     assert "allow_probe" not in written["debuggers"]["dut"]["permissions"]
     assert "allow_read" not in written["com_ports"]["dut_uart"]["permissions"]
 

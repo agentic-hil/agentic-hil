@@ -243,8 +243,8 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             "probe_id": discovery["probe_id"],
             "interface": "SWD",
             "timeout_s": profile_debugger.get("timeout_s", 60),
-            # The template this fills in is a version 2 configuration, where
-            # reading needs no grant and `allow_probe` is refused by name. A
+            # The template this fills in is a version 3 configuration, and from
+            # version 2 on reading needs no grant and `allow_probe` is refused by name. A
             # profile written against version 1 may still request it; that
             # request is already satisfied, so it is dropped rather than
             # written into a file that would be refused on load.
@@ -279,22 +279,30 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
     profile_port = next((value for value in profile_ports.values() if isinstance(value, dict)), None)
     if isinstance(matched_port, dict) and profile_port is not None:
         requested_io = profile_port.get("permissions") if isinstance(profile_port.get("permissions"), dict) else {}
+        # The vendor and product ids off the same enumeration record, because a
+        # USB serial is unique only within a vendor: without them a matching
+        # serial on another kind of adapter passes the check. Written only when
+        # the host reported them.
+        usb_ids = {field: value for field in ("vid", "pid") if isinstance(value := matched_port.get(field), int) and not isinstance(value, bool)}
+        # The port was correlated by this serial in the first place, so recording
+        # it costs nothing and is what makes the entry survive a replug: `device`
+        # is how the port is opened, this is which board it is.
+        serial_number = str(matched_port.get("serial_number") or discovery["probe_id"] or "")
         template["com_ports"] = {
             "dut_uart": {
                 "device": port_device_name(matched_port),
                 "baudrate": int(profile_port.get("baudrate", 115200)),
-                # The port was correlated by this serial in the first place, so
-                # recording it costs nothing and is what makes the entry survive
-                # a replug: `device` is how the port is opened, this is which
-                # board it is.
-                "serial_number": str(matched_port.get("serial_number") or discovery["probe_id"]),
-                # And the vendor and product ids from the same record, because
-                # a USB serial is unique only within a vendor: without them a
-                # matching serial on another kind of adapter passes the check.
-                # Written only when the host reported them.
-                **{field: value for field in ("vid", "pid") if isinstance(value := matched_port.get(field), int) and not isinstance(value, bool)},
+                **({"serial_number": serial_number} if serial_number else {}),
+                **usb_ids,
+                # The template this fills in says `version: 3`, where an entry
+                # carrying no serial has to declare what identifies it instead.
+                # A serial is what this path normally writes — the port was found
+                # by it — so this is the adapter that published none, and the
+                # file says which of the two it is rather than leaving a reader
+                # to guess.
+                **({} if serial_number else {"identity_source": "_".join(usb_ids) or "device"}),
                 # `allow_read` went the same way as `allow_probe`: reading a
-                # port needs no grant at version 2, and the key is refused there.
+                # port needs no grant from version 2 on, and the key is refused there.
                 "permissions": {
                     "allow_write": bool(requested_io.get("allow_write", True)),
                 },

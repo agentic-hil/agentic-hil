@@ -69,6 +69,7 @@ from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, han
 from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
+from agentic_hil.types import CURRENT_CONFIG_VERSION
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
@@ -98,7 +99,7 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     # permission line a fresh config carries is about writing — and since
     # 0.8.0 every one of them that grants a capability is granted, so the
     # bench this writes is workable without anybody opening it.
-    assert "version: 2" in config_text
+    assert f"version: {CURRENT_CONFIG_VERSION}\n" in config_text
     assert "allow_probe: " not in config_text
     assert "allow_flash: true" in config_text
     assert "allow_reset: true" in config_text

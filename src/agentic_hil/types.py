@@ -124,9 +124,20 @@ def is_stable_device_name(value: str) -> bool:
 # the keys that used to express one. Turning the default over without this
 # marker would have widened every existing file silently on update, which is the
 # one thing a permission change may not do.
+#
+# Version 3 tightens one thing and no permission: a `com_ports` entry must say
+# which hardware it is, in the file, rather than be warned about at runtime. See
+# `com_port_carries_hardware_identity` below for the rule and
+# `config.reject_unidentified_com_ports` for the refusal. Every version is still
+# read, so no file in the field has to move; what changes is what a file that
+# opts into 3 promises.
 LEGACY_CONFIG_VERSION = 1
 READ_FREE_CONFIG_VERSION = 2
-CURRENT_CONFIG_VERSION = READ_FREE_CONFIG_VERSION
+IDENTIFIED_COM_PORT_CONFIG_VERSION = 3
+CURRENT_CONFIG_VERSION = IDENTIFIED_COM_PORT_CONFIG_VERSION
+# Every version this release loads, in order. One tuple, so the loader's check,
+# the schema's enum and every refusal that lists them cannot disagree.
+SUPPORTED_CONFIG_VERSIONS = (LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION)
 
 
 @dataclass(frozen=True)
@@ -303,7 +314,56 @@ class ComPortConfig:
     vid: int | None = None
     pid: int | None = None
     resource_id: str | None = None
+    # Which key of this entry an operator says identifies the hardware — the
+    # answer `com_port_identity_source` derives, written down. It grants nothing
+    # and selects nothing: a declaration that disagrees with the entry's own keys
+    # is refused at load, so this can only ever repeat what is already there.
+    #
+    # What it buys is a *file* that distinguishes "identified by a type, because
+    # this adapter publishes no serial" from "nobody got round to it". Those two
+    # read identically without it, which is why version 3 requires the
+    # declaration on any entry that carries no serial and no `resource_id`. Unset
+    # is what every configuration written before it existed says, and versions 1
+    # and 2 keep reading it as they always did.
+    identity_source: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
+
+
+# Every value `com_port_identity_source` can return, and therefore every value
+# `com_ports.<name>.identity_source` may be spelled as. Each one is the name of
+# the key (or keys) that carries the identity, strongest first.
+COM_PORT_IDENTITY_SOURCES = ("resource_id", "serial_number", "vid_pid", "vid", "pid", "device")
+
+
+def com_port_identity_source(port: ComPortConfig) -> str:
+    """Which key of this entry says which hardware it is.
+
+    One computation, read by `devices.UartDevice.identity_source` — which is what
+    every result reports — and by the version 3 load check, so what the file has
+    to declare and what the server reports are the same answer rather than two
+    that can drift.
+
+    ``vid_pid`` — or ``vid``/``pid`` alone, when only one is set — is the honest
+    name for the type check: it says the entry names a kind of adapter and not a
+    unit, which is exactly what those keys are."""
+    if port.resource_id:
+        return "resource_id"
+    if port.serial_number:
+        return "serial_number"
+    usb_ids = "_".join(name for name, value in (("vid", port.vid), ("pid", port.pid)) if value is not None)
+    return usb_ids or "device"
+
+
+def com_port_carries_hardware_identity(port: ComPortConfig) -> bool:
+    """Whether this entry names a *unit* without having to say so.
+
+    The three ways a serial port entry survives a replug on its own: an operator's
+    ``resource_id`` alias, the adapter's USB ``serial_number``, or a
+    ``/dev/serial/by-id/...`` device name, which udev builds out of the vendor,
+    the product and the device's own serial. Exactly the set
+    ``UartDevice.identity_warning`` stays quiet about — which is the point: what
+    version 3 requires a declaration for is precisely what `doctor` warns about."""
+    return bool(port.resource_id) or bool(port.serial_number) or is_stable_device_name(port.device)
 
 
 @dataclass(frozen=True)
