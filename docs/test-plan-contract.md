@@ -37,10 +37,15 @@ more: no port number, no device path, no probe serial, no adapter channel.
 several it must be named, because picking a board for the author is how the
 wrong board gets flashed.
 
-**Actions are the thirteen the device classes serve.** `flash` and `reset` on a
+**Actions are the ones the device classes declare.** `flash` and `reset` on a
 probe; `debug_start`, `run_until_breakpoint`, `dump_memory` and `debug_stop` for
-a debug session; `uart_open`, `uart_expect` and `uart_close` on a serial line;
-`can_open`, `can_send`, `can_read` and `can_close` on a bus.
+a debug session; `uart_open`, `uart_write`, `uart_read`, `uart_expect` and
+`uart_close` on a serial line; `can_open`, `can_send`, `can_read` and
+`can_close` on a bus; and `delay`, declared once on the base class and served by
+every kind. Each action is declared on the method that implements it, so the
+authoritative list is the set of declarations — an action a kind does not
+declare answers `not_supported` naming the kind. From plan format v3, `device:`
+is the one routing key for every step; the v2 route keys stay valid as aliases.
 
 **Arguments are the test's own parameters.** A firmware image path, a reset
 mode, a breakpoint location, a symbol to dump and where to write it, a frame id
@@ -49,13 +54,17 @@ and its data bytes, a frame budget, a deadline. Paths are resolved inside
 the repository — it is a statement about the build layout, which travels with
 the repository, not about a filesystem, which does not.
 
-**One expectation exists, and it is `uart_expect`.** Exactly one of `text` (a
-substring) or `pattern` (a Python regular expression, `re.search` semantics)
-per step, plus a `timeout_s` that must be greater than zero. A step carrying
-both, or neither, is refused before the run starts, and a pattern that does not
-compile is refused there too. Every other step states its expectation by
-existing: the step must succeed, and the plan stops at the first one that does
-not.
+**Expectations are a `comparator`.** A feedback action (`uart_read` today)
+takes an optional `comparator:` object: `equals` for a complete decoded match,
+`pattern` for a Python regular expression (`re.search` semantics), or `pattern`
+with a single capture group plus `range: {min, max}` to bound the numeric value
+it extracts. Exactly one of `equals`/`pattern` per comparator; a range without a
+capturing pattern, or a pattern that does not compile, is refused before the run
+starts. The comparator is an object deliberately, so preprocessing keys (scale,
+convert) can be added later without breaking the format. `uart_expect` with
+`text`/`pattern` remains valid as the v2 spelling. Every other step states its
+expectation by existing: the step must succeed, and the plan stops at the first
+one that does not.
 
 Nothing in that list identifies a machine. A plan is a document about firmware
 and about the shape of a test, and it is reviewable as such —
@@ -202,11 +211,6 @@ plan that opens a debug session states, implicitly, that its bench runs OpenOCD.
 These are limits of what a plan can currently express, verified against the
 schema and the reactor rather than inferred:
 
-- **No serial stimulus.** A plan can open a line, wait on it and close it, but
-  it cannot write to it: the serial actions map to `com_session_start`,
-  `com_read` and `com_session_stop`, and there is no step that reaches
-  `com_write`. A test that must send a command and check the answer can send on
-  CAN and cannot send on UART.
 - **No expectation on CAN traffic.** `can_read` returns frames and the step
   succeeds if the read succeeds. There is no `can_expect`, so a plan cannot
   state which frame, which identifier or which payload it requires — the
@@ -214,9 +218,6 @@ schema and the reactor rather than inferred:
 - **No expectation on dumped memory.** `dump_memory` writes an Intel HEX file
   and succeeds on having written it. The plan cannot state what the buffer
   should contain.
-- **No waiting step.** Deadlines exist only as arguments to actions that wait
-  for something (`uart_expect`, `can_read`, `debug_*`). A plan cannot say "let
-  the firmware run for two seconds" without something to wait *for*.
 - **No control flow, no reuse, no parameters.** `steps` is a flat sequence of at
   most 128 items, executed in order and stopped at the first failure. There is
   no branch, no loop, no retry, no include, and no variable or substitution: an
