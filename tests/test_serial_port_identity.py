@@ -12,15 +12,19 @@ two ST-Links in it.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import write_authoritative_config, write_config
+from jsonschema import Draft202012Validator
 
 from agentic_hil import comports
 from agentic_hil.adopt import plan_adoption
-from agentic_hil.cli import doctor
+from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template
+from agentic_hil.cli import doctor, schema
 from agentic_hil.comports import (
     COM_PORT_IDENTITY_MISMATCH,
     COM_PORT_IDENTITY_UNVERIFIED,
@@ -33,9 +37,17 @@ from agentic_hil.comports import (
     stable_device_name,
     verify_port_identity,
 )
-from agentic_hil.config import ConfigError, load_config, usb_id_config
+from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError, load_config, usb_id_config
 from agentic_hil.devices import TYPE_ONLY_SERIAL_DEVICE_WARNING, VOLATILE_SERIAL_DEVICE_WARNING, uart_device
-from agentic_hil.types import is_stable_device_name
+from agentic_hil.types import (
+    COM_PORT_IDENTITY_SOURCES,
+    CURRENT_CONFIG_VERSION,
+    IDENTIFIED_COM_PORT_CONFIG_VERSION,
+    LEGACY_CONFIG_VERSION,
+    READ_FREE_CONFIG_VERSION,
+    SUPPORTED_CONFIG_VERSIONS,
+    is_stable_device_name,
+)
 
 # The two boards on the bench in the report: one plugged in, then a second, and
 # the kernel names swap depending on which was seen first.
@@ -816,3 +828,237 @@ def test_doctor_says_what_a_type_only_entry_is_and_stays_quiet_about_the_rest(tm
 
     assert VOLATILE_SERIAL_DEVICE_WARNING in warned["warnings"]
     assert "vid`/`pid" in VOLATILE_SERIAL_DEVICE_WARNING
+
+
+# ---------------------------------------------------------------------------
+# Configuration version 3: the warning above, turned into a property of the file.
+#
+# Everything before this point is a runtime answer — `doctor` reports it, the
+# open-time check acts on it — and a bench nobody runs `doctor` on keeps
+# identifying a board by an enumeration order. Version 3 is where a file has to
+# have said which hardware each port is. The rule is decidable from the document
+# alone, because a configuration is read on hosts with nothing attached: an entry
+# carries a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` name, or
+# it declares what identifies it instead.
+
+
+def test_a_version_three_entry_that_names_its_board_loads(tmp_path: Path) -> None:
+    """The three self-standing identities, and the two declared exceptions.
+
+    Each is a whole file that loads, so this pins what version 3 *permits* rather
+    than only what it refuses — the half a ratchet is easiest to get wrong."""
+    identified = config_for(
+        tmp_path / "serial",
+        config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+        com_ports_yaml=com_ports_yaml(device="COM7", serial_number=BOARD_A, vid=STLINK_VID, pid=STLINK_PID),
+    )
+    assert identified.config_version == IDENTIFIED_COM_PORT_CONFIG_VERSION
+    assert uart_device(identified, "dut_uart").identity_source == "serial_number"
+
+    # udev builds this name out of the vendor, the product and the device's own
+    # serial, so it follows the board and is an identity in its own right.
+    by_id = config_for(tmp_path / "by-id", config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION, com_ports_yaml=com_ports_yaml(device=BY_ID_A))
+    assert uart_device(by_id, "dut_uart").identity_warning is None
+
+    aliased = config_for(
+        tmp_path / "resource",
+        config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+        com_ports_yaml=com_ports_yaml(device="COM7", resource_id="bench-a-uart"),
+    )
+    assert uart_device(aliased, "dut_uart").identity_source == "resource_id"
+
+    # And the deliberate exceptions: an adapter that publishes USB ids but no
+    # serial, and one that publishes neither.
+    typed = config_for(
+        tmp_path / "typed",
+        config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+        com_ports_yaml=com_ports_yaml(device="/dev/ttyUSB0", vid=CH340_VID, pid=CH340_PID, identity_source="vid_pid"),
+    )
+    assert typed.com_ports["dut_uart"].identity_source == "vid_pid"
+    assert uart_device(typed, "dut_uart").identity_source == "vid_pid"
+
+    opted_out = config_for(
+        tmp_path / "opt-out",
+        config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+        com_ports_yaml=com_ports_yaml(device="/dev/ttyS0", identity_source="device"),
+    )
+    assert opted_out.com_ports["dut_uart"].identity_source == "device"
+    # The declaration decides nothing at runtime: the entry is identified by the
+    # same key it always was, and the warning still says so.
+    assert uart_device(opted_out, "dut_uart").identity_warning == VOLATILE_SERIAL_DEVICE_WARNING
+
+
+def test_a_version_three_entry_identified_by_nothing_is_refused_naming_adopt(tmp_path: Path) -> None:
+    """The refusal, and what it has to contain to be actionable.
+
+    A bare `device:` is an enumeration order — which board the host saw first —
+    so it is exactly the entry this version exists to stop. The refusal names the
+    entry, names the command that fills the identity in from the attached adapter,
+    and says in which order to run it, because that command loads this file and
+    therefore needs it to load."""
+    with pytest.raises(ConfigError) as refused:
+        config_for(tmp_path / "bare", config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION, com_ports_yaml=com_ports_yaml(device="COM7"))
+
+    details = refused.value.to_dict()
+    assert details["error_type"] == "config_invalid"
+    assert details["field"] == "com_ports.dut_uart"
+    assert details["actual_identity_source"] == "device"
+    assert details["config_version"] == IDENTIFIED_COM_PORT_CONFIG_VERSION
+    assert "agentic-hil adopt-hardware --apply" in details["migration"]["identify"]
+    assert f"version: {READ_FREE_CONFIG_VERSION}" in details["migration"]["order"]
+    assert "identity_source" in details["summary"] and "COM7" in details["summary"]
+
+    # `vid`/`pid` without a serial is the case worth stating separately: it is a
+    # real identity of a *type*, the lock still follows the device name, and
+    # version 3 wants that said out loud rather than left to be inferred.
+    with pytest.raises(ConfigError) as typed:
+        config_for(
+            tmp_path / "typed",
+            config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+            com_ports_yaml=com_ports_yaml(device="/dev/ttyUSB0", vid=CH340_VID, pid=CH340_PID),
+        )
+    assert typed.value.to_dict()["actual_identity_source"] == "vid_pid"
+    assert "identity_source: vid_pid" in typed.value.to_dict()["migration"]["by_hand"]
+
+    # A declaration is not a way of asserting an identity into existence. One
+    # that disagrees with the entry's own keys is refused too, at every version,
+    # or version 3 could be satisfied by writing something untrue.
+    for version in (None, LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION):
+        with pytest.raises(ConfigError) as lied:
+            config_for(
+                tmp_path / f"lie-{version}",
+                config_version=version,
+                com_ports_yaml=com_ports_yaml(device="COM7", identity_source="serial_number"),
+            )
+        assert lied.value.to_dict()["field"] == "com_ports.dut_uart.identity_source"
+        assert lied.value.to_dict()["actual_identity_source"] == "device"
+
+
+def test_versions_one_and_two_keep_loading_an_entry_that_names_no_hardware(tmp_path: Path) -> None:
+    """Bestandsschutz, pinned. The migration guarantee is the point of a version.
+
+    Every bench on disk today has a file that either omits `version:` or says 2,
+    and plenty of them name a port by `COM7` alone. Those files load, mean what
+    they meant, and are warned about exactly as before. An update adds a
+    requirement to a file that opted into it and to no other."""
+    for version in (None, LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION):
+        config = config_for(tmp_path / f"v{version}", config_version=version, com_ports_yaml=com_ports_yaml(device="COM7"))
+        assert config.com_ports["dut_uart"].device == "COM7"
+        assert config.com_ports["dut_uart"].identity_source is None
+        device = uart_device(config, "dut_uart")
+        assert device.identity_source == "device"
+        # The runtime answer is unchanged: still a warning, still not a refusal.
+        assert device.identity_warning == VOLATILE_SERIAL_DEVICE_WARNING
+
+    # And the loader reads all three versions, so nothing has to move at all.
+    assert list(SUPPORTED_CONFIG_VERSIONS) == [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION]
+    assert CURRENT_CONFIG_VERSION == IDENTIFIED_COM_PORT_CONFIG_VERSION
+
+
+def test_the_shipped_schema_declares_the_version_and_the_declaration(tmp_path: Path) -> None:
+    """The schema an operator exports is the schema the loader validates against.
+
+    Two documents describe this file — the JSON Schema and the loader — and a
+    version the loader reads but the schema refuses is a file that cannot be
+    written. So the enum and the declared values are checked against the
+    constants, and a document carrying both is put back through the loader."""
+    exported = tmp_path / "config.schema.json"
+    assert schema(str(exported))["ok"] is True
+    document = json.loads(exported.read_text(encoding="utf-8"))
+
+    assert document["properties"]["version"]["enum"] == list(SUPPORTED_CONFIG_VERSIONS)
+    declared = document["properties"]["com_ports"]["additionalProperties"]["properties"]["identity_source"]
+    assert declared["enum"] == [*COM_PORT_IDENTITY_SOURCES, None]
+    assert "adopt-hardware" in declared["description"]
+
+    # Round trip: a version 3 entry with the declaration in it validates against
+    # the exported schema and loads, and the value survives as written.
+    written = config_for(
+        tmp_path / "project",
+        config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
+        com_ports_yaml=com_ports_yaml(device="/dev/ttyUSB0", vid=CH340_VID, pid=CH340_PID, identity_source="vid_pid"),
+    )
+    reloaded = yaml.safe_load(Path(written.config_path).read_text(encoding="utf-8"))
+    Draft202012Validator(document).validate(reloaded)
+    assert reloaded["com_ports"]["dut_uart"]["identity_source"] == "vid_pid"
+    assert written.com_ports["dut_uart"].identity_source == "vid_pid"
+
+    # A value outside the set is refused by the schema rather than reaching the
+    # loader, so the two gates cover the same ground from both sides.
+    reloaded["com_ports"]["dut_uart"]["identity_source"] = "probe_id"
+    assert list(Draft202012Validator(document).iter_errors(reloaded))
+
+
+def test_a_generated_configuration_is_born_at_version_three_with_an_identified_port(tmp_path: Path) -> None:
+    """What `init` and `project_config_create` write, from the one skeleton both fill.
+
+    A generated file has to satisfy the version it declares, or the ratchet would
+    be a rule only hand-written configurations are held to. Discovery correlates
+    the port *by* the probe's serial, so a serial is always what it writes; the
+    declaration is for the adapter that turns out to have none."""
+    skeleton = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    assert skeleton["version"] == IDENTIFIED_COM_PORT_CONFIG_VERSION
+    assert skeleton["com_ports"] == {}
+
+    filled = apply_discovery_to_template(
+        yaml.safe_load(DEFAULT_CONFIG_TEMPLATE),
+        DEFAULT_PROJECT_PROFILE,
+        discovery_of("/dev/ttyACM0", BY_ID_A, STLINK_VID, STLINK_PID),
+    )
+    port = filled["com_ports"]["dut_uart"]
+    assert port["serial_number"] == BOARD_A
+    assert (port["vid"], port["pid"]) == (STLINK_VID, STLINK_PID)
+    assert "identity_source" not in port, "a serial identifies the entry; the declaration would only repeat it"
+
+    # The whole generated document loads under the version it declares.
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    config_file = generated / "config.yaml"
+    config_file.write_text(
+        yaml.safe_dump({"workspace_root": str(generated), "state_root": str(tmp_path / "state" / "agentic-hil"), **filled}, sort_keys=False),
+        encoding="utf-8",
+    )
+    loaded = load_config(str(config_file), str(generated))
+    assert loaded.config_version == IDENTIFIED_COM_PORT_CONFIG_VERSION
+    assert loaded.com_ports["dut_uart"].serial_number == BOARD_A
+
+
+def test_adoption_records_the_exception_for_an_adapter_that_publishes_no_serial(tmp_path: Path) -> None:
+    """The half of the version 3 rule only a hardware read can settle.
+
+    "This adapter has no serial number" and "nobody filled it in" are the same
+    file. `adopt-hardware` has just asked the adapter, so it is the thing that
+    can write the difference down — which is what makes the refusal's advice
+    actionable rather than an instruction to hand-edit YAML."""
+    document = {"debuggers": {"dut": {"type": "stlink", "probe_id": None, "executable": None}}, "com_ports": {}}
+
+    def serial_less(*ports: dict) -> dict:
+        found = ports[0]
+        return {**discovery_of("/dev/ttyUSB0"), "com_port": found, "available_com_ports": {"ok": True, "ports": [found]}}
+
+    planned = plan_adoption(document, serial_less(host_port("/dev/ttyUSB0", None, None, CH340_VID, CH340_PID)))
+    written = {item["key"]: item["value"] for item in planned["carried"]}
+    assert "com_ports.dut_uart.serial_number" not in written
+    assert written["com_ports.dut_uart.identity_source"] == "vid_pid"
+
+    # Nothing at all off the adapter is the other exception, and it is written
+    # too rather than left as the entry version 3 refuses.
+    nothing = plan_adoption(document, serial_less(host_port("/dev/ttyUSB0", None)))
+    assert {item["key"]: item["value"] for item in nothing["carried"]}["com_ports.dut_uart.identity_source"] == "device"
+
+    # An adapter that does publish one needs no declaration, so none is proposed.
+    identified = plan_adoption(document, discovery_of("/dev/ttyACM0", BY_ID_A, STLINK_VID, STLINK_PID))
+    assert [item["key"] for item in identified["carried"] if item["key"].endswith(".identity_source")] == []
+
+    # And a declaration that has stopped being true is corrected rather than
+    # kept: a port replaced by one that does publish a serial would otherwise be
+    # left with `identity_source: device` beside the serial adoption just wrote,
+    # which is the disagreement the loader refuses.
+    stale = plan_adoption(
+        {**document, "com_ports": {"dut_uart": {"device": "/dev/ttyACM0", "identity_source": "device"}}},
+        discovery_of("/dev/ttyACM0", BY_ID_A, STLINK_VID, STLINK_PID),
+    )
+    corrected = {item["key"]: item for item in stale["carried"]}
+    assert corrected["com_ports.dut_uart.identity_source"]["value"] == "serial_number"
+    assert corrected["com_ports.dut_uart.identity_source"]["previous_value"] == "device"
+    assert [item["key"] for item in stale["kept"]] == []

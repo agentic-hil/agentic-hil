@@ -17,7 +17,7 @@ from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import CURRENT_CONFIG_VERSION, LEGACY_CONFIG_VERSION
+from agentic_hil.types import CURRENT_CONFIG_VERSION, LEGACY_CONFIG_VERSION, SUPPORTED_CONFIG_VERSIONS
 
 NO_PERMISSIONS = {
     "allow_probe": False,
@@ -30,7 +30,13 @@ NO_PERMISSIONS = {
     "allow_raw_debugger_commands": False,
     "allow_mass_erase": False,
 }
-COM_PORTS = 'com_ports:\n  dut_uart:\n    device: "/dev/ttyNONEXISTENT"\n'
+# `identity_source: device` is the deliberate opt-out version 3 requires of an
+# entry that names no hardware. Written here so these tests keep being about the
+# read model at the current version and nothing else: without it the current
+# version refuses the file, and with a `serial_number` instead the open would
+# start comparing this entry against whatever is attached to the machine running
+# the suite.
+COM_PORTS = 'com_ports:\n  dut_uart:\n    device: "/dev/ttyNONEXISTENT"\n    identity_source: "device"\n'
 CAN_BUSES = 'can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n'
 
 
@@ -167,7 +173,7 @@ def test_an_unsupported_version_is_refused_by_number(tmp_path: Path) -> None:
         load_config(str(path))
     assert excinfo.value.error_type == "config_invalid"
     assert excinfo.value.details["field"] == "version"
-    assert excinfo.value.details["supported_versions"] == [LEGACY_CONFIG_VERSION, CURRENT_CONFIG_VERSION]
+    assert excinfo.value.details["supported_versions"] == list(SUPPORTED_CONFIG_VERSIONS)
 
 
 class _RecordingHandle:
@@ -208,7 +214,7 @@ def test_a_port_can_be_opened_without_touching_the_target(tmp_path: Path, monkey
     config = config_for(
         tmp_path,
         config_version=CURRENT_CONFIG_VERSION,
-        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n    assert_dtr: false\n    assert_rts: false\n',
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n    identity_source: "device"\n    assert_dtr: false\n    assert_rts: false\n',
     )
     assert config.com_ports["dut_uart"].assert_dtr is False
     assert config.com_ports["dut_uart"].assert_rts is False
@@ -234,7 +240,7 @@ def test_a_port_can_be_opened_without_touching_the_target(tmp_path: Path, monkey
 def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:
     from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE
 
-    assert "version: 2" in DEFAULT_CONFIG_TEMPLATE
+    assert f"version: {CURRENT_CONFIG_VERSION}\n" in DEFAULT_CONFIG_TEMPLATE
     assert "allow_probe: " not in DEFAULT_CONFIG_TEMPLATE
     # Reading needs no grant, and since 0.8.0 the writing grants are not
     # withheld either: the skeleton states each of them, granted. The two
