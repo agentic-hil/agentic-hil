@@ -18,7 +18,7 @@ from agentic_hil.gdbmi import (
     write_intel_hex_file,
 )
 from agentic_hil.knowledge import exclusive_permission_summary
-from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
+from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
     mark_audit_failure,
@@ -149,7 +149,6 @@ class GdbDebugSessions:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                **process_group_kwargs(),
             )
         except OSError as error:
             # The spawn itself raised: no server process ever existed, so

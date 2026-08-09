@@ -14,6 +14,10 @@ CHILD_REAP_TIMEOUT_S = 5.0
 _PROCESS_RECORDS: dict[int, ManagedProcessRecord] = {}
 _PROCESS_RECORDS_LOCK = threading.RLock()
 _PROCESS_OWNER: ContextVar[str | None] = ContextVar("agentic_hil_process_owner", default=None)
+# Marks a child as one this module spawned suspended and therefore owes a
+# resume. Nothing outside this module can hand it out, which is what keeps the
+# registration half from being called on its own.
+_SPAWN_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -41,11 +45,30 @@ class ManagedProcessRecord:
 
 
 def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
-    child = subprocess.Popen(args, **kwargs)
+    """Start a contained child and hand it back running.
+
+    Spawning, containment and resumption are one call because they were once
+    three, and two of them were optional-looking. On Windows the child is born
+    suspended so that no instruction of it executes before it is inside a
+    kill-on-close Job Object — which is the only way a descendant that outlives
+    its parent still dies with this run. A caller that took the creation flags
+    and skipped the containment got a child frozen forever: alive, silent, no
+    output to read and no exit code to classify. That is not a mistake a
+    docstring prevents, so the two halves are private below and this function
+    is the only thing that calls them, in the only order that works.
+
+    Process-group and detachment flags are the contract, not a parameter: pass
+    them and this refuses rather than letting a caller re-open the hole from
+    the outside. For a child that must outlive this run's containment, use
+    :func:`spawn_detached_process`, which says so in its name.
+    """
+    _reject_creation_kwargs("spawn_managed_process", kwargs)
+    child = subprocess.Popen(args, **kwargs, **_process_group_kwargs())
+    child._agentic_hil_spawn_token = _SPAWN_TOKEN
     with _PROCESS_RECORDS_LOCK:
         _PROCESS_RECORDS[id(child)] = ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get())
     try:
-        return register_process_group(child)
+        return _register_process_group(child)
     except BaseException as primary_error:
         if os.name == "nt":
             raise
@@ -54,6 +77,45 @@ def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
         except BaseException as cleanup_error:
             primary_error.args = (*primary_error.args, f"Process registration cleanup error: {cleanup_error}")
         raise
+
+
+def spawn_detached_process(args: Any, **kwargs: Any) -> subprocess.Popen:
+    """Start a child that must outlive the run that started it.
+
+    The opposite trade from :func:`spawn_managed_process`, and the difference is
+    the whole reason this exists as its own name rather than as a flag. This
+    child gets process-group isolation *without* the containment: its own group,
+    so a Ctrl-C in the starting run's console does not take it out, and on
+    Windows no console of its own, since nobody is at a terminal for it. It is
+    not born suspended, it joins no Job Object, and it is not in this run's
+    managed records — so no cleanup sweep reaps it when the run that happened to
+    start it ends.
+
+    That is what a shared broker needs: one that died with the handle of
+    whichever run attached first would not be a shared bus, because the second
+    participant would lose the medium when the first one's run ended. A child
+    spawned here is bounded by its own rules instead, and owning those rules is
+    the caller's job — nothing in this module will end it.
+    """
+    _reject_creation_kwargs("spawn_detached_process", kwargs)
+    return subprocess.Popen(args, **kwargs, **_detached_process_kwargs())
+
+
+def _reject_creation_kwargs(function_name: str, kwargs: dict[str, Any]) -> None:
+    """Refuse the creation flags that are this module's to decide.
+
+    A caller passing these is trying to hold half the contract again, whether or
+    not they know it: on Windows a hand-built ``creationflags`` either drops the
+    suspended start that makes containment safe, or keeps it and leaves the
+    child frozen. Both are the bug this surface exists to remove, so they raise
+    here instead of merging into something plausible.
+    """
+    named = [key for key in ("creationflags", "start_new_session") if key in kwargs]
+    if named:
+        raise TypeError(
+            f"{function_name}() sets {' and '.join(named)} itself; passing it would break the spawn contract. "
+            "Use spawn_managed_process() for a child contained by this run, or spawn_detached_process() for one that outlives it."
+        )
 
 
 def current_process_owner() -> str | None:
@@ -69,13 +131,41 @@ def managed_process_owner(owner_marker: str):
         _PROCESS_OWNER.reset(reset_token)
 
 
-def process_group_kwargs() -> dict[str, object]:
+def _process_group_kwargs() -> dict[str, object]:
+    """Creation flags for a contained child: own group, and born suspended on Windows.
+
+    Private, and callable in practice only by :func:`spawn_managed_process`,
+    because ``CREATE_SUSPENDED`` (0x4) is an obligation rather than an option —
+    whoever spawns with it owes the child a resume, and the resume lives in
+    :func:`_register_process_group`.
+    """
     if os.name == "nt":
         return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x00000004}
     return {"start_new_session": True}
 
 
-def register_process_group(child: subprocess.Popen) -> subprocess.Popen:
+def _detached_process_kwargs() -> dict[str, object]:
+    """Creation flags for a child that outlives its spawner: own group, no console, not suspended."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+    return {"start_new_session": True}
+
+
+def _register_process_group(child: subprocess.Popen) -> subprocess.Popen:
+    """Contain a child spawned by this module, and on Windows resume it.
+
+    Refuses any child it was not handed by :func:`spawn_managed_process`. The
+    token is not paperwork: this function's Windows path assumes the child is
+    suspended and unblocks it, so calling it on a child spawned elsewhere either
+    resumes a thread that was already running or leaves a frozen one frozen with
+    the caller believing it was handled.
+    """
+    if getattr(child, "_agentic_hil_spawn_token", None) is not _SPAWN_TOKEN:
+        raise RuntimeError(
+            "Process group registration is not a standalone step: it resumes a child that spawn_managed_process() "
+            "started suspended. Call spawn_managed_process() instead, or spawn_detached_process() for a child that "
+            "must outlive this run."
+        )
     with _PROCESS_RECORDS_LOCK:
         record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get()))
     if os.name == "nt":
