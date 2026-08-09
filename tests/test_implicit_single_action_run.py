@@ -34,6 +34,7 @@ from conftest import write_config
 
 from agentic_hil.config import load_config
 from agentic_hil.contracts import TOOL_ANNOTATIONS
+from agentic_hil.bench import fold_resource_name
 from agentic_hil.coordination import HardwareCoordinator
 from agentic_hil.tools import (
     _READ_ONLY_HARDWARE_TOOLS,
@@ -269,7 +270,9 @@ def test_a_bare_com_write_that_fails_aborts_and_drives_the_recovery_action(tmp_p
         assert result["run"]["implicit"] is True, result
         assert result["run"]["aborted"] is True, result
         # The run declared the port it was about to write to, and nothing else.
-        assert result["run"]["declared_devices"] == ["com:" + DEVICE.replace("/", "\\").lower()], result["run"]
+        # Folded by the same production rule the lock key uses: backslashed and
+        # lowercased on Windows, verbatim on POSIX — the test must not re-implement it.
+        assert result["run"]["declared_devices"] == [fold_resource_name(f"com:{DEVICE}")], result["run"]
         recovery = result["recovery"]
         assert recovery["attempted"] is True, recovery
         assert recovery["actions"] == ["reap_processes", "reset_halt", "probe_target"], recovery
