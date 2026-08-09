@@ -245,9 +245,26 @@ Preventing it: name ports so the name cannot move.
 
 - On Linux, set `device` to the udev symlink — `/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_<serial>-if02`. It is built from the vendor, the product and the device's own serial, so it follows the board. `agentic-hil com-ports` lists it as `stable_device` next to each port, and `adopt-hardware` writes it.
 - On both platforms, set `serial_number` to the adapter's USB serial — on a Nucleo the same serial `probe_id` carries. This is what makes the machine-wide lock follow the board rather than the name, and it is what the check at open time compares. Windows has no openable stable device name, so there `device` stays `COM5` and this key carries the identity by itself.
-- `agentic-hil doctor` names every port that has neither, under `warnings`, and every `com_ports` entry reports its `identity_source`. Such an entry keeps working exactly as before — it is simply identified by something the host can reassign.
+- `agentic-hil doctor` names every port that has neither, under `warnings`, and every `com_ports` entry reports its `identity_source`. Under `version: 1` and `version: 2` such an entry keeps working exactly as before — it is simply identified by something the host can reassign.
+- From `version: 3` on the warning is a property of the file instead. An entry there must carry a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else declare what identifies it with `identity_source`: `vid_pid` (or `vid`/`pid`) for an adapter that publishes USB ids but no serial number, `device` for one that publishes neither. An entry with none of those refuses the file at load rather than being warned about.
 
 An entry that names no hardware is not checked at all, and neither is one whose port the host does not enumerate (a pseudo-terminal, a URL handler) or one whose adapter reports no serial. Those say so in the result's `identity` block rather than guessing.
+
+### `config_invalid` on a `com_ports` entry under `version: 3`
+
+Symptom: a configuration that loaded yesterday refuses to load after `version:` was raised to `3`, naming a `com_ports` entry and `agentic-hil adopt-hardware --apply`.
+
+What it means: that entry is identified by its device name alone — `COM7`, `/dev/ttyACM0` — which is an enumeration order rather than a board. Version 3 is the version under which that is not enough. The loader cannot ask the machine whether this particular adapter has a serial number to write down, because a configuration is read on hosts with nothing attached, so the file has to carry the answer.
+
+Fix, in this order, because `adopt-hardware` loads this configuration and therefore needs it to load:
+
+1. Put `version:` back to `2`.
+2. Attach the boards and run `agentic-hil adopt-hardware --apply` (add `--com-port <id>` on a bench with several ports). It writes `serial_number`, `vid` and `pid` from each adapter, and writes `identity_source` where the adapter turns out to publish no serial of its own.
+3. Set `version: 3`.
+
+By hand instead: add `serial_number` with the adapter's USB serial, or `identity_source: vid_pid` beside `vid` and `pid`, or `identity_source: device` to state deliberately that a kernel name is all this port has. A declaration that disagrees with the entry's own keys — `identity_source: serial_number` on an entry carrying no serial — is refused too: it records which key carries the identity and does not create one.
+
+Staying at `version: 2` is also an answer. Nothing about that bench changes, and `doctor` goes on reporting the identity as a warning.
 
 ## 12. CAN Bus Does Not Work
 

@@ -27,8 +27,11 @@ from yaml.resolver import BaseResolver
 
 from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields, safe_state_root_suggestion
 from agentic_hil.types import (
+    COM_PORT_IDENTITY_SOURCES,
+    IDENTIFIED_COM_PORT_CONFIG_VERSION,
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
+    SUPPORTED_CONFIG_VERSIONS,
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
@@ -44,6 +47,8 @@ from agentic_hil.types import (
     ReportsConfig,
     TargetConfig,
     ValidationConfig,
+    com_port_carries_hardware_identity,
+    com_port_identity_source,
     fold_device_path,
     fold_hardware_id,
 )
@@ -208,6 +213,12 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     # as two probes that happen to resolve to one resource.
     validate_resource_ids(debuggers, com_ports, can_buses)
     validate_debuggers(debuggers)
+    # After parsing rather than on the raw mapping, unlike the version 2 read
+    # permission ratchet: what identifies a port is decided by normalised values
+    # — `vid: "0483"` and `vid: 1155` are one fact — so the check reads the parsed
+    # entry and cannot disagree with what the server goes on to use.
+    validate_com_port_identity_declarations(com_ports, config_path)
+    reject_unidentified_com_ports(com_ports, config_path, config_version)
     return ValidatedDocument(
         config_version=config_version,
         workspace_root=str(workspace),
@@ -573,8 +584,10 @@ def ensure_safe_state_root() -> list[str]:
 def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
     """Remove group/other write from the *current user's own* directories (and a
     final regular file such as a launcher) along ``target``'s chain, so the
-    fail-closed executable trust check accepts a umask-002 / private-group home
-    without the operator hand-fixing permissions.
+    fail-closed executable trust check accepts a launcher an installer wrote
+    under a umask-002 / private-group home without the operator hand-fixing
+    permissions. Since #143 that check reads the mode of the launcher itself and
+    not of its ancestors, so the file is what this still has to reach.
 
     Only components owned by the current user are ever changed; the walk stops at
     the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
@@ -1154,14 +1167,26 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
 # `true`, so the bench an operator receives is workable and narrowing it is what
 # an agent does on request. `project_config_set` enforces that from the document
 # rather than from the request.
-DEFAULT_CONFIG_TEMPLATE = """# Version 2: reading a device needs no permission. Every device a test plan
+DEFAULT_CONFIG_TEMPLATE = """# Version 3, which is two things.
+#
+# From version 2: reading a device needs no permission. Every device a test plan
 # names is locked machine-wide for the whole run and a device the plan does not
 # name is refused, so an observation from outside cannot reach into a run, and a
 # reader while no run holds the board disturbs nobody. Writing and
 # state-changing operations are unchanged. A config
 # written without this key is read under version 1, where reading still needs
 # allow_probe / allow_read.
-version: 2
+#
+# And version 3's own rule: every com_ports entry below must say which hardware
+# it is. A `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device
+# name is one; an entry with none of those must declare `identity_source` —
+# `vid_pid` for an adapter that publishes USB ids but no serial number, `device`
+# to state deliberately that a kernel name like COM7 or /dev/ttyACM0 is all this
+# port has. That name is an enumeration order rather than a board, so attaching a
+# second adapter can hand one entry the other's port; under this version the file
+# has to have said so. `agentic-hil adopt-hardware --apply` fills it in from the
+# attached board. Versions 1 and 2 are unchanged and still load.
+version: 3
 
 # What may be done to this project, beside its hardware. All start true, so an
 # agent can describe the bench, regenerate it from hardware discovery, clear an
@@ -1573,6 +1598,34 @@ def write_generated_config(target_path: Path, workspace: Path, text: str) -> Non
     secure_atomic_write_text(target_path, text)
 
 
+def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_uids: frozenset[int]) -> str | None:
+    """Why a POSIX MCP launcher's ancestor directory cannot be trusted, or None.
+
+    Who *else* may write the directory is deliberately not asked. Until this
+    change the walk refused every ancestor carrying group or other write, which
+    is the ordinary state of a home directory on a distribution that combines
+    ``umask 002`` with per-user groups: ``~`` and ``~/.local`` at ``0775`` were
+    enough to have `mcp-config` reject every candidate and then recommend the
+    user-level tool installer that had produced exactly that layout. The rule
+    could only ever defend against a different account on the same machine —
+    never a guarantee of this project — and it could not defend against the
+    operator's own processes, which own these directories and can rewrite them
+    regardless of their mode. Windows dropped the equivalent ACL walk in 0.8.0
+    and holds the chain open instead; this is that line, on POSIX.
+
+    What remains is about identity rather than permissions: the launcher's own
+    parent must belong to root or to this user, because a directory owned by a
+    third account can have the validated file renamed out from under it between
+    the check and the registration, and no mode expresses that. The passed
+    ``info`` is a stat of an already-opened directory descriptor, and
+    ``trusted_uids`` is supplied by the caller so this stays answerable on hosts
+    that have no ``os.geteuid``.
+    """
+    if final and info.st_uid not in trusted_uids:
+        return "owned by another user"
+    return None
+
+
 def trusted_persistent_executable(
     executable: str | Path,
     *,
@@ -1625,14 +1678,14 @@ def trusted_persistent_executable(
         return str(path)
 
     def trusted_parent_chain(candidate: Path) -> list[int]:
+        trusted_uids = frozenset({0, os.geteuid()})
         descriptors = _hold_posix_directory_chain(candidate.parent)
         try:
             for index, descriptor in enumerate(descriptors):
                 opened = os.fstat(descriptor)
-                mode = stat.S_IMODE(opened.st_mode)
                 final = index == len(descriptors) - 1
-                unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
-                if unsafe_write or (final and opened.st_uid not in {0, os.geteuid()}):
+                reason = untrusted_launcher_directory(opened, final=final, trusted_uids=trusted_uids)
+                if reason is not None:
                     # Name the component and its mode: the caller cannot fix a
                     # directory the message does not identify, and one bad
                     # ancestor of a shared prefix condemns every launcher below.
@@ -1641,8 +1694,8 @@ def trusted_persistent_executable(
                     ancestor = parents[position] if 0 <= position < len(parents) else candidate.parent
                     raise ConfigError(
                         "mcp_command_untrusted",
-                        "The MCP server executable has an untrusted or replaceable parent directory.",
-                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                        f"The MCP server executable has a parent directory that is {reason}.",
+                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{stat.S_IMODE(opened.st_mode):04o}", "uid": opened.st_uid},
                     )
             return descriptors
         except BaseException:
@@ -1658,7 +1711,15 @@ def trusted_persistent_executable(
                 opened = os.fstat(handle.fileno())
                 mode = stat.S_IMODE(opened.st_mode)
                 if opened.st_uid not in {0, os.geteuid()} or mode & 0o022 or not mode & 0o111:
-                    raise ConfigError("mcp_command_untrusted", "The MCP server executable must be trusted, executable, and not writable by other users.", {"path": str(candidate)})
+                    # The mode and the owner travel with the refusal for the same
+                    # reason the directory's do: this is the last thing between an
+                    # operator and a registration, and a caller told only that the
+                    # file is untrusted has to go and stat it to learn why.
+                    raise ConfigError(
+                        "mcp_command_untrusted",
+                        "The MCP server executable must be trusted, executable, and not writable by other users.",
+                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                    )
         finally:
             for descriptor in reversed(target_descriptors):
                 os.close(descriptor)
@@ -2586,6 +2647,7 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
         vid=usb_id_config(raw.get("vid"), f"com_ports.{name}.vid"),
         pid=usb_id_config(raw.get("pid"), f"com_ports.{name}.pid"),
         resource_id=optional_string(raw.get("resource_id")),
+        identity_source=optional_string(raw.get("identity_source")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"com_ports.{name}.permissions")),
     )
 
@@ -2713,21 +2775,23 @@ def reject_removed_sections(raw: JsonObject, config_path: str) -> None:
 
 
 def configured_version(raw: JsonObject, config_path: str) -> int:
-    """Which permission model this file is read under.
+    """Which rules this file is read under.
 
     A file with no ``version:`` was written when reading needed a grant, and it
-    keeps that meaning. Nothing infers the new model from the absence of a key:
-    that inference is exactly the silent widening this marker exists to stop."""
+    keeps that meaning. Nothing infers a newer model from the absence of a key:
+    that inference is exactly the silent widening this marker exists to stop, and
+    it is why every version this project has ever written is still read here."""
     value = raw.get("version")
     if value is None:
         return LEGACY_CONFIG_VERSION
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError("config_invalid", "version must be an integer.", {"path": config_path, "field": "version", "value": value})
-    if value not in {LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION}:
+    if value not in set(SUPPORTED_CONFIG_VERSIONS):
+        supported = ", ".join(str(item) for item in SUPPORTED_CONFIG_VERSIONS)
         raise ConfigError(
             "config_invalid",
-            f"Unsupported configuration version; this release reads version {LEGACY_CONFIG_VERSION} and {READ_FREE_CONFIG_VERSION}.",
-            {"path": config_path, "field": "version", "value": value, "supported_versions": [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION]},
+            f"Unsupported configuration version; this release reads versions {supported}.",
+            {"path": config_path, "field": "version", "value": value, "supported_versions": list(SUPPORTED_CONFIG_VERSIONS)},
         )
     return value
 
@@ -2834,6 +2898,135 @@ def reject_read_permissions(raw: JsonObject, config_path: str, version: int) -> 
                         },
                     },
                 )
+
+
+# The command that fills a serial port entry's identity in from the attached
+# adapter, written once so the refusal below, the schema and the documentation
+# cannot come to name different commands.
+ADOPT_HARDWARE_COMMAND = "agentic-hil adopt-hardware --apply"
+# The rule version 3 adds, in one sentence. Quoted verbatim by the refusal, so
+# what a reader is told and what the loader does are the same text.
+COM_PORT_IDENTITY_RULE = (
+    f"Under version {IDENTIFIED_COM_PORT_CONFIG_VERSION} every com_ports entry must say which hardware it is. An entry carrying a "
+    "`serial_number`, a `resource_id`, or a `/dev/serial/by-id/...` device name already does. An entry carrying none of "
+    "those is identified by something the host reassigns, so it must declare what does identify it with "
+    "`identity_source`: `vid_pid` (or `vid`/`pid`) for an adapter that publishes USB ids but no serial number, `device` "
+    "for one that publishes neither."
+)
+
+
+def validate_com_port_identity_declarations(com_ports: dict[str, ComPortConfig], config_path: str) -> None:
+    """Refuse an ``identity_source`` that does not describe the entry it is in.
+
+    The key is a declaration, never a second source of truth: what actually
+    identifies a port is decided by ``serial_number``, ``resource_id`` and
+    ``vid``/``pid``, exactly as before, and this says out loud which of them the
+    operator meant. So a declaration that disagrees with those keys is refused
+    rather than believed — `identity_source: serial_number` on an entry with no
+    serial would otherwise be a file that satisfies version 3's requirement by
+    asserting something untrue, which is worse than the warning it replaces.
+
+    Checked at every version. The key is new, so no configuration in the field
+    carries one to be broken by this, and a declaration that is wrong is wrong
+    under version 1 too."""
+    for name, port in com_ports.items():
+        declared = port.identity_source
+        if declared is None:
+            continue
+        derived = com_port_identity_source(port)
+        if declared == derived:
+            continue
+        raise ConfigError(
+            "config_invalid",
+            f"com_ports.{name}.identity_source says `{declared}`, but this entry is identified by `{derived}`. "
+            "The declaration records which key carries the identity; it does not create one.",
+            {
+                "path": config_path,
+                "field": f"com_ports.{name}.identity_source",
+                "value": declared,
+                "actual_identity_source": derived,
+                "migration": {
+                    "declare": f"Set com_ports.{name}.identity_source to `{derived}`, which is what this entry's keys say.",
+                    "or_identify": f"Set the key you meant — `serial_number`, `resource_id`, or `vid` and `pid` — or run `{ADOPT_HARDWARE_COMMAND}` to fill it in from the attached adapter.",
+                    "allowed_values": list(COM_PORT_IDENTITY_SOURCES),
+                },
+            },
+        )
+
+
+def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_path: str, version: int) -> None:
+    """Refuse a version 3 com_ports entry that names no hardware, by name.
+
+    The requirement version 3 adds, and the only one. `serial_number`, `vid` and
+    `pid` have shipped beside `device` for a while, `adopt-hardware` and `init`
+    write them, and `doctor` warns about an entry carrying none of them — but a
+    warning is not a property of the file, and a bench nobody runs `doctor` on
+    keeps identifying a board by an enumeration order. Under version 3 it is a
+    property of the file.
+
+    Decidable from the document alone, which is what makes it a version rule
+    rather than a host check. The loader cannot ask whether *this* adapter
+    publishes a serial number: configurations are read on hosts with nothing
+    attached, and a rule that needed the hardware present would refuse a bench for
+    being unplugged. So the file carries the answer. An adapter that publishes a
+    serial has it written down; one that publishes only USB ids says
+    `identity_source: vid_pid`; one that publishes nothing says
+    `identity_source: device`, which is a deliberate sentence somebody wrote
+    rather than a key nobody filled in. `adopt-hardware` writes whichever of the
+    three the attached adapter turns out to justify, so the declaration is
+    ordinarily a record of what was read off the hardware and not a promise.
+
+    Versions 1 and 2 are untouched: an entry with a bare `device:` loads there
+    exactly as it always has, and moving a bench to version 3 is the operator's
+    edit — the same shape as version 2's read-permission removal."""
+    if version < IDENTIFIED_COM_PORT_CONFIG_VERSION:
+        return
+    for name, port in com_ports.items():
+        if com_port_carries_hardware_identity(port) or port.identity_source is not None:
+            continue
+        derived = com_port_identity_source(port)
+        undeclared = (
+            f"com_ports.{name} is identified by `{port.device}` alone, which is an enumeration order rather than a "
+            "board: attaching a second adapter can hand this entry another one."
+            if derived == "device"
+            else (
+                f"com_ports.{name} carries `{derived}` and no serial number, so it names a kind of adapter rather than "
+                f"a unit and its lock still follows `{port.device}`, which is an enumeration order rather than a board."
+            )
+        )
+        raise ConfigError(
+            "config_invalid",
+            f"{undeclared} {COM_PORT_IDENTITY_RULE}",
+            {
+                "path": config_path,
+                "field": f"com_ports.{name}",
+                "device": port.device,
+                "actual_identity_source": derived,
+                "config_version": version,
+                "migration": {
+                    "identify": (
+                        f"Run `{ADOPT_HARDWARE_COMMAND}` with the board attached. It fills in `serial_number` and the "
+                        "`vid`/`pid` of the adapter behind this port, and records `identity_source` when the adapter "
+                        "publishes no serial number of its own."
+                    ),
+                    "order": (
+                        f"That command loads this configuration, so run it while the file still says `version: "
+                        f"{READ_FREE_CONFIG_VERSION}` and set `version: {IDENTIFIED_COM_PORT_CONFIG_VERSION}` afterwards — the same one-edit migration "
+                        f"version {READ_FREE_CONFIG_VERSION} needed."
+                    ),
+                    "by_hand": (
+                        f"Or declare it yourself: `com_ports.{name}.serial_number` for the adapter's USB serial, or "
+                        f"`com_ports.{name}.identity_source: {derived}` to state deliberately that this is all this "
+                        "port has."
+                    ),
+                    "stay": (
+                        f"Or leave the file at `version: {READ_FREE_CONFIG_VERSION}`, where this entry loads exactly as it does today and "
+                        "`agentic-hil doctor` reports the same identity as a warning."
+                    ),
+                    "allowed_values": list(COM_PORT_IDENTITY_SOURCES),
+                },
+            },
+        )
 
 
 def reject_bridge_args(raw: JsonObject, config_path: str) -> None:

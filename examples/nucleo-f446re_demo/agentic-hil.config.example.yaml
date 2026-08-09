@@ -1,7 +1,10 @@
 # Bootstrap profile for `agentic-hil init` / `setup`. Roots, debugger/probe,
 # target, and serial bindings resolve externally; placeholders show final shape.
-# The config it produces is written at version 2, where reading needs no
-# permission, so a profile only ever requests what writes or changes state.
+# The config it produces is written at version 3, where reading needs no
+# permission, so a profile only ever requests what writes or changes state, and
+# where every com_ports entry has to say which hardware it is. This profile does
+# not: `device` below is a placeholder, and the serial number that identifies the
+# port is filled in from the attached adapter when the config is generated.
 workspace_root: "/absolute/path/to/agentic-hil/examples/nucleo-f446re_demo"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
