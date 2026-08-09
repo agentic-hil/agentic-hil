@@ -27,6 +27,7 @@ from fixtures import fake_openocd
 from support import trusted_launcher
 
 from agentic_hil import __version__
+from agentic_hil import process as process_module
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends import openocd as openocd_backend
 from agentic_hil.backends.common import command_for_log
@@ -68,7 +69,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
-from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import CURRENT_CONFIG_VERSION
@@ -3608,7 +3609,7 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
 time.sleep(30)
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
         for _ in range(100):
             if pid_file.exists():
@@ -3633,7 +3634,7 @@ import signal, subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
 open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
         child.wait(timeout=5)
         descendant_pid = int(pid_file.read_text(encoding="utf-8"))
@@ -3654,7 +3655,7 @@ import subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
 open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     child.wait(timeout=5)
     descendant_pid = int(pid_file.read_text(encoding="utf-8"))
 
@@ -3664,14 +3665,26 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended-start regression")
-def test_windows_process_does_not_run_before_job_registration(tmp_path: Path) -> None:
+def test_windows_managed_spawn_holds_child_until_contained_then_runs_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suspended start is still there, and it still ends in a running child.
+
+    Both halves in one call means neither is observable from outside any more,
+    so the freeze is caught where it happens: at Job Object setup the child must
+    not have run a line yet, and by the time the call returns it must have.
+    """
     marker = tmp_path / "started"
-    child = subprocess.Popen([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)], **process_group_kwargs())
+    original = process_module._create_windows_kill_job
+    frozen_at_containment: list[bool] = []
+
+    def watched(process: subprocess.Popen) -> int:
+        frozen_at_containment.append(not marker.exists())
+        return original(process)
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", watched)
+    child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)])
     try:
-        time.sleep(0.1)
-        assert not marker.exists()
-        register_process_group(child)
         child.wait(timeout=5)
+        assert frozen_at_containment == [True]
         assert marker.read_text(encoding="utf-8") == "started"
         terminate_process_tree(child, 1.0)
     finally:
@@ -3681,24 +3694,36 @@ def test_windows_process_does_not_run_before_job_registration(tmp_path: Path) ->
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows fail-closed registration regression")
 def test_windows_job_setup_failure_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
-    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: (_ for _ in ()).throw(OSError("job setup failed")))
+    spawned: list[subprocess.Popen] = []
+
+    def fail(process: subprocess.Popen) -> int:
+        spawned.append(process)
+        raise OSError("job setup failed")
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", fail)
 
     with pytest.raises(OSError, match="job setup failed"):
-        register_process_group(child)
+        spawn_managed_process([sys.executable, "-c", "import time; time.sleep(30)"])
 
-    assert child.poll() is not None
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows missing Job Object regression")
 def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
-    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: None)
+    spawned: list[subprocess.Popen] = []
+
+    def no_handle(process: subprocess.Popen) -> None:
+        spawned.append(process)
+        return None
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", no_handle)
 
     with pytest.raises(OSError, match="no containment handle"):
-        register_process_group(child)
+        spawn_managed_process([sys.executable, "-c", "import time; time.sleep(30)"])
 
-    assert child.poll() is not None
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object verification regression")

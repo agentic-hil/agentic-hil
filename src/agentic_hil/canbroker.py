@@ -83,6 +83,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.devices import DeviceError, can_device
+from agentic_hil.process import spawn_detached_process
 from agentic_hil.report import logs_directory, safe_filename, timestamp_for_filename
 from agentic_hil.types import AgenticHILConfig, CanBusConfig, CanShareConfig, JsonObject
 
@@ -1163,30 +1164,17 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
     return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started)
 
 
-def _detached_spawn_kwargs() -> dict[str, object]:
-    """Process-creation flags for a child that outlives the run that started it.
-
-    Deliberately *not* :func:`agentic_hil.process.process_group_kwargs`, and the
-    difference is the whole point of this function existing. That helper is half
-    of a two-part contract: on Windows it adds ``CREATE_SUSPENDED``, and the
-    child stays frozen until :func:`~agentic_hil.process.register_process_group`
-    resumes it — which also puts it in a kill-on-close Job Object owned by the
-    spawning process. Both halves are wrong here. A broker that dies with the
-    handle of whichever run happened to attach first is not a shared bus; the
-    second participant would lose the medium because the first one's run ended.
-
-    So the broker gets process-group isolation without the containment: its own
-    group so a Ctrl-C in the first run's console does not take the bus out from
-    under the others, and no console of its own, since nobody is at a terminal
-    for it. Its lifetime is bounded by its own rules instead — the last
-    participant detaching, and the first-attach deadline below."""
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
-    return {"start_new_session": True}
-
-
 def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root: Path) -> subprocess.Popen:
     """Start a broker for this bus, detached from the run that started it.
+
+    :func:`~agentic_hil.process.spawn_detached_process` rather than
+    ``spawn_managed_process``, and the difference is the whole reason the broker
+    is spawned through the detached name: a managed child joins a kill-on-close
+    Job Object owned by this run, and a broker that died with whichever run
+    happened to attach first would not be a shared bus — the second participant
+    would lose the medium because the first one's run ended. The broker's
+    lifetime is bounded by its own rules instead: the last participant
+    detaching, and the first-attach deadline below.
 
     Losing the race for the bus lock is a clean exit, not an error — the
     winner's descriptor is what the loser's client then finds.
@@ -1199,7 +1187,7 @@ def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root
     # reading a broker's stderr once the run that started it has moved on, and a
     # full pipe would block the broker mid-bus.
     with open(broker_log_path(bus_key, lock_root), "ab") as handle:
-        return subprocess.Popen(
+        return spawn_detached_process(
             [
                 sys.executable,
                 "-m",
@@ -1215,7 +1203,6 @@ def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root
             stdout=handle,
             stderr=handle,
             cwd=str(config.work_dir),
-            **_detached_spawn_kwargs(),
         )
 
 
