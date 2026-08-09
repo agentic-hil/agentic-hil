@@ -8,6 +8,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- The test reactor's `can_read` takes a `comparator:`: an identifier filter (`id`, optionally `id_mask`) and a payload claim (`equals`, `pattern`, or `pattern` with `range` over a hex-captured value), read until met within `timeout_s` and failing with the frames the bus did carry (#168)
+
+### Fixed
+
+- Spawning a contained child is one call, not two that a caller can hold half of: `spawn_managed_process()` sets its creation flags itself, `spawn_detached_process()` stands beside it for a child that must outlive its spawner, both halves of the old contract are private, and registration refuses a child it did not spawn — the shape that had shipped a broker born frozen (#169)
+
+### Added
+
 - A CAN broker lets several runs share one physical bus: a `shares:` section under a `can_buses` entry names participant views (identifier filter, permissions, frame budget), and one broker process owns the adapter and the machine-wide bus lock for all of them. An entry without `shares:` is the single-owner bus it always was, unchanged (#146)
 - Test reactor step actions are declared on the methods that serve them (`@step_action`): dispatch is written once in the base class, adding a capability is one decorated method, and an action a device kind does not declare answers `not_supported` naming the kind by construction (#168)
 - Test plan format v3: `device:` as the one routing key (the v2 route keys stay valid as aliases), a `comparator:` object on `uart_read` with `equals`, `pattern` and `pattern`+`range`, the new `uart_write` and universal `delay` actions, and optional close steps — `version: 2` plans load and behave unchanged (#168)
