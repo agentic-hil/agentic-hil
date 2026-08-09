@@ -535,11 +535,11 @@ def _skipped_setup_step(summary: str) -> JsonObject:
 
 
 def _smooth_permissions(targets: list[Path]) -> list[str]:
-    """Silently tighten the current user's own group/other-writable directories
-    along these chains so the fail-closed trust validator accepts a umask-002 /
-    private-group home without the operator hand-fixing permissions. Only
-    user-owned components are ever changed. POSIX only; on Windows this is a
-    no-op."""
+    """Silently tighten the current user's own group/other-writable components
+    along these chains so the fail-closed trust validator accepts a launcher an
+    installer wrote under a umask-002 / private-group home without the operator
+    hand-fixing permissions. Only user-owned components are ever changed. POSIX
+    only; on Windows this is a no-op."""
     actions: list[str] = []
     seen: set[str] = set()
     for target in targets:
@@ -556,8 +556,10 @@ def _smooth_user_permissions() -> list[str]:
     the MCP command will be registered as.
 
     ``trusted_persistent_executable`` is the last check that refuses a path for
-    its POSIX mode, and it looks at the executable and its ancestors and nothing
-    else. Smoothing was once wider because configured paths were mode-checked
+    its POSIX mode, and since #143 that mode is the launcher file's own: its
+    ancestors are no longer refused for who else may write them, so a umask-002
+    home no longer has to be tightened for a registration to be possible.
+    Smoothing was once wider still because configured paths were mode-checked
     too; that check was removed whole, and chmod-ing a tree
     nothing validates any more would be this policy's remnant mutating an
     operator's filesystem for no refusal it can prevent. The skill and the
@@ -1081,7 +1083,14 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
         assert isinstance(template, dict)
-        configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        try:
+            # The profile is a hand-written file in the repository and the only
+            # untrusted input this template filling has. A value it cannot use is
+            # a refusal that names the key, not a traceback out of `init` after
+            # the board was already read; nothing has been written at this point.
+            configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        except ConfigError as error:
+            return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
         document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
@@ -1662,7 +1671,15 @@ def mcp_server_command() -> str:
         try:
             return _trusted_mcp_command(candidate)
         except (ConfigError, OSError) as error:
-            rejected.append({"path": str(candidate), "reason": str(error)})
+            # Whatever the refusal knew about this candidate travels with it: the
+            # component that stopped the walk, its mode and its owner. A caller
+            # holding a path and a sentence has to go and stat the chain itself
+            # to find out which directory to fix.
+            entry: JsonObject = {"path": str(candidate), "reason": str(error)}
+            if isinstance(error, ConfigError):
+                entry["error_type"] = error.error_type
+                entry.update({key: value for key, value in error.details.items() if key not in entry})
+            rejected.append(entry)
     raise ConfigError(
         "mcp_command_untrusted",
         "No stable trusted Agentic HIL executable was found. Install it persistently with 'uv tool install agentic-hil' or 'pipx install agentic-hil'.",
@@ -2315,10 +2332,18 @@ def _doctor_mcp_report() -> JsonObject:
         command = mcp_server_command()
     except (ConfigError, OSError) as error:
         summary = error.summary if isinstance(error, ConfigError) else str(error)
+        # The refusal already knows which candidates it looked at, where they
+        # were, and what was wrong with each. Passing on the summary alone left
+        # an operator with "no trusted executable was found" and no path to act
+        # on — a refusal handed over without its reasons, which is the one thing
+        # this project's error line does not do.
+        details = error.details if isinstance(error, ConfigError) else {}
+        rejected = details.get("rejected_candidates")
         return {
             **report,
             "command": None,
             "persistent": False,
+            **({"rejected_candidates": rejected} if isinstance(rejected, list) else {}),
             "summary": f"No trusted persistent executable to register yet: {summary}",
         }
     return {

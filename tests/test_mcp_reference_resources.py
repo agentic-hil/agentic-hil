@@ -239,6 +239,57 @@ def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
     assert "do_not" not in refusal
 
 
+# The three the catalogue had no entry for, and the reason the gap mattered:
+# `invalid_argument` is the most frequent refusal on this surface, and the two
+# CAN adapter ones are raised where a frame may or may not have reached the bus,
+# which is precisely when a caller most needs to be told what to do next.
+UNCOVERED_UNTIL_NOW = ("invalid_argument", "can_adapter_protocol_unsupported", "can_adapter_invalid_response")
+
+
+@pytest.mark.parametrize("error_type", UNCOVERED_UNTIL_NOW)
+def test_the_refusals_that_carried_nothing_now_carry_a_way_forward(error_type: str) -> None:
+    """A refusal carries the way forward, and these three did not.
+
+    `remediation_fields` answered `{}` for all three, so the most common refusal
+    this server produces went out with no next step and no `do_not` line while
+    `permission_denied`, `device_busy` and `com_port_identity_mismatch` each
+    carried one."""
+    fields = remediation_fields(error_type)
+
+    assert fields["remediation"], error_type
+    assert fields["do_not"], error_type
+    assert catalogue_entry(error_type)["meaning"].strip(), error_type
+
+
+def test_the_invalid_argument_entry_says_how_to_read_the_fields_the_refusal_names(service: AgenticHILToolService) -> None:
+    """The entry has to be about `field` and `validator`, not about one argument.
+
+    A per-argument entry would be a second copy of the input schemas with nothing
+    keeping it in step with them, so the general entry earns its place only by
+    telling a caller how to read what its own result already carries."""
+    entry = catalogue_entry("invalid_argument")
+    said = json.dumps(entry)
+
+    assert "`field`" in said and "`validator`" in said
+    # And the reference resource serves the same entry, over the connection a
+    # caller with no source tree has.
+    assert json.loads(read_text(service, ERROR_URI_PREFIX + "invalid_argument")) == entry
+
+
+def test_a_schema_refusal_carries_the_catalogues_fix_in_the_result(service: AgenticHILToolService) -> None:
+    """Every tool's schema refusal is built in one place, so it is fixed in one place.
+
+    Without this the entry would exist and never reach the caller who met the
+    error: `contracts.invalid_argument` is what every `tools/call` argument
+    failure on this surface is rendered by."""
+    refused = mcp(service, "tools/call", {"name": "bench_run_start", "arguments": {}})["result"]["structuredContent"]
+
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "devices"
+    assert refused["remediation"] == remediation_fields("invalid_argument")["remediation"]
+    assert refused["do_not"] == remediation_fields("invalid_argument")["do_not"]
+
+
 def test_a_target_that_does_not_answer_carries_that_backends_next_checks(tmp_path: Path) -> None:
     tools = AgenticHILToolService(load_config(str(write_config(tmp_path, debugger_executable=FAKE_OPENOCD_NO_TARGET))))
     try:
