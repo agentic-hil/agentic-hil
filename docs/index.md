@@ -12,10 +12,12 @@ for installation and the first real run. The pages here carry the depth:
 - [Configuration](configuration.md) — the authoritative bench file: permissions, identities, migration.
 - [MCP tools](mcp-tools.md) — the tool inventory and the typical loop.
 - [Testing](testing.md) — the test reactor, declarative plans, and the pytest plugin.
+- [Test plan contract](test-plan-contract.md) — what a plan may state, what only the bench configuration binds, and what a run attests.
 - [Safety model](safety-model.md) — locks, runs, incidents and recovery.
 - [Security design](security-design.md) — permissions, quarantine and recovery, audit.
 - [MCP host configuration](mcp-hosts.md) — wiring the server into Claude Code, Codex, opencode and others.
 - [CAN as a service](can-service-design.md) — the design for shared buses with one owner and named participants.
+- [GitHub Action](github-action-design.md) — the design for `agentic-hil/run`: one plan, one self-hosted bench, one evidence bundle.
 - [Release strategy](release-strategy.md) — versioning, the release gate, and how publishing runs.
 
 This site renders the markdown files in the repository's `docs/` directory;
