@@ -5,8 +5,10 @@ against local hardware-in-the-loop targets: narrow tools for probing,
 flashing, resetting, serial and CAN stimulus and feedback, and structured
 reports, all gated by one authoritative bench configuration.
 
-Start in the repository's [README](https://github.com/agentic-hil/agentic-hil#readme)
-for installation and the first real run. The pages here carry the depth:
+Start with [Installation](installation.md) — two commands and a first real run
+on a Nucleo-F446RE — then bind your bench in [Configuration](configuration.md).
+The repository's [README](https://github.com/agentic-hil/agentic-hil#readme) is the
+short tour; the pages here carry the depth:
 
 - [Installation](installation.md) — install depth, extras, upgrade paths, platform backends.
 - [Configuration](configuration.md) — the authoritative bench file: permissions, identities, migration.
