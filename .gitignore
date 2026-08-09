@@ -25,3 +25,6 @@ evals/install/artifacts/
 # Review documents and transcripts from tools/agent_review_loop.py: a record of
 # how a change was produced, not the change.
 .agentic-loop/
+
+# Editor/agent-local configuration, never part of the product
+.claude/
