@@ -15,7 +15,7 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.artifacts import ArtifactManager
-from agentic_hil.bench import BenchMutex, DeviceBusyError
+from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
 from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template, discover_attached_hardware
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
@@ -799,10 +799,22 @@ class AgenticHILToolService:
         except DeviceError as error:
             return {"tool": "bench_run_start", "side_effect_committed": False, **error.result}
         try:
+            # The raw value, not `float()` over it. The mutex is the layer that
+            # decides what a wait may be, and it rejects `bool` on purpose —
+            # converting first handed it `1.0` for a `wait_s: true` nobody could
+            # have meant, and handed it a `ValueError`/`TypeError` for a string
+            # or a null that went straight past the handler below as a traceback.
+            # The schema gate catches both over MCP; this method is also called
+            # directly, and a conversion that only holds while something upstream
+            # is watching is not a contract.
+            wait_s = validated_wait(payload.get("wait_s", 0.0))
+        except ConfigError as error:
+            return {"tool": "bench_run_start", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
+        try:
             return self.coordinator.begin_run(
                 devices,
                 label=str(payload["label"]) if payload.get("label") is not None else None,
-                wait_s=float(payload.get("wait_s", 0.0)),
+                wait_s=wait_s,
             )
         except CoordinationError as error:
             return {"tool": "bench_run_start", "side_effect_committed": False, **error.result}

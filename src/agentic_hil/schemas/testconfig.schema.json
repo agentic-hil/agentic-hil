@@ -15,7 +15,9 @@
       "items": {
         "oneOf": [
           { "$ref": "#/$defs/flash" },
+          { "$ref": "#/$defs/reset" },
           { "$ref": "#/$defs/uartOpen" },
+          { "$ref": "#/$defs/uartExpect" },
           { "$ref": "#/$defs/uartClose" },
           { "$ref": "#/$defs/canOpen" },
           { "$ref": "#/$defs/canClose" },
@@ -35,6 +37,7 @@
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
     "path": { "type": "string", "minLength": 1 },
     "timeout": { "type": "number", "minimum": 0 },
+    "positiveTimeout": { "type": "number", "exclusiveMinimum": 0, "description": "A deadline a step waits out. Zero is refused rather than read as 'do not wait': a step whose whole purpose is to wait has no useful reading of no time at all." },
     "location": {
       "oneOf": [
         { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
@@ -76,6 +79,17 @@
         "reset_after_flash": { "type": "boolean", "default": false }
       }
     },
+    "reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "description": "Reset the target through the named debugger, exactly as the `reset_target` tool does. A backend that cannot run the requested mode refuses it with its own `not_supported`; the step reports that refusal unchanged.",
+      "properties": {
+        "debugger": { "$ref": "#/$defs/debugger" },
+        "action": { "const": "reset" },
+        "mode": { "type": "string", "enum": ["run", "halt", "init"], "default": "run", "description": "How the target is left afterwards. 'run' resets and lets the target execute. 'halt' leaves the core stopped. 'init' additionally runs the target's reset-init event script and is OpenOCD-only." }
+      }
+    },
     "uartOpen": {
       "type": "object",
       "additionalProperties": false,
@@ -84,6 +98,18 @@
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
         "clear_buffer": { "type": "boolean", "default": true }
+      }
+    },
+    "uartExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "port_id", "text", "timeout_s"],
+      "description": "Wait for text on a serial line this plan has opened. Reads the port the same way `com_read` does and matches against everything read so far, so output that arrives in pieces still counts. A step whose text never appears fails with the tail of what the port did say.",
+      "properties": {
+        "port_id": { "$ref": "#/$defs/portId" },
+        "action": { "const": "uart_expect" },
+        "text": { "type": "string", "minLength": 1, "description": "The substring the port's output must contain." },
+        "timeout_s": { "$ref": "#/$defs/positiveTimeout" }
       }
     },
     "uartClose": {

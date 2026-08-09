@@ -21,6 +21,17 @@ from pathlib import Path
 
 FIXTURE = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "fixture"
 HARNESS = Path(__file__).resolve().parent
+# The repository keeps one tool contract, under `evals/install/`, and the
+# shipped tool tables are already held against that file in both directions. A
+# second copy next to this script would be the next thing to drift, so this
+# reads the existing one. It used to read `HARNESS / "tools.list.expected"`,
+# which has never existed: the comparison below raised FileNotFoundError every
+# time rather than running.
+TOOL_CONTRACT = HARNESS.parent / "install" / "tools.list.expected"
+# Named rather than written into the call, so the probe can be pointed at a
+# stand-in server on a machine with no board and no installation. Nothing else
+# about the exchange changes when it is.
+SERVER_COMMAND = ["agentic-hil", "mcp-stdio"]
 RESPONSE_TIMEOUT_S = 10.0
 
 
@@ -33,10 +44,13 @@ def dig(obj, *path):
 
 
 def main() -> int:
+    # Read before the server is started: a contract this probe cannot find is a
+    # fault in the probe, and it should say so without leaving a process behind.
+    expected = {x.strip() for x in TOOL_CONTRACT.read_text(encoding="utf-8").split() if x.strip()}
     env = dict(os.environ)
     env["PATH"] = str(Path.home() / ".local" / "bin") + os.pathsep + env.get("PATH", "")
     proc = subprocess.Popen(
-        ["agentic-hil", "mcp-stdio"],
+        list(SERVER_COMMAND),
         cwd=str(FIXTURE),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -90,7 +104,6 @@ def main() -> int:
         listed = recv()
         tools = dig(listed, "result", "tools") or []
         names = {t["name"] for t in tools}
-        expected = {x.strip() for x in (HARNESS / "tools.list.expected").read_text().split() if x.strip()}
         missing, added = expected - names, names - expected
         checks.append({"name": "tool surface matches snapshot", "ok": not missing and not added,
                        "detail": f"count={len(names)} missing={sorted(missing)} added={sorted(added)}"})
