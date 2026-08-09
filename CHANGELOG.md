@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tools/ci_linux.py` reported success for a run in which no test executed.** It forwarded whatever the container exited with and asserted nothing about what ran, and it was observed exiting 0 after zero tests were collected: the clone inside the container borrowed objects through `.git/objects/info/alternates` at a path the container could not resolve, so it never built a usable tree, and a green result came back for work that never happened. The clone step now reports its own failure as itself — the script checks the clone rather than relying on `set -e` alone, and checks that what it produced is this repository — so a run that dies there goes red naming the clone instead of surfacing as a pytest step that never happened. The run is then held against pytest's own summary line: its absence is a failure, and a summary accounting for no tests at all is a failure too, because zero collected is never a success of this tool. A failing suite still leaves the process with pytest's exit status, and a selection that legitimately only skips still passes — the floor is on what pytest found, not on what it chose to execute. (#139)
+
 ## [0.10.0] - 2026-08-09
 
 ### Added
