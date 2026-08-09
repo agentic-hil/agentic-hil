@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
@@ -3724,6 +3725,107 @@ def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pyte
 
     assert len(spawned) == 1
     assert spawned[0].poll() is not None
+
+
+SPAWNER_SOURCE = """
+import sys
+from agentic_hil.process import {function}
+child = {function}([sys.executable, "-c", "import time; time.sleep(30)"])
+print(child.pid, flush=True)
+"""
+
+
+def grandchild_pid_after_spawner_exit(function: str) -> int:
+    """Start a child through ``function`` from a process that then exits, and report its pid.
+
+    The spawner is a plain ``subprocess.Popen`` on purpose: it must belong to no
+    Job Object of this test's making, so the only containment in the picture is
+    the one ``function`` itself creates.
+    """
+    spawner = subprocess.Popen([sys.executable, "-c", SPAWNER_SOURCE.format(function=function)], stdout=subprocess.PIPE, text=True, encoding="utf-8")
+    stdout, _ = spawner.communicate(timeout=60)
+    assert spawner.returncode == 0, stdout
+    return int(stdout.strip())
+
+
+def pid_alive_after_settling(pid: int, *, awaiting: bool, timeout_s: float = 5.0) -> bool:
+    """Poll until the pid reaches ``awaiting`` or the deadline passes, then answer.
+
+    Waiting for the answer the caller is *not* asserting is the point: a child
+    that was going to die has the full window in which to do it, so "still
+    alive" is a proof rather than a race won.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        alive = pid_alive(pid)
+        if alive == awaiting or time.monotonic() >= deadline:
+            return alive
+        time.sleep(0.05)
+
+
+def kill_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+    with suppress(ProcessLookupError):
+        os.kill(pid, 9)
+
+
+def test_managed_spawn_hands_back_a_child_that_is_already_running(tmp_path: Path) -> None:
+    """The regression this surface exists for: the caller owes no second call.
+
+    On Windows the child is born suspended, so a spawn that forgot to resume it
+    would sit here until the wait timed out — alive, silent, nothing to read.
+    """
+    marker = tmp_path / "ran"
+    child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')", str(marker)])
+    assert child.wait(timeout=10) == 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    terminate_process_tree(child, 5.0)
+
+
+def test_detached_spawn_child_outlives_the_process_that_started_it() -> None:
+    """What the CAN broker needs: a bus that does not end with the first run to attach."""
+    pid = grandchild_pid_after_spawner_exit("spawn_detached_process")
+    try:
+        assert pid_alive_after_settling(pid, awaiting=False) is True
+    finally:
+        kill_pid(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Job Object containment is what the detached variant opts out of")
+def test_managed_spawn_child_dies_with_the_process_that_started_it() -> None:
+    """The contrast that gives the detached variant its meaning: same shape, opposite lifetime."""
+    pid = grandchild_pid_after_spawner_exit("spawn_managed_process")
+    try:
+        assert pid_alive_after_settling(pid, awaiting=False) is False
+    finally:
+        kill_pid(pid)
+
+
+def test_the_spawn_contract_has_no_half_a_caller_can_hold() -> None:
+    """Neither half is reachable by the name it used to have."""
+    assert not hasattr(process_module, "process_group_kwargs")
+    assert not hasattr(process_module, "register_process_group")
+
+
+def test_registration_refuses_a_child_it_did_not_spawn() -> None:
+    """Reaching past the underscore does not get the old two-step back either."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        with pytest.raises(RuntimeError, match="not a standalone step"):
+            process_module._register_process_group(child)
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("function", ["spawn_managed_process", "spawn_detached_process"])
+@pytest.mark.parametrize(("keyword", "value"), [("creationflags", 0), ("start_new_session", True)])
+def test_spawn_refuses_caller_supplied_creation_flags(function: str, keyword: str, value: object) -> None:
+    """The flags are the contract, so a caller cannot re-open the hole from outside."""
+    with pytest.raises(TypeError, match="spawn contract"):
+        getattr(process_module, function)([sys.executable, "-c", "pass"], **{keyword: value})
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object verification regression")
