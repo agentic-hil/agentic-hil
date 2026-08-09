@@ -1204,15 +1204,6 @@ def attach_participant(
 
 def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool) -> Participant:
     lock_root = owner.root
-    # Validate the IPC address before a broker is ever spawned. A broker started
-    # on an address that cannot fit `sockaddr_un` would fail at bind time in its
-    # own process, and the client would learn of it only as the start timeout
-    # elapsing with no descriptor; deriving the same address here turns that into
-    # an immediate, structured refusal.
-    try:
-        endpoint_address(bus_key, lock_root)
-    except ConfigError as error:
-        raise ParticipantError({**error.to_dict(), "bus_id": bus_id, "participant": participant, "retry_safe": False, "side_effect_committed": False}) from error
     deadline = time.monotonic() + start_timeout_s
     started: subprocess.Popen | None = None
     last: JsonObject = {"ok": False, "error_type": "can_broker_unavailable", "summary": "No CAN broker for this bus could be reached or started.", "bus_id": bus_id, "bus_key": bus_key}
@@ -1258,6 +1249,21 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
                 started = None
                 time.sleep(BROKER_POLL_INTERVAL_S)
                 continue
+            # Validate the IPC address only now, immediately before a broker is
+            # spawned. A broker started on an address that cannot fit
+            # `sockaddr_un` would fail at bind time in its own process, and the
+            # client would learn of it only as the start timeout elapsing with no
+            # descriptor; deriving the same address here turns that into an
+            # immediate, structured refusal. It is derived *only* on this branch:
+            # a broker that already published a bindable endpoint is reached
+            # through its descriptor above and answers on the address it chose, so
+            # this client's own — possibly unusable — derivation never gates
+            # attaching to one, and with `allow_start` false the branch is
+            # unreachable and no address is derived at all.
+            try:
+                endpoint_address(bus_key, lock_root)
+            except ConfigError as error:
+                raise ParticipantError({**error.to_dict(), "bus_id": bus_id, "participant": participant, "retry_safe": False, "side_effect_committed": False}) from error
             started = _spawn_broker(config, bus_id, bus_key, lock_root)
         time.sleep(BROKER_POLL_INTERVAL_S)
     if started is not None and started.poll() is None:

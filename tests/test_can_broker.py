@@ -906,6 +906,55 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
         alpha.broker_process.wait(timeout=30)
 
 
+def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_broker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """A client whose own environment yields no bindable address must still
+    attach to a broker that already published a valid one.
+
+    The published endpoint is what makes the address independent of client-side
+    derivation: two clients of the same machine-wide bus can carry different
+    temporary-directory environments, and a non-abstract-socket host (macOS, a
+    BSD) with a long local temp root derives no address that fits `sockaddr_un`.
+    Deriving one before consulting the descriptor would refuse such a client with
+    `config_invalid` even though the running broker's endpoint is short and
+    bindable — so the derived address is validated only on the branch that
+    spawns a broker, never before attaching to one that exists."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.config import ConfigError
+
+    config = shared_config(tmp_path, monkeypatch)
+    bus_key = bus_lock_key(config, "bench")
+    lock_root = BenchMutex().root
+
+    # A real broker publishes a short, bindable endpoint under a normal env.
+    alpha = attach_participant(config, "bench", "alpha")
+    try:
+        published = read_descriptor(bus_key, lock_root).endpoint
+        assert alpha.status()["ok"] is True
+
+        # Now poison *this* client's derivation the way a non-abstract-socket host
+        # with a long temp root would: the filesystem path overflows the AF_UNIX
+        # cap and there is no abstract-socket fallback, so `endpoint_address`
+        # refuses. The already-running broker is untouched by either change.
+        monkeypatch.setattr(canbroker, "_socket_root", lambda: tmp_path / ("t" * 100))
+        monkeypatch.setattr(canbroker, "_abstract_sockets_supported", lambda: False)
+        with pytest.raises(ConfigError) as raised:
+            canbroker.endpoint_address(bus_key, lock_root)
+        assert raised.value.error_type == "config_invalid"
+
+        # The client attaches on the broker's published endpoint regardless — its
+        # own derivation is never reached because a broker is not spawned.
+        beta = attach_participant(config, "bench", "beta")
+        try:
+            assert beta.status()["ok"] is True
+            assert beta.broker_process is None, "no broker was spawned for a bus that already had one"
+            assert read_descriptor(bus_key, lock_root).endpoint == published
+        finally:
+            beta.detach()
+    finally:
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
 # ---------------------------------------------------------------------------
 # A filter term is a frame type as well as a number.
 

@@ -380,18 +380,33 @@ def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
     keep the operator's own command line. This is the consistency assertion the
     finding asked for — before it, the schema and generated comments said
     physical reasons are refused over MCP with no such argument, which the tool
-    stopped being true of when operator_statement arrived."""
+    stopped being true of when operator_statement arrived.
+
+    The authoritative agent instructions — `AGENTS.md` and both shipped skill
+    copies — are held to the same boundary here. Round 1 left them still telling
+    an agent that every remaining quarantine is the operator's to clear from a
+    shell, which sends a host with no operator shell away from the very route
+    `operator_statement` opened; the round-2 finding asked that these surfaces be
+    pinned to the boundary too, so a reader of the instructions cannot be steered
+    off the MCP route the tool implements."""
     from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE
     from agentic_hil.knowledge import config_schema_document
     from agentic_hil.mcp import AGENTIC_HIL_WORKFLOW_PROMPT
 
     contract = next(tool["description"] for tool in MCP_TOOLS if tool["name"] == TOOL)
     schema_description = config_schema_document()["properties"]["permissions"]["properties"]["allow_recover"]["description"]
+    repository_root = Path(__file__).resolve().parents[1]
+    instruction_surfaces = {
+        "agents_md": repository_root / "AGENTS.md",
+        "skill_src": repository_root / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md",
+        "skill_plugin": repository_root / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md",
+    }
     surfaces = {
         "tool_contract": contract,
         "config_template": DEFAULT_CONFIG_TEMPLATE,
         "config_schema": schema_description,
         "mcp_workflow_prompt": AGENTIC_HIL_WORKFLOW_PROMPT,
+        **{name: path.read_text(encoding="utf-8") for name, path in instruction_surfaces.items()},
     }
     for name, text in surfaces.items():
         lowered = text.lower()
@@ -399,6 +414,11 @@ def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
         assert "operator_statement" in lowered, name
         # A no-contact reason still clears with none.
         assert "no argument" in lowered or "no arguments" in lowered or "no hardware contact" in lowered, name
+
+    # The agent-facing instructions must name the MCP recovery tool, not send
+    # every physical incident to the shell as round 1 still did.
+    for name in instruction_surfaces:
+        assert "hardware_recover" in surfaces[name], name
 
     # None of the generated surfaces still claims the physical route does not
     # exist over MCP — the exact stale wordings this finding removed.
