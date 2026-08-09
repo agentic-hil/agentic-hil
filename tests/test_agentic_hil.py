@@ -2020,14 +2020,19 @@ def test_the_skill_tool_check_reads_the_table_and_not_the_prose() -> None:
     assert set(_skill_routing_table("\n".join(lines))) - exposed == {"flash_firmware_v2"}
 
 
-README_TOOL_COLUMN = "Tools"
+# The tool inventory used to live in README.md. It moved to docs/mcp-tools.md
+# when README became the human entry point; the table and this pin moved
+# together, because a table nothing reads back against the served surface is how
+# the inventory drifts.
+TOOL_INVENTORY_DOCUMENT = "docs/mcp-tools.md"
+INVENTORY_TOOL_COLUMN = "Tools"
 AGENTS_CONFIG_COLUMN = "Call"
 AGENTS_CONFIG_FAMILY = "project_config_"
 # The one configuration tool that table leaves out on purpose: it creates a
 # configuration rather than changing an existing one, and both documents make
-# that split — README gives it a "Project setup" row of its own, apart from the
-# "Project config" group. Excluded from the table, not from the document: the
-# check below still requires AGENTS.md to name it somewhere.
+# that split — the inventory gives it a "Project setup" row of its own, apart
+# from the "Project config" group. Excluded from the table, not from the
+# document: the check below still requires AGENTS.md to name it somewhere.
 AGENTS_CONFIG_TABLE_OMITS = frozenset({"project_config_create"})
 
 
@@ -2054,18 +2059,18 @@ def _repository_document(name: str) -> str:
     return (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
 
 
-def test_readme_tool_table_is_the_whole_tool_inventory() -> None:
-    """README's `Tools` column is an inventory, so it holds the contract both ways.
+def test_tool_inventory_table_is_the_whole_tool_inventory() -> None:
+    """The inventory's `Tools` column holds the contract both ways.
 
-    The same shape as the skill's routing table and for the same reason: the column is read, the prose is not. README's notes column
+    The same shape as the skill's routing table and for the same reason: the column is read, the prose is not. The notes column
     alone writes `set`, `describe`, `adopt_hardware` and `reload_description` in
     backticks, none of which is a tool name, and a scan of the document would
     have to exclude them by hand for as long as anybody keeps writing notes.
     """
     exposed = _repository_tool_contract()
-    declared = _documented_tools(_repository_document("README.md"), README_TOOL_COLUMN)
+    declared = _documented_tools(_repository_document(TOOL_INVENTORY_DOCUMENT), INVENTORY_TOOL_COLUMN)
 
-    assert declared, f"README has no `{README_TOOL_COLUMN}` column to read"
+    assert declared, f"{TOOL_INVENTORY_DOCUMENT} has no `{INVENTORY_TOOL_COLUMN}` column to read"
     assert len(set(declared)) == len(declared), "the tool table names a tool twice"
     assert set(declared) == exposed, (
         f"documented but not exposed: {sorted(set(declared) - exposed)}; "
@@ -2073,19 +2078,19 @@ def test_readme_tool_table_is_the_whole_tool_inventory() -> None:
     )
 
 
-def test_readme_tool_table_spells_out_every_tool_rather_than_a_prefix() -> None:
+def test_tool_inventory_table_spells_out_every_tool_rather_than_a_prefix() -> None:
     """No wildcards in that column: `debug_*` stood for eleven tools and checked none.
 
     Expanding a prefix against the contract would have passed today and left the
     completeness direction blind exactly where the wildcard sits — a twelfth
-    session tool would be absorbed by `debug_*` and README would never have to
-    mention it, which is the drift this check exists to catch. Spelling the
-    names out costs one long cell and holds all 38.
+    session tool would be absorbed by `debug_*` and the inventory would never
+    have to mention it, which is the drift this check exists to catch. Spelling
+    the names out costs one long cell and holds all 38.
     """
-    declared = _documented_tools(_repository_document("README.md"), README_TOOL_COLUMN)
+    declared = _documented_tools(_repository_document(TOOL_INVENTORY_DOCUMENT), INVENTORY_TOOL_COLUMN)
 
     assert not _not_tool_names(declared), (
-        f"the `{README_TOOL_COLUMN}` column must name each tool in full: {_not_tool_names(declared)}"
+        f"the `{INVENTORY_TOOL_COLUMN}` column must name each tool in full: {_not_tool_names(declared)}"
     )
     assert "debug_start_session" in declared and "debug_dump_symbol_ihex" in declared
 
@@ -2122,14 +2127,14 @@ def test_the_document_tool_tables_fail_in_both_directions() -> None:
 
     A tool added to the contract fails until the documents name it, and a name
     in a document the server does not serve fails too — for the whole inventory
-    in README and for the configuration family in AGENTS.md.
+    in docs/mcp-tools.md and for the configuration family in AGENTS.md.
     """
     exposed = _repository_tool_contract()
-    readme = _repository_document("README.md")
+    inventory = _repository_document(TOOL_INVENTORY_DOCUMENT)
     agents = _repository_document("AGENTS.md")
 
     # A tool this server gains has no row anywhere until somebody writes one.
-    assert (exposed | {"flash_firmware_v2"}) - set(_documented_tools(readme, README_TOOL_COLUMN)) == {
+    assert (exposed | {"flash_firmware_v2"}) - set(_documented_tools(inventory, INVENTORY_TOOL_COLUMN)) == {
         "flash_firmware_v2"
     }
     gained_config = {
@@ -2138,8 +2143,8 @@ def test_the_document_tool_tables_fail_in_both_directions() -> None:
     assert gained_config - set(_documented_tools(agents, AGENTS_CONFIG_COLUMN)) == {"project_config_freeze"}
 
     # A name a document invents is caught in the other direction.
-    invented_readme = _with_extra_row(readme, README_TOOL_COLUMN, "| Invented | `flash_firmware_v2` | no such tool |")
-    assert set(_documented_tools(invented_readme, README_TOOL_COLUMN)) - exposed == {"flash_firmware_v2"}
+    invented = _with_extra_row(inventory, INVENTORY_TOOL_COLUMN, "| Invented | `flash_firmware_v2` | no such tool |")
+    assert set(_documented_tools(invented, INVENTORY_TOOL_COLUMN)) - exposed == {"flash_firmware_v2"}
     invented_agents = _with_extra_row(agents, AGENTS_CONFIG_COLUMN, "| `project_config_freeze` | nothing |")
     assert set(_documented_tools(invented_agents, AGENTS_CONFIG_COLUMN)) - exposed == {"project_config_freeze"}
 
@@ -2152,16 +2157,16 @@ def test_the_document_tool_tables_fail_in_both_directions() -> None:
 
     # And the wildcard this check ruled out is caught rather than skipped: the
     # reader hands it back as written, so it fails the shape it does not have.
-    wildcarded = _with_extra_row(readme, README_TOOL_COLUMN, "| Debug sessions | `debug_*` | a prefix |")
-    assert _not_tool_names(_documented_tools(wildcarded, README_TOOL_COLUMN)) == ["debug_*"]
+    wildcarded = _with_extra_row(inventory, INVENTORY_TOOL_COLUMN, "| Debug sessions | `debug_*` | a prefix |")
+    assert _not_tool_names(_documented_tools(wildcarded, INVENTORY_TOOL_COLUMN)) == ["debug_*"]
 
 
 def _with_extra_row(text: str, header: str, row: str) -> str:
     """The same table the check reads, one row longer.
 
-    By header rather than by the document's last table row: README and AGENTS.md
-    both carry tables after the one under test, and appending to the wrong one
-    would prove nothing.
+    By header rather than by the document's last table row: AGENTS.md carries
+    tables after the one under test, and appending to the wrong one would prove
+    nothing.
     """
     lines = text.splitlines()
     start = next(

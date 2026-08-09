@@ -207,7 +207,11 @@ def exclusion_statements() -> dict[str, str]:
     """Every statement of the interlock a reader can meet, as they meet it."""
     statements = {
         "docs/security-design.md": sole_statement(REPO_ROOT / "docs" / "security-design.md", "`allow_mass_erase` is enabled"),
-        "README.md": sole_statement(REPO_ROOT / "README.md", "Those two are false"),
+        # The operator-facing statement. It stood in README.md until the README
+        # became the human entry point; the configuration reference it moved
+        # into is where a reader now meets the interlock, and the reason moved
+        # with it rather than being left behind.
+        "docs/configuration.md": sole_statement(REPO_ROOT / "docs" / "configuration.md", "Those two are false"),
         "knowledge.py: the shipped configuration guide": sole_statement(KNOWLEDGE_SOURCE, "**generated with every permission true**"),
     }
     for flag in EXCLUSIVE_FLASH_PERMISSIONS:

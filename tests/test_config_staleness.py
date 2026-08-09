@@ -668,16 +668,18 @@ def test_every_agent_facing_copy_names_the_states_this_module_has() -> None:
         "packaged skill": (root / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
         "plugin skill": (root / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
         "AGENTS.md": (root / "AGENTS.md").read_text(encoding="utf-8"),
-        "README.md": (root / "README.md").read_text(encoding="utf-8"),
+        # The operator-facing copy. It was README.md until the README became the
+        # human entry point and the configuration reference moved out whole.
+        "docs/configuration.md": (root / "docs" / "configuration.md").read_text(encoding="utf-8"),
     }
     for name, text in copies.items():
         for state in (STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE):
             assert f"`{state}`" in text, f"{name} does not name the {state} state"
         assert "`invalid`" not in text, f"{name} still names a state this server cannot produce"
-    # And the states table in the README covers all five, so a reader counting
-    # rows against the code finds the same set.
+    # And the states table in the configuration reference covers all five, so a
+    # reader counting rows against the code finds the same set.
     for state in (STATE_UNCHANGED, STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE, STATE_UNKNOWN):
-        assert f"| `{state}` |" in copies["README.md"]
+        assert f"| `{state}` |" in copies["docs/configuration.md"]
 
 
 # ---------------------------------------------------------------------------
