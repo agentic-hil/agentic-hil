@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from typing import Any, ClassVar
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
+from agentic_hil.comports import data_result, decode_bytes
 from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
@@ -39,6 +41,16 @@ from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
+# What a `uart_expect` that timed out answers with: the last of what the line
+# actually said. Capped, because a chatty port must not turn one red step into an
+# unbounded result — but never zero, because a red step that cannot say what the
+# port did say is the failure an operator has to reproduce by hand.
+UART_EXPECT_TAIL_BYTES = 512
+# How long a `uart_expect` pass that read nothing waits before the next one.
+# Reached only when `com_read` returned early — a session that is no longer
+# active ends its wait at once — so this paces a line that has stopped talking
+# rather than spinning on it until the step's deadline.
+UART_EXPECT_IDLE_POLL_S = 0.05
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -530,18 +542,22 @@ class SessionDevice(StepDevice):
 
 
 class UartRunner(SessionDevice):
-    """A configured serial line, as a plan opens and closes it."""
+    """A configured serial line, as a plan opens it, waits on it and closes it."""
 
     kind: ClassVar[str] = "uart"
     device_class: ClassVar[type[Device]] = UartDevice
     route_field: ClassVar[str] = "port_id"
     configured_field: ClassVar[str] = "configured_com_ports"
     unknown_name_summary: ClassVar[str] = "Test step references a COM port that is not in the authoritative config."
-    step_actions: ClassVar[dict[str, str]] = {"uart_open": "uartOpen", "uart_close": "uartClose"}
-    step_tools: ClassVar[dict[str, str]] = {"uart_open": "com_session_start", "uart_close": "com_session_stop"}
+    step_actions: ClassVar[dict[str, str]] = {"uart_open": "uartOpen", "uart_expect": "uartExpect", "uart_close": "uartClose"}
+    step_tools: ClassVar[dict[str, str]] = {"uart_open": "com_session_start", "uart_expect": "com_read", "uart_close": "com_session_stop"}
     step_defaults: ClassVar[dict[str, JsonObject]] = {"uart_open": {"clear_buffer": True}}
     open_action: ClassVar[str] = "uart_open"
     close_action: ClassVar[str] = "uart_close"
+    # The action that waits on the line. Its arguments are the plan's own — a
+    # substring and a deadline — and neither is a `com_read` argument, so it
+    # builds that tool's call itself rather than passing the step through.
+    expect_action: ClassVar[str] = "uart_expect"
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a UART session it did not open."
@@ -556,16 +572,101 @@ class UartRunner(SessionDevice):
 
     @classmethod
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
-        # Omitted on purpose: a UART step carries no plan-supplied argument a
-        # contract could reject, and its port_id is checked against the
-        # authoritative config's own com_ports names instead.
+        # Omitted on purpose: no UART step hands a plan-supplied value to a tool.
+        # `uart_expect` is the only one that carries arguments at all, and its
+        # two are read by this class rather than passed on — this reactor's own
+        # schema is what refuses an empty text or a timeout of zero. The port_id
+        # is checked against the authoritative config's own com_ports names.
         return []
 
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+        # Only the open is asked about reading, and that is enough: every other
+        # action on this line requires a session this plan opened, so a port the
+        # config will not let a plan read is refused before any of them. Naming
+        # the permission a second time here would be a second answer.
         if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
             return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
         return None
+
+    def execute(self, step: TestStep) -> JsonObject:
+        if step.action != self.expect_action:
+            return super().execute(step)
+        return self._expect(str(step.arguments["text"]), float(step.arguments["timeout_s"]))
+
+    def _expect(self, text: str, timeout_s: float) -> JsonObject:
+        """Wait for `text` on this line, or fail saying what the line did say.
+
+        The plan's own read path and nothing else: each pass is one `com_read` —
+        the tool an agent would call by hand — waiting out whatever is left of
+        the step's deadline. `com_read` returns the moment the session has bytes,
+        so a banner that arrives in pieces is several short reads rather than one
+        long one, and the match is therefore made against everything read so far
+        and never against the chunk that happened to arrive last. A line that
+        says nothing at all costs exactly one read.
+
+        Bytes are carried across passes rather than decoded text: a character
+        split across two reads decodes to replacement characters on each side of
+        the seam, and a plan would then be waiting for text that did arrive."""
+        deadline = time.monotonic() + timeout_s
+        # Enough tail to still find a match that only completes in the next
+        # chunk, and enough to answer with when the deadline passes. Four bytes
+        # is the widest any one character encodes to in UTF-8, so this cannot cut
+        # into a match no matter how long the expected text is.
+        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(text) + 16)
+        received = bytearray()
+        received_bytes = 0
+        encoding = "utf-8"
+        reads = 0
+        while True:
+            result = self.service.call(self.step_tools[self.expect_action], {"port_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())})
+            reads += 1
+            if result_failed(result):
+                # The read's own refusal, unchanged. A closed session, a denied
+                # permission or a broken audit latch is not an expectation that
+                # went unmet, and answering it with `uart_expect_timeout` would
+                # send an operator to look at firmware that never ran.
+                return result
+            data = result.get("data") or {}
+            encoding = str(data.get("encoding") or encoding)
+            chunk = bytes.fromhex(str(data.get("hex") or ""))
+            received_bytes += len(chunk)
+            received.extend(chunk)
+            del received[:-window]
+            if text in decode_bytes(bytes(received), encoding):
+                return {
+                    "ok": True,
+                    "tool": "test_reactor",
+                    "summary": "Expected text appeared on the COM port.",
+                    "port_id": self.id,
+                    "expected_text": text,
+                    "timeout_s": timeout_s,
+                    "bytes_received": received_bytes,
+                    "reads": reads,
+                }
+            if time.monotonic() >= deadline:
+                tail = bytes(received[-UART_EXPECT_TAIL_BYTES:])
+                return {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "error_type": "uart_expect_timeout",
+                    "summary": "Expected text did not appear on the COM port before this step's timeout.",
+                    "port_id": self.id,
+                    "expected_text": text,
+                    "timeout_s": timeout_s,
+                    "bytes_received": received_bytes,
+                    "reads": reads,
+                    # What the port actually said, so a red result is readable
+                    # without reconnecting to the board.
+                    "received_tail": data_result(tail, encoding),
+                    "received_tail_truncated": received_bytes > len(tail),
+                }
+            if not chunk:
+                # A read that returned nothing while time was left had its own
+                # wait cut short — `com_read` ends its wait at once on a session
+                # that is no longer active — so pace the next pass rather than
+                # spinning on a line that has stopped talking.
+                time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
 class CanRunner(SessionDevice):
@@ -654,6 +755,7 @@ class DebuggerRunner(StepDevice):
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
     step_actions: ClassVar[dict[str, str]] = {
         "flash": "flash",
+        "reset": "reset",
         "debug_start": "debugStart",
         "run_until_breakpoint": "runUntilBreakpoint",
         "dump_memory": "dumpMemory",
@@ -661,10 +763,15 @@ class DebuggerRunner(StepDevice):
     }
     step_tools: ClassVar[dict[str, str]] = {
         "flash": "flash_firmware",
+        "reset": "reset_target",
         "debug_start": "debug_start_session",
         "dump_memory": "debug_dump_symbol_ihex",
         "debug_stop": "debug_stop_session",
     }
+    # `reset_target` reads its own default the same way, but the reactor writes
+    # every argument it sends: the schema documents `run`, and a step that leaves
+    # the mode out must reach the tool saying which reset it asked for.
+    step_defaults: ClassVar[dict[str, JsonObject]] = {"reset": {"mode": "run"}}
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
     # This kind's own actions that require a live debug session, and therefore a
@@ -752,6 +859,21 @@ class DebuggerRunner(StepDevice):
             if permissions.allow_mass_erase:
                 return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
             return cls._artifact_refusal(reactor, index, step, require_elf=False)
+
+        if step.action == "reset":
+            # The two answers flash already gives, for the same reasons.
+            # `reset_target` is a one-shot that cannot take the lease a live
+            # debug session holds, so a reset inside one could only ever come
+            # back busy; and the permission that governs it is the one the
+            # config names for this probe. Which resets a backend can actually
+            # perform is deliberately not asked here: a mode it will not run —
+            # `init` off OpenOCD — is refused by that backend with its own
+            # `not_supported`, and that refusal is the honest answer.
+            if state.debug_session is not None:
+                return preflight_error(index, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
+            if not permissions.allow_reset:
+                return preflight_error(index, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
+            return None
 
         if step.action in cls.debug_session_actions and debugger.type != "openocd":
             return preflight_error(

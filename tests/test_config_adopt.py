@@ -36,7 +36,13 @@ import pytest
 import yaml
 from conftest import FAKE_STLINK, write_authoritative_config
 
-from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, is_unset, plan_adoption, project_config_adopt_hardware
+from agentic_hil.adopt import (
+    PROJECT_CONFIG_ADOPT,
+    _release_refusal,
+    is_unset,
+    plan_adoption,
+    project_config_adopt_hardware,
+)
 from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import adopt_hardware, doctor, init_config
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, GENERATED_PROJECT_PERMISSIONS, load_authoritative_config
@@ -964,6 +970,43 @@ def test_a_release_that_fails_is_recorded_as_the_terminal_outcome(tmp_path: Path
     assert report["cleanup_required"] is True
     assert failure["error_type"] == "resource_quarantined", "the refusal reaches classify_last_error too"
     assert failure["source_tool"] == PROJECT_CONFIG_ADOPT
+
+
+def test_a_discovery_that_never_said_what_it_committed_is_not_reported_as_committing_nothing() -> None:
+    """agentic-hil/agentic-hil#141: absence is unknown, and was being rendered as no.
+
+    `bool(discovery.get("side_effect_committed", False))` gave a discovery that
+    set no marker the positive claim that nothing was committed, with
+    `side_effect_status: not_started` beside it from the same absence — the one
+    reading that tells an operator a quarantined bench is untouched. Every
+    discovery result carries the marker today, which is what makes this worth
+    removing rather than relying on: the refusal is what an operator reads after
+    a release failed, and it must not invent the reassuring half of an answer
+    nobody gave.
+    """
+    refusal = _release_refusal({"probe_id": PROBE_SERIAL}, {"lease_state": "quarantined"}, PROJECT_CONFIG_ADOPT)
+
+    assert "side_effect_committed" not in refusal
+    assert refusal["side_effect_status"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("discovery", "expected"),
+    [
+        ({"side_effect_committed": False}, {"side_effect_committed": False, "side_effect_status": "not_started"}),
+        ({"side_effect_committed": True}, {"side_effect_committed": True, "side_effect_status": "partial"}),
+        (
+            {"side_effect_committed": True, "side_effect_status": "committed"},
+            {"side_effect_committed": True, "side_effect_status": "committed"},
+        ),
+    ],
+    ids=["stated-no", "stated-yes", "stated-both"],
+)
+def test_a_discovery_that_did_say_keeps_what_it_said(discovery: dict[str, Any], expected: dict[str, Any]) -> None:
+    """The fix only touches the silent case; a stated marker is carried unchanged."""
+    refusal = _release_refusal(discovery, {"lease_state": "quarantined"}, PROJECT_CONFIG_ADOPT)
+
+    assert {key: refusal[key] for key in expected} == expected
 
 
 def test_a_partial_release_never_reports_the_aggregate_as_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
