@@ -1799,3 +1799,182 @@ def test_unknown_reactor_action_still_names_the_two_new_ones(tmp_path: Path) -> 
     assert refused.value.details["field"] == "steps[0].action"
     assert {"reset", "uart_expect"} <= set(refused.value.details["allowed_values"])
     assert "uart_wait" not in refused.value.details["allowed_values"]
+
+
+# The four `version: 2` plans this repository ships, frozen as text at the point
+# format v3 was introduced. The files themselves move on to the v3 idiom; these
+# copies do not, because what has to keep holding is that a plan already written
+# against v2 — on someone's bench, in someone's CI — parses to the same steps and
+# runs to the same result after v3 lands. A pin against the live files would only
+# ever prove that the files agree with themselves.
+V2_EXAMPLE_PLAN = """version: 2
+name: capture-state
+steps:
+  - {debugger: dut, action: flash, image_path: build/app.elf}
+  - {port_id: dut_uart, action: uart_open, clear_buffer: true}
+  - {bus_id: dut_can, action: can_open, clear_rx_queue: true}
+  - {debugger: dut, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {debugger: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
+  - {bus_id: dut_can, action: can_read, max_frames: 64, wait_timeout_s: 1}
+  - {debugger: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
+  - {debugger: dut, action: debug_stop}
+  - {bus_id: dut_can, action: can_close}
+  - {port_id: dut_uart, action: uart_close}
+"""
+
+V2_DEMO_PLAN = """version: 2
+name: nucleo-f446re-hello-world
+steps:
+  - {debugger: dut, action: flash, image_path: build/Debug/nucleo-f446re_demo.elf}
+  - {port_id: dut_uart, action: uart_open, clear_buffer: true}
+  - {debugger: dut, action: reset, mode: run}
+  - {port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: 5}
+  - {port_id: dut_uart, action: uart_close}
+"""
+
+V2_OPENOCD_PLAN = """version: 2
+name: nucleo-f446re-openocd
+steps:
+  - {debugger: dut, action: flash, image_path: build/Debug/demo.elf, reset_after_flash: true}
+  - {port_id: dut_uart, action: uart_open}
+  - {debugger: dut, action: debug_start, image_path: build/Debug/demo.elf, mode: reset_halt}
+  - {debugger: dut, action: run_until_breakpoint, location: delay, timeout_s: 5}
+  - {debugger: dut, action: debug_stop}
+  - {port_id: dut_uart, action: uart_close}
+"""
+
+V2_STLINK_PLAN = """version: 2
+name: nucleo-f446re-stlink
+steps:
+  - {debugger: dut, action: flash, image_path: build/Debug/demo.elf, reset_after_flash: true}
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: dut_uart, action: uart_close}
+"""
+
+# Every step of all four, as `load_test_config` resolves it: the action, the
+# routing key each kind reads, and the flat arguments left over. Written out
+# rather than derived, so a change to how a v2 plan parses has to be made here
+# in full before the suite goes green again.
+V2_PLAN_STEPS: dict[str, list[tuple[str, str | None, str | None, str | None, dict]]] = {
+    "example": [
+        ("flash", "dut", None, None, {"image_path": "build/app.elf"}),
+        ("uart_open", None, "dut_uart", None, {"clear_buffer": True}),
+        ("can_open", None, None, "dut_can", {"clear_rx_queue": True}),
+        ("debug_start", "dut", None, None, {"image_path": "build/app.elf", "mode": "attach"}),
+        ("run_until_breakpoint", "dut", None, None, {"location": "capture_done", "timeout_s": 5}),
+        ("can_read", None, None, "dut_can", {"max_frames": 64, "wait_timeout_s": 1}),
+        ("dump_memory", "dut", None, None, {"symbol": "capture_buffer", "output_path": "build/capture.hex"}),
+        ("debug_stop", "dut", None, None, {}),
+        ("can_close", None, None, "dut_can", {}),
+        ("uart_close", None, "dut_uart", None, {}),
+    ],
+    "demo": [
+        ("flash", "dut", None, None, {"image_path": "build/Debug/nucleo-f446re_demo.elf"}),
+        ("uart_open", None, "dut_uart", None, {"clear_buffer": True}),
+        ("reset", "dut", None, None, {"mode": "run"}),
+        ("uart_expect", None, "dut_uart", None, {"text": "Hello World", "timeout_s": 5}),
+        ("uart_close", None, "dut_uart", None, {}),
+    ],
+    "openocd": [
+        ("flash", "dut", None, None, {"image_path": "build/Debug/demo.elf", "reset_after_flash": True}),
+        ("uart_open", None, "dut_uart", None, {}),
+        ("debug_start", "dut", None, None, {"image_path": "build/Debug/demo.elf", "mode": "reset_halt"}),
+        ("run_until_breakpoint", "dut", None, None, {"location": "delay", "timeout_s": 5}),
+        ("debug_stop", "dut", None, None, {}),
+        ("uart_close", None, "dut_uart", None, {}),
+    ],
+    "stlink": [
+        ("flash", "dut", None, None, {"image_path": "build/Debug/demo.elf", "reset_after_flash": True}),
+        ("uart_open", None, "dut_uart", None, {}),
+        ("uart_close", None, "dut_uart", None, {}),
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [("example", V2_EXAMPLE_PLAN), ("demo", V2_DEMO_PLAN), ("openocd", V2_OPENOCD_PLAN), ("stlink", V2_STLINK_PLAN)],
+)
+def test_version_2_plans_parse_to_exactly_the_steps_they_always_did(tmp_path: Path, name: str, text: str) -> None:
+    loaded = load_test_config(str(write_test_config(tmp_path, text)), str(tmp_path))
+
+    assert [(step.action, step.debugger, step.port_id, step.bus_id, step.arguments) for step in loaded.steps] == V2_PLAN_STEPS[name]
+
+
+def test_version_2_demo_plan_runs_to_exactly_the_result_it_always_did(tmp_path: Path) -> None:
+    # The whole run, key for key: the banner arrives in three pieces, the step
+    # result carries the same fields under the same names, the tool calls are
+    # the same calls in the same order, and nothing is left for cleanup. This is
+    # the pin format v3 is not allowed to move.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(tmp_path, V2_DEMO_PLAN)
+    service = RecordingService(uart_reads=[b"Hel", b"lo Wo", b"rld\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["cleanup"] == []
+    assert result["cleanup_ok"] is True
+    assert [(step["index"], step["route"], step["action"]) for step in result["steps"]] == [
+        (1, "dut", "flash"),
+        (2, "dut_uart", "uart_open"),
+        (3, "dut", "reset"),
+        (4, "dut_uart", "uart_expect"),
+        (5, "dut_uart", "uart_close"),
+    ]
+    assert result["steps"][3]["result"] == {
+        "ok": True,
+        "tool": "test_reactor",
+        "summary": "Expected text appeared on the COM port.",
+        "port_id": "dut_uart",
+        "expected_text": "Hello World",
+        "timeout_s": 5.0,
+        "bytes_received": 13,
+        "reads": 3,
+    }
+    assert [name for name, _ in service.calls] == [
+        "flash_firmware",
+        "com_session_start",
+        "reset_target",
+        "com_read",
+        "com_read",
+        "com_read",
+        "com_session_stop",
+    ]
+    assert service.calls[0][1] == {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
+    assert service.calls[1][1] == {"clear_buffer": True, "port_id": "dut_uart"}
+    assert service.calls[2][1] == {"mode": "run"}
+    assert service.calls[6][1] == {"port_id": "dut_uart"}
+    assert [sorted(arguments) for name, arguments in service.calls if name == "com_read"] == [["port_id", "wait_timeout_s"]] * 3
+
+
+def test_version_2_uart_expect_timeout_reports_exactly_what_it_always_did(tmp_path: Path) -> None:
+    # The red half of the same pin: a banner that never arrives fails with the
+    # tail of what the port did say, under the names a v2 report already uses.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+name: silent
+steps:
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"Goodbye\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["error_type"] == "uart_expect_timeout"
+    failed = result["steps"][1]["result"]
+    assert failed["error_type"] == "uart_expect_timeout"
+    assert failed["summary"] == "Expected text did not appear on the COM port before this step's timeout."
+    assert failed["expected_text"] == "Hello World"
+    assert failed["port_id"] == "dut_uart"
+    assert failed["received_tail"]["text"] == "Goodbye\r\n"
+    assert failed["received_tail_truncated"] is False
+    assert failed["bytes_received"] == 9
+    # The plan never closed the port, so cleanup did.
+    assert [record["action"] for record in result["cleanup"]] == ["uart_close"]
