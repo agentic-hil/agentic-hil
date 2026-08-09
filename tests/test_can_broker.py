@@ -359,11 +359,19 @@ class _ImpostorListener:
 def test_lock_probe_refuses_an_impostor_that_does_not_hold_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A peer's claim to own the bus is not evidence; the free lock is.
 
-    The impostor here is not a broken endpoint — it authenticates, it answers a
-    well-formed `attached`, and it would be believed by any handshake that only
-    asked. What it cannot do is hold `can:process:vcan0`, and the probe is what
-    notices. The assertion that it was never spoken to is the other half: the
-    probe has to run *before* the peer is trusted, not after."""
+    The impostor here is not a broken endpoint. It authenticates, it answers a
+    well-formed `attached`, it publishes a descriptor naming itself — and it
+    forges the holder record too, because that record is advisory: any process
+    can write the file that says who owns the lock. Every question that can be
+    answered by asking, it answers correctly, and any handshake that only asked
+    would seat a participant on a bus this process does not own.
+
+    What it cannot do is hold `can:process:vcan0`. The probe takes the lock, and
+    taking it is the proof nobody else has it. The assertion that the impostor
+    was never spoken to is the other half: the probe has to run *before* the peer
+    is trusted, not after."""
+    import socket as socket_module
+
     from agentic_hil.bench import BenchMutex
 
     config = shared_config(tmp_path, monkeypatch)
@@ -374,6 +382,20 @@ def test_lock_probe_refuses_an_impostor_that_does_not_hold_the_bus(tmp_path: Pat
     impostor = _ImpostorListener(address, key)
     try:
         canbroker._write_authkey(authkey_path(bus_key, lock_root), key)
+        # The advisory record, forged to name this process as the lock holder.
+        (lock_root / f"{canbroker.resource_digest(bus_key)}.holder.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "held",
+                    "resource": bus_key,
+                    "owner": {"pid": os.getpid(), "host": socket_module.gethostname(), "frontend": "can-broker"},
+                    "acquired_at": "2026-08-09T00:00:00.000Z",
+                    "heartbeat_at": "2026-08-09T00:00:00.000Z",
+                }
+            ),
+            encoding="utf-8",
+        )
         descriptor_path(bus_key, lock_root).write_text(
             json.dumps(
                 {
@@ -394,6 +416,15 @@ def test_lock_probe_refuses_an_impostor_that_does_not_hold_the_bus(tmp_path: Pat
             attach_participant(config, "bench", "alpha", allow_start=False, start_timeout_s=5.0)
     finally:
         impostor.close()
+        # These three were planted in the user's real lock root, not in tmp_path,
+        # because that is where an attach looks. Sweep them up rather than
+        # leaving a forged bus owner behind for the next test to read.
+        for planted in (
+            descriptor_path(bus_key, lock_root),
+            authkey_path(bus_key, lock_root),
+            lock_root / f"{canbroker.resource_digest(bus_key)}.holder.json",
+        ):
+            planted.unlink(missing_ok=True)
     assert refusal.value.result["error_type"] == "can_broker_not_bus_owner"
     assert refusal.value.result["bus_lock_held"] is False
     assert impostor.accepted == [], "the impostor must never be reached, let alone believed"
