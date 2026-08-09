@@ -362,7 +362,7 @@ class CanBusService:
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         frames = normalize_received_frames(read.get("frames", []))
         if frames is None:
-            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True})
+            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response")})
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
@@ -1060,7 +1060,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED
         if opened.get("ok") is True:
             opened = (
-                {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response."}
+                {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response.", **remediation_fields("can_adapter_protocol_unsupported")}
                 if not valid_open
                 else {
                     "ok": False,
@@ -1164,7 +1164,7 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
 
 
 def invalid_can_bridge_response(method: str) -> JsonObject:
-    return {"ok": False, "error_type": "can_adapter_invalid_response", "summary": f"CAN process adapter returned an invalid {method} response.", "side_effect_status": "unknown", "cleanup_required": True}
+    return {"ok": False, "error_type": "can_adapter_invalid_response", "summary": f"CAN process adapter returned an invalid {method} response.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response")}
 
 
 def _optional_strings(result: JsonObject, *fields: str) -> bool:

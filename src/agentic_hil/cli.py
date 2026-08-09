@@ -1021,7 +1021,14 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
         assert isinstance(template, dict)
-        configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        try:
+            # The profile is a hand-written file in the repository and the only
+            # untrusted input this template filling has. A value it cannot use is
+            # a refusal that names the key, not a traceback out of `init` after
+            # the board was already read; nothing has been written at this point.
+            configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
+        except ConfigError as error:
+            return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
         document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
