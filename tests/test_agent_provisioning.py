@@ -54,7 +54,7 @@ from agentic_hil.tools import (
     UnprovisionedToolService,
     project_config_create,
 )
-from agentic_hil.types import fold_hardware_id
+from agentic_hil.types import CURRENT_CONFIG_VERSION, fold_hardware_id
 
 # The fake CLI a generated configuration is pinned to. It has to be a real file
 # outside the workspace, because loading the configuration pins the executable.
@@ -173,7 +173,7 @@ def test_agent_generates_the_configuration_it_could_not_find(tmp_path: Path, mon
         assert document["debuggers"]["dut"]["type"] == "stlink"
         assert document["target"]["controller"] == "stm32f446re"
         assert document["com_ports"]["dut_uart"]["device"] == "COM3"
-        assert document["version"] == 2
+        assert document["version"] == CURRENT_CONFIG_VERSION
         # The session that generated it can read the bench through it, without a
         # restart nothing would have told the host about.
         assert service.config is not None

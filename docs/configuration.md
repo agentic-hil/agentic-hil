@@ -20,7 +20,8 @@ A configured path is checked for what it *is*: every component is opened without
 Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state — flash, reset, serial and CAN sends, mass erase, raw debugger commands — is declared per device, and a generated configuration grants all of it except `allow_raw_debugger_commands` and `allow_mass_erase`. Those two are false because of what they can reach: both act on flash outside the path this server validates — a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written — so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here to trade for that, so setting one true withholds flashing rather than granting anything. The example below is what a generation writes:
 
 ```yaml
-version: 2                   # reading needs no permission; see Migration below
+version: 3                   # reading needs no permission, and every com_ports
+                             # entry says which hardware it is; see Migration below
 workspace_root: "/absolute/path/to/firmware-project"
 state_root: "/absolute/operator-controlled/user-state/agentic-hil"
 
@@ -74,7 +75,12 @@ com_ports:
     # serial `probe_id` also carries. This is the machine-wide lock identity, and
     # it is compared against the attached hardware when the port is opened.
     # `adopt-hardware` fills both in; on Windows `device` stays "COM5" and this
-    # is what carries the identity.
+    # is what carries the identity. From `version: 3` on an entry has to say
+    # which hardware it is: this key, a `resource_id`, or a
+    # `/dev/serial/by-id/...` device name. An adapter that publishes no serial
+    # number of its own — a cheap USB-serial bridge — says so instead, with
+    # `identity_source: vid_pid` beside `vid`/`pid`, or `identity_source: device`
+    # when it publishes nothing at all.
     serial_number: "0669FF303435"
     baudrate: 115200
     assert_dtr: false        # opening the port must not reset this board
@@ -218,7 +224,13 @@ Afterwards `config_status` compares the file against the description now in forc
 
 ## Migration
 
-A configuration written before this release has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Nothing infers the new model from a missing key, so an update never widens what a bench already allows. Migrating is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.
+Versions 1, 2 and 3 are all read, so no file already on disk has to move; what changes is what a file that opts into a version promises. Nothing is inferred from the absence of a key, so an update never widens what a bench already allows and never adds a requirement to a file that did not ask for one.
+
+A configuration written before 0.8.0 has no `version:` key and is read under version 1, where reading still needs `allow_probe` on a debugger and `allow_read` on a COM port or CAN bus. Migrating to version 2 is one edit: remove those keys and set `version: 2`. A version 2 file that still carries one is refused by name rather than silently ignoring it.
+
+Version 3 requires every `com_ports` entry to say which hardware it is. A `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name is such a statement; a bare `device: COM7` is not — it is an enumeration order, so attaching a second adapter can hand one entry the other's board. An adapter that publishes no serial number has a deliberate exception, and it is visible in the file rather than reported as a warning: `identity_source: vid_pid` beside `vid`/`pid` for one that publishes USB ids, `identity_source: device` for one that publishes nothing at all. A version 3 file with an entry that carries none of these is refused at load, naming the entry and `agentic-hil adopt-hardware --apply`.
+
+Migrating is one edit again, in this order: run `agentic-hil adopt-hardware --apply` with the boards attached while the file still says `version: 2` — it fills in `serial_number`, `vid` and `pid` from each adapter, and records `identity_source` where the adapter turns out to publish no serial — then set `version: 3`. That order matters because the command loads this configuration, so it has to be able to. A bench that stays at `version: 2` keeps working exactly as it does today, with `agentic-hil doctor` reporting the same identity as a warning. `agentic-hil init` and `project_config_create` write version 3.
 
 The operator reviews this file and takes away the permissions this bench should not have; a generated one grants all of them except `allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, and adding a resource is still an operator's edit. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. A `resource_id` names hardware rather than a file, so it is matched case-insensitively on every platform, and two entries that spell one id in two cases are refused rather than merged — make them identical if they are one unit, or different by more than case if they are two. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
 

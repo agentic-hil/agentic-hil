@@ -988,6 +988,48 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
 # was never asked, which is what lets a refusal say the bus was not touched.
 BRIDGE_OPEN_UNANSWERED = frozenset({"can_adapter_timeout", "can_adapter_invalid_response"})
 
+# The field a bridge sets on its own `ok: false` to say its channel was already
+# on the bus when the step that failed ran.
+BRIDGE_CHANNEL_OPEN_KEY = "channel_open"
+
+
+def bridge_opened_before_failing(opened: JsonObject) -> bool:
+    """Whether a bridge's own refusal of `open` says the channel was already up.
+
+    Where the boundary runs, and why it is read off a field rather than off the
+    error type:
+
+    Protocol v2 is one request and one response, so there is no separate open
+    acknowledgment for a later failure to arrive after — everything the bridge
+    has to say about a failed `open` is in that one error object. A bridge that
+    never got a channel and a bridge that opened one and then failed at a later
+    step of its own initialization answer in the same envelope, and the error
+    type cannot separate them: it names what went wrong, not when, and it is a
+    string the bridge chose. So the bridge is asked to say which of the two it
+    is, in the first person, about the only thing it alone can know.
+
+    ``channel_open: true`` is that statement. Anything else — the field absent,
+    ``false``, or not a boolean — leaves the failure where it has always been: a
+    refusal that says the bus was not touched and is safe to retry. That keeps
+    the most common bridge failure of all unchanged — a mistyped channel, `open`
+    refused cleanly before anything was opened, which is a bad config and not a
+    bench incident. A field on the error response and not a version bump, the
+    same way `listen_only` was added to the success response: a bridge that does
+    not know the field is unaffected.
+
+    The asymmetry is deliberate. Withholding the marker costs a bench a
+    `side_effect_status: unknown` it may not have earned; claiming
+    `side_effect_committed: false` over a bridge that is sitting on the bus hands
+    back a bench that is still being driven. Only a positive statement moves it.
+
+    The two failures raised before the request was written —
+    `can_adapter_process_exited`, `can_adapter_invalid_request` — cannot acquire
+    the field by accident: the transport synthesizes those itself and never sets
+    it. A bridge that spells one of those error types *and* claims an open
+    channel has answered, and is taken at its word in the safe direction.
+    """
+    return opened.get("ok") is False and opened.get(BRIDGE_CHANNEL_OPEN_KEY) is True
+
 
 def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
     """Open the bridge, recording contact from what the bridge itself said.
@@ -1002,6 +1044,11 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     protocol cannot read, leaves the far side's state to the far side: neither
     contact nor its absence can be shown, and reading silence as innocence is
     what would give a bench back while a bridge is sitting on the bus.
+
+    A bridge's own ``ok: false`` gets the third state too, but only where the
+    bridge says its channel was already open when it failed — see
+    ``bridge_opened_before_failing`` for where that boundary runs. A clean
+    refusal of `open` keeps saying the bus was not touched.
     """
     contact = contact if contact is not None else ContactMarker()
     if not bus_config.executable:
@@ -1027,10 +1074,13 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         except BaseException as cleanup_error:
             primary_error.args = (*primary_error.args, f"Bridge cleanup error: {cleanup_error}")
         raise
+    opened_before_failing = bridge_opened_before_failing(opened)
     if opened.get("ok") is True:
         contact.record("can_bridge_open_confirmed")
     elif opened.get("error_type") in BRIDGE_OPEN_UNANSWERED:
         contact.record_unproven("can_bridge_open_unanswered")
+    elif opened_before_failing:
+        contact.record_unproven("can_bridge_failed_after_channel_open")
     valid_open = (
         opened.get("ok") is True
         and opened.get("protocol_version") == BRIDGE_PROTOCOL_VERSION
@@ -1047,17 +1097,20 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     listen_only_confirmed = not bus_config.listen_only or opened.get("listen_only") is True
     if not valid_open or not listen_only_confirmed:
         # `side_effect_committed: False` is a claim that the bridge is not on the
-        # bus, and this path makes it only where something backs it: the bridge's
-        # own `ok: false`, or a failure raised before its open request was sent.
-        # A bridge that answered `ok: true` has opened, whatever disqualified the
-        # response afterwards — its shape, or a listen-only it did not confirm —
-        # and a request that was delivered and then not answered leaves the far
-        # side's state to the far side. Those withhold the marker rather than
-        # assume the reading that looks better, and `mark_side_effect` renders
-        # the absence as `side_effect_status: unknown`. `cleanup_confirmed` still
-        # releases the lease, so what changes is what the report claims and not
-        # whether a bench goes into recovery.
-        bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED
+        # bus, and this path makes it only where something backs it: a bridge's
+        # own `ok: false` that does not report an open channel, or a failure
+        # raised before its open request was sent. A bridge that answered
+        # `ok: true` has opened, whatever disqualified the response afterwards —
+        # its shape, or a listen-only it did not confirm — a request that was
+        # delivered and then not answered leaves the far side's state to the far
+        # side, and a bridge that refused while reporting `channel_open: true`
+        # failed with its channel already on the bus. Those withhold the marker
+        # rather than assume the reading that looks better, and
+        # `mark_side_effect` renders the absence as
+        # `side_effect_status: unknown`. `cleanup_confirmed` still releases the
+        # lease, so what changes is what the report claims and not whether a
+        # bench goes into recovery.
+        bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED or opened_before_failing
         if opened.get("ok") is True:
             opened = (
                 {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response.", **remediation_fields("can_adapter_protocol_unsupported")}
@@ -1080,8 +1133,10 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
             session.close()
         except BridgeCleanupError as cleanup_error:
             return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_required": True, "cleanup_error": cleanup_error.result, "session": session}
-        contact: JsonObject = {} if bus_contact_unknown else {"side_effect_committed": False}
-        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, **contact}
+        # Named apart from the marker parameter it used to shadow: three branches
+        # above now write to that marker, and a rebind here read as one of them.
+        no_contact_field: JsonObject = {} if bus_contact_unknown else {"side_effect_committed": False}
+        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, **no_contact_field}
     result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
     if bus_config.listen_only:
         result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT["process"]})

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from typing import Any, ClassVar
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
+from agentic_hil.comports import data_result, decode_bytes
 from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
@@ -39,6 +41,30 @@ from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
+# What a `uart_expect` that timed out answers with: the last of what the line
+# actually said. Capped, because a chatty port must not turn one red step into an
+# unbounded result — but never zero, because a red step that cannot say what the
+# port did say is the failure an operator has to reproduce by hand.
+UART_EXPECT_TAIL_BYTES = 512
+# How long a `uart_expect` pass that read nothing waits before the next one.
+# Reached only when `com_read` returned early — a session that is no longer
+# active ends its wait at once — so this paces a line that has stopped talking
+# rather than spinning on it until the step's deadline.
+UART_EXPECT_IDLE_POLL_S = 0.05
+# What a `uart_expect` says about itself, per kind of expectation: (matched,
+# timed out). A plan that waited for a literal and a plan that waited for a
+# pattern fail for different reasons, and a result that called both "expected
+# text" would send an operator looking for a substring nobody asked for.
+UART_EXPECT_SUMMARIES: dict[str, tuple[str, str]] = {
+    "text": (
+        "Expected text appeared on the COM port.",
+        "Expected text did not appear on the COM port before this step's timeout.",
+    ),
+    "pattern": (
+        "Expected pattern matched the COM port output.",
+        "Expected pattern did not match the COM port output before this step's timeout.",
+    ),
+}
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -283,6 +309,17 @@ def raise_test_config_validation_error(error: Any, path: str | None, prefix: lis
         details["value"] = error.instance[:128] if isinstance(error.instance, str) else error.instance
     if error.validator in {"enum", "const"}:
         details["allowed_values"] = error.validator_value if error.validator == "enum" else [error.validator_value]
+    if error.validator == "oneOf":
+        # A step whose alternatives are "exactly one of these keys" — the shape
+        # `uart_expect` uses for `text` / `pattern`. Bare, a oneOf failure names
+        # only the step, which is the difference between "this step is wrong
+        # somewhere" and "say one of these two". The keys come off the branches
+        # rather than from a list here, so they cannot drift from the schema.
+        alternatives = list(
+            dict.fromkeys(name for branch in error.validator_value if isinstance(branch, dict) for name in branch.get("required", ()))
+        )
+        if alternatives:
+            details["exactly_one_of"] = alternatives
     raise ConfigError("test_config_invalid", "Test reactor configuration failed schema validation.", details) from error
 
 
@@ -530,18 +567,26 @@ class SessionDevice(StepDevice):
 
 
 class UartRunner(SessionDevice):
-    """A configured serial line, as a plan opens and closes it."""
+    """A configured serial line, as a plan opens it, waits on it and closes it."""
 
     kind: ClassVar[str] = "uart"
     device_class: ClassVar[type[Device]] = UartDevice
     route_field: ClassVar[str] = "port_id"
     configured_field: ClassVar[str] = "configured_com_ports"
     unknown_name_summary: ClassVar[str] = "Test step references a COM port that is not in the authoritative config."
-    step_actions: ClassVar[dict[str, str]] = {"uart_open": "uartOpen", "uart_close": "uartClose"}
-    step_tools: ClassVar[dict[str, str]] = {"uart_open": "com_session_start", "uart_close": "com_session_stop"}
+    step_actions: ClassVar[dict[str, str]] = {"uart_open": "uartOpen", "uart_expect": "uartExpect", "uart_close": "uartClose"}
+    step_tools: ClassVar[dict[str, str]] = {"uart_open": "com_session_start", "uart_expect": "com_read", "uart_close": "com_session_stop"}
     step_defaults: ClassVar[dict[str, JsonObject]] = {"uart_open": {"clear_buffer": True}}
     open_action: ClassVar[str] = "uart_open"
     close_action: ClassVar[str] = "uart_close"
+    # The action that waits on the line. Its arguments are the plan's own — an
+    # expectation and a deadline — and none is a `com_read` argument, so it
+    # builds that tool's call itself rather than passing the step through.
+    expect_action: ClassVar[str] = "uart_expect"
+    # The two ways a plan says what to wait for, as the schema names them. Exactly
+    # one appears on a step; the key is also the one the result reports under, so
+    # `expected_text` and `expected_pattern` say which kind of claim went unmet.
+    expect_fields: ClassVar[tuple[str, ...]] = ("text", "pattern")
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a UART session it did not open."
@@ -556,16 +601,150 @@ class UartRunner(SessionDevice):
 
     @classmethod
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
-        # Omitted on purpose: a UART step carries no plan-supplied argument a
-        # contract could reject, and its port_id is checked against the
-        # authoritative config's own com_ports names instead.
-        return []
+        # `uart_open` hands the plan's own `clear_buffer` to `com_session_start`,
+        # so that call goes through the tool contract like any other plan-supplied
+        # value. The other two are omitted on purpose: `uart_expect`'s arguments
+        # are read by this class rather than passed on — an expectation and a
+        # deadline are not `com_read` arguments, and this reactor's own schema is
+        # what refuses an empty text, an uncompilable pattern or a timeout of zero
+        # — and `uart_close` carries none. The port_id is checked against the
+        # authoritative config's own com_ports names.
+        return super().tool_calls(config, step) if step.action == cls.open_action else []
 
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+        # Only the open is asked about reading, and that is enough: every other
+        # action on this line requires a session this plan opened, so a port the
+        # config will not let a plan read is refused before any of them. Naming
+        # the permission a second time here would be a second answer.
         if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
             return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
         return None
+
+    @classmethod
+    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+        # A pattern that does not compile is a fault in the plan, so it is
+        # answered here rather than at the step: preflight builds nothing, so a
+        # plan refused for a bad regex has opened no session and touched no
+        # board. `re.error` carries the position it gave up at, which is the
+        # whole reason this is not left to raise out of the run as a traceback.
+        pattern = step.arguments.get("pattern") if step.action == cls.expect_action else None
+        if pattern is not None:
+            try:
+                re.compile(str(pattern))
+            except re.error as error:
+                return preflight_error(
+                    index,
+                    step,
+                    "pattern",
+                    "Test step's uart_expect pattern is not a valid Python regular expression.",
+                    {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)},
+                )
+        return super().preflight(reactor, index, step, state)
+
+    def execute(self, step: TestStep) -> JsonObject:
+        if step.action != self.expect_action:
+            return super().execute(step)
+        # Exactly one of the two is present — the schema's own `oneOf` is what
+        # holds that — so the first one found names both the claim and the key
+        # the result reports it under.
+        field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
+        return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
+
+    @staticmethod
+    def _matcher(field_name: str, expected: str) -> Callable[[str], bool]:
+        """What counts as a match for one of the two expectation kinds.
+
+        A pattern is `re.search`, so it is anchored where it is written and
+        nowhere else: a plan that means "the line starts this way" writes the
+        `^` itself. Compiled once per step rather than per read — the pattern
+        already compiled cleanly at preflight, so this cannot raise."""
+        if field_name == "text":
+            return lambda decoded: expected in decoded
+        search = re.compile(expected).search
+        return lambda decoded: search(decoded) is not None
+
+    def _expect(self, field_name: str, expected: str, timeout_s: float) -> JsonObject:
+        """Wait for `expected` on this line, or fail saying what the line did say.
+
+        The plan's own read path and nothing else: each pass is one `com_read` —
+        the tool an agent would call by hand — waiting out whatever is left of
+        the step's deadline. `com_read` returns the moment the session has bytes,
+        so a banner that arrives in pieces is several short reads rather than one
+        long one, and the match is therefore made against everything read so far
+        and never against the chunk that happened to arrive last. A line that
+        says nothing at all costs exactly one read.
+
+        Bytes are carried across passes rather than decoded text: a character
+        split across two reads decodes to replacement characters on each side of
+        the seam, and a plan would then be waiting for text that did arrive. The
+        same seam is why a pattern is matched against the decoded window rather
+        than against each chunk: a value that arrives in two reads is one match
+        here and none at all to a per-chunk search."""
+        matches = self._matcher(field_name, expected)
+        appeared, missing = UART_EXPECT_SUMMARIES[field_name]
+        deadline = time.monotonic() + timeout_s
+        # Enough tail to still find a match that only completes in the next
+        # chunk, and enough to answer with when the deadline passes. Four bytes
+        # is the widest any one character encodes to in UTF-8, so this cannot cut
+        # into a match no matter how long the expected text is. A pattern is
+        # measured the same way, by what the plan wrote: the floor is what keeps
+        # a short pattern matching across a read boundary, and a pattern whose
+        # match is longer than the window is bounded by it like everything else.
+        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(expected) + 16)
+        received = bytearray()
+        received_bytes = 0
+        encoding = "utf-8"
+        reads = 0
+        while True:
+            result = self.service.call(self.step_tools[self.expect_action], {"port_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())})
+            reads += 1
+            if result_failed(result):
+                # The read's own refusal, unchanged. A closed session, a denied
+                # permission or a broken audit latch is not an expectation that
+                # went unmet, and answering it with `uart_expect_timeout` would
+                # send an operator to look at firmware that never ran.
+                return result
+            data = result.get("data") or {}
+            encoding = str(data.get("encoding") or encoding)
+            chunk = bytes.fromhex(str(data.get("hex") or ""))
+            received_bytes += len(chunk)
+            received.extend(chunk)
+            del received[:-window]
+            if matches(decode_bytes(bytes(received), encoding)):
+                return {
+                    "ok": True,
+                    "tool": "test_reactor",
+                    "summary": appeared,
+                    "port_id": self.id,
+                    f"expected_{field_name}": expected,
+                    "timeout_s": timeout_s,
+                    "bytes_received": received_bytes,
+                    "reads": reads,
+                }
+            if time.monotonic() >= deadline:
+                tail = bytes(received[-UART_EXPECT_TAIL_BYTES:])
+                return {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "error_type": "uart_expect_timeout",
+                    "summary": missing,
+                    "port_id": self.id,
+                    f"expected_{field_name}": expected,
+                    "timeout_s": timeout_s,
+                    "bytes_received": received_bytes,
+                    "reads": reads,
+                    # What the port actually said, so a red result is readable
+                    # without reconnecting to the board.
+                    "received_tail": data_result(tail, encoding),
+                    "received_tail_truncated": received_bytes > len(tail),
+                }
+            if not chunk:
+                # A read that returned nothing while time was left had its own
+                # wait cut short — `com_read` ends its wait at once on a session
+                # that is no longer active — so pace the next pass rather than
+                # spinning on a line that has stopped talking.
+                time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
 class CanRunner(SessionDevice):
@@ -654,6 +833,7 @@ class DebuggerRunner(StepDevice):
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
     step_actions: ClassVar[dict[str, str]] = {
         "flash": "flash",
+        "reset": "reset",
         "debug_start": "debugStart",
         "run_until_breakpoint": "runUntilBreakpoint",
         "dump_memory": "dumpMemory",
@@ -661,10 +841,15 @@ class DebuggerRunner(StepDevice):
     }
     step_tools: ClassVar[dict[str, str]] = {
         "flash": "flash_firmware",
+        "reset": "reset_target",
         "debug_start": "debug_start_session",
         "dump_memory": "debug_dump_symbol_ihex",
         "debug_stop": "debug_stop_session",
     }
+    # `reset_target` reads its own default the same way, but the reactor writes
+    # every argument it sends: the schema documents `run`, and a step that leaves
+    # the mode out must reach the tool saying which reset it asked for.
+    step_defaults: ClassVar[dict[str, JsonObject]] = {"reset": {"mode": "run"}}
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
     # This kind's own actions that require a live debug session, and therefore a
@@ -752,6 +937,21 @@ class DebuggerRunner(StepDevice):
             if permissions.allow_mass_erase:
                 return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
             return cls._artifact_refusal(reactor, index, step, require_elf=False)
+
+        if step.action == "reset":
+            # The two answers flash already gives, for the same reasons.
+            # `reset_target` is a one-shot that cannot take the lease a live
+            # debug session holds, so a reset inside one could only ever come
+            # back busy; and the permission that governs it is the one the
+            # config names for this probe. Which resets a backend can actually
+            # perform is deliberately not asked here: a mode it will not run —
+            # `init` off OpenOCD — is refused by that backend with its own
+            # `not_supported`, and that refusal is the honest answer.
+            if state.debug_session is not None:
+                return preflight_error(index, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
+            if not permissions.allow_reset:
+                return preflight_error(index, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
+            return None
 
         if step.action in cls.debug_session_actions and debugger.type != "openocd":
             return preflight_error(

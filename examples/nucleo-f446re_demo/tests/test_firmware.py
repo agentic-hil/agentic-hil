@@ -1,5 +1,16 @@
 """End-to-end HIL regression test for the Nucleo-F446RE demo firmware.
 
+The CI-embedding variant of this demo's loop. The primary way to run the loop is
+the declared plan in ../testconfig.yaml:
+
+    agentic-hil test-reactor --test-config testconfig.yaml
+
+which says the same five steps in one command and validates every device name,
+permission and session order before the first hardware action. This file is for
+suites that already run pytest and want the hardware check reported through the
+same runner as everything else, so it drives the same tools by hand — the read
+loop below is what a plan's `uart_expect` step does declaratively.
+
 Build the firmware first, then run pytest from this demo directory with
 AGENTIC_HIL_CONFIG selecting the external authoritative config (see
 agentic-hil.config.example.yaml) and the board connected:

@@ -56,6 +56,7 @@ from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOA
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
     ACTOR_HUMAN,
+    NOT_STARTED,
     PERMISSION_COMMAND_VALUES,
     authoritative_write_target,
     load_config_document,
@@ -69,6 +70,7 @@ from agentic_hil.knowledge import (
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
     RUNNING_SERVER_COMPARISON,
+    remediation_fields,
 )
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
@@ -533,11 +535,11 @@ def _skipped_setup_step(summary: str) -> JsonObject:
 
 
 def _smooth_permissions(targets: list[Path]) -> list[str]:
-    """Silently tighten the current user's own group/other-writable directories
-    along these chains so the fail-closed trust validator accepts a umask-002 /
-    private-group home without the operator hand-fixing permissions. Only
-    user-owned components are ever changed. POSIX only; on Windows this is a
-    no-op."""
+    """Silently tighten the current user's own group/other-writable components
+    along these chains so the fail-closed trust validator accepts a launcher an
+    installer wrote under a umask-002 / private-group home without the operator
+    hand-fixing permissions. Only user-owned components are ever changed. POSIX
+    only; on Windows this is a no-op."""
     actions: list[str] = []
     seen: set[str] = set()
     for target in targets:
@@ -554,8 +556,10 @@ def _smooth_user_permissions() -> list[str]:
     the MCP command will be registered as.
 
     ``trusted_persistent_executable`` is the last check that refuses a path for
-    its POSIX mode, and it looks at the executable and its ancestors and nothing
-    else. Smoothing was once wider because configured paths were mode-checked
+    its POSIX mode, and since #143 that mode is the launcher file's own: its
+    ancestors are no longer refused for who else may write them, so a umask-002
+    home no longer has to be tightened for a registration to be possible.
+    Smoothing was once wider still because configured paths were mode-checked
     too; that check was removed whole, and chmod-ing a tree
     nothing validates any more would be this policy's remnant mutating an
     operator's filesystem for no refusal it can prevent. The skill and the
@@ -944,6 +948,17 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     either. So this goes through `discover_for_generation`, which is the function
     `project_config_create` uses, under this command's own coordinator.
 
+    The open-run refusal comes first, before a word is said to any board. Every
+    other write of this file has one — `project_config_create`,
+    `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all refuse
+    while a run, a lease or another terminal holds the bench — and `init --force`
+    had none. What stopped it was incidental: a run that declared the probe owns
+    the lock the read takes, so the read answered `device_busy`. A run that
+    declared only a COM port or only a CAN bus holds no probe, and that
+    regeneration went through and replaced the permissions, the baudrate and the
+    device bindings underneath live measurements. `bench_open_holds` already
+    answers the question the other write sites ask, so this asks it too.
+
     Returns the discovery, the refusal that is the whole answer when the read did
     not happen or did not end cleanly, and — when the board was read without a
     lease — the reason it could not be leased.
@@ -959,9 +974,16 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         # either would leave no way to reach a configured bench at all, which is
         # worse than what this fixes. Named in the result instead of inferred
         # from a record that is not there.
+        #
+        # It is also why the holds question below is asked only of a
+        # configuration that loaded: the devices a hold would be on are the ones
+        # this file names, and a file that does not load names none.
         current, unleased = None, error.error_type
     else:
         unleased = None
+        holds = bench_open_holds(current)
+        if holds is not None:
+            return {}, _init_open_run_refusal(current, holds), unleased
     discovery, refusal = discover_for_generation(
         current,
         None,
@@ -970,6 +992,45 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         frontend="operator-cli",
     )
     return discovery, refusal, unleased
+
+
+def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
+    """Somebody holds this bench, so `init --force` does not regenerate it.
+
+    The same rule and the same error type as `project_config_create`, which
+    writes this file from the same read over MCP: what is held was taken under
+    the policy this file states, and a regeneration replaces every permission,
+    every baudrate and every device binding in it. The holder here is usually
+    another process — an MCP server, another terminal — so the next step names
+    `agentic-hil lease-status`, which says whose bench it is, rather than a run
+    this caller could close.
+
+    Nothing was read either. The refusal is raised before the board is touched,
+    so a `--force` typed by accident during somebody's run costs neither a
+    HOTPLUG connect nor a line in the audit trail.
+    """
+    return {
+        "ok": False,
+        "tool": CLI_INIT,
+        "error_type": "config_write_in_open_run",
+        "summary": (
+            "Something on this machine is holding this bench's hardware right now, and those holds were taken under "
+            "the policy this configuration states. Regenerating reads the attached probe and replaces that policy, so "
+            "nothing was read and nothing was written."
+        ),
+        "open_holds": open_holds,
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        **remediation_fields("config_write_in_open_run"),
+        "next_step": (
+            "`agentic-hil lease-status` names the holder — which devices are held, which frontend took them and under "
+            "which process — and `open_holds` here carries the same. Let the run finish or ask whoever holds it to "
+            f"close it, then run `{CONFIG_REOPEN_COMMAND}` again. `agentic-hil adopt-hardware` is the command that "
+            "refreshes the hardware and leaves the rest of the file standing."
+        ),
+        **NOT_STARTED,
+        "retry_safe": True,
+    }
 
 
 def _init_lease_note(unleased: str | None) -> JsonObject:
@@ -1014,8 +1075,9 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     profile = load_project_profile(workspace)
     discovery, refusal, unleased = _init_bench_read(workspace)
     if refusal is not None:
-        # The read is what was refused, so there is nothing to write a file from
-        # and nothing was written. The refusal is the whole answer.
+        # Either the read was refused or it was never reached, and both leave
+        # nothing to write a file from. Nothing was written; the refusal is the
+        # whole answer.
         return {**refusal, "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
@@ -1609,7 +1671,15 @@ def mcp_server_command() -> str:
         try:
             return _trusted_mcp_command(candidate)
         except (ConfigError, OSError) as error:
-            rejected.append({"path": str(candidate), "reason": str(error)})
+            # Whatever the refusal knew about this candidate travels with it: the
+            # component that stopped the walk, its mode and its owner. A caller
+            # holding a path and a sentence has to go and stat the chain itself
+            # to find out which directory to fix.
+            entry: JsonObject = {"path": str(candidate), "reason": str(error)}
+            if isinstance(error, ConfigError):
+                entry["error_type"] = error.error_type
+                entry.update({key: value for key, value in error.details.items() if key not in entry})
+            rejected.append(entry)
     raise ConfigError(
         "mcp_command_untrusted",
         "No stable trusted Agentic HIL executable was found. Install it persistently with 'uv tool install agentic-hil' or 'pipx install agentic-hil'.",
@@ -2262,10 +2332,18 @@ def _doctor_mcp_report() -> JsonObject:
         command = mcp_server_command()
     except (ConfigError, OSError) as error:
         summary = error.summary if isinstance(error, ConfigError) else str(error)
+        # The refusal already knows which candidates it looked at, where they
+        # were, and what was wrong with each. Passing on the summary alone left
+        # an operator with "no trusted executable was found" and no path to act
+        # on — a refusal handed over without its reasons, which is the one thing
+        # this project's error line does not do.
+        details = error.details if isinstance(error, ConfigError) else {}
+        rejected = details.get("rejected_candidates")
         return {
             **report,
             "command": None,
             "persistent": False,
+            **({"rejected_candidates": rejected} if isinstance(rejected, list) else {}),
             "summary": f"No trusted persistent executable to register yet: {summary}",
         }
     return {
@@ -2531,7 +2609,8 @@ def codex_registration_block(target_path: str, version: str, requested_agent: st
 - Skill path: `{target_path}`
 - Agentic HIL version: `{version}`
 - Agentic HIL is for embedded firmware development with local hardware-in-the-loop targets.
-- Read and follow this skill before acting on any firmware or hardware request: flashing, resetting, probing, debugging, UART or CAN traffic, firmware artifacts, and hardware test runs, as well as Agentic HIL setup, configuration, and MCP registration.
+- Read and follow this skill when a request operates the connected target board through the configured bench - flashing, resetting, probing, debugging, UART or CAN traffic, firmware artifacts, hardware test runs - or sets up Agentic HIL itself: configuration, skill installation, MCP registration.
+- Not for designing hardware (PCB layout, schematic capture, EDA, mechanical design) and not for firmware authoring that never touches a board.
 - Do not invoke a debugger, serial device, or CAN adapter directly when an Agentic HIL tool covers the request.
 - If this version differs from `agentic-hil --version`, run `agentic-hil skill-install --agent {requested_agent}`.
 {AGENTIC_HIL_REGISTRATION_END}"""

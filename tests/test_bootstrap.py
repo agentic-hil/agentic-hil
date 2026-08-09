@@ -27,10 +27,11 @@ from agentic_hil.config import (
     load_config,
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
-from agentic_hil.devices import debugger_device
+from agentic_hil.devices import config_devices, debugger_device
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import read_last_report
-from agentic_hil.tools import project_config_create
-from agentic_hil.types import JsonObject, fold_hardware_id
+from agentic_hil.tools import AgenticHILToolService, project_config_create
+from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -240,9 +241,9 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["debuggers"]["dut"]["type"] == "stlink"
     assert configured["debuggers"]["dut"]["probe_id"] == "STLINK123"
     # The profile above still requests the version 1 read grants. The document
-    # this writes is version 2, where reading needs none and the keys are
-    # refused by name, so the request is satisfied by dropping it.
-    assert configured["version"] == 2
+    # this writes is the current version, where reading needs none and the keys
+    # are refused by name, so the request is satisfied by dropping it.
+    assert configured["version"] == CURRENT_CONFIG_VERSION
     # Granted unless the profile said otherwise: a flag it does not name follows
     # the generated default, and one it names is honoured — which can only
     # narrow, because the default it would have to beat is already true wherever
@@ -361,9 +362,10 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     assert written["debuggers"]["dut"]["type"] == "stlink"
     assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert written["com_ports"]["dut_uart"]["device"] == "COM3"
-    # A bootstrapped config is a version 2 config: it loads, which it could not
-    # do while carrying a read permission this version refuses by name.
-    assert written["version"] == 2
+    # A bootstrapped config is written at the current version: it loads, which it
+    # could not do while carrying a read permission that version refuses by name,
+    # nor with a COM port entry naming no hardware.
+    assert written["version"] == CURRENT_CONFIG_VERSION
     assert "allow_probe" not in written["debuggers"]["dut"]["permissions"]
     assert "allow_read" not in written["com_ports"]["dut_uart"]["permissions"]
 
@@ -1031,13 +1033,18 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
 
 
 def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`agentic-hil init --force` gets `device_busy`, not the board.
+    """`agentic-hil init --force` gets a refusal, not the board.
 
     The holder is a stranger — an MCP server, another project's run, a test
-    reactor. It has the physical probe, which is the lock the read takes between
-    enumerating and connecting, so the HOTPLUG connect never happens. Rewriting
-    this workspace's whole policy in the middle of somebody else's run is not
-    something an operator wants either, so nothing is written."""
+    reactor. It has the physical probe, which the configuration this workspace
+    would replace names, so the open-run refusal answers first and the read is
+    never reached. It used to be `device_busy` off the read itself, from the
+    device lock taken between enumerating and connecting; the guarantee that test
+    defended is unchanged and stronger — there is now no enumeration either — and
+    the answer names why the write stopped rather than which lock it collided
+    with. The holder is still named, in `open_holds`. Rewriting this workspace's
+    whole policy in the middle of somebody else's run is not something an
+    operator wants either, so nothing is written."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -1056,13 +1063,151 @@ def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, mo
         stranger.release_all()
 
     assert refused["ok"] is False, refused
-    assert refused["error_type"] == "device_busy"
-    assert refused["holder"]["label"] == "other-bench-session"
+    assert refused["error_type"] == "config_write_in_open_run"
+    assert [item["holder"]["label"] for item in refused["open_holds"]["busy_devices"]] == ["other-bench-session"]
     # The record and the refusal name the command that ran, not the MCP tool
     # that writes the same file — an incident has to say which one left it.
     assert refused["tool"] == "cli_init"
     assert not any("mode=HOTPLUG" in argument for command in commands for argument in command), commands
+    assert commands == [], commands
     assert path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# And a run that holds no probe is refused too, before the board is read.
+#
+# The probe refusal above is incidental: it is the device lock the read takes
+# doing its job, not a rule about writing this file. Every other write of the
+# authoritative configuration has that rule — `project_config_create`,
+# `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all answer
+# while a run, a lease or another terminal holds the bench — and `init --force`
+# had none. A run that declared only a COM port or only a CAN bus holds no
+# probe, so nothing stood in the way at all and the regeneration replaced the
+# permissions, the baudrate and the device bindings underneath live
+# measurements. These two tests are that hole.
+
+
+def _initialised_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, with_can_bus: bool = False) -> tuple[Path, Path, list[list[str]]]:
+    """A workspace `init` has already configured from the attached board.
+
+    Returns the workspace, the written configuration, and the list this host
+    records its commands in — cleared, so anything in it afterwards was asked by
+    the second `init` rather than by the first."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands = _one_attached_stlink(monkeypatch)
+    first = init_config()
+    assert first["ok"] is True, first
+    path = Path(first["path"])
+    if with_can_bus:
+        # A bus the operator added afterwards. `init` writes no `can_buses`
+        # section, and a bench that has one is exactly the case where the
+        # regeneration used to walk through a run holding it.
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document["can_buses"] = {"dut": {"adapter": "peak", "channel": "PCAN_USBBUS1", "bitrate": 250000}}
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    commands.clear()
+    return workspace, path, commands
+
+
+def _assert_refused_before_the_read(refused: JsonObject, *, path: Path, before: bytes, commands: list[list[str]], held: str) -> None:
+    """The named refusal, and the proof that no board was touched to reach it."""
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_write_in_open_run"
+    # The command that ran, not the MCP tool that writes the same file.
+    assert refused["tool"] == "cli_init"
+    assert refused["retry_safe"] is True
+    assert refused["side_effect_committed"] is False
+    assert refused["hardware_state"] == "unchanged"
+    assert refused["path"] == str(path)
+    assert refused["open_holds"]["held_devices"] == [held]
+    assert [item["resource"] for item in refused["open_holds"]["busy_devices"]] == [held]
+    assert refused["remediation"] == remediation_fields("config_write_in_open_run")["remediation"]
+    assert "lease-status" in refused["next_step"]
+    # Raised before the bench read, so nothing was said to this host at all:
+    # there is no enumeration and no HOTPLUG connect to inspect, and no
+    # discovery in the result because none ran.
+    assert commands == [], commands
+    assert "hardware_discovery" not in refused
+    assert path.read_bytes() == before
+
+
+def test_init_force_is_refused_while_a_run_holds_only_a_com_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with a COM port and no probe: the case nothing used to stop.
+
+    The port is held, the probe is not, so the board read `init --force` performs
+    goes through — and behind it the whole file is replaced while a session is
+    reading that port under the permissions and the baudrate it names. The
+    refusal is now the same one every other write of this file answers, and it is
+    raised before the read rather than fallen into by it."""
+    workspace, path, commands = _initialised_bench(tmp_path, monkeypatch)
+    config = load_authoritative_config(workspace)
+    uart = next(key for key in config_devices(config).lock_keys if key.startswith("com:"))
+    before = path.read_bytes()
+
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        assert tools.call("bench_run_start", {"devices": [{"kind": "uart", "id": "dut_uart"}], "label": "boot-smoke"})["ok"] is True
+
+        refused = init_config(force=True)
+
+        _assert_refused_before_the_read(refused, path=path, before=before, commands=commands, held=uart)
+        # The run itself was not disturbed: it still holds what it declared.
+        assert tools.call("bench_run_status")["run_active"] is True
+        assert tools.call("bench_run_stop")["ok"] is True
+    finally:
+        tools.close()
+
+    # And the reset goes through the moment the run ends. Nothing was lost by the
+    # refusal; the regeneration is exactly as available after the run as before.
+    assert init_config(force=True)["ok"] is True
+
+
+def test_init_force_is_refused_while_a_run_holds_only_a_can_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """And a CAN bus, which shares nothing with the probe lock at all.
+
+    A COM port at least sits on the same physical adapter as the probe on this
+    bench. A CAN bus does not, so a plan that stimulates the body bus while
+    somebody runs `init --force` in another terminal was the case with no
+    accidental protection whatsoever: the read succeeded, the file was replaced,
+    and `allow_write` on the bus came back open underneath a run that had taken
+    it closed."""
+    workspace, path, commands = _initialised_bench(tmp_path, monkeypatch, with_can_bus=True)
+    config = load_authoritative_config(workspace)
+    bus = next(key for key in config_devices(config).lock_keys if key.startswith("can:"))
+    before = path.read_bytes()
+
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        assert tools.call("bench_run_start", {"devices": [{"kind": "can", "id": "dut"}], "label": "body-bus"})["ok"] is True
+
+        refused = init_config(force=True)
+
+        _assert_refused_before_the_read(refused, path=path, before=before, commands=commands, held=bus)
+        assert tools.call("bench_run_stop")["ok"] is True
+    finally:
+        tools.close()
+
+    assert init_config(force=True)["ok"] is True
+
+
+def test_a_first_init_is_not_refused_by_a_bench_it_has_no_configuration_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal is asked of a configuration, so it cannot block the first one.
+
+    A workspace with no loadable configuration names no devices, so there is
+    nothing for a hold to be on and no policy for a run to have been taken under.
+    Refusing here would leave no way to reach a configured bench at all, which is
+    the same reason this case reads the board without a lease."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+
+    first = init_config()
+
+    assert first["ok"] is True, first
+    assert first["hardware_discovery"]["ok"] is True
 
 
 def test_the_board_init_reads_is_written_into_the_audit_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

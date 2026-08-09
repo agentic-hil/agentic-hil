@@ -1744,9 +1744,9 @@ def debugger_backends_document() -> JsonObject:
             ),
             "removed_field": {
                 "allow_probe": (
-                    "Version 1 only. A configuration that sets `version: 2` must not carry it; a configuration without "
-                    "a `version` key is still read under version 1, where reading needs it. Both COM ports and CAN "
-                    "buses lost `permissions.allow_read` the same way."
+                    "Version 1 only. A configuration that sets `version: 2` or higher must not carry it; a "
+                    "configuration without a `version` key is still read under version 1, where reading needs it. Both "
+                    "COM ports and CAN buses lost `permissions.allow_read` the same way."
                 )
             },
             "on_refusal": "error_type `permission_denied`: report it and stop. Never edit the authoritative configuration to grant it, and never carry the action out another way.",
@@ -1921,8 +1921,13 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
     # enumeration record and say which *kind* of device it is, which is what
-    # makes the serial mean a unit at all.
-    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid")),
+    # makes the serial mean a unit at all. `identity_source` is in it because it
+    # is decided by those three and by nothing else — it grants nothing, and a
+    # value disagreeing with them is refused at load — and because
+    # `adopt-hardware` has to be able to write it: whether an adapter publishes a
+    # serial number at all is a fact only a read of the hardware settles, and
+    # version 3 requires the file to state it.
+    ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid", "identity_source")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # The permissions half, every block of it.
     ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
@@ -2100,7 +2105,7 @@ def config_permission_keys() -> tuple[str, ...]:
 # schema says nothing about a field, this document says nothing either, because
 # the alternative is a second description of the same field.
 _SECTION_PURPOSE: dict[str, str] = {
-    "version": "Which permission model the file is read under. A new file should say `2`.",
+    "version": "Which rules the file is read under. Versions 1, 2 and 3 all load, so no file already on disk has to move. A new file should say `3`.",
     "workspace_root": "The project this configuration authorizes, and nothing else. A server started elsewhere refuses it.",
     "state_root": "Where leases, quarantine incidents and canonical reports live. Outside `workspace_root`, so repository content cannot forge them.",
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
@@ -2109,7 +2114,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
-    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": (
         "The CAN buses. `listen_only: true` is how a bus is observed without sending ACK bits, and it is enforced per "
         "adapter rather than assumed: `peak` sets the mode and reads it back from the driver, `socketcan` reads the "
@@ -2123,7 +2128,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "recovery": "How far the owning process may clear its own hardware quarantine before an operator is required.",
 }
 
-CONFIG_WORKED_EXAMPLE = """version: 2
+CONFIG_WORKED_EXAMPLE = """version: 3
 
 # Absolute, and this file is stored outside it.
 workspace_root: "C:/Users/dana/work/thermostat-fw"
@@ -2166,7 +2171,15 @@ debuggers:
 
 com_ports:
   dut_uart:
-    device: "COM7"              # the ST-Link virtual COM port
+    device: "COM7"              # the ST-Link virtual COM port: how it is opened
+    # Which board it is. Version 3 requires this, a resource_id, or a
+    # /dev/serial/by-id/... device name — COM7 is an enumeration order, so it can
+    # come to mean the other adapter. An adapter that publishes no serial says so
+    # instead, with identity_source: vid_pid, or identity_source: device when it
+    # publishes nothing at all. `agentic-hil adopt-hardware --apply` writes it.
+    serial_number: "066AFF495451885087171450"
+    vid: 1155                   # the type, which is what makes the serial mean a unit
+    pid: 14155
     baudrate: 115200
     assert_dtr: false           # this board wires DTR to reset
     assert_rts: false
@@ -2470,7 +2483,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware — `resource_id`, a probe serial, a port's `serial_number`, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone — which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so — and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware --apply`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone — which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

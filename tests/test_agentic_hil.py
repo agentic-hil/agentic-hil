@@ -47,6 +47,7 @@ from agentic_hil.cli import (
     install_skill,
     is_agentic_hil_setup_skill,
     mcp_config,
+    mcp_server_command,
     register_agent_mcp,
     restrict_agent_write_access,
     schema,
@@ -62,6 +63,7 @@ from agentic_hil.config import (
     project_config_path,
     tighten_owned_writable_ancestors,
     trusted_persistent_executable,
+    untrusted_launcher_directory,
     user_file_lock_path,
     user_state_root,
 )
@@ -69,6 +71,7 @@ from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, han
 from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
+from agentic_hil.types import CURRENT_CONFIG_VERSION
 
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
@@ -98,7 +101,7 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     # permission line a fresh config carries is about writing — and since
     # 0.8.0 every one of them that grants a capability is granted, so the
     # bench this writes is workable without anybody opening it.
-    assert "version: 2" in config_text
+    assert f"version: {CURRENT_CONFIG_VERSION}\n" in config_text
     assert "allow_probe: " not in config_text
     assert "allow_flash: true" in config_text
     assert "allow_reset: true" in config_text
@@ -559,15 +562,22 @@ def test_upgrade_asks_for_the_extras_that_are_installed(
 def test_installed_extras_names_only_the_extras_whose_requirements_are_present() -> None:
     """Read against the real distribution metadata, not a fixture of it.
 
-    `can` is installed for the test suite and `pyocd` is not, so this also
-    proves the two are told apart rather than both being reported.
+    `can` is a requirement of this suite, so it must be reported. `pyocd` is what
+    tells the two apart on the canonical development environment, which does not
+    install it — but an environment that does is legitimate, and is the only one
+    where the pyOCD phrase tests run at all, so pinning its absence outright
+    would make installing the extra fail the suite. What is pinned instead is
+    that the answer tracks what is installed, asked here through the import
+    system rather than through the metadata the function itself reads.
     """
+    from importlib.util import find_spec
+
     from agentic_hil.upgrade import _installed_extras
 
     extras = _installed_extras()
 
     assert "can" in extras
-    assert "pyocd" not in extras
+    assert ("pyocd" in extras) is (find_spec("pyocd") is not None)
 
 
 def _fake_process(pid: int, parent_pid: int, image: str, created_ns: int = 100) -> ProcessImage:
@@ -1234,9 +1244,93 @@ def test_doctor_says_when_there_is_nothing_trustworthy_to_register(
     assert result["mcp"]["command"] is None
     assert result["mcp"]["persistent"] is False
     assert "No stable trusted" in result["mcp"]["summary"]
+    # A refusal that examined nothing lists nothing: the key is absent rather
+    # than an empty list nobody can act on.
+    assert "rejected_candidates" not in result["mcp"]
     # Reporting it is not the same as failing: an install may simply not have
     # happened yet, and doctor's verdict is about the hardware configuration.
     assert result["ok"] is True
+
+
+def test_the_mcp_command_refusal_says_what_each_candidate_was_rejected_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One path and one sentence per candidate was not enough to act on.
+
+    The refusal that ends the search recommends a persistent installation, so
+    the operator it reaches is the one who already has one and cannot use it.
+    What the underlying refusal knew — which component stopped the walk, its
+    mode and its owner — now travels with the candidate it condemned.
+    """
+    directory_refusal = ConfigError(
+        "mcp_command_untrusted",
+        "The MCP server executable has a parent directory that is owned by another user.",
+        {"path": "/opt/shared/bin/agentic-hil", "directory": "/opt/shared/bin", "mode": "0755", "uid": 4242},
+    )
+    refusals: dict[str, Exception] = {
+        "/opt/shared/bin/agentic-hil": directory_refusal,
+        "/home/dev/venv/bin/agentic-hil": OSError("No such file or directory"),
+    }
+
+    def refuse(candidate: str) -> str:
+        raise refusals[candidate]
+
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: list(refusals))
+    monkeypatch.setattr("agentic_hil.cli._trusted_mcp_command", refuse)
+
+    with pytest.raises(ConfigError) as refused:
+        mcp_server_command()
+
+    rejected = refused.value.details["rejected_candidates"]
+    assert [entry["path"] for entry in rejected] == list(refusals)
+    assert rejected[0]["directory"] == "/opt/shared/bin"
+    assert rejected[0]["mode"] == "0755"
+    assert rejected[0]["uid"] == 4242
+    assert rejected[0]["error_type"] == "mcp_command_untrusted"
+    assert "owned by another user" in rejected[0]["reason"]
+    # An OSError carries no details and is still named, with its own message.
+    assert "No such file" in rejected[1]["reason"]
+    assert "mode" not in rejected[1]
+
+
+def test_doctor_carries_the_rejected_candidates_and_not_only_the_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handing on a refusal without its reasons is what this fixes.
+
+    `doctor` is where an operator looks when a registration will not happen, and
+    it reported "no trusted persistent executable to register yet" over a
+    refusal that knew the path, the mode and the owner of every candidate it had
+    turned down.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, permissions={})
+    monkeypatch.chdir(workspace)
+    refusal = ConfigError(
+        "mcp_command_untrusted",
+        "The MCP server executable must be trusted, executable, and not writable by other users.",
+        {"path": "/home/dev/.local/bin/agentic-hil", "mode": "0777", "uid": 1000},
+    )
+
+    def refuse(candidate: str) -> str:
+        raise refusal
+
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: ["/home/dev/.local/bin/agentic-hil"])
+    monkeypatch.setattr("agentic_hil.cli._trusted_mcp_command", refuse)
+
+    report = doctor()["mcp"]
+
+    assert report["command"] is None
+    assert report["persistent"] is False
+    assert report["rejected_candidates"] == [
+        {
+            "path": "/home/dev/.local/bin/agentic-hil",
+            "reason": refusal.summary,
+            "error_type": "mcp_command_untrusted",
+            "mode": "0777",
+            "uid": 1000,
+        }
+    ]
+    assert json.dumps(report)
 
 
 def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1490,6 +1584,17 @@ def _packaged_skill_text() -> str:
     return (skill / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8")
 
 
+def _plugin_skill_text() -> str:
+    plugin = Path(__file__).resolve().parents[1] / "plugins" / "agentic-hil" / "skills"
+    return (plugin / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _skill_description(text: str) -> str:
+    """The frontmatter line a host decides to load this skill on."""
+    frontmatter = text.split("---\n", 2)[1]
+    return next(line for line in frontmatter.splitlines() if line.startswith("description:"))
+
+
 def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     text = _packaged_skill_text()
 
@@ -1499,6 +1604,44 @@ def test_skill_routes_firmware_work_to_agentic_hil() -> None:
     for raw in ("openocd", "gdb", "minicom", "candump"):
         assert raw in text, raw
 
+
+def test_the_skill_description_scopes_to_operating_the_bench() -> None:
+    """The description is the routing decision, so it has to state its own limits.
+
+    "Use for any embedded firmware or hardware request" was taken at its word:
+    PCB layout, schematic capture and mechanical design are hardware requests,
+    so hosts loaded the skill on turns where no tool here can contribute
+    anything. The line therefore names what the bench does *and* says the
+    negative out loud, and both installed copies say it, because an agent reads
+    whichever one its host put there.
+    """
+    for name, text in (("packaged", _packaged_skill_text()), ("plugin", _plugin_skill_text())):
+        description = _skill_description(text)
+        for scope in ("connected target board", "flashing", "resetting", "probing", "debugging", "UART", "CAN", "test reports"):
+            assert scope in description, f"{name} description does not name {scope}"
+        for outside in ("PCB layout", "schematic capture", "EDA", "mechanical design", "never touches a board"):
+            assert outside in description, f"{name} description does not exclude {outside}"
+        # Rescoping must not drop what the skill exists to displace.
+        assert "instead of invoking a debugger, serial device, or CAN adapter directly" in description, name
+        # And the body repeats the boundary for a session routed here anyway.
+        assert "The gate is the whole of the scope." in text, name
+
+
+
+def test_the_codex_registration_block_carries_the_same_boundary() -> None:
+    """The block written into a host's AGENTS.md routes like the skill does.
+
+    The over-broad "any firmware or hardware request" wording sent
+    hardware-design sessions here; the registration block states the same
+    positive scope and the same negative as the skill description."""
+    from agentic_hil.cli import codex_registration_block
+
+    block = codex_registration_block("skills/agentic-hil/SKILL.md", "0.0.0", "codex")
+    assert "operates the connected target board through the configured bench" in block
+    assert "Not for designing hardware" in block
+    assert "PCB layout" in block
+    assert "never touches a board" in block
+    assert "any firmware or hardware request" not in block
 
 def test_skill_frontmatter_survives_a_windows_checkout() -> None:
     # git converts the packaged skill to CRLF on Windows unless .gitattributes
@@ -1516,8 +1659,7 @@ def test_plugin_skill_carries_the_packaged_guidance() -> None:
     # A plugin install is an alternative to setup, not a lesser one: it has to
     # deliver the same routing rules, so the bodies may not drift apart.
     packaged = _packaged_skill_text()
-    plugin_path = Path(__file__).resolve().parents[1] / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md"
-    plugin = plugin_path.read_text(encoding="utf-8")
+    plugin = _plugin_skill_text()
     body = packaged.split("---\n", 2)[2].strip()
 
     assert body in plugin
@@ -2419,6 +2561,97 @@ def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
     assert excinfo.value.error_type == "mcp_command_untrusted"
 
 
+def _directory_stat(mode: int, uid: int) -> SimpleNamespace:
+    """A stat of an opened directory, as the POSIX ancestor walk sees one.
+
+    The walk itself cannot run on Windows — it needs `os.geteuid`, `O_DIRECTORY`
+    and `dir_fd` — so the decision it makes per component is a named function
+    and this is what that function is asked about, on every host.
+    """
+    return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777, 0o755])
+@pytest.mark.parametrize("final", [True, False])
+def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mode: int, final: bool) -> None:
+    """The refusal that made an ordinary user-local installation unregisterable.
+
+    `~` or `~/.local` at `0775` is what a distribution combining `umask 002`
+    with per-user groups produces, and the ancestor walk refused every one of
+    them: on such a host `mcp-config` rejected every candidate and then
+    recommended installing with the user-level tool installer that had written
+    the layout it was refusing. Group and other write are no longer read, sticky
+    or not, at any depth — the same detect-rather-than-prevent line Windows has
+    held since its ACL walk was removed in 0.8.0.
+    """
+    assert untrusted_launcher_directory(_directory_stat(mode, 1000), final=final, trusted_uids=frozenset({0, 1000})) is None
+
+
+def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user() -> None:
+    """What survives the removal: identity, not permissions.
+
+    A directory a third account owns can have the validated file renamed out of
+    it between the check and the registration, and no mode expresses that. Only
+    the launcher's own parent is asked — an ancestor further up owned by another
+    user is how every `/home/<user>` chain looks.
+    """
+    foreign = _directory_stat(0o755, 4242)
+    trusted = frozenset({0, 1000})
+
+    assert untrusted_launcher_directory(foreign, final=True, trusted_uids=trusted) == "owned by another user"
+    assert untrusted_launcher_directory(foreign, final=False, trusted_uids=trusted) is None
+    assert untrusted_launcher_directory(_directory_stat(0o755, 0), final=True, trusted_uids=trusted) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes; the walk this exercises is POSIX-only")
+def test_a_umask_002_home_registers_its_launcher(tmp_path: Path) -> None:
+    """The reported case, end to end, through the walk itself.
+
+    Reported twice from a normally installed, non-editable installation: every
+    ancestor group-writable, the launcher itself as an installer writes it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
+    launcher.parent.mkdir(parents=True)
+    for directory in (tmp_path / "home", tmp_path / "home" / ".local", launcher.parent):
+        directory.chmod(0o775)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    assert trusted_persistent_executable(launcher, workspace=workspace) == str(launcher)
+    # Untouched: this validates, it does not repair. Smoothing is a separate
+    # call an operator's `setup` makes, and it is the only thing that chmods.
+    assert stat.S_IMODE((tmp_path / "home").stat().st_mode) == 0o775
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes; the walk this exercises is POSIX-only")
+def test_the_launcher_file_itself_may_still_not_be_writable_by_others(tmp_path: Path) -> None:
+    """The ancestors stopped being read; the executable did not.
+
+    It is the object that gets run under the hardware gate, so who may rewrite
+    it is the one permission question still worth refusing on. The refusal
+    carries the mode and the owner it read, because a caller who is told only
+    that the file is untrusted has to go and stat it to learn why.
+
+    Runs as root too: what refuses here is the mode this code reads, not the
+    mode the kernel would enforce against the caller.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o775)
+
+    with pytest.raises(ConfigError) as refused:
+        trusted_persistent_executable(launcher, workspace=workspace)
+
+    assert refused.value.error_type == "mcp_command_untrusted"
+    assert refused.value.details["mode"] == "0775"
+    assert refused.value.details["uid"] == os.geteuid()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
 def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_path: Path) -> None:
     state_dir = tmp_path / "home" / ".local" / "state" / "agentic-hil"
@@ -2445,11 +2678,11 @@ def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_pa
 def test_smoothing_covers_the_launcher_chain_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One validator walks modes, so one chain is smoothed.
 
-    `trusted_persistent_executable` refuses an MCP launcher whose ancestors
-    group or other may write, and it is the last check that reads a POSIX mode
-    at all. Smoothing exists to keep a umask-002 / private-group home from
-    failing it; anything beyond that chain is a chmod with no refusal behind
-    it."""
+    `trusted_persistent_executable` refuses an MCP launcher that group or other
+    may write, and it is the last check that reads a POSIX mode at all.
+    Smoothing exists to keep a launcher an installer wrote under a umask-002 /
+    private-group home from failing it; anything beyond that chain is a chmod
+    with no refusal behind it."""
     launcher = tmp_path / "profile" / ".local" / "bin" / "agentic-hil"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
