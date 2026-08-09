@@ -1560,10 +1560,16 @@ def test_local_source_snapshot_excludes_unrelated_and_secret_files(tmp_path: Pat
         ({"quarantined": True}, False),
         ({"lease_state": "stale"}, False),
         ({"side_effect_status": "partial"}, False),
+        ({"side_effect_status": "unknown"}, False),
         ({"hardware_state": "unknown"}, False),
     ],
 )
 def test_independent_success_predicate(patch: dict[str, object], expected: bool) -> None:
+    # `side_effect_status: committed` because that is what a successful effectful
+    # call actually carries. The base said `none`, a value no production path
+    # emits, so the unpatched case asserted that `overall_success` accepts a
+    # status that can never reach it — and the two statuses it does have to
+    # reject are the ones patched below.
     result = {
         "ok": True,
         "target_ok": True,
@@ -1572,7 +1578,7 @@ def test_independent_success_predicate(patch: dict[str, object], expected: bool)
         "cleanup_required": False,
         "quarantined": False,
         "lease_state": None,
-        "side_effect_status": "none",
+        "side_effect_status": "committed",
         "hardware_state": "not_applicable",
         **patch,
     }

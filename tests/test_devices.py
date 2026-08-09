@@ -691,6 +691,55 @@ def test_a_run_declared_with_bare_resource_names_still_works(tmp_path: Path) -> 
         coordinator.close()
 
 
+# What `bench_run_start` used to run `float()` over before the mutex could look
+# at it. `True` is the one that mattered most: the mutex refuses `bool` on
+# purpose, and `float(True)` is `1.0`, so a wait nobody could have meant became a
+# one-second wait. The rest raised `ValueError`/`TypeError` straight past the
+# `CoordinationError` handler as a traceback.
+WAITS_THE_MUTEX_REFUSES = (True, "fast", "5", [], -1)
+
+
+@pytest.mark.parametrize("wait_s", WAITS_THE_MUTEX_REFUSES, ids=repr)
+def test_a_wait_the_mutex_would_refuse_is_answered_and_never_converted(tmp_path: Path, wait_s: object) -> None:
+    """The frontend hands the mutex the value it was given, not a float of it.
+
+    Called on the method rather than through `service.call`, deliberately: the
+    schema gate covers the MCP surface, and a conversion that is only safe while
+    something upstream is watching is not a contract. Nothing is locked and no
+    run opens, so the refusal costs the bench nothing."""
+    config = four_device_config(tmp_path)
+    service = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = service.bench_run_start({"devices": [{"kind": "uart", "id": "port_a"}], "wait_s": wait_s})
+
+        assert refused["ok"] is False
+        assert refused["error_type"] == "invalid_argument"
+        assert refused["field"] == "wait_s"
+        # A refusal carries the way forward; this one had no catalogue entry.
+        assert refused["remediation"]
+        assert service.coordinator.run_active is False
+        assert service.coordinator.bench.held_resources() == frozenset()
+    finally:
+        service.close()
+
+
+def test_a_wait_the_mutex_reads_as_no_wait_still_opens_the_run(tmp_path: Path) -> None:
+    """The other half: only what the mutex refuses is refused.
+
+    `None` and `False` are its own spelling of "do not wait", and `float(None)`
+    was a `TypeError` where the mutex would have taken it."""
+    config = four_device_config(tmp_path)
+    service = AgenticHILToolService(config, frontend="mcp")
+    try:
+        started = service.bench_run_start({"devices": [{"kind": "uart", "id": "port_a"}], "wait_s": None})
+
+        assert started["ok"] is True
+        assert service.coordinator.run_active is True
+    finally:
+        service.coordinator.end_run()
+        service.close()
+
+
 def test_a_declaration_mixing_devices_and_names_is_refused(tmp_path: Path) -> None:
     """Half a declaration locked and all of it reported as held is worse than no run.
 

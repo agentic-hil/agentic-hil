@@ -1,0 +1,37 @@
+# The demo loop as a test plan: build → flash → reset → assert on serial output.
+# Test plan only. Hardware resources and permissions always come from the
+# discovered external authoritative file or AGENTIC_HIL_CONFIG override, which
+# is where `dut` and `dut_uart` below are declared — see
+# agentic-hil.config.example.yaml.
+#
+# Build the ELF first, then from this directory:
+#   agentic-hil test-reactor --test-config testconfig.yaml
+#
+# The reactor validates every device name, permission and session order before
+# the first hardware action, closes the UART session even if a step fails, and
+# fails the run when `Hello World` does not reach the port in time — with the
+# tail of what the port did say, so a silent board and a wrong banner read
+# differently.
+version: 2
+name: nucleo-f446re-hello-world
+steps:
+  - debugger: dut
+    action: flash
+    image_path: build/Debug/nucleo-f446re_demo.elf
+
+  # Opened before the reset, so the banner the firmware prints at boot is
+  # already being captured when the core starts running.
+  - port_id: dut_uart
+    action: uart_open
+
+  - debugger: dut
+    action: reset
+    mode: run
+
+  - port_id: dut_uart
+    action: uart_expect
+    text: "Hello World"
+    timeout_s: 5
+
+  - port_id: dut_uart
+    action: uart_close

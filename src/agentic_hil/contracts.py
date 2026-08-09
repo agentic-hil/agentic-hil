@@ -7,6 +7,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from agentic_hil.config import format_field_path
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import JsonObject
 
 EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -585,7 +586,14 @@ def validate_tool_arguments(name: str, arguments: JsonObject) -> JsonObject | No
 
 
 def invalid_argument(tool: str, field: str, validator: str, summary: str) -> JsonObject:
-    return {"ok": False, "tool": tool, "error_type": "invalid_argument", "field": field, "validator": validator, "summary": summary}
+    # Every schema refusal on the MCP surface is built here, so this is where the
+    # catalogue's fix is attached — the same one `agentic-hil://reference/errors`
+    # serves and the same one `ConfigError.to_dict` merges in, rather than a
+    # second wording that would drift from it. The scope is the tool rather than
+    # the field: a per-field entry would be a copy of the input schemas that
+    # nothing keeps in step with them, and the bare entry says how to read
+    # `field` and `validator`, which is what the caller is missing.
+    return {"ok": False, "tool": tool, "error_type": "invalid_argument", "field": field, "validator": validator, "summary": summary, **remediation_fields("invalid_argument", tool)}
 
 
 def find_nonfinite(value: Any, parts: list[str] | None = None) -> str | None:
