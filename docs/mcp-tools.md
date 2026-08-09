@@ -39,4 +39,4 @@ Devices are named as `{"kind": "debugger" | "uart" | "can", "id": "<config entry
 
 Every result is structured JSON (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`), and each hardware action is validated against the authoritative configuration, executed with a timeout, and logged to `.agentic-hil/logs/`. Which calls a host should treat as read-only or destructive is published per tool in the MCP `annotations` object — see [Tool Annotations](mcp-hosts.md#tool-annotations).
 
-Agent-facing routing — which tool answers which request, and what to do with a refusal — lives in [AGENTS.md](../AGENTS.md).
+Agent-facing routing — which tool answers which request, and what to do with a refusal — lives in [AGENTS.md](https://github.com/agentic-hil/agentic-hil/blob/master/AGENTS.md).

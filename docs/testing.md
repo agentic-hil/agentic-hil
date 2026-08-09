@@ -44,7 +44,7 @@ steps:
 agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 ```
 
-See [`examples/testconfig.example.yaml`](../examples/testconfig.example.yaml) for the expanded form.
+See [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml) for the expanded form.
 
 ## pytest Plugin
 

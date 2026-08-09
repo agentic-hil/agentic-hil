@@ -1,9 +1,9 @@
 # Installing and Running Agentic HIL
 
 Everything installs user-local, **no admin rights required, ever** — whether an
-agent does it or you do. [AI_AGENT_QUICKSTART.md](../AI_AGENT_QUICKSTART.md) is
+agent does it or you do. [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md) is
 the agent's copy of this and carries the complete fallback chain;
-[TROUBLESHOOTING.md](../TROUBLESHOOTING.md) covers what to do when something
+[TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) covers what to do when something
 does not start.
 
 ## The two commands
@@ -75,7 +75,7 @@ Adding one of them to an installation that already exists means rewriting that
 environment, so stop the agent host first — it runs the MCP server out of that
 environment — and name every extra you want on the command line, because `uv`
 records the requirement literally and drops the extras it is not told about.
-[TROUBLESHOOTING.md](../TROUBLESHOOTING.md) has the sequence and the way to add
+[TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) has the sequence and the way to add
 an extra without stopping the host.
 
 ## Upgrading
