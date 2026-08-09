@@ -35,6 +35,8 @@ from agentic_hil.types import (
     AgenticHILConfig,
     ArtifactsConfig,
     CanBusConfig,
+    CanFilterConfig,
+    CanShareConfig,
     ComPortConfig,
     DebuggerConfig,
     DebuggerPermissions,
@@ -2652,6 +2654,65 @@ def com_port_config(name: str, value: Any) -> ComPortConfig:
     )
 
 
+def can_filter_config(bus: str, share: str, index: int, value: Any) -> CanFilterConfig:
+    raw = mapping(value, f"can_buses.{bus}.shares.{share}.filter[{index}]")
+    identifier = int(raw.get("id", 0))
+    mask = int(raw.get("mask", 0x7FF))
+    if identifier < 0 or mask < 0:
+        raise ConfigError(
+            "config_invalid",
+            "A CAN share filter identifier and mask must not be negative.",
+            {"field": f"can_buses.{bus}.shares.{share}.filter[{index}]", "id": identifier, "mask": mask},
+        )
+    return CanFilterConfig(identifier=identifier, mask=mask, extended=bool(raw.get("extended", False)))
+
+
+# Names a share may not carry. `configwrite.permission_surface` reads a mapping
+# called `permissions` as a block of grants at any depth below an entry id, and
+# `description_view` drops one; a share named `permissions` would have its own
+# view read as a permission block and dropped from the description. The
+# collision is refused where the name is read rather than repaired in two
+# walkers that would then have to agree with each other.
+RESERVED_SHARE_NAMES = ("permissions", "provenance")
+# And the same argument for that walk's other name-driven arm. It reads any key
+# beginning with `allow_` as a grant, and suppresses that reading only one level
+# below a named section, where the schema says the keys are operator-chosen entry
+# ids. A share name is operator-chosen too, but it sits two levels down — so
+# `shares.allow_writes` would be collected as a grant whose value is the whole
+# share mapping, and the ratchet would be comparing a subtree against a boolean.
+# Teaching the walker about a third id level would be a second place that has to
+# know the schema; refusing the name is one.
+RESERVED_SHARE_NAME_PREFIX = "allow_"
+
+
+def can_share_config(bus: str, name: str, value: Any) -> CanShareConfig:
+    field_path = f"can_buses.{bus}.shares.{name}"
+    if name in RESERVED_SHARE_NAMES or name.startswith(RESERVED_SHARE_NAME_PREFIX):
+        raise ConfigError(
+            "config_invalid",
+            "A CAN share may not be named after a configuration block or a permission flag.",
+            {
+                "field": field_path,
+                "value": name,
+                "reserved_names": list(RESERVED_SHARE_NAMES),
+                "reserved_name_prefix": RESERVED_SHARE_NAME_PREFIX,
+            },
+        )
+    raw = mapping(value, field_path)
+    filters_raw = raw.get("filter", [])
+    if not isinstance(filters_raw, list):
+        raise ConfigError("config_invalid", "A CAN share filter must be a list of acceptance terms.", {"field": f"{field_path}.filter"})
+    max_frames = int(raw.get("max_frames", 1024))
+    if max_frames < 1:
+        raise ConfigError("config_invalid", "A CAN share frame budget must be at least one frame.", {"field": f"{field_path}.max_frames", "value": max_frames})
+    return CanShareConfig(
+        filters=tuple(can_filter_config(bus, name, index, item) for index, item in enumerate(filters_raw)),
+        max_frames=max_frames,
+        requires_listen_only=bool(raw.get("requires_listen_only", False)),
+        permissions=io_permissions(mapping(raw.get("permissions"), f"{field_path}.permissions")),
+    )
+
+
 def can_bus_config(name: str, value: Any) -> CanBusConfig:
     raw = mapping(value, f"can_buses.{name}")
     adapter = str(raw.get("adapter", "peak"))
@@ -2661,6 +2722,14 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
             "Unsupported can_buses adapter.",
             {"field": f"can_buses.{name}.adapter", "value": adapter, "allowed_values": ["peak", "socketcan", "process"]},
         )
+    enforcement = str(raw.get("listen_only_enforcement", "controller"))
+    if enforcement not in {"controller", "service"}:
+        raise ConfigError(
+            "config_invalid",
+            "Unsupported can_buses listen_only_enforcement.",
+            {"field": f"can_buses.{name}.listen_only_enforcement", "value": enforcement, "allowed_values": ["controller", "service"]},
+        )
+    shares = {share: can_share_config(name, share, entry) for share, entry in mapping(raw.get("shares"), f"can_buses.{name}.shares").items()}
     fd = bool(raw.get("fd", False))
     return CanBusConfig(
         adapter=adapter,  # type: ignore[arg-type]
@@ -2679,6 +2748,8 @@ def can_bus_config(name: str, value: Any) -> CanBusConfig:
         max_frame_data_bytes=int(raw.get("max_frame_data_bytes", 64 if fd else 8)),
         resource_id=optional_string(raw.get("resource_id")),
         permissions=io_permissions(mapping(raw.get("permissions"), f"can_buses.{name}.permissions")),
+        listen_only_enforcement=enforcement,  # type: ignore[arg-type]
+        shares=shares,
     )
 
 

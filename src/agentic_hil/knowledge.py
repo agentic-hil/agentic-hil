@@ -1996,25 +1996,45 @@ def _section_entry_schema(schema: JsonObject, rule: ConfigKeyRule) -> JsonObject
     return section
 
 
+def _writes_a_scalar(schema: JsonObject, node: object) -> bool:
+    """Whether this schema node holds a value one ``project_config_set`` can carry.
+
+    An object or an array is a subtree, and a subtree set through this surface is
+    content the agent authored rather than a value an operator chose — which is
+    the one thing the key model exists to prevent. The rules below used to keep
+    that promise by hand, listing ``fields`` explicitly wherever a section had
+    grown a list; a section that grew one later simply became settable, silently.
+    Reading it off the schema is the same promise made structurally."""
+    declared = _dereference(schema, node).get("type")
+    kinds = set(declared if isinstance(declared, list) else [declared])
+    return not kinds & {"object", "array"}
+
+
 @cache
 def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
     """The field names this rule covers, read out of the shipped schema.
 
     An explicit subset is returned as written. A rule that names none covers
     everything the schema declares for that node except ``permissions`` (which
-    belongs to the other right) and except keys the schema marks deprecated —
+    belongs to the other right), except keys the schema marks deprecated —
     ``allow_probe`` and ``allow_read`` exist only for version 1 files and are
-    refused outright in a version 2 one."""
+    refused outright in a version 2 one — and except values that are not
+    scalars, because this surface sets one value at a time and a subtree is not
+    one. ``can_buses.<name>.shares`` is the standing example: participant views
+    are an operator's structure, edited in the file, not a key an agent sets."""
     if rule.fields:
         return rule.fields
-    properties = _section_entry_schema(config_schema_document(), rule).get("properties")
+    schema = config_schema_document()
+    properties = _section_entry_schema(schema, rule).get("properties")
     if not isinstance(properties, dict):
         return ()
     return tuple(
         sorted(
             name
             for name, node in properties.items()
-            if name != "permissions" and not (isinstance(node, dict) and node.get("deprecated") is True)
+            if name != "permissions"
+            and not (isinstance(node, dict) and node.get("deprecated") is True)
+            and _writes_a_scalar(schema, node)
         )
     )
 

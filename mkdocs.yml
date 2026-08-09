@@ -5,8 +5,29 @@ repo_url: https://github.com/agentic-hil/agentic-hil
 repo_name: agentic-hil/agentic-hil
 edit_uri: edit/master/docs/
 
-# No explicit nav: every page under docs/ is picked up automatically, so the
-# documentation reorganisation can move pages without touching this file.
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Configuration: configuration.md
+  - MCP hosts: mcp-hosts.md
+  - MCP tools: mcp-tools.md
+  - Testing: testing.md
+  - Test plan contract: test-plan-contract.md
+  - Safety model: safety-model.md
+  - Security design: security-design.md
+  - Designs:
+      - CAN as a service: can-service-design.md
+      - GitHub Action: github-action-design.md
+  - Project:
+      - Release strategy: release-strategy.md
+      - Repository security: repository-security.md
+
+validation:
+  links:
+    unrecognized_links: warn
+    anchors: warn
+strict: true
+
 theme:
   name: material
   palette:
@@ -23,6 +44,9 @@ theme:
   features:
     - navigation.sections
     - navigation.top
+    - navigation.footer
+    - content.action.edit
+    - content.action.view
     - content.code.copy
     - search.suggest
 
