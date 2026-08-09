@@ -2674,15 +2674,29 @@ def can_filter_config(bus: str, share: str, index: int, value: Any) -> CanFilter
 # collision is refused where the name is read rather than repaired in two
 # walkers that would then have to agree with each other.
 RESERVED_SHARE_NAMES = ("permissions", "provenance")
+# And the same argument for that walk's other name-driven arm. It reads any key
+# beginning with `allow_` as a grant, and suppresses that reading only one level
+# below a named section, where the schema says the keys are operator-chosen entry
+# ids. A share name is operator-chosen too, but it sits two levels down — so
+# `shares.allow_writes` would be collected as a grant whose value is the whole
+# share mapping, and the ratchet would be comparing a subtree against a boolean.
+# Teaching the walker about a third id level would be a second place that has to
+# know the schema; refusing the name is one.
+RESERVED_SHARE_NAME_PREFIX = "allow_"
 
 
 def can_share_config(bus: str, name: str, value: Any) -> CanShareConfig:
     field_path = f"can_buses.{bus}.shares.{name}"
-    if name in RESERVED_SHARE_NAMES:
+    if name in RESERVED_SHARE_NAMES or name.startswith(RESERVED_SHARE_NAME_PREFIX):
         raise ConfigError(
             "config_invalid",
-            "A CAN share may not be named after a configuration block.",
-            {"field": field_path, "value": name, "reserved_names": list(RESERVED_SHARE_NAMES)},
+            "A CAN share may not be named after a configuration block or a permission flag.",
+            {
+                "field": field_path,
+                "value": name,
+                "reserved_names": list(RESERVED_SHARE_NAMES),
+                "reserved_name_prefix": RESERVED_SHARE_NAME_PREFIX,
+            },
         )
     raw = mapping(value, field_path)
     filters_raw = raw.get("filter", [])

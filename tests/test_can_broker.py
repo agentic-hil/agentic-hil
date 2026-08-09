@@ -112,14 +112,47 @@ def test_single_owner_bus_has_no_participants_and_starts_no_broker(tmp_path: Pat
     assert not descriptor_path(bus_lock_key(config, "bench"), Path(os.path.expanduser("~")) / ".agentic-hil" / "device-locks").exists()
 
 
-def test_a_share_may_not_be_named_after_a_configuration_block(tmp_path: Path) -> None:
-    """`configwrite` reads a mapping called `permissions` as grants at any depth."""
+@pytest.mark.parametrize("share_name", ["permissions", "provenance", "allow_write", "allow_anything"])
+def test_a_share_may_not_be_named_after_a_configuration_block_or_a_grant(tmp_path: Path, share_name: str) -> None:
+    """`configwrite.permission_surface` is name-driven, and both its arms collide here.
+
+    It reads a mapping called `permissions` as grants at any depth, and any key
+    beginning with `allow_` as a grant unless it is one level below a named
+    section — which a share name is not. Either spelling would have the walker
+    reading a participant view as a permission."""
     from agentic_hil.config import ConfigError
 
-    yaml_text = SINGLE_OWNER_BUS_YAML + "    shares:\n      permissions:\n        max_frames: 4\n"
+    yaml_text = SINGLE_OWNER_BUS_YAML + f"    shares:\n      {share_name}:\n        max_frames: 4\n"
     with pytest.raises(ConfigError) as refusal:
         load_config(str(write_config(tmp_path, can_buses_yaml=yaml_text)))
     assert refusal.value.error_type == "config_invalid"
+
+
+def test_a_participant_grant_is_governed_by_the_permissions_right(tmp_path: Path) -> None:
+    """A share's `permissions:` are grants, and the ratchet has to see them as grants.
+
+    A participant that may transmit is a bus that may be written, whatever it is
+    called. If the permission walk missed a share's block, a run could be given
+    the medium by a description-level edit — the exact thing the two-right split
+    exists to stop."""
+    from agentic_hil.configwrite import permission_surface
+
+    document = {
+        "can_buses": {
+            "bench": {
+                "adapter": "peak",
+                "permissions": {"allow_read": True, "allow_write": False},
+                "shares": {"alpha": {"max_frames": 16, "permissions": {"allow_read": True, "allow_write": True}}},
+            }
+        }
+    }
+    surface = permission_surface(document)
+
+    assert surface["can_buses.bench.shares.alpha.permissions.allow_write"] is True
+    assert surface["can_buses.bench.shares.alpha.permissions.allow_read"] is True
+    # The bus's own block is still its own, so a participant grant cannot be
+    # mistaken for the bus being writable or the other way round.
+    assert surface["can_buses.bench.permissions.allow_write"] is False
 
 
 # ---------------------------------------------------------------------------
