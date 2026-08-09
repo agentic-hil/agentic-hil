@@ -1310,29 +1310,72 @@ steps:
 
 
 def test_every_device_kind_answers_for_its_own_actions() -> None:
-    # The one authority: a step action belongs to the class that serves it, and
-    # the schema map, the routing keys and the tools are all read off those
-    # classes. A kind naming a tool its device does not own, or a schema entry
-    # the bundled schema does not define, would be a second answer.
+    # The one authority: a step action exists because a method declared it, and
+    # the schema map, the routing keys and the tools are all read back off those
+    # declarations. A kind naming a tool its device does not own, or a schema
+    # entry the bundled schema does not define, would be a second answer — and
+    # so would an action nothing implements.
     from importlib import resources
 
-    from agentic_hil.test_reactor import ACTION_SCHEMAS, ROUTE_FIELDS, STEP_DEVICE_CLASSES, step_device_class
+    from agentic_hil.test_reactor import (
+        ACTION_SCHEMAS,
+        ROUTE_FIELDS,
+        STEP_ACTION_DECLARATIONS,
+        STEP_DEVICE_CLASSES,
+        step_device_classes,
+    )
 
     schema = json.loads(resources.files("agentic_hil").joinpath("schemas/testconfig.schema.json").read_text(encoding="utf-8"))
-    claimed: set[str] = set()
+    claimed: dict[str, object] = {}
     for device_class in STEP_DEVICE_CLASSES:
         assert device_class.route_field in ROUTE_FIELDS
-        for action, schema_key in device_class.step_actions.items():
-            assert action not in claimed, f"{action} is claimed by two device kinds"
-            claimed.add(action)
-            assert schema_key in schema["$defs"], f"{action} names a schema $def that does not exist"
-            assert step_device_class(action) is device_class
-        for action, tool in device_class.step_tools.items():
-            assert action in device_class.step_actions
-            assert tool in device_class.device_class.tools, f"{tool} is not a tool {device_class.device_class.__name__} owns"
+        assert device_class.step_actions == {name: spec.schema for name, spec in device_class.step_action_specs.items()}
+        for action, spec in device_class.step_action_specs.items():
+            # An action claimed by two kinds is only ever one declaration two
+            # kinds inherited — `delay`, declared once on the base. Two kinds
+            # declaring the same name separately is the drift this forbids.
+            assert claimed.get(action, spec) == spec, f"{action} is declared twice, by two different methods"
+            claimed[action] = spec
+            assert spec.schema in schema["$defs"], f"{action} names a schema $def that does not exist"
+            assert device_class in step_device_classes(action)
+            # The declaration is on the method that runs it, and nowhere else.
+            method = getattr(device_class, spec.method)
+            assert spec in getattr(method, STEP_ACTION_DECLARATIONS, ()), f"{action} names a method that does not declare it"
+            if spec.tool is not None:
+                assert spec.tool in device_class.device_class.tools, f"{spec.tool} is not a tool {device_class.device_class.__name__} owns"
 
-    assert claimed == set(ACTION_SCHEMAS)
-    assert {"can_open", "can_close", "can_send", "can_read"} <= claimed
+    assert set(claimed) == set(ACTION_SCHEMAS)
+    assert {"can_open", "can_close", "can_send", "can_read"} <= set(claimed)
+    assert {"uart_write", "uart_read", "delay"} <= set(claimed)
+    # Every step shape the schema offers is served, and every action a kind
+    # serves has a shape. A `$def` nobody dispatches is a step a plan can be
+    # written against and no device will run.
+    offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["properties"]["steps"]["items"]["oneOf"]}
+    assert offered == set(ACTION_SCHEMAS.values())
+
+
+def test_the_schema_is_exported_without_building_a_single_device() -> None:
+    # The property declaration-on-the-method exists to keep: the plan schema is
+    # read off the classes, so `agentic-hil` can answer what a plan may contain
+    # on a machine with no bench attached and no config loaded at all.
+    from agentic_hil.test_reactor import ACTION_SCHEMAS, STEP_DEVICE_CLASSES
+
+    for device_class in STEP_DEVICE_CLASSES:
+        assert device_class.step_action_specs, f"{device_class.__name__} declares no actions"
+        for spec in device_class.step_action_specs.values():
+            # Reading the declaration touches the class, never an instance.
+            assert ACTION_SCHEMAS[spec.name] == spec.schema
+
+
+def test_delay_is_declared_once_and_served_by_every_device_kind() -> None:
+    from agentic_hil.test_reactor import STEP_DEVICE_CLASSES, StepDevice, step_device_classes
+
+    assert "delay" in StepDevice.step_action_specs
+    # One declaration, three claimants: the kinds inherit it rather than repeat it.
+    assert set(step_device_classes("delay")) == set(STEP_DEVICE_CLASSES)
+    # The very same declaration object reaches all three, not three copies of it.
+    assert all(device_class.step_action_specs["delay"] is StepDevice.step_action_specs["delay"] for device_class in STEP_DEVICE_CLASSES)
+    assert StepDevice.step_action_specs["delay"].touches_device is False
 
 
 def test_reset_and_uart_expect_reproduce_the_demo_flow(tmp_path: Path) -> None:

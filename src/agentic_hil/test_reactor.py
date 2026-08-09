@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any, ClassVar
@@ -41,6 +42,10 @@ from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
+# The annotation the plan schema marks a newer format's additions with. A plan
+# is held to what its own `version:` contains, and the schema is what says which
+# version each action and each key arrived in.
+PLAN_FEATURE_VERSION_KEY = "x-since-version"
 # What a `uart_expect` that timed out answers with: the last of what the line
 # actually said. Capped, because a chatty port must not turn one red step into an
 # unbounded result — but never zero, because a red step that cannot say what the
@@ -65,6 +70,136 @@ UART_EXPECT_SUMMARIES: dict[str, tuple[str, str]] = {
         "Expected pattern did not match the COM port output before this step's timeout.",
     ),
 }
+# What a `comparator:` says about itself, per kind of claim: (met, unmet). Same
+# two-sentence shape as the v2 table above and for the same reason — a plan that
+# waited for an exact value and a plan that waited for a value inside a range
+# fail for different reasons, and one sentence for both would send an operator
+# looking for the wrong thing.
+COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
+    "equals": (
+        "The COM port output equalled the expected value.",
+        "The COM port output never equalled the expected value before this step's timeout.",
+    ),
+    "pattern": (
+        "Expected pattern matched the COM port output.",
+        "Expected pattern did not match the COM port output before this step's timeout.",
+    ),
+    "range": (
+        "A value captured from the COM port output fell inside the expected range.",
+        "No value captured from the COM port output fell inside the expected range before this step's timeout.",
+    ),
+}
+# The longest a `delay` step may wait, in milliseconds. Ten minutes: a plan that
+# must wait longer than that is waiting for something it should be expecting
+# instead, and an unbounded wait in a plan is how a bench ends up held by a run
+# nobody is watching.
+DELAY_MAX_MS = 600_000
+
+
+def decoded_equals(decoded: str, expected: str) -> bool:
+    """True when what the line said equals `expected` — not merely contains it.
+
+    A serial line has no end, so "the whole thing" is read two ways and either
+    counts: the whole of what has been received so far, or any one complete line
+    of it, once surrounding whitespace is removed. The first is what a board that
+    answers once and stops looks like; the second is what a board that prints its
+    banner in a loop looks like, where the whole buffer is never one value."""
+    if decoded.strip() == expected:
+        return True
+    lines = decoded.splitlines()
+    if lines and not decoded.endswith(("\n", "\r")):
+        # The last fragment has no terminator yet, so it is not a line — it is
+        # the beginning of one, and matching it would be matching a prefix.
+        lines = lines[:-1]
+    return any(line.strip() == expected for line in lines)
+
+
+class StepComparator:
+    """What a feedback step claims about what it received.
+
+    An object in the plan (`comparator: {equals: ...}`) rather than a bare value,
+    so the preprocessing a bench eventually needs — scaling a raw count into a
+    unit, converting a base — can be added as further keys without invalidating
+    plans written today. None of that is implemented here; the shape is what
+    makes it addable.
+
+    Three claims, all judged against everything read so far rather than against
+    the chunk that happened to arrive last: `equals` is an exact value, `pattern`
+    is a Python regular expression under `re.search`, and `pattern` with `range`
+    is a numeric value read out of that pattern's one capture group and held to
+    inclusive bounds."""
+
+    def __init__(self, raw: JsonObject):
+        self.raw = dict(raw)
+        self.equals: str | None = None if raw.get("equals") is None else str(raw["equals"])
+        self.pattern: str | None = None if raw.get("pattern") is None else str(raw["pattern"])
+        bounds = raw.get("range")
+        self.bounds: tuple[float, float] | None = None if bounds is None else (float(bounds["min"]), float(bounds["max"]))
+        # Compiled once per step, not per read. The pattern already compiled
+        # cleanly at preflight, so this cannot raise.
+        self._finditer = re.compile(self.pattern).finditer if self.pattern is not None else None
+        # The last value the pattern captured and could read as a number, kept so
+        # a step that timed out can say what it did see against what it wanted.
+        self.captured_text: str | None = None
+        self.captured_value: float | None = None
+
+    @property
+    def claim(self) -> str:
+        if self.bounds is not None:
+            return "range"
+        return "equals" if self.equals is not None else "pattern"
+
+    @property
+    def written(self) -> str:
+        """The plan's own string, which sizes the read window."""
+        return self.equals or self.pattern or ""
+
+    def matches(self, decoded: str) -> bool:
+        if self.equals is not None:
+            return decoded_equals(decoded, self.equals)
+        if self._finditer is None:
+            return False
+        if self.bounds is None:
+            return next(self._finditer(decoded), None) is not None
+        low, high = self.bounds
+        matched = False
+        # Every match, not the first: a line that reported an out-of-range value
+        # and then an in-range one is a bench that settled, and searching only
+        # the earliest occurrence would keep answering with the older reading.
+        for match in self._finditer(decoded):
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            self.captured_text, self.captured_value = match.group(1), value
+            matched = matched or low <= value <= high
+        return matched
+
+    def report(self) -> JsonObject:
+        """What the result says about this comparator, met or unmet."""
+        if self.bounds is None:
+            return {"comparator": self.raw}
+        return {"comparator": self.raw, "captured_text": self.captured_text, "captured_value": self.captured_value}
+
+
+@dataclass(frozen=True)
+class UartReadOutcome:
+    """What one bounded read of a serial line came back with."""
+
+    matched: bool
+    reads: int
+    bytes_received: int
+    tail: bytes
+    encoding: str
+    # The read's own refusal, when `com_read` itself failed. A closed session, a
+    # denied permission or a broken audit latch is not an expectation that went
+    # unmet, and answering it as a timeout would send an operator to look at
+    # firmware that never ran.
+    read_failure: JsonObject | None = None
+
+    @property
+    def tail_result(self) -> JsonObject:
+        return {"received_tail": data_result(self.tail, self.encoding), "received_tail_truncated": self.bytes_received > len(self.tail)}
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -127,12 +262,16 @@ def merge_result_status(result: JsonObject, *sources: JsonObject) -> JsonObject:
 class TestStep:
     action: str
     arguments: JsonObject
-    # Routing keys, straight from the authoritative config's own names: a
+    # `device` is format v3's one route key: every step names the configured
+    # entry it drives, and the config knows which class that name belongs to.
+    device: str | None = None
+    # The kind-specific keys v2 used, which stay valid as readable aliases: a
     # debugger action names a `debuggers` entry, a UART action names a
     # `com_ports` entry, a CAN action names a `can_buses` entry. Each is the
     # `route_field` of the device class that serves the action, so this list and
     # ROUTE_FIELDS cannot disagree. `debugger` may be None only while the project
-    # configures exactly one probe.
+    # configures exactly one probe. A step names its device once — an alias
+    # beside `device:` is refused at preflight rather than silently preferred.
     debugger: str | None = None
     port_id: str | None = None
     bus_id: str | None = None
@@ -140,6 +279,11 @@ class TestStep:
     @property
     def route(self) -> str:
         return next((named for field_name in ROUTE_FIELDS if (named := getattr(self, field_name))), "-")
+
+    @property
+    def route_keys(self) -> list[str]:
+        """Every routing key this step actually set."""
+        return [field_name for field_name in ROUTE_FIELDS if getattr(self, field_name) is not None]
 
 
 @dataclass
@@ -212,6 +356,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     reject_nonfinite_numbers(raw, "test_config_invalid", str(path))
     reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
+    reject_features_newer_than_plan_version(raw, str(path))
     steps = [
         TestStep(
             action=str(step["action"]),
@@ -226,10 +371,12 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
 def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> None:
     """Refuse a version 1 plan by name.
 
-    Version 1 steps addressed a `device:` that the config model no longer has.
-    Leaving the plan at version 1 would have made every old plan invalid with
-    only a bare const mismatch to go on, so the break gets a version boundary
-    and a message that says which key replaced which."""
+    Version 1 steps addressed a `device:` naming a single modelled unit the
+    config no longer has — not the `device:` of version 3, which names one entry
+    of the `debuggers`, `com_ports` or `can_buses` sections. Leaving the plan at
+    version 1 would have made every old plan invalid with only a bare const
+    mismatch to go on, so the break gets a version boundary and a message that
+    says which key replaced which."""
     if raw.get("version") != 1:
         return
     raise ConfigError(
@@ -247,8 +394,59 @@ def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> 
     )
 
 
+def resolve_schema_node(node: Any, schema: JsonObject) -> JsonObject:
+    """One schema node with a local `$ref` followed, so a marker on the shared
+    definition is read wherever that definition is used."""
+    if not isinstance(node, dict):
+        return {}
+    reference = node.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        return {**schema["$defs"].get(reference.rsplit("/", 1)[-1], {}), **node}
+    return node
+
+
+def reject_features_newer_than_plan_version(raw: JsonObject, path: str | None = None) -> None:
+    """Refuse a plan that uses a step format its own `version` predates.
+
+    The version a plan declares is what tells another install whether it can run
+    it, so a plan saying `version: 2` while using a v3 action or a v3 key would
+    be a plan that works here and fails there for no stated reason. Which things
+    are newer is read off the bundled schema's own `x-since-version` markers
+    rather than from a list kept here, so the schema stays the single authority
+    on what the format contains and when it arrived."""
+    version = raw.get("version")
+    if not isinstance(version, int):
+        return
+    schema = test_config_schema()
+    for index, step in enumerate(raw["steps"]):
+        definition = schema["$defs"][ACTION_SCHEMAS[step["action"]]]
+        introduced = definition.get(PLAN_FEATURE_VERSION_KEY)
+        if isinstance(introduced, int) and version < introduced:
+            raise_outdated_plan_version(path, f"steps[{index}].action", step["action"], version, introduced)
+        for key in step:
+            property_schema = resolve_schema_node(definition.get("properties", {}).get(key), schema)
+            introduced = property_schema.get(PLAN_FEATURE_VERSION_KEY)
+            if isinstance(introduced, int) and version < introduced:
+                raise_outdated_plan_version(path, f"steps[{index}].{key}", key, version, introduced)
+
+
+def raise_outdated_plan_version(path: str | None, field_name: str, value: str, version: int, introduced: int) -> None:
+    raise ConfigError(
+        "test_config_invalid",
+        f"This test plan says `version: {version}`, but this step uses `{value}`, which test plan format version {introduced} introduced.",
+        {
+            "path": path,
+            "field": field_name,
+            "value": value,
+            "plan_version": version,
+            "requires_plan_version": introduced,
+            "migration": f"Set `version: {introduced}` on this plan, or write the step the way version {version} spells it.",
+        },
+    )
+
+
 def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> None:
-    schema = json.loads(resources.files("agentic_hil").joinpath(TEST_CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8"))
+    schema = test_config_schema()
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as error:
@@ -333,6 +531,119 @@ def format_test_config_field(parts: list[str]) -> str:
     return field or "$"
 
 
+@dataclass(frozen=True)
+class StepActionSpec:
+    """One step action, exactly as the method that serves it declared it.
+
+    This is the whole of what the reactor knows about an action: which schema
+    validates it, which MCP tool it calls, what the schema documents as defaults,
+    whether the step's own arguments are that tool's arguments, and whether it
+    drives the device at all. Nothing outside a `@step_action` decoration adds to
+    this, which is what keeps the declaration the single authority the hierarchy
+    already demanded of the hand-written tables it replaces."""
+
+    name: str
+    # The `$defs` entry in the bundled plan schema that validates this step.
+    schema: str
+    # The attribute on the device class that implements it.
+    method: str
+    # The MCP tool the implementation calls, or None when it calls several or
+    # none. Held to the tool vocabulary of the class's own `device_class`.
+    tool: str | None = None
+    # Arguments the tool call takes when the plan leaves them out. The schema
+    # documents these as defaults, and JSON Schema defaults do not apply
+    # themselves.
+    defaults: JsonObject = field(default_factory=dict)
+    # "open" / "close" for the two ends of a session, read by SessionDevice;
+    # empty for an action that is neither.
+    role: str = ""
+    # True when the step's own arguments are the tool's arguments, so preflight
+    # can put them through that tool's MCP contract. False for an action that
+    # reads its arguments itself — a deadline and an expectation are not
+    # `com_read` arguments — and builds the call it makes.
+    forwards_arguments: bool = True
+    # False for an action that drives no hardware: it still routes to a device
+    # and still appears in the run's steps, but nothing about sessions,
+    # permissions or plan state applies to it.
+    touches_device: bool = True
+
+
+@dataclass(frozen=True)
+class BoundStepAction:
+    """One device's declared action, bound to the object that will run it."""
+
+    spec: StepActionSpec
+    call: Callable[[TestStep], JsonObject]
+
+
+STEP_ACTION_DECLARATIONS = "agentic_hil_step_actions"
+
+
+def step_action(
+    name: str,
+    *,
+    schema: str,
+    tool: str | None = None,
+    defaults: JsonObject | None = None,
+    role: str = "",
+    forwards_arguments: bool = True,
+    touches_device: bool = True,
+) -> Callable[[Any], Any]:
+    """Declare that this method serves a step action.
+
+    Declaration-on-the-method rather than a dictionary built in `__init__`: the
+    plan schema is exported by reading these off the classes, which must keep
+    working without constructing a device and therefore without a bench. Applied
+    more than once to one method, it declares that method under each name — which
+    is how an older action name stays valid beside a newer one."""
+
+    def declare(method: Any) -> Any:
+        spec = StepActionSpec(
+            name=name,
+            schema=schema,
+            method=method.__name__,
+            tool=tool,
+            defaults=dict(defaults or {}),
+            role=role,
+            forwards_arguments=forwards_arguments,
+            touches_device=touches_device,
+        )
+        setattr(method, STEP_ACTION_DECLARATIONS, (*getattr(method, STEP_ACTION_DECLARATIONS, ()), spec))
+        return method
+
+    return declare
+
+
+def collect_step_actions(device_class: type) -> dict[str, StepActionSpec]:
+    """Every action a device class serves, its own and its ancestors'.
+
+    Walked base-first, so a subclass redeclaring an inherited name replaces it
+    rather than being shadowed by it, and an action declared once on the base —
+    `delay` — is served by every kind without any of them repeating it."""
+    collected: dict[str, StepActionSpec] = {}
+    for ancestor in reversed(device_class.__mro__):
+        for attribute in vars(ancestor).values():
+            for spec in getattr(attribute, STEP_ACTION_DECLARATIONS, ()):
+                collected[spec.name] = spec
+    return collected
+
+
+@lru_cache(maxsize=1)
+def test_config_schema() -> JsonObject:
+    """The bundled plan schema, read once. Callers must not mutate it."""
+    return json.loads(resources.files("agentic_hil").joinpath(TEST_CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8"))
+
+
+def action_schema_errors(schema_name: str, document: JsonObject) -> list[Any]:
+    """A reconstructed step, held to its own action's schema entry."""
+    schema = test_config_schema()
+    definition = schema["$defs"].get(schema_name)
+    if definition is None:
+        return []
+    validator = Draft202012Validator({**definition, "$defs": schema["$defs"]})
+    return sorted(validator.iter_errors(document), key=lambda item: list(item.absolute_path))
+
+
 class StepDevice:
     """One configured device, as a test plan drives it.
 
@@ -359,30 +670,37 @@ class StepDevice:
     # The identity/mutex class in `devices` this kind drives.
     device_class: ClassVar[type[Device]] = Device
     # The plan key naming this kind's config entry, the result key an unknown
-    # name is answered with, and the sentence that answers it.
+    # name is answered with, and the sentence that answers it. `device:` is the
+    # v3 spelling of the same thing and is read for every kind.
     route_field: ClassVar[str] = ""
     configured_field: ClassVar[str] = ""
     unknown_name_summary: ClassVar[str] = ""
-    # Every step action this kind serves, and the schema `$defs` entry each one
-    # validates against. Merged into ACTION_SCHEMAS; nothing else lists actions.
+    # Every action this kind serves, collected from the `@step_action`
+    # decorations on the methods that implement them. Derived, never written:
+    # `step_actions` is the action → schema projection ACTION_SCHEMAS is built
+    # from, so neither can disagree with the method that actually runs.
+    step_action_specs: ClassVar[dict[str, StepActionSpec]] = {}
     step_actions: ClassVar[dict[str, str]] = {}
-    # The MCP tool each action calls. The same names `device_class` owns — a test
-    # holds the two to each other, so this cannot drift into a private surface.
-    step_tools: ClassVar[dict[str, str]] = {}
-    # Arguments a step's tool call takes when the plan leaves them out. The
-    # reactor schema documents these as defaults, and JSON Schema defaults do not
-    # apply themselves.
-    step_defaults: ClassVar[dict[str, JsonObject]] = {}
     # Where this kind falls when a run closes what it left open. Debug sessions
     # close before serial lines and CAN buses: a still-attached debugger can keep
     # writing to a line or a bus this plan is about to close.
     cleanup_order: ClassVar[int] = 1
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.step_action_specs = collect_step_actions(cls)
+        cls.step_actions = {name: spec.schema for name, spec in cls.step_action_specs.items()}
 
     def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
         self.id = config_id
         self.device = device
         self.service = service
         self.cleanup_interrupts: list[BaseException] = []
+        # This device's actions, bound: the string a plan writes, the schema that
+        # validates it and the method that runs it, in one place, built once.
+        self.actions: dict[str, BoundStepAction] = {
+            name: BoundStepAction(spec=spec, call=getattr(self, spec.method)) for name, spec in type(self).step_action_specs.items()
+        }
 
     # --- naming: which config entry a step drives ------------------------
 
@@ -398,7 +716,11 @@ class StepDevice:
 
     @classmethod
     def step_config_id(cls, config: AgenticHILConfig, step: TestStep) -> str | None:
-        return getattr(step, cls.route_field)
+        """The config entry this step names, by this kind's own key or by the
+        universal `device:`. Both spellings mean the same entry, and a step that
+        writes both is refused before this is asked."""
+        named = getattr(step, cls.route_field)
+        return step.device if named is None else named
 
     @classmethod
     def service_for(cls, reactor: TestReactor, config_id: str) -> AgenticHILToolService:
@@ -446,17 +768,24 @@ class StepDevice:
         """The plan-supplied tool calls a step will make, as (tool, arguments),
         so preflight can put them through the exact MCP contract validators the
         dispatcher enforces — a step this reactor's schema accepted but the tool
-        contract rejects then fails before any backend builds hardware state."""
-        tool = cls.step_tools.get(step.action)
+        contract rejects then fails before any backend builds hardware state.
+
+        Read off the declaration: an action that forwards the step's own
+        arguments is checked here, and one that reads them itself is not, because
+        what it hands the tool is not what the plan wrote."""
+        spec = cls.step_action_specs.get(step.action)
         name = cls.step_config_id(config, step)
-        return [] if tool is None or name is None else [(tool, cls.call_arguments(name, step))]
+        if spec is None or spec.tool is None or not spec.forwards_arguments or name is None:
+            return []
+        return [(spec.tool, cls.call_arguments(name, step))]
 
     @classmethod
     def call_arguments(cls, config_id: str, step: TestStep) -> JsonObject:
         """A step's tool arguments: what the plan wrote, under the defaults the
         schema documents, addressed to this device's own config entry so a step
         cannot name one entry and reach another."""
-        arguments = {**cls.step_defaults.get(step.action, {}), **step.arguments}
+        spec = cls.step_action_specs.get(step.action)
+        arguments = {**(spec.defaults if spec is not None else {}), **step.arguments}
         scope = cls.device_class.scope_field
         if scope is not None:
             arguments[scope] = config_id
@@ -465,17 +794,72 @@ class StepDevice:
     # --- run time --------------------------------------------------------
 
     def execute(self, step: TestStep) -> JsonObject:
-        tool = self.step_tools.get(step.action)
-        if tool is None:
+        """Dispatch, written exactly once for every device kind there is.
+
+        Look the action string up among this device's declarations, hold the step
+        to that action's own schema, call the method. A string this kind does not
+        declare is `not_supported` naming the kind by construction — there is no
+        table to forget to add it to."""
+        bound = self.actions.get(step.action)
+        if bound is None:
             return {
                 "ok": False,
                 "tool": "test_reactor",
-                "error_type": "unknown_action",
-                "summary": "Unknown test reactor action.",
+                "error_type": "not_supported",
+                "summary": f"The {self.kind} device kind does not serve this test reactor action.",
                 self.route_field: self.id,
                 "action": step.action,
+                "supported_actions": sorted(self.actions),
             }
-        return self.service.call(tool, self.call_arguments(self.id, step))
+        invalid = self.schema_refusal(bound.spec, step)
+        if invalid is not None:
+            return invalid
+        return bound.call(step)
+
+    def schema_refusal(self, spec: StepActionSpec, step: TestStep) -> JsonObject | None:
+        """The step, put back together and held to its action's schema.
+
+        `load_test_config` already does this for a plan it read; this is the same
+        check on the dispatch path, so a step some other caller assembled cannot
+        reach a device method carrying arguments the format never allowed."""
+        errors = action_schema_errors(spec.schema, {"action": spec.name, self.route_field: self.id, **step.arguments})
+        if not errors:
+            return None
+        return {
+            "ok": False,
+            "tool": "test_reactor",
+            "error_type": "invalid_argument",
+            "summary": "Test step does not satisfy its action's schema.",
+            self.route_field: self.id,
+            "action": step.action,
+            "field": format_test_config_field([str(part) for part in errors[0].absolute_path]),
+            "validator": errors[0].validator,
+        }
+
+    def call_tool(self, step: TestStep) -> JsonObject:
+        """Hand this step's own arguments to the tool its action declared. The
+        implementation of every action whose step *is* the tool call."""
+        return self.service.call(str(self.actions[step.action].spec.tool), self.call_arguments(self.id, step))
+
+    @step_action("delay", schema="delay", touches_device=False)
+    def _delay(self, step: TestStep) -> JsonObject:
+        """Wait, and drive nothing.
+
+        Declared once here, so every device kind serves it and none of them had
+        to be told: a plan waiting on a board is waiting on that board whatever
+        kind of thing it is. It is still a step — it routes to a named device and
+        it appears in the run's result — because a wait that left no trace would
+        be a gap in the record of what a test did."""
+        duration_ms = int(step.arguments["duration_ms"])
+        time.sleep(duration_ms / 1000.0)
+        return {
+            "ok": True,
+            "tool": "test_reactor",
+            "summary": "Test plan waited.",
+            self.route_field: self.id,
+            "action": "delay",
+            "duration_ms": duration_ms,
+        }
 
     def cleanup(self) -> list[JsonObject]:
         """Close what this device is still holding for this plan."""
@@ -493,13 +877,23 @@ class StepDevice:
             return exception_result(tool, "cleanup_exception", "Cleanup action raised an exception.", error)
 
 
+# `StepDevice` declares `delay` itself, and `__init_subclass__` only fires for
+# subclasses, so the base's own collection is made here — one call, the same one
+# every kind gets.
+StepDevice.step_action_specs = collect_step_actions(StepDevice)
+StepDevice.step_actions = {name: spec.schema for name, spec in StepDevice.step_action_specs.items()}
+
+
 class SessionDevice(StepDevice):
     """A device a plan opens and closes: a serial line, a CAN bus.
 
     The two differ in their permissions and in the traffic they carry, not in
     their session — both can be left open by a plan that fails, both may only be
     closed by the run that opened them, and both are closed again by that run's
-    cleanup. That is written once, here."""
+    cleanup. That is written once, here.
+
+    Which of a kind's actions are those two ends is read off the declarations
+    (`role="open"` / `role="close"`), not named again in a class attribute."""
 
     open_action: ClassVar[str] = ""
     close_action: ClassVar[str] = ""
@@ -507,6 +901,15 @@ class SessionDevice(StepDevice):
     session_noun: ClassVar[str] = ""
     not_owned_error: ClassVar[str] = ""
     not_owned_summary: ClassVar[str] = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.open_action = cls.action_in_role("open")
+        cls.close_action = cls.action_in_role("close")
+
+    @classmethod
+    def action_in_role(cls, role: str) -> str:
+        return next((name for name, spec in cls.step_action_specs.items() if spec.role == role), "")
 
     def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
         super().__init__(config_id, device, service)
@@ -537,13 +940,16 @@ class SessionDevice(StepDevice):
         """Refuse a step this entry's own permissions do not allow."""
         return None
 
-    def execute(self, step: TestStep) -> JsonObject:
-        if step.action == self.open_action:
-            result = super().execute(step)
-            self._owns_session = result.get("ok") is True and not result.get("already_active", False)
-            return result
-        if step.action != self.close_action:
-            return super().execute(step)
+    def open_session(self, step: TestStep) -> JsonObject:
+        """Open, and take ownership of what this plan opened. The body of every
+        kind's `role="open"` action."""
+        result = self.call_tool(step)
+        self._owns_session = result.get("ok") is True and not result.get("already_active", False)
+        return result
+
+    def close_session(self, step: TestStep) -> JsonObject:
+        """Close, but only a session this plan is the one holding. The body of
+        every kind's `role="close"` action."""
         if not self._owns_session:
             return {
                 "ok": False,
@@ -552,7 +958,7 @@ class SessionDevice(StepDevice):
                 "summary": self.not_owned_summary,
                 self.route_field: self.id,
             }
-        result = super().execute(step)
+        result = self.call_tool(step)
         if result.get("ok") is True:
             self._owns_session = False
         return result
@@ -560,7 +966,7 @@ class SessionDevice(StepDevice):
     def cleanup(self) -> list[JsonObject]:
         if not self._owns_session:
             return []
-        result = self.cleanup_call(self.step_tools[self.close_action], {str(self.device_class.scope_field): self.id})
+        result = self.cleanup_call(str(self.step_action_specs[self.close_action].tool), {str(self.device_class.scope_field): self.id})
         if result.get("ok") is True:
             self._owns_session = False
         return [self.cleanup_record(self.close_action, result)]
@@ -574,18 +980,10 @@ class UartRunner(SessionDevice):
     route_field: ClassVar[str] = "port_id"
     configured_field: ClassVar[str] = "configured_com_ports"
     unknown_name_summary: ClassVar[str] = "Test step references a COM port that is not in the authoritative config."
-    step_actions: ClassVar[dict[str, str]] = {"uart_open": "uartOpen", "uart_expect": "uartExpect", "uart_close": "uartClose"}
-    step_tools: ClassVar[dict[str, str]] = {"uart_open": "com_session_start", "uart_expect": "com_read", "uart_close": "com_session_stop"}
-    step_defaults: ClassVar[dict[str, JsonObject]] = {"uart_open": {"clear_buffer": True}}
-    open_action: ClassVar[str] = "uart_open"
-    close_action: ClassVar[str] = "uart_close"
-    # The action that waits on the line. Its arguments are the plan's own — an
-    # expectation and a deadline — and none is a `com_read` argument, so it
-    # builds that tool's call itself rather than passing the step through.
-    expect_action: ClassVar[str] = "uart_expect"
-    # The two ways a plan says what to wait for, as the schema names them. Exactly
-    # one appears on a step; the key is also the one the result reports under, so
-    # `expected_text` and `expected_pattern` say which kind of claim went unmet.
+    # The two ways a v2 `uart_expect` says what to wait for, as its schema names
+    # them. Exactly one appears on a step; the key is also the one the result
+    # reports under, so `expected_text` and `expected_pattern` say which kind of
+    # claim went unmet.
     expect_fields: ClassVar[tuple[str, ...]] = ("text", "pattern")
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
@@ -599,61 +997,106 @@ class UartRunner(SessionDevice):
     def build_device(cls, config: AgenticHILConfig, config_id: str) -> Device:
         return uart_device(config, config_id)
 
-    @classmethod
-    def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
-        # `uart_open` hands the plan's own `clear_buffer` to `com_session_start`,
-        # so that call goes through the tool contract like any other plan-supplied
-        # value. The other two are omitted on purpose: `uart_expect`'s arguments
-        # are read by this class rather than passed on — an expectation and a
-        # deadline are not `com_read` arguments, and this reactor's own schema is
-        # what refuses an empty text, an uncompilable pattern or a timeout of zero
-        # — and `uart_close` carries none. The port_id is checked against the
-        # authoritative config's own com_ports names.
-        return super().tool_calls(config, step) if step.action == cls.open_action else []
+    # --- the actions this kind serves ------------------------------------
 
-    @classmethod
-    def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
-        # Only the open is asked about reading, and that is enough: every other
-        # action on this line requires a session this plan opened, so a port the
-        # config will not let a plan read is refused before any of them. Naming
-        # the permission a second time here would be a second answer.
-        if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
-            return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
-        return None
+    @step_action("uart_open", schema="uartOpen", tool="com_session_start", defaults={"clear_buffer": True}, role="open")
+    def _uart_open(self, step: TestStep) -> JsonObject:
+        return self.open_session(step)
 
-    @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
-        # A pattern that does not compile is a fault in the plan, so it is
-        # answered here rather than at the step: preflight builds nothing, so a
-        # plan refused for a bad regex has opened no session and touched no
-        # board. `re.error` carries the position it gave up at, which is the
-        # whole reason this is not left to raise out of the run as a traceback.
-        pattern = step.arguments.get("pattern") if step.action == cls.expect_action else None
-        if pattern is not None:
-            try:
-                re.compile(str(pattern))
-            except re.error as error:
-                return preflight_error(
-                    index,
-                    step,
-                    "pattern",
-                    "Test step's uart_expect pattern is not a valid Python regular expression.",
-                    {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)},
-                )
-        return super().preflight(reactor, index, step, state)
+    @step_action("uart_close", schema="uartClose", tool="com_session_stop", role="close")
+    def _uart_close(self, step: TestStep) -> JsonObject:
+        return self.close_session(step)
 
-    def execute(self, step: TestStep) -> JsonObject:
-        if step.action != self.expect_action:
-            return super().execute(step)
+    @step_action("uart_write", schema="uartWrite", tool="com_write")
+    def _uart_write(self, step: TestStep) -> JsonObject:
+        """Serial stimulus, straight through `com_write` — the same tool and the
+        same permission an agent driving the line by hand would meet. A port the
+        config will not let a plan write to is refused by name at preflight, so
+        the plan is corrected rather than the bench half driven."""
+        return self.call_tool(step)
+
+    @step_action("uart_expect", schema="uartExpect", tool="com_read", forwards_arguments=False)
+    def _uart_expect(self, step: TestStep) -> JsonObject:
         # Exactly one of the two is present — the schema's own `oneOf` is what
         # holds that — so the first one found names both the claim and the key
         # the result reports it under.
         field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
         return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
 
+    @step_action("uart_read", schema="uartRead", tool="com_read", forwards_arguments=False)
+    def _uart_read(self, step: TestStep) -> JsonObject:
+        """Read the line, and judge what came back if the plan said what it wants.
+
+        With a `comparator:` this is read-until-match on the same rolling buffer
+        `uart_expect` uses, failing with the tail of what the port did say.
+        Without one it is a plain read: one `com_read`, answered unchanged."""
+        raw = step.arguments.get("comparator")
+        if not raw:
+            return self.service.call("com_read", {"port_id": self.id, "wait_timeout_s": float(step.arguments.get("timeout_s", 0.0))})
+        return self._compare(StepComparator(raw), float(step.arguments["timeout_s"]))
+
+    # --- plan time -------------------------------------------------------
+
+    @classmethod
+    def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+        # The open is asked about reading, and that covers every action that only
+        # listens: each of them requires a session this plan opened, so a port
+        # the config will not let a plan read is refused before any of them.
+        # Writing is its own grant and its own refusal, named where it applies.
+        if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
+            return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
+        if step.action == "uart_write" and not entry.permissions.allow_write:
+            return preflight_error(index, step, "action", "Writing to this COM port is disabled by the authoritative config.", {"permission": "allow_write"})
+        return None
+
+    @classmethod
+    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+        refusal = cls._pattern_refusal(index, step)
+        if refusal is not None:
+            return refusal
+        return super().preflight(reactor, index, step, state)
+
+    @classmethod
+    def _pattern_refusal(cls, index: int, step: TestStep) -> JsonObject | None:
+        """Refuse a regular expression this plan cannot mean, before the run.
+
+        A pattern that does not compile, or a `range` whose pattern captures
+        nothing to put in it, is a fault in the plan and is answered here:
+        preflight builds nothing, so a plan refused for either has opened no
+        session and touched no board. `re.error` carries the position it gave up
+        at, which is the whole reason this is not left to raise out of the run as
+        a traceback."""
+        if step.action == "uart_expect":
+            field_name, pattern, needs_capture = "pattern", step.arguments.get("pattern"), False
+            summary = "Test step's uart_expect pattern is not a valid Python regular expression."
+        elif step.action == "uart_read":
+            comparator = step.arguments.get("comparator") or {}
+            field_name, pattern = "comparator.pattern", comparator.get("pattern")
+            needs_capture = comparator.get("range") is not None
+            summary = "Test step's comparator pattern is not a valid Python regular expression."
+        else:
+            return None
+        if pattern is None:
+            return None
+        try:
+            compiled = re.compile(str(pattern))
+        except re.error as error:
+            return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
+        if needs_capture and compiled.groups != 1:
+            return preflight_error(
+                index,
+                step,
+                field_name,
+                "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
+                {"error_type": "invalid_argument", "value": str(pattern)[:128], "capture_groups": compiled.groups},
+            )
+        return None
+
+    # --- reading the line ------------------------------------------------
+
     @staticmethod
     def _matcher(field_name: str, expected: str) -> Callable[[str], bool]:
-        """What counts as a match for one of the two expectation kinds.
+        """What counts as a match for one of the two v2 expectation kinds.
 
         A pattern is `re.search`, so it is anchored where it is written and
         nowhere else: a plan that means "the line starts this way" writes the
@@ -665,7 +1108,52 @@ class UartRunner(SessionDevice):
         return lambda decoded: search(decoded) is not None
 
     def _expect(self, field_name: str, expected: str, timeout_s: float) -> JsonObject:
-        """Wait for `expected` on this line, or fail saying what the line did say.
+        """The v2 `uart_expect`, reported under the names a v2 report already
+        uses. The waiting itself is `_read_until`, shared with `uart_read`."""
+        appeared, missing = UART_EXPECT_SUMMARIES[field_name]
+        outcome = self._read_until(timeout_s, expected, self._matcher(field_name, expected))
+        if outcome.read_failure is not None:
+            return outcome.read_failure
+        if outcome.matched:
+            return {
+                "ok": True,
+                "tool": "test_reactor",
+                "summary": appeared,
+                "port_id": self.id,
+                f"expected_{field_name}": expected,
+                "timeout_s": timeout_s,
+                "bytes_received": outcome.bytes_received,
+                "reads": outcome.reads,
+            }
+        return {
+            "ok": False,
+            "tool": "test_reactor",
+            "error_type": "uart_expect_timeout",
+            "summary": missing,
+            "port_id": self.id,
+            f"expected_{field_name}": expected,
+            "timeout_s": timeout_s,
+            "bytes_received": outcome.bytes_received,
+            "reads": outcome.reads,
+            # What the port actually said, so a red result is readable without
+            # reconnecting to the board.
+            **outcome.tail_result,
+        }
+
+    def _compare(self, comparator: StepComparator, timeout_s: float) -> JsonObject:
+        """Read until the comparator is met, or fail saying what was received —
+        and, for a range, which value was captured against which bounds."""
+        met, unmet = COMPARATOR_SUMMARIES[comparator.claim]
+        outcome = self._read_until(timeout_s, comparator.written, comparator.matches)
+        if outcome.read_failure is not None:
+            return outcome.read_failure
+        common = {"port_id": self.id, **comparator.report(), "timeout_s": timeout_s, "bytes_received": outcome.bytes_received, "reads": outcome.reads}
+        if outcome.matched:
+            return {"ok": True, "tool": "test_reactor", "summary": met, **common}
+        return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
+
+    def _read_until(self, timeout_s: float, written: str, matches: Callable[[str], bool]) -> UartReadOutcome:
+        """Read this line until `matches` is satisfied or the deadline passes.
 
         The plan's own read path and nothing else: each pass is one `com_read` —
         the tool an agent would call by hand — waiting out whatever is left of
@@ -681,8 +1169,6 @@ class UartRunner(SessionDevice):
         same seam is why a pattern is matched against the decoded window rather
         than against each chunk: a value that arrives in two reads is one match
         here and none at all to a per-chunk search."""
-        matches = self._matcher(field_name, expected)
-        appeared, missing = UART_EXPECT_SUMMARIES[field_name]
         deadline = time.monotonic() + timeout_s
         # Enough tail to still find a match that only completes in the next
         # chunk, and enough to answer with when the deadline passes. Four bytes
@@ -691,20 +1177,16 @@ class UartRunner(SessionDevice):
         # measured the same way, by what the plan wrote: the floor is what keeps
         # a short pattern matching across a read boundary, and a pattern whose
         # match is longer than the window is bounded by it like everything else.
-        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(expected) + 16)
+        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(written) + 16)
         received = bytearray()
         received_bytes = 0
         encoding = "utf-8"
         reads = 0
         while True:
-            result = self.service.call(self.step_tools[self.expect_action], {"port_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())})
+            result = self.service.call("com_read", {"port_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())})
             reads += 1
             if result_failed(result):
-                # The read's own refusal, unchanged. A closed session, a denied
-                # permission or a broken audit latch is not an expectation that
-                # went unmet, and answering it with `uart_expect_timeout` would
-                # send an operator to look at firmware that never ran.
-                return result
+                return UartReadOutcome(False, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding, result)
             data = result.get("data") or {}
             encoding = str(data.get("encoding") or encoding)
             chunk = bytes.fromhex(str(data.get("hex") or ""))
@@ -712,33 +1194,9 @@ class UartRunner(SessionDevice):
             received.extend(chunk)
             del received[:-window]
             if matches(decode_bytes(bytes(received), encoding)):
-                return {
-                    "ok": True,
-                    "tool": "test_reactor",
-                    "summary": appeared,
-                    "port_id": self.id,
-                    f"expected_{field_name}": expected,
-                    "timeout_s": timeout_s,
-                    "bytes_received": received_bytes,
-                    "reads": reads,
-                }
+                return UartReadOutcome(True, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
             if time.monotonic() >= deadline:
-                tail = bytes(received[-UART_EXPECT_TAIL_BYTES:])
-                return {
-                    "ok": False,
-                    "tool": "test_reactor",
-                    "error_type": "uart_expect_timeout",
-                    "summary": missing,
-                    "port_id": self.id,
-                    f"expected_{field_name}": expected,
-                    "timeout_s": timeout_s,
-                    "bytes_received": received_bytes,
-                    "reads": reads,
-                    # What the port actually said, so a red result is readable
-                    # without reconnecting to the board.
-                    "received_tail": data_result(tail, encoding),
-                    "received_tail_truncated": received_bytes > len(tail),
-                }
+                return UartReadOutcome(False, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
             if not chunk:
                 # A read that returned nothing while time was left had its own
                 # wait cut short — `com_read` ends its wait at once on a session
@@ -761,21 +1219,6 @@ class CanRunner(SessionDevice):
     route_field: ClassVar[str] = "bus_id"
     configured_field: ClassVar[str] = "configured_can_buses"
     unknown_name_summary: ClassVar[str] = "Test step references a CAN bus that is not in the authoritative config."
-    step_actions: ClassVar[dict[str, str]] = {
-        "can_open": "canOpen",
-        "can_close": "canClose",
-        "can_send": "canSend",
-        "can_read": "canRead",
-    }
-    step_tools: ClassVar[dict[str, str]] = {
-        "can_open": "can_session_start",
-        "can_close": "can_session_stop",
-        "can_send": "can_send",
-        "can_read": "can_read",
-    }
-    step_defaults: ClassVar[dict[str, JsonObject]] = {"can_open": {"clear_rx_queue": True}}
-    open_action: ClassVar[str] = "can_open"
-    close_action: ClassVar[str] = "can_close"
     session_noun: ClassVar[str] = "CAN bus"
     not_owned_error: ClassVar[str] = "can_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a CAN bus session it did not open."
@@ -787,6 +1230,24 @@ class CanRunner(SessionDevice):
     @classmethod
     def build_device(cls, config: AgenticHILConfig, config_id: str) -> Device:
         return can_device(config, config_id)
+
+    # --- the actions this kind serves ------------------------------------
+
+    @step_action("can_open", schema="canOpen", tool="can_session_start", defaults={"clear_rx_queue": True}, role="open")
+    def _can_open(self, step: TestStep) -> JsonObject:
+        return self.open_session(step)
+
+    @step_action("can_close", schema="canClose", tool="can_session_stop", role="close")
+    def _can_close(self, step: TestStep) -> JsonObject:
+        return self.close_session(step)
+
+    @step_action("can_send", schema="canSend", tool="can_send")
+    def _can_send(self, step: TestStep) -> JsonObject:
+        return self.call_tool(step)
+
+    @step_action("can_read", schema="canRead", tool="can_read")
+    def _can_read(self, step: TestStep) -> JsonObject:
+        return self.call_tool(step)
 
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
@@ -831,25 +1292,6 @@ class DebuggerRunner(StepDevice):
     route_field: ClassVar[str] = "debugger"
     configured_field: ClassVar[str] = "configured_debuggers"
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
-    step_actions: ClassVar[dict[str, str]] = {
-        "flash": "flash",
-        "reset": "reset",
-        "debug_start": "debugStart",
-        "run_until_breakpoint": "runUntilBreakpoint",
-        "dump_memory": "dumpMemory",
-        "debug_stop": "debugStop",
-    }
-    step_tools: ClassVar[dict[str, str]] = {
-        "flash": "flash_firmware",
-        "reset": "reset_target",
-        "debug_start": "debug_start_session",
-        "dump_memory": "debug_dump_symbol_ihex",
-        "debug_stop": "debug_stop_session",
-    }
-    # `reset_target` reads its own default the same way, but the reactor writes
-    # every argument it sends: the schema documents `run`, and a step that leaves
-    # the mode out must reach the tool saying which reset it asked for.
-    step_defaults: ClassVar[dict[str, JsonObject]] = {"reset": {"mode": "run"}}
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
     # This kind's own actions that require a live debug session, and therefore a
@@ -872,6 +1314,52 @@ class DebuggerRunner(StepDevice):
     @classmethod
     def build_device(cls, config: AgenticHILConfig, config_id: str) -> Device:
         return debugger_device(config, config_id)
+
+    # --- the actions this kind serves ------------------------------------
+
+    @step_action("flash", schema="flash", tool="flash_firmware")
+    def _flash(self, step: TestStep) -> JsonObject:
+        return self.call_tool(step)
+
+    # `reset_target` reads its own default the same way, but the reactor writes
+    # every argument it sends: the schema documents `run`, and a step that leaves
+    # the mode out must reach the tool saying which reset it asked for.
+    @step_action("reset", schema="reset", tool="reset_target", defaults={"mode": "run"})
+    def _reset(self, step: TestStep) -> JsonObject:
+        return self.call_tool(step)
+
+    @step_action("dump_memory", schema="dumpMemory", tool="debug_dump_symbol_ihex")
+    def _dump_memory(self, step: TestStep) -> JsonObject:
+        return self.call_tool(step)
+
+    @step_action("debug_start", schema="debugStart", tool="debug_start_session")
+    def _debug_start(self, step: TestStep) -> JsonObject:
+        self._owns_debug_session = True
+        result = self.call_tool(step)
+        if result.get("ok") is True:
+            if result.get("target_ok") is False:
+                result = {
+                    **result,
+                    "ok": False,
+                    "error_type": result.get("target_error_type", "target_stop"),
+                    "summary": "Debug session started, but the target is stopped abnormally.",
+                }
+        else:
+            self._owns_debug_session = result.get("cleanup_required") is True
+        return result
+
+    @step_action("debug_stop", schema="debugStop", tool="debug_stop_session")
+    def _debug_stop(self, step: TestStep) -> JsonObject:
+        result = self.call_tool(step)
+        if result.get("ok") is True:
+            self._owns_debug_session = False
+        return result
+
+    # Two tool calls and a breakpoint to clean up either way, so this one both
+    # declares no single tool and answers for its own preflight contract check.
+    @step_action("run_until_breakpoint", schema="runUntilBreakpoint")
+    def _run_until_breakpoint_step(self, step: TestStep) -> JsonObject:
+        return self._run_until_breakpoint(step.arguments)
 
     @classmethod
     def step_config_id(cls, config: AgenticHILConfig, step: TestStep) -> str | None:
@@ -1031,31 +1519,6 @@ class DebuggerRunner(StepDevice):
             return preflight_error(index, step, "image_path", "Debug sessions require an ELF artifact with debug symbols.")
         return None
 
-    def execute(self, step: TestStep) -> JsonObject:
-        action, arguments = step.action, step.arguments
-        if action == "debug_start":
-            self._owns_debug_session = True
-            result = self.service.call("debug_start_session", arguments)
-            if result.get("ok") is True:
-                if result.get("target_ok") is False:
-                    result = {
-                        **result,
-                        "ok": False,
-                        "error_type": result.get("target_error_type", "target_stop"),
-                        "summary": "Debug session started, but the target is stopped abnormally.",
-                    }
-            else:
-                self._owns_debug_session = result.get("cleanup_required") is True
-            return result
-        if action == "run_until_breakpoint":
-            return self._run_until_breakpoint(arguments)
-        if action == "debug_stop":
-            result = self.service.call("debug_stop_session", arguments)
-            if result.get("ok") is True:
-                self._owns_debug_session = False
-            return result
-        return super().execute(step)
-
     def cleanup(self) -> list[JsonObject]:
         if not self._owns_debug_session:
             return []
@@ -1115,13 +1578,39 @@ class DebuggerRunner(StepDevice):
 # disagree with the class that actually serves the action.
 STEP_DEVICE_CLASSES: tuple[type[StepDevice], ...] = (DebuggerRunner, UartRunner, CanRunner)
 ACTION_SCHEMAS = {action: schema for device_class in STEP_DEVICE_CLASSES for action, schema in device_class.step_actions.items()}
-ROUTE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(device_class.route_field for device_class in STEP_DEVICE_CLASSES))
-STEP_DEVICE_BY_ACTION: dict[str, type[StepDevice]] = {action: device_class for device_class in STEP_DEVICE_CLASSES for action in device_class.step_actions}
+# `device` is format v3's universal routing key and is read for every kind; the
+# rest are the v2 spellings, which stay valid as aliases.
+ROUTE_FIELDS: tuple[str, ...] = ("device", *dict.fromkeys(device_class.route_field for device_class in STEP_DEVICE_CLASSES))
+# An action can be served by more than one kind — `delay` is declared once on the
+# base and therefore inherited by all of them — so this maps to every claimant
+# and the name the step gave settles which one runs it.
+STEP_DEVICE_CLASSES_BY_ACTION: dict[str, tuple[type[StepDevice], ...]] = {
+    action: tuple(device_class for device_class in STEP_DEVICE_CLASSES if action in device_class.step_actions) for action in ACTION_SCHEMAS
+}
 
 
-def step_device_class(action: str) -> type[StepDevice] | None:
-    """Which device kind serves an action, or None for one no kind claims."""
-    return STEP_DEVICE_BY_ACTION.get(action)
+def step_device_classes(action: str) -> tuple[type[StepDevice], ...]:
+    """Every device kind that serves an action; empty for one no kind claims."""
+    return STEP_DEVICE_CLASSES_BY_ACTION.get(action, ())
+
+
+def step_device_class(config: AgenticHILConfig, step: TestStep) -> type[StepDevice] | None:
+    """Which device kind runs this step, or None when the step does not say.
+
+    One claimant is the ordinary case and the action alone answers it. For an
+    action every kind serves, the routing key is what decides: a v2 alias names
+    its kind outright, and a `device:` is looked up in the configured entries —
+    which is where "the configuration knows which class a name belongs to" is
+    actually cashed. A name in no section, or in two of them, is not answered
+    here; preflight refuses it saying which."""
+    candidates = step_device_classes(step.action)
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else None
+    pinned = [device_class for device_class in candidates if getattr(step, device_class.route_field) is not None]
+    if pinned:
+        return pinned[0]
+    named = [device_class for device_class in candidates if step.device is not None and step.device in device_class.config_entries(config)]
+    return named[0] if len(named) == 1 else None
 
 
 class TestReactor:
@@ -1160,7 +1649,7 @@ class TestReactor:
         """The device a step drives. DeviceError when the plan named something
         the config does not declare — preflight refuses that before any step
         runs, so reaching it here means the plan was never validated."""
-        device_class = step_device_class(step.action)
+        device_class = step_device_class(self.config, step)
         name = None if device_class is None else device_class.step_config_id(self.config, step)
         if device_class is None or name is None:
             raise DeviceError(
@@ -1317,18 +1806,39 @@ class TestReactor:
         permissions and its own session. Nothing here is built — see PlanState."""
         state = PlanState()
         for index, step in enumerate(test_config.steps, start=1):
-            device_class = step_device_class(step.action)
-            if device_class is None:
+            named = step.route_keys
+            if len(named) > 1:
+                # `device:` and its v2 alias mean the same entry, so a step
+                # carrying both is a plan that has not decided. Refused rather
+                # than resolved by precedence: a step that names one board under
+                # one key and another under the other must be corrected, not run.
+                return preflight_error(index, step, named[1], "A test step names the device it drives once.", {"route_keys": named})
+            candidates = step_device_classes(step.action)
+            if not candidates:
                 # Unreachable through load_test_config, whose schema pass refuses
                 # an unknown action first; reachable by a caller that built a
                 # TestConfig itself, and silence would be a step nobody checked.
                 return preflight_error(index, step, "action", "No configured device kind serves this test reactor action.", {"allowed_values": sorted(ACTION_SCHEMAS)})
+            device_class = step_device_class(self.config, step)
+            if device_class is None:
+                return preflight_error(
+                    index,
+                    step,
+                    ROUTE_FIELDS[0],
+                    "Every device kind serves this action, so the step's `device:` must name exactly one configured entry — this one names none, or names an entry in more than one section.",
+                    {claimant.configured_field: sorted(claimant.config_entries(self.config)) for claimant in candidates},
+                )
             name_error = device_class.name_refusal(self, index, step)
             if name_error is not None:
                 return name_error
             contract_error = self._preflight_tool_contract(index, step, device_class)
             if contract_error is not None:
                 return contract_error
+            if not device_class.step_action_specs[step.action].touches_device:
+                # An action that drives nothing has no session to be in, no
+                # permission to hold and nothing to leave behind, so the kind's
+                # own refusals are about a step this one is not.
+                continue
             refusal = device_class.preflight(self, index, step, state)
             if refusal is not None:
                 return refusal
@@ -1355,8 +1865,9 @@ def step_debugger_id(config: AgenticHILConfig, step: TestStep) -> str | None:
     configured one. None means the plan must name it — with several probes
     configured, picking one for the author is how the wrong board gets
     flashed."""
-    if step.debugger is not None:
-        return step.debugger
+    named = step.debugger if step.debugger is not None else step.device
+    if named is not None:
+        return named
     return next(iter(config.debuggers)) if len(config.debuggers) == 1 else None
 
 
@@ -1378,7 +1889,7 @@ def plan_devices(config: AgenticHILConfig, test_config: TestConfig) -> DeviceSet
     locks: a plan that can drive a bus declares that bus."""
     devices: list[Device] = []
     for step in test_config.steps:
-        device_class = step_device_class(step.action)
+        device_class = step_device_class(config, step)
         # Named, not bound: a device's lock identity comes from its own config
         # entry, so which probe this config happens to be bound to cannot change
         # which board a step is declared to lock.
@@ -1398,7 +1909,7 @@ def step_tool_arguments(config: AgenticHILConfig, step: TestStep) -> list[tuple[
 
     Delegates to the device class that serves the action; kept as a function
     because a caller holding a step should not have to resolve the class first."""
-    device_class = step_device_class(step.action)
+    device_class = step_device_class(config, step)
     return [] if device_class is None else device_class.tool_calls(config, step)
 
 
