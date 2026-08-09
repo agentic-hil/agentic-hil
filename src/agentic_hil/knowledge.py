@@ -77,9 +77,14 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 # holds the bench, and what an operator does about that is find out whose it is.
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 
-# Validated flashing and unrestricted debugger access are mutually exclusive
-# policies (docs/security-design.md): while either of these is true on a probe,
-# `flash_firmware` on that probe is refused, and so is a debug session.
+# Both of these act on flash outside the path this server validates — a raw
+# debugger command writes whatever it is given, a mass erase clears whatever a
+# flash has just written — so once either is allowed, a flash report's claim
+# about what is on the device is no longer one this server can stand behind.
+# That is what makes validated flashing and unrestricted debugger access
+# mutually exclusive policies (docs/security-design.md): while either of these is
+# true on a probe, `flash_firmware` on that probe is refused, and so is a debug
+# session.
 #
 # They are therefore the two exceptions to the allow-by-default generation, and
 # a generated configuration writes both false. For a while it did not, and the
@@ -149,14 +154,21 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 
     One text for the four backends that raise it, because a refusal an operator
     meets on their first flash must not read differently depending on which
-    programmer their board happens to use."""
+    programmer their board happens to use.
+
+    It gives the reason rather than restating the rule. "Mutually exclusive
+    policies" on its own reads as an arbitrary interlock, and an operator who
+    takes it that way reaches for the flag it names — which is the one move that
+    keeps flashing refused."""
     entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
     return (
-        f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: validated flashing and "
-        f"unrestricted debugger access are mutually exclusive policies, which is why a generated configuration leaves "
-        f"both false. Something on this bench set `{entry}` to true since. Set it back to false — with "
-        "`project_config_set`, or by asking the operator — and this works. Nothing here can set it back to true "
-        "afterwards."
+        f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: it acts on flash "
+        f"outside the path this server validates, so while it is allowed a flash report's claim about what is on the "
+        f"device is no longer one this server can stand behind. That is what makes validated flashing and unrestricted "
+        f"debugger access mutually exclusive policies, and why a generated configuration leaves both false. Something "
+        f"on this bench set `{entry}` to true since. Set it back to false — with `project_config_set`, or by asking "
+        "the operator — and this works. Nothing here can set it back to true afterwards, and no tool here is behind "
+        "that flag, so nothing becomes unavailable by turning it off."
     )
 # The scope that separates "this project has no configuration", which
 # `project_config_create` answers, from "the configuration this running server
@@ -2292,7 +2304,7 @@ These calls are the only door. The file itself is protected by deny rules `agent
 
 ### Permissions move one way — through `project_config_set`
 
-A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Validated flashing and unrestricted debugger access are mutually exclusive, so while either of those is true `flash_firmware` on that probe is refused; neither has a tool behind it here, so leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
+A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Both of those act on flash outside the path this server validates — a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written — so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either of those is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here, so setting one true withholds flashing rather than granting anything, and leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
 
 What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 

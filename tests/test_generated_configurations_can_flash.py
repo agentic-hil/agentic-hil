@@ -40,7 +40,7 @@ from agentic_hil.config import (
     load_authoritative_config,
 )
 from agentic_hil.configwrite import deny_all_permissions
-from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS
+from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, exclusive_permission_summary
 
 BACKENDS = Path(__file__).resolve().parent.parent / "src" / "agentic_hil" / "backends"
 
@@ -176,6 +176,62 @@ def test_neither_interlocked_permission_is_a_capability_anything_grants() -> Non
                     granting.append(f"{source.relative_to(source_root)}:{number}: {line.strip()}")
 
     assert granting == [], "something now requires one of the interlocked permissions to be true: " + "; ".join(granting)
+
+
+# --- the interlock has to give its reason, not restate itself ------------
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+KNOWLEDGE_SOURCE = REPO_ROOT / "src" / "agentic_hil" / "knowledge.py"
+
+# The two halves of the actual reason: these permissions can act on flash outside
+# the path this server validates, so a flash report's claim about device state
+# stops being one this server can stand behind. Both halves are required —
+# "outside the validated path" alone does not say what it costs the caller, and
+# "cannot be trusted" alone does not say why.
+REASON_HALVES = ("outside the path this server validates", "stand behind")
+
+
+def sole_statement(document: Path, anchor: str) -> str:
+    """The one line of `document` that states the interlock, by a stable anchor.
+
+    Anchored on wording the restated-rule version also had, so that reverting the
+    reason out of a document still leaves this test reading the same line rather
+    than skipping it."""
+    lines = [line for line in document.read_text(encoding="utf-8").splitlines() if anchor in line]
+    assert len(lines) == 1, f"{document.name} has {len(lines)} lines containing {anchor!r}; this test is not reading it any more"
+    return lines[0]
+
+
+def exclusion_statements() -> dict[str, str]:
+    """Every statement of the interlock a reader can meet, as they meet it."""
+    statements = {
+        "docs/security-design.md": sole_statement(REPO_ROOT / "docs" / "security-design.md", "`allow_mass_erase` is enabled"),
+        "README.md": sole_statement(REPO_ROOT / "README.md", "Those two are false"),
+        "knowledge.py: the shipped configuration guide": sole_statement(KNOWLEDGE_SOURCE, "**generated with every permission true**"),
+    }
+    for flag in EXCLUSIVE_FLASH_PERMISSIONS:
+        # The refusal itself, rendered — the one an operator meets on a first
+        # flash, from all four backends.
+        statements[f"knowledge.py: the refusal on {flag}"] = exclusive_permission_summary("Flashing", flag, "dut")
+    return statements
+
+
+@pytest.mark.parametrize("where", sorted(exclusion_statements()))
+def test_every_statement_of_the_interlock_gives_its_reason(where: str) -> None:
+    """"Mutually exclusive policies" restates the rule; it does not give it.
+
+    Neither flag grants anything — there is no MCP tool for raw debugger commands
+    and none for mass erase — so the pair withholds flashing rather than granting
+    a tool, and a reader told only "mutually exclusive" has no way to work that
+    out. The one who reaches for the named flag to make flashing work makes the
+    one change that keeps it refused. The reason is that both can act on flash
+    outside the validated path, which is what costs a flash report its claim
+    about what is on the device."""
+    statement = exclusion_statements()[where]
+
+    missing = [half for half in REASON_HALVES if half not in statement]
+    assert missing == [], f"{where} states the interlock without its reason; missing {missing}: {statement}"
 
 
 def test_an_entry_an_agent_creates_still_arrives_closed() -> None:
