@@ -17,6 +17,7 @@ steps:
 
   - port_id: dut_uart
     action: uart_open
+    clear_buffer: true
 
   - bus_id: dut_can
     action: can_open

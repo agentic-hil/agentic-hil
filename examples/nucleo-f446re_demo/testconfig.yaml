@@ -1,4 +1,7 @@
-# The demo loop as a test plan: build → flash → reset → assert on serial output.
+# The demo loop, declared: build → flash → reset → assert on serial output. This
+# is the primary way to run this demo — an agent asked to test this firmware
+# should reach for the plan below rather than write its own loop.
+#
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override, which
 # is where `dut` and `dut_uart` below are declared — see
@@ -12,6 +15,14 @@
 # fails the run when `Hello World` does not reach the port in time — with the
 # tail of what the port did say, so a silent board and a wrong banner read
 # differently.
+#
+# `uart_expect` takes either `text:` for a fixed substring, as below, or
+# `pattern:` for a Python regular expression. Reach for `pattern:` when the check
+# is that the board answered with the *right* value rather than merely that it
+# answered — a counter, a measurement, a version string:
+#   pattern: "temp=\\d+C"     # a reading, whatever the number turns out to be
+# It is `re.search`, so it is anchored only where the pattern says: write `^` or
+# `$` when the position is part of the claim. Exactly one of the two per step.
 version: 2
 name: nucleo-f446re-hello-world
 steps:
@@ -20,9 +31,14 @@ steps:
     image_path: build/Debug/nucleo-f446re_demo.elf
 
   # Opened before the reset, so the banner the firmware prints at boot is
-  # already being captured when the core starts running.
+  # already being captured when the core starts running. `clear_buffer` discards
+  # whatever the line buffered before this step, which is what makes the match
+  # below a claim about *this* boot rather than about something still sitting in
+  # the buffer from a previous run. It is the default; written out because it is
+  # load-bearing here.
   - port_id: dut_uart
     action: uart_open
+    clear_buffer: true
 
   - debugger: dut
     action: reset

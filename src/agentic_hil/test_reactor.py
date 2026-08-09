@@ -51,6 +51,20 @@ UART_EXPECT_TAIL_BYTES = 512
 # active ends its wait at once — so this paces a line that has stopped talking
 # rather than spinning on it until the step's deadline.
 UART_EXPECT_IDLE_POLL_S = 0.05
+# What a `uart_expect` says about itself, per kind of expectation: (matched,
+# timed out). A plan that waited for a literal and a plan that waited for a
+# pattern fail for different reasons, and a result that called both "expected
+# text" would send an operator looking for a substring nobody asked for.
+UART_EXPECT_SUMMARIES: dict[str, tuple[str, str]] = {
+    "text": (
+        "Expected text appeared on the COM port.",
+        "Expected text did not appear on the COM port before this step's timeout.",
+    ),
+    "pattern": (
+        "Expected pattern matched the COM port output.",
+        "Expected pattern did not match the COM port output before this step's timeout.",
+    ),
+}
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -295,6 +309,17 @@ def raise_test_config_validation_error(error: Any, path: str | None, prefix: lis
         details["value"] = error.instance[:128] if isinstance(error.instance, str) else error.instance
     if error.validator in {"enum", "const"}:
         details["allowed_values"] = error.validator_value if error.validator == "enum" else [error.validator_value]
+    if error.validator == "oneOf":
+        # A step whose alternatives are "exactly one of these keys" — the shape
+        # `uart_expect` uses for `text` / `pattern`. Bare, a oneOf failure names
+        # only the step, which is the difference between "this step is wrong
+        # somewhere" and "say one of these two". The keys come off the branches
+        # rather than from a list here, so they cannot drift from the schema.
+        alternatives = list(
+            dict.fromkeys(name for branch in error.validator_value if isinstance(branch, dict) for name in branch.get("required", ()))
+        )
+        if alternatives:
+            details["exactly_one_of"] = alternatives
     raise ConfigError("test_config_invalid", "Test reactor configuration failed schema validation.", details) from error
 
 
@@ -554,10 +579,14 @@ class UartRunner(SessionDevice):
     step_defaults: ClassVar[dict[str, JsonObject]] = {"uart_open": {"clear_buffer": True}}
     open_action: ClassVar[str] = "uart_open"
     close_action: ClassVar[str] = "uart_close"
-    # The action that waits on the line. Its arguments are the plan's own — a
-    # substring and a deadline — and neither is a `com_read` argument, so it
+    # The action that waits on the line. Its arguments are the plan's own — an
+    # expectation and a deadline — and none is a `com_read` argument, so it
     # builds that tool's call itself rather than passing the step through.
     expect_action: ClassVar[str] = "uart_expect"
+    # The two ways a plan says what to wait for, as the schema names them. Exactly
+    # one appears on a step; the key is also the one the result reports under, so
+    # `expected_text` and `expected_pattern` say which kind of claim went unmet.
+    expect_fields: ClassVar[tuple[str, ...]] = ("text", "pattern")
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a UART session it did not open."
@@ -572,12 +601,15 @@ class UartRunner(SessionDevice):
 
     @classmethod
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
-        # Omitted on purpose: no UART step hands a plan-supplied value to a tool.
-        # `uart_expect` is the only one that carries arguments at all, and its
-        # two are read by this class rather than passed on — this reactor's own
-        # schema is what refuses an empty text or a timeout of zero. The port_id
-        # is checked against the authoritative config's own com_ports names.
-        return []
+        # `uart_open` hands the plan's own `clear_buffer` to `com_session_start`,
+        # so that call goes through the tool contract like any other plan-supplied
+        # value. The other two are omitted on purpose: `uart_expect`'s arguments
+        # are read by this class rather than passed on — an expectation and a
+        # deadline are not `com_read` arguments, and this reactor's own schema is
+        # what refuses an empty text, an uncompilable pattern or a timeout of zero
+        # — and `uart_close` carries none. The port_id is checked against the
+        # authoritative config's own com_ports names.
+        return super().tool_calls(config, step) if step.action == cls.open_action else []
 
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
@@ -589,13 +621,51 @@ class UartRunner(SessionDevice):
             return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
         return None
 
+    @classmethod
+    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+        # A pattern that does not compile is a fault in the plan, so it is
+        # answered here rather than at the step: preflight builds nothing, so a
+        # plan refused for a bad regex has opened no session and touched no
+        # board. `re.error` carries the position it gave up at, which is the
+        # whole reason this is not left to raise out of the run as a traceback.
+        pattern = step.arguments.get("pattern") if step.action == cls.expect_action else None
+        if pattern is not None:
+            try:
+                re.compile(str(pattern))
+            except re.error as error:
+                return preflight_error(
+                    index,
+                    step,
+                    "pattern",
+                    "Test step's uart_expect pattern is not a valid Python regular expression.",
+                    {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)},
+                )
+        return super().preflight(reactor, index, step, state)
+
     def execute(self, step: TestStep) -> JsonObject:
         if step.action != self.expect_action:
             return super().execute(step)
-        return self._expect(str(step.arguments["text"]), float(step.arguments["timeout_s"]))
+        # Exactly one of the two is present — the schema's own `oneOf` is what
+        # holds that — so the first one found names both the claim and the key
+        # the result reports it under.
+        field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
+        return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
 
-    def _expect(self, text: str, timeout_s: float) -> JsonObject:
-        """Wait for `text` on this line, or fail saying what the line did say.
+    @staticmethod
+    def _matcher(field_name: str, expected: str) -> Callable[[str], bool]:
+        """What counts as a match for one of the two expectation kinds.
+
+        A pattern is `re.search`, so it is anchored where it is written and
+        nowhere else: a plan that means "the line starts this way" writes the
+        `^` itself. Compiled once per step rather than per read — the pattern
+        already compiled cleanly at preflight, so this cannot raise."""
+        if field_name == "text":
+            return lambda decoded: expected in decoded
+        search = re.compile(expected).search
+        return lambda decoded: search(decoded) is not None
+
+    def _expect(self, field_name: str, expected: str, timeout_s: float) -> JsonObject:
+        """Wait for `expected` on this line, or fail saying what the line did say.
 
         The plan's own read path and nothing else: each pass is one `com_read` —
         the tool an agent would call by hand — waiting out whatever is left of
@@ -607,13 +677,21 @@ class UartRunner(SessionDevice):
 
         Bytes are carried across passes rather than decoded text: a character
         split across two reads decodes to replacement characters on each side of
-        the seam, and a plan would then be waiting for text that did arrive."""
+        the seam, and a plan would then be waiting for text that did arrive. The
+        same seam is why a pattern is matched against the decoded window rather
+        than against each chunk: a value that arrives in two reads is one match
+        here and none at all to a per-chunk search."""
+        matches = self._matcher(field_name, expected)
+        appeared, missing = UART_EXPECT_SUMMARIES[field_name]
         deadline = time.monotonic() + timeout_s
         # Enough tail to still find a match that only completes in the next
         # chunk, and enough to answer with when the deadline passes. Four bytes
         # is the widest any one character encodes to in UTF-8, so this cannot cut
-        # into a match no matter how long the expected text is.
-        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(text) + 16)
+        # into a match no matter how long the expected text is. A pattern is
+        # measured the same way, by what the plan wrote: the floor is what keeps
+        # a short pattern matching across a read boundary, and a pattern whose
+        # match is longer than the window is bounded by it like everything else.
+        window = max(UART_EXPECT_TAIL_BYTES, 4 * len(expected) + 16)
         received = bytearray()
         received_bytes = 0
         encoding = "utf-8"
@@ -633,13 +711,13 @@ class UartRunner(SessionDevice):
             received_bytes += len(chunk)
             received.extend(chunk)
             del received[:-window]
-            if text in decode_bytes(bytes(received), encoding):
+            if matches(decode_bytes(bytes(received), encoding)):
                 return {
                     "ok": True,
                     "tool": "test_reactor",
-                    "summary": "Expected text appeared on the COM port.",
+                    "summary": appeared,
                     "port_id": self.id,
-                    "expected_text": text,
+                    f"expected_{field_name}": expected,
                     "timeout_s": timeout_s,
                     "bytes_received": received_bytes,
                     "reads": reads,
@@ -650,9 +728,9 @@ class UartRunner(SessionDevice):
                     "ok": False,
                     "tool": "test_reactor",
                     "error_type": "uart_expect_timeout",
-                    "summary": "Expected text did not appear on the COM port before this step's timeout.",
+                    "summary": missing,
                     "port_id": self.id,
-                    "expected_text": text,
+                    f"expected_{field_name}": expected,
                     "timeout_s": timeout_s,
                     "bytes_received": received_bytes,
                     "reads": reads,

@@ -1394,6 +1394,131 @@ steps:
     assert result["steps"][1]["result"]["bytes_received"] == len(banner)
 
 
+def test_uart_open_hands_the_plans_clean_buffer_choice_to_the_session(tmp_path: Path) -> None:
+    # What the plan says about starting clean must reach `com_session_start`,
+    # because that is the only thing standing between "the banner I matched came
+    # from this boot" and "it was already in the buffer". Both the schema default
+    # and an explicit `false` are pinned: a default that silently stopped being
+    # applied would leave the first plan below passing for the wrong reason.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n  aux_uart:\n    device: "COM_AUX"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: aux_uart, action: uart_open, clear_buffer: false}
+  - {port_id: aux_uart, action: uart_close}
+  - {port_id: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is True, result
+    opens = [arguments for name, arguments in service.calls if name == "com_session_start"]
+    assert opens == [{"clear_buffer": True, "port_id": "dut_uart"}, {"clear_buffer": False, "port_id": "aux_uart"}]
+
+
+def test_uart_open_refuses_a_non_boolean_clean_buffer(tmp_path: Path) -> None:
+    path = write_test_config(tmp_path, 'version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open, clear_buffer: "yes"}\n')
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["field"] == "steps[0].clear_buffer"
+    assert refused.value.details["validator"] == "type"
+
+
+def test_uart_expect_pattern_matches_a_value_split_across_two_reads(tmp_path: Path) -> None:
+    # The reason a pattern exists at all: checking the board answered with the
+    # *right* value, not merely that it answered. The reading is split mid-number
+    # across two reads, so this only passes if the pattern is searched against the
+    # decoded rolling buffer rather than against the chunk that arrived last —
+    # a per-chunk search sees "temp=23" and "7C" and matches neither.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: dut_uart, action: uart_expect, pattern: "temp=\\\\d+C\\\\b", timeout_s: 5}
+  - {port_id: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot ok\r\ntemp=23", b"7C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is True, result
+    matched = result["steps"][1]["result"]
+    assert matched["ok"] is True
+    assert matched["reads"] == 2
+    assert matched["bytes_received"] == 20
+    # A pattern reports under its own key, so a result cannot be read as a
+    # substring expectation nobody wrote.
+    assert matched["expected_pattern"] == "temp=\\d+C\\b"
+    assert "expected_text" not in matched
+
+
+def test_uart_expect_pattern_is_anchored_only_where_it_is_written(tmp_path: Path) -> None:
+    # `re.search` semantics: the same output matches an unanchored pattern and
+    # fails a `^`-anchored one, so a plan that means "the line starts this way"
+    # gets to say it and a plan that does not is not silently given it.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+
+    def run(pattern: str) -> dict:
+        plan_path = write_test_config(
+            tmp_path,
+            f"""version: 2
+steps:
+  - {{port_id: dut_uart, action: uart_open}}
+  - {{port_id: dut_uart, action: uart_expect, pattern: "{pattern}", timeout_s: 0.2}}
+  - {{port_id: dut_uart, action: uart_close}}
+""",
+        )
+        service = RecordingService(uart_reads=[b"noise\r\nversion 1.4.2\r\n"])
+        return TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert run("version \\\\d+\\\\.\\\\d+\\\\.\\\\d+")["ok"] is True
+    anchored = run("^version \\\\d+\\\\.\\\\d+\\\\.\\\\d+")
+    # Named, so this cannot pass on a pattern that merely failed to compile.
+    assert anchored["error_type"] == "uart_expect_timeout"
+
+
+def test_uart_expect_pattern_timeout_reports_the_tail_like_a_text_step(tmp_path: Path) -> None:
+    # A pattern that never matches fails the same named way a text step does and
+    # answers with the same bounded tail — a red result stays readable without
+    # reconnecting to the board, whichever kind of claim went unmet.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: dut_uart, action: uart_expect, pattern: "temp=\\\\d+C", timeout_s: 0.2}
+  - {port_id: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\n", b"sensor timeout, temp=??C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["error_type"] == "uart_expect_timeout"
+    assert [item["action"] for item in result["cleanup"]] == ["uart_close"]
+
+    failed = result["steps"][1]["result"]
+    assert failed["expected_pattern"] == "temp=\\d+C"
+    assert "expected_text" not in failed
+    assert "temp=??C" in failed["received_tail"]["text"]
+    assert failed["received_tail"]["hex"] == b"boot: stage 1\r\nsensor timeout, temp=??C\r\n".hex()
+    assert failed["received_tail_truncated"] is False
+    assert failed["bytes_received"] == 41
+
+
 def test_uart_expect_timeout_fails_the_run_and_reports_what_the_port_said(tmp_path: Path) -> None:
     config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
     plan_path = write_test_config(
@@ -1582,8 +1707,11 @@ steps:
 @pytest.mark.parametrize(
     ("step", "field"),
     [
-        ("{port_id: dut_uart, action: uart_expect, timeout_s: 5}", "steps[0].text"),
+        # Neither expectation: the step names nothing to wait for, which is a
+        # fault in the step rather than in one key, so the field is the step.
+        ("{port_id: dut_uart, action: uart_expect, timeout_s: 5}", "steps[0]"),
         ('{port_id: dut_uart, action: uart_expect, text: "", timeout_s: 5}', "steps[0].text"),
+        ('{port_id: dut_uart, action: uart_expect, pattern: "", timeout_s: 5}', "steps[0].pattern"),
         ('{port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: 0}', "steps[0].timeout_s"),
         ('{port_id: dut_uart, action: uart_expect, text: "Hello World", timeout_s: -1}', "steps[0].timeout_s"),
         ('{port_id: dut_uart, action: uart_expect, text: "Hello World"}', "steps[0].timeout_s"),
@@ -1603,6 +1731,61 @@ def test_new_steps_are_refused_by_the_bundled_schema(tmp_path: Path, step: str, 
 
     assert refused.value.error_type == "test_config_invalid"
     assert refused.value.details["field"] == field
+
+
+@pytest.mark.parametrize(
+    "expectation",
+    [
+        # Both: two claims where the schema allows one, so there is no answer to
+        # "what did this step wait for".
+        'text: "Hello World", pattern: "Hello"',
+        # Neither: nothing to wait for at all.
+        "",
+    ],
+)
+def test_uart_expect_refuses_a_step_that_is_not_exactly_one_expectation(tmp_path: Path, expectation: str) -> None:
+    step = f"{{port_id: dut_uart, action: uart_expect, {expectation + ', ' if expectation else ''}timeout_s: 5}}"
+    path = write_test_config(tmp_path, f"version: 2\nsteps:\n  - {step}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["field"] == "steps[0]"
+    # The refusal says which two keys it means, so the plan can be corrected
+    # without reading the bundled schema.
+    assert refused.value.details["exactly_one_of"] == ["text", "pattern"]
+
+
+def test_uart_expect_refuses_a_pattern_that_does_not_compile(tmp_path: Path) -> None:
+    # An uncompilable regex is a named refusal before the run starts, not a
+    # traceback out of the middle of one: the plan is refused with nothing
+    # opened, nothing flashed and no session to clean up.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {port_id: dut_uart, action: uart_open}
+  - {port_id: dut_uart, action: uart_expect, pattern: "temp=(\\\\d+", timeout_s: 5}
+  - {port_id: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert result["failed_step"] == 2
+    assert result["steps"] == []
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].pattern"
+    assert refusal["value"] == "temp=(\\d+"
+    # The position re gave up at, which is the whole point of catching this.
+    assert "missing )" in refusal["regex_error"]
+    # Refused before the bench was touched at all.
+    assert service.calls == []
 
 
 def test_unknown_reactor_action_still_names_the_two_new_ones(tmp_path: Path) -> None:

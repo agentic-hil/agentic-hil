@@ -97,18 +97,23 @@
       "properties": {
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
-        "clear_buffer": { "type": "boolean", "default": true }
+        "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later `uart_expect` matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
       }
     },
     "uartExpect": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "port_id", "text", "timeout_s"],
-      "description": "Wait for text on a serial line this plan has opened. Reads the port the same way `com_read` does and matches against everything read so far, so output that arrives in pieces still counts. A step whose text never appears fails with the tail of what the port did say.",
+      "required": ["action", "port_id", "timeout_s"],
+      "description": "Wait for output on a serial line this plan has opened. Reads the port the same way `com_read` does and matches against everything read so far, so output that arrives in pieces still counts. A step whose expectation never appears fails with the tail of what the port did say. Exactly one of `text` and `pattern` says what to wait for: a step carrying both, or neither, is refused before the run starts.",
+      "oneOf": [
+        { "required": ["text"], "not": { "required": ["pattern"] } },
+        { "required": ["pattern"], "not": { "required": ["text"] } }
+      ],
       "properties": {
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_expect" },
-        "text": { "type": "string", "minLength": 1, "description": "The substring the port's output must contain." },
+        "text": { "type": "string", "minLength": 1, "description": "The substring the port's output must contain. Mutually exclusive with `pattern`." },
+        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the port's output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. Use this to check that the board answered with the right value — a counter, a measurement, a version string — rather than merely that it answered. A pattern that does not compile is refused before the run starts. Mutually exclusive with `text`." },
         "timeout_s": { "$ref": "#/$defs/positiveTimeout" }
       }
     },

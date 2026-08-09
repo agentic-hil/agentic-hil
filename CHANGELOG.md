@@ -8,6 +8,20 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- `uart_expect` steps can wait on a `pattern:` regular expression instead of a `text:` substring, matched across read boundaries with the same bounded `received_tail` on timeout, and `uart_open` steps can start from a clean buffer with `clear_buffer:`; the nucleo demo now leads with the declarative plan and keeps its pytest file as the CI-embedding variant (#159)
+- The `docs/` directory builds as an MkDocs Material site on Read the Docs (`mkdocs.yml`, `.readthedocs.yaml`, `docs/index.md`); the markdown files in the repository stay canonical (#161)
+
+### Changed
+
+- Restructured the README into a human entry point — value, supported first path, install, one real run — and moved the reference depth into `docs/configuration.md`, `docs/mcp-tools.md`, `docs/testing.md`, `docs/safety-model.md` and `docs/installation.md`, with the tool-inventory pin moving with its table (#158)
+- Scoped the skill description to operating a connected target board through the configured bench, and said the negative out loud — not for PCB layout, schematic capture, EDA or mechanical design, and not for firmware authoring that never touches a board — and the registration block written into a host's AGENTS.md carries the same boundary, so hosts stop routing hardware-design sessions into a skill with no tool for them (#160)
+
+### Fixed
+
+- The review-loop container image pins its Python base by digest, matching its Node base
+
+### Added
+
 - Two test reactor step actions, `reset` and `uart_expect`. `reset` drives the same `reset_target` path the MCP tool does and takes the same modes — `run`, `halt`, `init` — so a backend that will not run one refuses the step with its own `not_supported` rather than a reworded approximation of it; preflight refuses the step without `allow_reset` on the named probe, and inside a live debug session, where a `reset_target` one-shot could only ever come back busy. `uart_expect` takes a required `text` and a required positive `timeout_s` and waits for that substring on a serial line the plan has already opened, reading through `com_read` and matching against everything read so far, so a banner that arrives in pieces still counts. A step whose text never appears fails the run with `uart_expect_timeout` carrying the last 512 bytes the port did send, decoded, so a silent board and a wrong banner read differently.
 - `examples/nucleo-f446re_demo/testconfig.yaml`: the demo loop — flash, open the port, reset, expect `Hello World`, close — as a declarative plan, run from that directory with `agentic-hil test-reactor --test-config testconfig.yaml`.
 
