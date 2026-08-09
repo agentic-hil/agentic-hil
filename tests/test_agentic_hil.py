@@ -1533,6 +1533,22 @@ def test_the_skill_description_scopes_to_operating_the_bench() -> None:
         assert "The gate is the whole of the scope." in text, name
 
 
+
+def test_the_codex_registration_block_carries_the_same_boundary() -> None:
+    """The block written into a host's AGENTS.md routes like the skill does.
+
+    The over-broad "any firmware or hardware request" wording sent
+    hardware-design sessions here; the registration block states the same
+    positive scope and the same negative as the skill description."""
+    from agentic_hil.cli import codex_registration_block
+
+    block = codex_registration_block("skills/agentic-hil/SKILL.md", "0.0.0", "codex")
+    assert "operates the connected target board through the configured bench" in block
+    assert "Not for designing hardware" in block
+    assert "PCB layout" in block
+    assert "never touches a board" in block
+    assert "any firmware or hardware request" not in block
+
 def test_skill_frontmatter_survives_a_windows_checkout() -> None:
     # git converts the packaged skill to CRLF on Windows unless .gitattributes
     # pins it; refusing to recognise it there would report this project's own
