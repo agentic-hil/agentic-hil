@@ -426,6 +426,16 @@ class CanBusService:
             result["shares"] = {name: share_view(share) for name, share in bus_config.shares.items()}
             result["listen_only_enforcement_level"] = bus_config.listen_only_enforcement
             result["listen_only_proof"] = listen_only_proof(bus_config)
+            if bus_config.listen_only_enforcement == "service":
+                # The adapter's own evidence is not what backs the flag on this
+                # bus, so it does not get to answer "how is listen-only enforced
+                # here". `driver_verified` sitting above a proof of
+                # `software_filter` is the exact misreading the configuration key
+                # exists to prevent: an operator acting on the first line would
+                # believe a controller had been put in a state nobody put it in.
+                # The capability is not lost, only renamed to what it is.
+                result["listen_only_adapter_capability"] = result["listen_only_enforcement"]
+                result["listen_only_enforcement"] = listen_only_proof(bus_config)
         if session is not None:
             result.update(self._session_status(session))
         return result

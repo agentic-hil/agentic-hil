@@ -112,6 +112,95 @@ def test_single_owner_bus_has_no_participants_and_starts_no_broker(tmp_path: Pat
     assert not descriptor_path(bus_lock_key(config, "bench"), Path(os.path.expanduser("~")) / ".agentic-hil" / "device-locks").exists()
 
 
+def test_a_service_enforced_bus_never_reports_a_controller_proof(tmp_path: Path) -> None:
+    """A software claim must not be readable as a controller one, on any line.
+
+    `listen_only_enforcement` in a bus status has always meant the evidence the
+    *adapter* would give — `driver_verified` on peak. On a bus that says its
+    listen-only is enforced at the service, that evidence is not what backs the
+    flag, and leaving it as the answer would tell an operator a controller was
+    put in a state nobody put it in. The capability is still reported; it is
+    just no longer the answer to how this bus enforces anything."""
+    yaml_text = (
+        "can_buses:\n"
+        "  bench:\n"
+        '    adapter: "peak"\n'
+        '    channel: "PCAN_USBBUS1"\n'
+        "    listen_only: true\n"
+        '    listen_only_enforcement: "service"\n'
+        "    shares:\n"
+        "      sniffer:\n"
+        "        requires_listen_only: true\n"
+    )
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=yaml_text)))
+    service = CanBusService(config)
+    try:
+        status = service.list_buses()["buses"]["bench"]
+    finally:
+        service.close()
+
+    assert status["listen_only_enforcement_level"] == "service"
+    assert status["listen_only_proof"] == "software_filter"
+    assert status["listen_only_enforcement"] == "software_filter"
+    assert status["listen_only_adapter_capability"] == "driver_verified", "the capability is renamed, not dropped"
+    # Nothing in the whole status offers the controller proof for this claim.
+    assert "driver_verified" not in json.dumps({key: value for key, value in status.items() if key != "listen_only_adapter_capability"})
+    assert "controller" not in json.dumps(status)
+
+
+def test_a_controller_enforced_bus_still_reports_the_adapter_evidence(tmp_path: Path) -> None:
+    """The rewrite is for the weaker claim only; a controller bus is untouched."""
+    yaml_text = (
+        "can_buses:\n"
+        "  bench:\n"
+        '    adapter: "peak"\n'
+        '    channel: "PCAN_USBBUS1"\n'
+        "    listen_only: true\n"
+        '    listen_only_enforcement: "controller"\n'
+        "    shares:\n"
+        "      sniffer:\n"
+        "        requires_listen_only: true\n"
+    )
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=yaml_text)))
+    service = CanBusService(config)
+    try:
+        status = service.list_buses()["buses"]["bench"]
+    finally:
+        service.close()
+
+    assert status["listen_only_enforcement"] == "driver_verified"
+    assert status["listen_only_proof"] == "controller"
+    assert "listen_only_adapter_capability" not in status
+
+
+@pytest.mark.parametrize("config_version", [1, 2, 3])
+def test_shares_are_additive_in_every_config_version_that_is_still_read(tmp_path: Path, config_version: int) -> None:
+    """All three versions are read, so `shares:` has to be readable in all three.
+
+    The versions gate read permissions and com_ports identity; a bus's
+    participant views are neither, and requiring a file to move to a new version
+    to describe a shared bus would make the feature cost exactly what the design
+    says it must not cost. The share-less entry beside it stays single-owner in
+    every one of them, which is the same promise from the other side."""
+    shared = (
+        "can_buses:\n"
+        "  bench:\n"
+        '    adapter: "peak"\n'
+        '    channel: "PCAN_USBBUS1"\n'
+        "    shares:\n"
+        "      alpha:\n"
+        "        max_frames: 8\n"
+        "  solo:\n"
+        '    adapter: "peak"\n'
+        '    channel: "PCAN_USBBUS2"\n'
+    )
+    config = load_config(str(write_config(tmp_path, can_buses_yaml=shared, config_version=config_version)))
+
+    assert sorted(config.can_buses["bench"].shares) == ["alpha"]
+    assert config.can_buses["bench"].shares["alpha"].max_frames == 8
+    assert config.can_buses["solo"].shares == {}, "an entry with no shares: is the single-owner bus, in every version"
+
+
 @pytest.mark.parametrize("share_name", ["permissions", "provenance", "allow_write", "allow_anything"])
 def test_a_share_may_not_be_named_after_a_configuration_block_or_a_grant(tmp_path: Path, share_name: str) -> None:
     """`configwrite.permission_surface` is name-driven, and both its arms collide here.
