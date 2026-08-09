@@ -191,6 +191,50 @@ class StepComparator:
         return {"comparator": self.raw, "captured_text": self.captured_text, "captured_value": self.captured_value}
 
 
+def pattern_refusal(index: int, step: TestStep, field_name: str, pattern: object, summary: str, needs_capture: bool) -> JsonObject | None:
+    """Refuse a regular expression this plan cannot mean, before the run.
+
+    A pattern that does not compile, or a `range` whose pattern captures nothing
+    to put in it, is a fault in the plan and is answered here: preflight builds
+    nothing, so a plan refused for either has opened no session and touched no
+    board. `re.error` carries the position it gave up at, which is the whole
+    reason this is not left to raise out of the run as a traceback."""
+    if pattern is None:
+        return None
+    try:
+        compiled = re.compile(str(pattern))
+    except re.error as error:
+        return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
+    if needs_capture and compiled.groups != 1:
+        return preflight_error(
+            index,
+            step,
+            field_name,
+            "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
+            {"error_type": "invalid_argument", "value": str(pattern)[:128], "capture_groups": compiled.groups},
+        )
+    return None
+
+
+def comparator_pattern_refusal(index: int, step: TestStep) -> JsonObject | None:
+    """A `comparator:`'s own pattern, refused before the run.
+
+    Written once for every medium a comparator judges: what a pattern must
+    satisfy is a property of the claim, not of the line or the bus it is read
+    against, so a serial step and a frame step are refused in the same shape and
+    under the same field name — which is what makes the two readable side by side
+    in a report."""
+    comparator = step.arguments.get("comparator") or {}
+    return pattern_refusal(
+        index,
+        step,
+        "comparator.pattern",
+        comparator.get("pattern"),
+        "Test step's comparator pattern is not a valid Python regular expression.",
+        needs_capture=comparator.get("range") is not None,
+    )
+
+
 @dataclass(frozen=True)
 class UartReadOutcome:
     """What one bounded read of a serial line came back with."""
@@ -1069,36 +1113,14 @@ class UartRunner(SessionDevice):
     def _pattern_refusal(cls, index: int, step: TestStep) -> JsonObject | None:
         """Refuse a regular expression this plan cannot mean, before the run.
 
-        A pattern that does not compile, or a `range` whose pattern captures
-        nothing to put in it, is a fault in the plan and is answered here:
-        preflight builds nothing, so a plan refused for either has opened no
-        session and touched no board. `re.error` carries the position it gave up
-        at, which is the whole reason this is not left to raise out of the run as
-        a traceback."""
+        The comparator's half of this is device-neutral and lives in
+        `comparator_pattern_refusal`; what is left here is the v2 `uart_expect`
+        spelling, whose `pattern:` is a bare key on the step and never carries a
+        range."""
         if step.action == "uart_expect":
-            field_name, pattern, needs_capture = "pattern", step.arguments.get("pattern"), False
-            summary = "Test step's uart_expect pattern is not a valid Python regular expression."
-        elif step.action == "uart_read":
-            comparator = step.arguments.get("comparator") or {}
-            field_name, pattern = "comparator.pattern", comparator.get("pattern")
-            needs_capture = comparator.get("range") is not None
-            summary = "Test step's comparator pattern is not a valid Python regular expression."
-        else:
-            return None
-        if pattern is None:
-            return None
-        try:
-            compiled = re.compile(str(pattern))
-        except re.error as error:
-            return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
-        if needs_capture and compiled.groups != 1:
-            return preflight_error(
-                index,
-                step,
-                field_name,
-                "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
-                {"error_type": "invalid_argument", "value": str(pattern)[:128], "capture_groups": compiled.groups},
-            )
+            return pattern_refusal(index, step, "pattern", step.arguments.get("pattern"), "Test step's uart_expect pattern is not a valid Python regular expression.", needs_capture=False)
+        if step.action == "uart_read":
+            return comparator_pattern_refusal(index, step)
         return None
 
     # --- reading the line ------------------------------------------------
