@@ -3728,24 +3728,37 @@ def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pyte
 
 
 SPAWNER_SOURCE = """
-import sys
+import subprocess, sys
 from agentic_hil.process import {function}
-child = {function}([sys.executable, "-c", "import time; time.sleep(30)"])
-print(child.pid, flush=True)
+child = {function}(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+open(sys.argv[1], "w", encoding="utf-8").write(str(child.pid))
 """
 
 
-def grandchild_pid_after_spawner_exit(function: str) -> int:
+def grandchild_pid_after_spawner_exit(function: str, pid_file: Path) -> int:
     """Start a child through ``function`` from a process that then exits, and report its pid.
 
     The spawner is a plain ``subprocess.Popen`` on purpose: it must belong to no
     Job Object of this test's making, so the only containment in the picture is
     the one ``function`` itself creates.
+
+    Two details are the difference between a proof and a hang. The grandchild's
+    standard streams go to ``DEVNULL``, because on POSIX a child inherits its
+    parent's fds 0-2 and would hold the write end of any pipe open for its whole
+    life — leaving this reader blocked on an EOF that only arrives once the
+    process it is asking about has died. It is the same reason
+    :func:`agentic_hil.canbroker._spawn_broker` hands the broker a log file
+    rather than a pipe. And the pid travels through a file rather than that
+    stream, so nothing here depends on a descriptor the grandchild shares.
     """
-    spawner = subprocess.Popen([sys.executable, "-c", SPAWNER_SOURCE.format(function=function)], stdout=subprocess.PIPE, text=True, encoding="utf-8")
-    stdout, _ = spawner.communicate(timeout=60)
-    assert spawner.returncode == 0, stdout
-    return int(stdout.strip())
+    spawner = subprocess.Popen([sys.executable, "-c", SPAWNER_SOURCE.format(function=function), str(pid_file)])
+    assert spawner.wait(timeout=60) == 0
+    return int(pid_file.read_text(encoding="utf-8"))
 
 
 def pid_alive_after_settling(pid: int, *, awaiting: bool, timeout_s: float = 5.0) -> bool:
@@ -3784,9 +3797,9 @@ def test_managed_spawn_hands_back_a_child_that_is_already_running(tmp_path: Path
     terminate_process_tree(child, 5.0)
 
 
-def test_detached_spawn_child_outlives_the_process_that_started_it() -> None:
+def test_detached_spawn_child_outlives_the_process_that_started_it(tmp_path: Path) -> None:
     """What the CAN broker needs: a bus that does not end with the first run to attach."""
-    pid = grandchild_pid_after_spawner_exit("spawn_detached_process")
+    pid = grandchild_pid_after_spawner_exit("spawn_detached_process", tmp_path / "detached.pid")
     try:
         assert pid_alive_after_settling(pid, awaiting=False) is True
     finally:
@@ -3794,9 +3807,9 @@ def test_detached_spawn_child_outlives_the_process_that_started_it() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Job Object containment is what the detached variant opts out of")
-def test_managed_spawn_child_dies_with_the_process_that_started_it() -> None:
+def test_managed_spawn_child_dies_with_the_process_that_started_it(tmp_path: Path) -> None:
     """The contrast that gives the detached variant its meaning: same shape, opposite lifetime."""
-    pid = grandchild_pid_after_spawner_exit("spawn_managed_process")
+    pid = grandchild_pid_after_spawner_exit("spawn_managed_process", tmp_path / "managed.pid")
     try:
         assert pid_alive_after_settling(pid, awaiting=False) is False
     finally:
