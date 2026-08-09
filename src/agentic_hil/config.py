@@ -1655,8 +1655,8 @@ def trusted_persistent_executable(
         return str(path)
 
     def trusted_parent_chain(candidate: Path) -> list[int]:
-        descriptors = _hold_posix_directory_chain(candidate.parent)
         trusted_uids = frozenset({0, os.geteuid()})
+        descriptors = _hold_posix_directory_chain(candidate.parent)
         try:
             for index, descriptor in enumerate(descriptors):
                 opened = os.fstat(descriptor)
