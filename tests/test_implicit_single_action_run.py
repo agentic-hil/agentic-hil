@@ -32,9 +32,9 @@ from types import SimpleNamespace
 import pytest
 from conftest import write_config
 
+from agentic_hil.bench import fold_resource_name
 from agentic_hil.config import load_config
 from agentic_hil.contracts import TOOL_ANNOTATIONS
-from agentic_hil.bench import fold_resource_name
 from agentic_hil.coordination import HardwareCoordinator
 from agentic_hil.tools import (
     _READ_ONLY_HARDWARE_TOOLS,
