@@ -12,7 +12,7 @@ FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c
 # required to clone, commit and diff. Diagnosing either from inside a container
 # is a waste of an afternoon -- the same reason tools/ci_linux.py uses the full
 # image.
-FROM python:3.12-bookworm
+FROM python:3.12-bookworm@sha256:3cd9086bdb30f7c9bc08a3fa621d9842e0d3f6f9291aeb4677e0547817c10b12
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules

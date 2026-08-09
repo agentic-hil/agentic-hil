@@ -1,6 +1,6 @@
 ---
 name: agentic-hil
-description: Use for any embedded firmware or hardware request in this project — flashing, resetting, probing, debugging, reading UART or CAN traffic, collecting firmware artifacts or test reports — and for configuring Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly.
+description: Use when a request operates this project's connected target board through the configured bench — flashing, resetting, probing, debugging, UART and CAN stimulus and feedback, firmware artifacts, test reports — or configures Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly. Not for designing hardware — PCB layout, schematic capture, EDA, mechanical design — and not for firmware authoring that never touches a board.
 metadata:
   origin: Agentic HIL
   agentic_hil_version: "0.10.0"
@@ -12,6 +12,11 @@ Agentic HIL is this project's hardware gate. Every request that would touch the
 target board goes through its MCP tools, which enforce the authoritative
 configuration's workspace binding, permissions, and limits. A direct debugger,
 serial, or CAN invocation bypasses that gate.
+
+The gate is the whole of the scope. Designing hardware — PCB layout, schematic
+capture, EDA, mechanical design — and authoring firmware that never reaches a
+board have no tool here: nothing below applies to them, so do that work
+directly.
 
 ## Route firmware work to these tools
 

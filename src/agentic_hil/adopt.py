@@ -86,7 +86,16 @@ from agentic_hil.report import (
     recommit_report_with_status,
     write_report,
 )
-from agentic_hil.types import AgenticHILConfig, JsonObject, fold_device_path, fold_hardware_id, is_stable_device_name
+from agentic_hil.types import (
+    AgenticHILConfig,
+    ComPortConfig,
+    JsonObject,
+    com_port_carries_hardware_identity,
+    com_port_identity_source,
+    fold_device_path,
+    fold_hardware_id,
+    is_stable_device_name,
+)
 
 PROJECT_CONFIG_ADOPT = "project_config_adopt_hardware"
 
@@ -276,6 +285,60 @@ def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[Js
                 "reason": "This key holds a value that is neither empty nor the placeholder the skeleton writes, so somebody set it. Adoption does not replace it.",
             }
         )
+
+
+def _resulting(entry: JsonObject | None, field: str, discovered: Any) -> Any:
+    """What a field holds once this adoption has been applied.
+
+    Adoption fills what is unset and keeps what somebody set, so the value the
+    entry ends up with is the configured one whenever there is one. Used to work
+    out what will identify the entry *after* the write rather than before it."""
+    current = (entry or {}).get(field)
+    return discovered if is_unset(current, "com_ports", field) else current
+
+
+def _adopted_identity_source(entry: JsonObject | None, device: str, serial: str, vid: int | None, pid: int | None) -> str | None:
+    """What this entry's ``identity_source`` has to say once the values are in, if anything.
+
+    Two jobs, and both exist because the file alone cannot answer the question
+    version 3 asks. An adapter that publishes no serial number and one nobody has
+    got round to reading are the same file; only a read of the hardware separates
+    them, and this call has just made one.
+
+    The first job is the declaration itself: an entry that will still carry no
+    serial, no ``resource_id`` and no ``/dev/serial/by-id/...`` name gets the
+    honest name of what does identify it — ``vid_pid``, ``vid``, ``pid``, or
+    ``device`` when the adapter published nothing at all. That is the deliberate
+    exception version 3 requires, written by the command that found out it
+    applies rather than by hand.
+
+    The second is keeping an existing declaration true. A port that once
+    published no serial and was written down as ``identity_source: device`` may
+    be replaced by one that does; adoption then fills the serial in, and a
+    declaration left behind saying ``device`` would contradict the entry it sits
+    in and refuse the file at load. So a declaration that has gone stale is
+    corrected — narrowly, and only towards what the entry's own keys now say. It
+    is not a value adoption is overruling: it never was a choice, only a record.
+
+    ``None`` when the entry needs no declaration and carries none, which is the
+    ordinary case on a bench whose adapters publish serials."""
+    resulting = ComPortConfig(
+        device=str(_resulting(entry, "device", device) or device),
+        baudrate=0,
+        timeout_s=0.0,
+        write_timeout_s=0.0,
+        encoding="",
+        max_buffer_bytes=0,
+        max_write_bytes=0,
+        serial_number=_optional_string(_resulting(entry, "serial_number", serial)),
+        vid=_resulting(entry, "vid", vid),
+        pid=_resulting(entry, "pid", pid),
+        resource_id=_optional_string((entry or {}).get("resource_id")),
+    )
+    declared = (entry or {}).get("identity_source")
+    if com_port_carries_hardware_identity(resulting) and is_unset(declared, "com_ports", "identity_source"):
+        return None
+    return com_port_identity_source(resulting)
 
 
 def _discovered_usb_id(matched_port: JsonObject | None, field: str) -> int | None:
@@ -551,6 +614,48 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 field=field,
                 current=(port_entry or {}).get(field),
                 value=discovered,
+            )
+        # And what identifies the entry, when the adapter published no serial to
+        # identify it by. This is the half of the version 3 rule that only a read
+        # of the hardware can settle: the file cannot tell "this adapter has no
+        # serial number" from "nobody filled it in", and this call has just asked
+        # the adapter. Written as a fact discovered here, exactly like the serial
+        # and the ids above, so an entry adopted from a cheap USB-serial bridge
+        # satisfies version 3 without anybody hand-editing YAML.
+        #
+        # Not written when the entry names hardware on its own — a serial, a
+        # `resource_id`, or a `/dev/serial/by-id/...` name — because there the
+        # declaration would be a key that repeats what is already unambiguous.
+        declared = _adopted_identity_source(port_entry, device, port_serial, port_vid, port_pid)
+        current_declaration = (port_entry or {}).get("identity_source")
+        if declared is not None and current_declaration not in (None, declared) and isinstance(current_declaration, str):
+            # A declaration that has stopped describing the entry. Corrected
+            # rather than kept, for the reason `_stabilises_device` above rewrites
+            # a device name: this is not a value being overruled but the same
+            # entry's own answer, brought back into agreement with the keys this
+            # call just filled in. Left alone it would refuse the file at load.
+            carried.append(
+                {
+                    "key": f"com_ports.{port_name}.identity_source",
+                    "value": declared,
+                    "previous_value": current_declaration,
+                    "reason": (
+                        f"This entry says it is identified by `{current_declaration}` and its keys now say `{declared}`. "
+                        "The declaration records which key carries the identity; a version 3 configuration is refused "
+                        "while the two disagree."
+                    ),
+                }
+            )
+        elif declared is not None:
+            _propose(
+                carried,
+                already,
+                kept,
+                key=f"com_ports.{port_name}.identity_source",
+                section="com_ports",
+                field="identity_source",
+                current=current_declaration,
+                value=declared,
             )
 
     return {

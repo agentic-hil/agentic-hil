@@ -14,7 +14,7 @@ agentic-hil setup --agent claude-code   # or: codex / opencode
 
 `setup` installs the skill, registers the host with a verified absolute
 executable path, and creates the external policy. Install it first if the
-command is missing: [AI_AGENT_QUICKSTART.md](../AI_AGENT_QUICKSTART.md) has the
+command is missing: [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md) has the
 complete install chain. The hosts below are the ones `setup` does not cover.
 
 `setup` composes two commands; either runs on its own:
@@ -262,4 +262,4 @@ Source: [MCP stdio transport specification](https://modelcontextprotocol.io/spec
 4. Run `debugger_info` before a hardware action when setup is unclear.
 5. Treat `permission_denied` as authoritative. Ask the operator to review the authoritative config; do not bypass it.
 
-See [Troubleshooting](../TROUBLESHOOTING.md) for startup, configuration, `PATH`, and debugger errors.
+See [Troubleshooting](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) for startup, configuration, `PATH`, and debugger errors.

@@ -31,7 +31,7 @@ from agentic_hil.devices import config_devices, debugger_device
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService, project_config_create
-from agentic_hil.types import JsonObject, fold_hardware_id
+from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -241,9 +241,9 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["debuggers"]["dut"]["type"] == "stlink"
     assert configured["debuggers"]["dut"]["probe_id"] == "STLINK123"
     # The profile above still requests the version 1 read grants. The document
-    # this writes is version 2, where reading needs none and the keys are
-    # refused by name, so the request is satisfied by dropping it.
-    assert configured["version"] == 2
+    # this writes is the current version, where reading needs none and the keys
+    # are refused by name, so the request is satisfied by dropping it.
+    assert configured["version"] == CURRENT_CONFIG_VERSION
     # Granted unless the profile said otherwise: a flag it does not name follows
     # the generated default, and one it names is honoured — which can only
     # narrow, because the default it would have to beat is already true wherever
@@ -258,6 +258,78 @@ def test_discovery_applies_project_requirements() -> None:
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
     assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
+
+
+@pytest.mark.parametrize("baudrate", ["fast", None, [], True], ids=repr)
+def test_a_profile_baudrate_that_is_not_a_number_is_refused_by_name(baudrate: object) -> None:
+    """A hand-written profile is the one input here with no schema in front of it.
+
+    `int(profile_port.get("baudrate", 115200))` turned `baudrate: fast` into a
+    `ValueError` out of a generation that had already read the board. `True` is
+    in the list for the opposite reason: `int(True)` is `1`, which the
+    configuration schema accepts as a baudrate, so the traceback was not even the
+    worst case — a value nobody meant would have been written into the file and
+    opened on the port."""
+    template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    profile = {
+        "target": {"name": "demo", "controller": "stm32f446ret6"},
+        "debuggers": {"dut": {"timeout_s": 30, "permissions": {}}},
+        "com_ports": {"uart": {"baudrate": baudrate, "permissions": {}}},
+    }
+    discovery = {
+        "executable": "C:/ST/STM32_Programmer_CLI.exe",
+        "probe_id": "STLINK123",
+        "target": {"controller": "STM32F446RE"},
+        "com_port": {"device": "COM3"},
+    }
+
+    with pytest.raises(ConfigError) as excinfo:
+        apply_discovery_to_template(template, profile, discovery)
+
+    assert excinfo.value.error_type == "invalid_argument"
+    # Named to the key in the file the operator has to edit, not to "baudrate".
+    assert excinfo.value.details["field"] == "com_ports.uart.baudrate"
+    assert excinfo.value.details["profile"] == PROJECT_PROFILE
+    assert "115200" in excinfo.value.summary
+    assert excinfo.value.to_dict()["remediation"]
+
+
+def test_init_answers_a_profile_it_cannot_use_instead_of_raising(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of the named refusal: `agentic-hil init` returns a result.
+
+    Discovery has already run and the board has already been read by the time the
+    profile is applied, so a traceback here loses that work and tells an operator
+    nothing about which line of their own file is wrong. Nothing is written, so a
+    repeat after the edit starts from the same place."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    (workspace / PROJECT_PROFILE).write_text(
+        "target:\n  name: demo\n  controller: stm32f446ret6\ncom_ports:\n  uart:\n    baudrate: fast\n",
+        encoding="utf-8",
+    )
+    executable = Path(__file__).resolve()
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "executable": str(executable),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
+
+    result = init_config()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert result["field"] == "com_ports.uart.baudrate"
+    assert result["remediation"]
+    assert "No configuration was written." in result["summary"]
+    assert not Path(result["path"]).exists()
 
 
 def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,9 +362,10 @@ def test_init_uses_hardware_discovery_when_project_profile_exists(tmp_path: Path
     assert written["debuggers"]["dut"]["type"] == "stlink"
     assert written["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     assert written["com_ports"]["dut_uart"]["device"] == "COM3"
-    # A bootstrapped config is a version 2 config: it loads, which it could not
-    # do while carrying a read permission this version refuses by name.
-    assert written["version"] == 2
+    # A bootstrapped config is written at the current version: it loads, which it
+    # could not do while carrying a read permission that version refuses by name,
+    # nor with a COM port entry naming no hardware.
+    assert written["version"] == CURRENT_CONFIG_VERSION
     assert "allow_probe" not in written["debuggers"]["dut"]["permissions"]
     assert "allow_read" not in written["com_ports"]["dut_uart"]["permissions"]
 
