@@ -927,10 +927,19 @@ def test_unknown_hardware_exception_poisons_active_lease(
     tool: str,
     arguments: dict,
 ) -> None:
+    # `auto_recover: off` on purpose. What this test is about is containment: an
+    # exception nobody classified poisons the lease that was open and blocks the
+    # bench. A bare effect call now declares an implicit single-action run, and
+    # that run's teardown would recover the incident this test needs standing —
+    # correct behaviour, and a different question, tested where it belongs in
+    # tests/test_implicit_single_action_run.py. The policy that governs it is a
+    # supported setting, so turning it off here separates the two rather than
+    # working around one of them.
     config = config_for(
         tmp_path,
         com_ports_yaml='com_ports:\n  dut:\n    device: "COM_TEST"\n',
         can_buses_yaml='can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "vcan0"\n',
+        auto_recover="off",
     )
     service = AgenticHILToolService(config)
     lease = service.coordinator.acquire("physical:exception")

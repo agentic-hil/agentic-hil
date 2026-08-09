@@ -65,7 +65,7 @@ from agentic_hil.coordination import (
     debugger_effect_resources,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.devices import DeviceError, resolve_devices
+from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
     RECOVERY_PHYSICAL_CHECK_ERROR,
     attach_quarantine_guidance,
@@ -493,48 +493,130 @@ class AgenticHILToolService:
                     ensure_audit_ready(self.config)
                 except (ConfigError, OSError) as error:
                     return audit_unavailable(name, error)
-            try:
-                if name in debugger_effect_tools() or name == "debug_stop_session":
-                    permission_failure = self._debug_permission_failure(name, args)
-                    if permission_failure is not None:
-                        return permission_failure
-                    return self._settle_after_recovery_class_call(name, blocked_before, self._coordinated_debug_call(name, lambda: self._invoke_dispatch(dispatch[name])))
-                return self._settle_after_recovery_class_call(name, blocked_before, self._invoke_dispatch(dispatch[name]))
-            except BaseException as error:
-                if name in audited_hardware_tools() or name in containment_tools():
-                    poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
-                    # Report the quarantine state that actually holds instead of a
-                    # hardcoded claim: a poison failure must not fake protection.
-                    quarantined_now = self.coordinator.blocked or any(item.state in {"cleanup_required", "quarantined"} for item in self.coordinator.leases.values())
-                    if not isinstance(error, Exception):
-                        if poison_error is not None:
-                            error.args = (*error.args, f"Quarantine error: {poison_error}")
-                        raise
-                    result: JsonObject = {
-                        "ok": False,
-                        "tool": name,
-                        "error_type": "audit_failed_after_action" if isinstance(error, (ConfigError, OSError)) else "hardware_action_exception",
-                        "summary": "Hardware action failed and its physical state is unconfirmed.",
-                        "side_effect_status": "unknown",
-                        "retry_safe": False,
-                        "cleanup_required": True,
-                        "quarantined": quarantined_now,
-                        "quarantine_id": self.coordinator.quarantine_id,
-                        "backend_error": str(error),
-                    }
-                    if poison_error is not None:
-                        result["quarantine_error"] = str(poison_error)
-                    if isinstance(error, (ConfigError, OSError)):
-                        result.update({"audit_ok": False, "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)}})
-                    written = write_report(self.config, result)
-                    if written.get("audit_ok") is False:
-                        self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
-                        quarantined_now = self.coordinator.blocked or quarantined_now
-                    return {**written, "cleanup_required": True, "quarantined": quarantined_now, "quarantine_id": self.coordinator.quarantine_id}
-                if isinstance(error, ConfigError):
-                    return {"tool": name, **error.to_dict()}
-                raise
+            action = dispatch[name]
+            # Run semantics apply to every effectful interaction, whether it is
+            # one action or fifty; a declared run is only the explicit spelling.
+            # A bare effect call therefore declares its own single-action run
+            # here, at the one place every tool passes through, so the wrap is
+            # never a thing each tool has to remember to do.
+            if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.blocked:
+                return self._in_implicit_run(name, args, lambda: self._dispatch_tool(name, args, blocked_before, action))
+            return self._dispatch_tool(name, args, blocked_before, action)
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
+
+    def _in_implicit_run(self, name: str, args: JsonObject, action) -> JsonObject:
+        """Perform one bare effect call as the single-action run it really is.
+
+        Before this, an effect tool called with no run open sat outside the run
+        model entirely: it took its lease, did its thing, and if it failed into
+        an incident there was no teardown to hang a recovery action on — the
+        only way back was `hardware_recover` or a person at a shell. A declared
+        run around the same call has had that since the abort seam existed.
+
+        So the call declares the run itself, over exactly the resources it is
+        about to lease, and the declaration is the same `begin_run` an agent's
+        own `bench_run_start` makes: the same hold, the same lease record, the
+        same audit trail. The teardown is the same too — literally
+        `bench_run_stop`'s, shared rather than copied — so an incident left
+        standing aborts into `recover_after_failed_run` exactly as a declared
+        run's would.
+
+        Never entered while a run is open (the declared run already holds
+        everything, and a second declaration would be refused), and never while
+        an incident stands: a new run is the stimulus class and waits for the
+        incident, while the recovery class must reach the board *through* it,
+        and wrapping either in a run it cannot open would break both.
+        """
+        try:
+            resources = implicit_run_resources(self.config, name, args)
+        except (CoordinationError, DeviceError):
+            # Nothing resolvable to declare means nothing to hold. The call
+            # answers for its own argument exactly as it did before, rather than
+            # having this layer restate a refusal it does not own.
+            return action()
+        try:
+            declaration = self.coordinator.begin_run(resources, label=f"{IMPLICIT_RUN_LABEL}{name}")
+        except CoordinationError as error:
+            return {"tool": name, "side_effect_committed": False, **error.result}
+        declared = [item for item in declaration.get("declared_devices") or [] if isinstance(item, str)]
+        try:
+            result = action()
+        except BaseException:
+            # The run still ends and still recovers: an exception on the way out
+            # is the failure this seam exists for. Its own recovery block has
+            # nowhere to go — the exception is the answer — but the bench is
+            # given back either way.
+            self._recover_if_run_left_an_incident(self._end_implicit_run(), declared)
+            raise
+        recovery = self._recover_if_run_left_an_incident(self._end_implicit_run(), declared)
+        if not isinstance(result, dict):
+            return result
+        # Said in the result, because "this call ran in a run" and "an agent
+        # declared a run around this call" are different facts and an operator
+        # reading the report afterwards has to be able to tell them apart.
+        run: JsonObject = {
+            "implicit": True,
+            "declared_devices": declared,
+            "run_label": declaration.get("run_label"),
+            "run_started_at": declaration.get("run_started_at"),
+            "aborted": recovery is not None,
+        }
+        return {**result, "run": run} if recovery is None else {**result, "run": run, "recovery": recovery}
+
+    def _end_implicit_run(self) -> bool:
+        """Close the implicit run, never raising over the call's own answer."""
+        try:
+            self.coordinator.end_run()
+        except CoordinationError:
+            # `end_run` is idempotent and this run was opened two statements
+            # ago, so this is close to unreachable; if it ever is reached, the
+            # bench state below is still read honestly and the call's own result
+            # is not replaced by a bookkeeping failure.
+            return False
+        return True
+
+    def _dispatch_tool(self, name: str, args: JsonObject, blocked_before: bool, action) -> JsonObject:
+        try:
+            if name in debugger_effect_tools() or name == "debug_stop_session":
+                permission_failure = self._debug_permission_failure(name, args)
+                if permission_failure is not None:
+                    return permission_failure
+                return self._settle_after_recovery_class_call(name, blocked_before, self._coordinated_debug_call(name, lambda: self._invoke_dispatch(action)))
+            return self._settle_after_recovery_class_call(name, blocked_before, self._invoke_dispatch(action))
+        except BaseException as error:
+            if name in audited_hardware_tools() or name in containment_tools():
+                poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
+                # Report the quarantine state that actually holds instead of a
+                # hardcoded claim: a poison failure must not fake protection.
+                quarantined_now = self.coordinator.blocked or any(item.state in {"cleanup_required", "quarantined"} for item in self.coordinator.leases.values())
+                if not isinstance(error, Exception):
+                    if poison_error is not None:
+                        error.args = (*error.args, f"Quarantine error: {poison_error}")
+                    raise
+                result: JsonObject = {
+                    "ok": False,
+                    "tool": name,
+                    "error_type": "audit_failed_after_action" if isinstance(error, (ConfigError, OSError)) else "hardware_action_exception",
+                    "summary": "Hardware action failed and its physical state is unconfirmed.",
+                    "side_effect_status": "unknown",
+                    "retry_safe": False,
+                    "cleanup_required": True,
+                    "quarantined": quarantined_now,
+                    "quarantine_id": self.coordinator.quarantine_id,
+                    "backend_error": str(error),
+                }
+                if poison_error is not None:
+                    result["quarantine_error"] = str(poison_error)
+                if isinstance(error, (ConfigError, OSError)):
+                    result.update({"audit_ok": False, "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)}})
+                written = write_report(self.config, result)
+                if written.get("audit_ok") is False:
+                    self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
+                    quarantined_now = self.coordinator.blocked or quarantined_now
+                return {**written, "cleanup_required": True, "quarantined": quarantined_now, "quarantine_id": self.coordinator.quarantine_id}
+            if isinstance(error, ConfigError):
+                return {"tool": name, **error.to_dict()}
+            raise
 
     def reload_description(self) -> JsonObject:
         """Take the device description on disk, keeping the permissions in force.
@@ -825,9 +907,25 @@ class AgenticHILToolService:
             stopped = self.coordinator.end_run()
         except CoordinationError as error:
             return {"tool": "bench_run_stop", "side_effect_committed": False, **error.result}
-        if not self.coordinator.blocked:
-            return stopped
-        return {**stopped, "recovery": self.recover_after_failed_run(declared)}
+        recovery = self._recover_if_run_left_an_incident(True, declared)
+        return stopped if recovery is None else {**stopped, "recovery": recovery}
+
+    def _recover_if_run_left_an_incident(self, ended: bool, declared: list[str]) -> JsonObject | None:
+        """The run teardown's trigger, shared by both interactive spellings.
+
+        A declared run and an implicit single-action run end the same way, so
+        they ask the same question in the same place rather than each carrying a
+        copy of it: is an incident still standing now the devices are back? That
+        is the failure signal an interactive run has — there is no step list to
+        read a verdict off — and the implicit run inherits it unchanged, which is
+        what makes a bare effect call abort and recover exactly as the same call
+        does between `bench_run_start` and `bench_run_stop`.
+
+        Returns the run result's `recovery` block, or None when there was nothing
+        to recover from."""
+        if not ended or not self.coordinator.blocked:
+            return None
+        return self.recover_after_failed_run(declared)
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
@@ -1157,7 +1255,7 @@ class AgenticHILToolService:
         return None
 
     def _coordinated_debug_call(self, name: str, callback) -> JsonObject:
-        one_shot = name in {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
+        one_shot = name in debugger_one_shot_tools()
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
         for_recovery = name in recovery_class_tools() and self.coordinator.blocked
@@ -1478,6 +1576,85 @@ def containment_tools() -> set[str]:
         "debug_stop_session", "debug_clear_breakpoints", "debug_halt",
         "com_session_stop", "can_session_stop",
     }
+
+
+# What an implicit single-action run is labelled with. It is a run label like any
+# other, so it reaches `bench_run_status` and the owner record on every lease the
+# run holds, and a reader there can tell which kind of run held the bench without
+# being told separately. The tool name follows it.
+IMPLICIT_RUN_LABEL = "implicit:"
+# The audited hardware tools that only read the bench. Written out here rather
+# than read off the annotation table in contracts.py: nothing in this package
+# decides behaviour from those hints — contracts.py says so and a test enforces
+# it — so the two are held in step by a test comparing them instead, in
+# tests/test_implicit_single_action_run.py. `probe_target` is deliberately not
+# among them, and for the reason contracts.py gives at length: it connects, and
+# an SWD attach halts a running core, so it is an effect on the target and its
+# own failure path treats it as one.
+_READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info"})
+# Session starts are deliberately outside the implicit run. The hold one takes
+# outlives the call that opened it — that is what a session is — so a
+# single-action run around a session start would end, and release, while the
+# session it opened was still running; the release would be a statement that is
+# not true.
+_SESSION_START_TOOLS = frozenset({"com_session_start", "can_session_start", "debug_start_session"})
+
+
+def debugger_one_shot_tools() -> set[str]:
+    """Debugger tools that take their own lease for one call and give it back.
+
+    Everything else in `debugger_effect_tools` runs through a session somebody
+    already opened, on the lease that session holds."""
+    return {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
+
+
+def implicit_run_tools() -> set[str]:
+    """Effect tools that a bare call wraps in a run it declares for itself.
+
+    Derived rather than listed, so a tool that joins the incident-marking set
+    later joins this one with it instead of being silently left outside the run
+    model. The base is `audited_hardware_tools` — precisely the calls whose
+    failure can raise an incident, and whose audit trail is proven writable
+    before the board is touched — less four groups:
+
+    * the read-only ones. A read leaves nothing for a recovery action to put
+      back.
+    * the session starts, for the reason given at `_SESSION_START_TOOLS`.
+    * the calls made *through* an open debug session. A recovery action reaps
+      this owner's debugger processes and drops the debug lease, so a run that
+      opened and closed around one call inside a session would take the session
+      with it — and a session is precisely the case where the agent's own hold
+      already spans several calls. Its teardown is `debug_stop_session` and the
+      containment tools beside it, which stay reachable through an incident on
+      purpose.
+    * the two configuration tools, which refuse while a run holds the bench —
+      wrapping either in a run would make it refuse itself.
+
+    A tool in this set is still only wrapped when there is no run open and no
+    incident standing; see `_in_implicit_run`."""
+    session_scoped_debug = debugger_effect_tools() - debugger_one_shot_tools()
+    return audited_hardware_tools() - _READ_ONLY_HARDWARE_TOOLS - _SESSION_START_TOOLS - session_scoped_debug - {
+        PROJECT_CONFIG_ADOPT,
+        PROJECT_CONFIG_CREATE,
+    }
+
+
+def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject) -> list[object]:
+    """What a bare effect call is about to lease, for its own run to declare.
+
+    Exactly the resources the call itself takes, and derived the same way it
+    derives them, because a run that declared anything else would be refused by
+    its own `_undeclared` check the moment the call reached for a lease. Raises
+    the same `DeviceError` / `CoordinationError` the call would raise on an
+    argument that names no configured device; the caller lets the call answer
+    for that itself."""
+    if name in debugger_effect_tools():
+        return list(debugger_effect_resources(config))
+    if name == "com_write":
+        return [uart_device(config, str(args.get("port_id", "")))]
+    if name == "can_send":
+        return [can_device(config, str(args.get("bus_id", "")))]
+    return []
 
 
 def recovery_class_tools() -> set[str]:
