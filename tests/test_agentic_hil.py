@@ -2543,7 +2543,6 @@ def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user() -> No
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes; the walk this exercises is POSIX-only")
-@pytest.mark.skipif(os.name != "nt" and os.geteuid() == 0, reason="root owns nothing another user could own here")
 def test_a_umask_002_home_registers_its_launcher(tmp_path: Path) -> None:
     """The reported case, end to end, through the walk itself.
 
@@ -2566,7 +2565,6 @@ def test_a_umask_002_home_registers_its_launcher(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes; the walk this exercises is POSIX-only")
-@pytest.mark.skipif(os.name != "nt" and os.geteuid() == 0, reason="root ignores the mode bits this test sets")
 def test_the_launcher_file_itself_may_still_not_be_writable_by_others(tmp_path: Path) -> None:
     """The ancestors stopped being read; the executable did not.
 
@@ -2574,6 +2572,9 @@ def test_the_launcher_file_itself_may_still_not_be_writable_by_others(tmp_path: 
     it is the one permission question still worth refusing on. The refusal
     carries the mode and the owner it read, because a caller who is told only
     that the file is untrusted has to go and stat it to learn why.
+
+    Runs as root too: what refuses here is the mode this code reads, not the
+    mode the kernel would enforce against the caller.
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
