@@ -645,6 +645,49 @@ def test_redact_sensitive_covers_an_authkey_field() -> None:
     assert "s3cret" not in json.dumps(redacted)
 
 
+def test_a_killed_broker_leaves_a_corpse_that_the_next_attach_replaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """One hard-killed broker must not brick the bus until somebody deletes a file.
+
+    A broker that is killed never runs its cleanup, so its descriptor and authkey
+    outlive it. The lock probe correctly refuses that endpoint — it owns nothing —
+    and if the refusal were the end of the story the bus would stay unusable. It
+    is not: a descriptor whose bus lock is free is provably a corpse, because a
+    live broker holds that lock from before it publishes until after it
+    unpublishes, so the next attach clears it and starts a broker of its own."""
+    import signal
+
+    config = shared_config(tmp_path, monkeypatch)
+    bus_key = bus_lock_key(config, "bench")
+    alpha = attach_participant(config, "bench", "alpha")
+    lock_root = alpha.mutex.root
+    dead_pid = alpha.broker_pid
+    os.kill(dead_pid, signal.SIGTERM)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and canbroker.probe_bus_lock(bus_key, dead_pid, lock_root)["ok"]:
+        time.sleep(0.05)
+    alpha.detach()
+
+    # The corpse is really there, and it really names the dead broker.
+    assert descriptor_path(bus_key, lock_root).exists(), "a killed broker cannot clean up after itself"
+    assert read_descriptor(bus_key, lock_root).pid == dead_pid
+    assert canbroker.probe_bus_lock(bus_key, dead_pid, lock_root)["bus_lock_held"] is False
+
+    # Starting a broker is what makes replacing it safe, so without that licence
+    # the corpse is still refused rather than quietly cleared.
+    with pytest.raises(ParticipantError) as refusal:
+        attach_participant(config, "bench", "beta", allow_start=False, start_timeout_s=5.0)
+    assert refusal.value.result["error_type"] == "can_broker_not_bus_owner"
+
+    beta = attach_participant(config, "bench", "beta")
+    try:
+        assert beta.broker_pid != dead_pid, "the corpse was replaced, not reused"
+        assert read_descriptor(bus_key, lock_root).pid == beta.broker_pid
+        assert beta.status()["ok"] is True
+    finally:
+        beta.detach()
+        beta.broker_process.wait(timeout=30)
+
+
 def test_a_broker_that_nobody_attaches_to_does_not_sit_on_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
     """The other orphan: a client that spawned a broker and then died."""
     from agentic_hil.bench import BenchMutex
