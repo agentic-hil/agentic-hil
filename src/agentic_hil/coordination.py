@@ -391,9 +391,10 @@ class HardwareCoordinator:
         of a run met no lock at all. The run holds its devices from here until
         end_run, and every call inside it borrows that hold.
 
-        Accepts Device objects or already-derived resource names. Devices are the
-        intended form — they carry the hardware identity and collapse two config
-        entries naming one unit onto one lock before anything is taken."""
+        Accepts Device objects or already-derived resource names, one form or the
+        other. Devices are the intended form — they carry the hardware identity and
+        collapse two config entries naming one unit onto one lock before anything
+        is taken. A declaration mixing the two is refused; see below for why."""
         with self._guard:
             self._require_open()
             if self.run_active:
@@ -406,7 +407,31 @@ class HardwareCoordinator:
                 # results nobody could stand behind afterwards.
                 raise CoordinationError(self._quarantined_result(sorted(self.incident_resources), "This bench has an unresolved incident; recover it before declaring a run."))
             given = resources.devices if isinstance(resources, DeviceSet) else tuple(resources)
-            device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of([item for item in given if isinstance(item, Device)])
+            objects = [item for item in given if isinstance(item, Device)]
+            names = [item for item in given if isinstance(item, str)]
+            if objects and names:
+                # One form or the other, because only one of them is ever locked.
+                # The acquisition below picks its branch on whether any device is
+                # present, so a single Device sends the whole declaration down the
+                # device branch and the hand-written names are never taken — while
+                # `declared` covers both and reports them as held. A declared board
+                # that is reported as held and never locked is the one outcome
+                # worse than refusing the run, and it is invisible from here: a
+                # foreign BenchMutex takes the named board while this run counts it
+                # as its own. No caller needs the mixed form — resolve the names to
+                # devices, or declare the whole run as names.
+                raise CoordinationError(
+                    {
+                        "ok": False,
+                        "error_type": "invalid_argument",
+                        "summary": "A run declares devices or already-derived resource names, not both: only the device half of a mixed declaration would be locked, and the named half would be reported as held without ever being taken.",
+                        "device_lock_keys": sorted(set(lock_keys(objects))),
+                        "declared_resource_names": sorted(set(names)),
+                        "retry_safe": False,
+                        "side_effect_committed": False,
+                    }
+                )
+            device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of(objects)
             declared = physical_resources(lock_keys(given))
             # Before the empty check, so a device that resolved to an unlockable
             # key is named as such instead of read as "you declared nothing".
@@ -423,7 +448,10 @@ class HardwareCoordinator:
                 # two by the time this raises. A declaration made of devices goes
                 # through DeviceSet, which additionally refuses a key the mutex
                 # would not lock — silently not locking a declared board is the
-                # one outcome worse than refusing the run.
+                # one outcome worse than refusing the run. The branch is total
+                # because the mixed form was refused above: a declaration is
+                # either all devices, in which case the set is every one of them,
+                # or all names, in which case there is no set to take.
                 if device_set:
                     device_set.acquire(self.bench, wait_s=wait_s)
                 else:

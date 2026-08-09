@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run declaration mixing device objects with hand-written resource names is refused instead of half locked.** `bench_run_start` accepts either form, and the acquisition chose its branch on whether any device object was present: one device sent the whole declaration down the device branch, so every bare name beside it was never taken — while the declared set covered both, and the run reported the named board as held for its whole length. A foreign holder could take that board while the run counted it as its own, which is invisible from inside the run and is the outcome the device path was built to prevent. The mixed form is now refused with `invalid_argument` before anything is locked, naming both halves of the declaration (`device_lock_keys`, `declared_resource_names`) so the caller can see which one it wrote. Neither homogeneous form changes: a declaration of devices is resolved, collapsed and taken exactly as before, and one of bare names is locked exactly as before. No caller passes the mixed form — every one of them hands over a device set or a list of names — so this closes a boundary rather than removing a capability. (#140)
+
 ## [0.10.0] - 2026-08-09
 
 ### Added
