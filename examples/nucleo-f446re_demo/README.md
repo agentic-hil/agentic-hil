@@ -49,6 +49,10 @@ com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
 → feedback contains "Hello World"
 ```
 
+## Run the loop from a test plan
+
+[testconfig.yaml](testconfig.yaml) is the same five steps declared rather than driven — flash, open the port, reset, wait for `Hello World`, close. Run it with `agentic-hil test-reactor --test-config testconfig.yaml`; a banner that never arrives fails the run and reports the tail of what the port did say instead.
+
 ## Run the loop from pytest
 
 ```bash

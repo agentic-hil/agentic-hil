@@ -77,9 +77,14 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 # holds the bench, and what an operator does about that is find out whose it is.
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 
-# Validated flashing and unrestricted debugger access are mutually exclusive
-# policies (docs/security-design.md): while either of these is true on a probe,
-# `flash_firmware` on that probe is refused, and so is a debug session.
+# Both of these act on flash outside the path this server validates — a raw
+# debugger command writes whatever it is given, a mass erase clears whatever a
+# flash has just written — so once either is allowed, a flash report's claim
+# about what is on the device is no longer one this server can stand behind.
+# That is what makes validated flashing and unrestricted debugger access
+# mutually exclusive policies (docs/security-design.md): while either of these is
+# true on a probe, `flash_firmware` on that probe is refused, and so is a debug
+# session.
 #
 # They are therefore the two exceptions to the allow-by-default generation, and
 # a generated configuration writes both false. For a while it did not, and the
@@ -149,14 +154,21 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 
     One text for the four backends that raise it, because a refusal an operator
     meets on their first flash must not read differently depending on which
-    programmer their board happens to use."""
+    programmer their board happens to use.
+
+    It gives the reason rather than restating the rule. "Mutually exclusive
+    policies" on its own reads as an arbitrary interlock, and an operator who
+    takes it that way reaches for the flag it names — which is the one move that
+    keeps flashing refused."""
     entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
     return (
-        f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: validated flashing and "
-        f"unrestricted debugger access are mutually exclusive policies, which is why a generated configuration leaves "
-        f"both false. Something on this bench set `{entry}` to true since. Set it back to false — with "
-        "`project_config_set`, or by asking the operator — and this works. Nothing here can set it back to true "
-        "afterwards."
+        f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: it acts on flash "
+        f"outside the path this server validates, so while it is allowed a flash report's claim about what is on the "
+        f"device is no longer one this server can stand behind. That is what makes validated flashing and unrestricted "
+        f"debugger access mutually exclusive policies, and why a generated configuration leaves both false. Something "
+        f"on this bench set `{entry}` to true since. Set it back to false — with `project_config_set`, or by asking "
+        "the operator — and this works. Nothing here can set it back to true afterwards, and no tool here is behind "
+        "that flag, so nothing becomes unavailable by turning it off."
     )
 # The scope that separates "this project has no configuration", which
 # `project_config_create` answers, from "the configuration this running server
@@ -831,6 +843,45 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "One run per owner is what makes the declared set the complete answer to what this owner may touch.",
         ),
     ),
+    # The most common refusal on this surface, and for a long time the one that
+    # carried nothing: every other entry here explains a bench, a policy or a
+    # backend, and this one explains the caller's own payload. It is deliberately
+    # general — the concrete fact is always in the result's own `field` — because
+    # a per-argument entry would be a second copy of the input schemas that
+    # nothing keeps in step with them.
+    "invalid_argument": ErrorRemedy(
+        meaning=(
+            "The call was refused on its arguments alone, before anything was locked, opened, or driven. Nothing was "
+            "reached and there is nothing to clean up. What was wrong is in the result rather than here: `field` names "
+            "the argument — dotted for a nested one, `$` for the object itself — and `validator` names the rule it "
+            "broke where a schema decided it (`type`, `minimum`, `maximum`, `required`, `enum`, "
+            "`additionalProperties`, `finite`). `allowed_values` appears when the rule was an enumeration, and `value` "
+            "when the refusal came from a configuration or profile document rather than from a tool argument. This "
+            "says the request as written is not answerable; it says nothing about whether the device, the probe or the "
+            "bus is available."
+        ),
+        remediation=(
+            "Read `field` and `validator` together and repeat the call with that one argument corrected. Validation "
+            "stops at the first fault, so a second wrong field is named on the next attempt rather than now.",
+            "Take the accepted shape from the tool's own `inputSchema` in `tools/list`, not from a remembered example. "
+            "That schema is what the refusal was decided against.",
+            "Types are checked as written and never coerced, so a value that means something other than what it would "
+            "convert to cannot pass as the converted one: `wait_s: true` and `wait_s: \"5\"` are both refused where "
+            "`wait_s: 5` is taken.",
+            "When `field` names a configuration or profile key — `com_ports.<name>.baudrate` and the like — the fix is "
+            "in the document the refusal names and not in the call. `agentic-hil://reference/config-shape` gives the "
+            "expected shape of each key; correct it there, then repeat the call.",
+        ),
+        do_not=(
+            "Do not retry the identical payload. Nothing here is timing or contention, and the same arguments are "
+            "refused the same way every time.",
+            "Do not drop a refused optional argument and let its default stand unless the default is what was meant. A "
+            "wait that is refused and then omitted becomes no wait at all, and the call fails on `device_busy` "
+            "instead — the same request failing one layer later for a reason that is not the real one.",
+            "Do not read this as a hardware or a permission problem. Nothing was contacted, so there is no state to "
+            "recover and no permission to ask the operator for.",
+        ),
+    ),
     "target_not_detected:openocd": ErrorRemedy(
         meaning="OpenOCD reached the debug adapter but no target answered on the selected transport.",
         remediation=(
@@ -1154,6 +1205,58 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not answer `listen_only: true` unconditionally to clear the refusal. That reintroduces the defect one "
             "process further out, where nothing in this repository can see it.",
+        ),
+    ),
+    "can_adapter_protocol_unsupported": ErrorRemedy(
+        meaning=(
+            "A CAN process bridge answered its `open` request with something this protocol does not accept: a "
+            "`protocol_version` that is not the one this server speaks, a field outside the response's closed set, or "
+            "a `backend`, `summary` or `listen_only` of the wrong type. The bridge is running and did answer, so the "
+            "fault is the shape of the answer and not the transport. The session is refused rather than opened on a "
+            "response nobody can read."
+        ),
+        remediation=(
+            "Make the bridge's `open` result carry `\"ok\": true` and `\"protocol_version\": 2`, and nothing beyond "
+            "`ok`, `protocol_version`, `backend`, `summary` and `listen_only`. `backend` and `summary` are strings "
+            "where present and `listen_only` is a boolean.",
+            "The set is closed on purpose: an unrecognised field is how a bridge speaking a later or a private "
+            "protocol would otherwise pass as one speaking this one. Carry extra detail in `summary`.",
+            "A bridge that cannot open the bus should answer `\"ok\": false` with its own `error_type` and `summary`. "
+            "That refusal reaches the caller as the bridge's own reason, which is more useful than this one.",
+            "`can_buses.<name>.adapter: process` selects this transport; check that the configured command is the "
+            "bridge that was meant and not another program that answers on stdout.",
+        ),
+        do_not=(
+            "Do not treat this as a bus or a wiring fault. Nothing was read off the bus and no frame was sent; what "
+            "failed is the agreement between this server and the bridge process.",
+            "Do not silence it by widening what the bridge sends. A response that is accepted because the check was "
+            "relaxed is a response nobody has checked.",
+        ),
+    ),
+    "can_adapter_invalid_response": ErrorRemedy(
+        meaning=(
+            "The CAN adapter answered a `send`, `read` or `open` request with a payload this server cannot read — a "
+            "result outside the closed field set for that method, a wrong type where the protocol fixes one, or frame "
+            "data that does not decode. Because the request was delivered before the answer came back, whether the "
+            "bridge acted on it is unknown: the result carries `side_effect_status: unknown` and "
+            "`cleanup_required: true`, and a frame may or may not have reached the bus."
+        ),
+        remediation=(
+            "Read the bus state from the target itself before sending anything else — the pending frame may have gone "
+            "out. The refusal deliberately does not guess.",
+            "Close the session with `can_session_stop` and open it again. A bridge that answered one request "
+            "unreadably has no state this server can rely on for the next.",
+            "Fix the bridge's response shape: `send` answers `ok`, and optionally `backend` and `summary` as strings; "
+            "`read` adds `frames` as a list, each frame carrying `id`, `extended`, `rtr`, `data_hex` and a `dlc` that "
+            "matches the decoded byte count.",
+            "If the adapter is not a bridge, the malformed frames came from the CAN library itself — check the "
+            "adapter's driver and firmware version against what `can_buses_list` reports for that bus.",
+        ),
+        do_not=(
+            "Do not resend the frame on the assumption that it did not go out. Duplicating a stimulus onto a live bus "
+            "is the specific outcome the unknown status exists to keep you from choosing blind.",
+            "Do not carry on with the open session. Whatever the bridge is doing with its channel, this server no "
+            "longer has a reliable account of it.",
         ),
     ),
 }
@@ -2214,7 +2317,7 @@ These calls are the only door. The file itself is protected by deny rules `agent
 
 ### Permissions move one way — through `project_config_set`
 
-A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Validated flashing and unrestricted debugger access are mutually exclusive, so while either of those is true `flash_firmware` on that probe is refused; neither has a tool behind it here, so leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
+A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Both of those act on flash outside the path this server validates — a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written — so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either of those is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here, so setting one true withholds flashing rather than granting anything, and leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
 
 What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 

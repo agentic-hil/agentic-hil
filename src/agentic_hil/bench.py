@@ -350,7 +350,7 @@ class BenchMutex:
         wanted = physical_resources(resources)
         if not wanted:
             return []
-        deadline = time.monotonic() + _validated_wait(wait_s)
+        deadline = time.monotonic() + validated_wait(wait_s)
         with self._guard:
             taken: list[str] = []
             try:
@@ -377,7 +377,7 @@ class BenchMutex:
         Folded and taken through the same path as a device, so a caller cannot
         split it by spelling and the holder record names whoever holds it. Raises
         DeviceBusyError naming the holder, exactly as `acquire` does."""
-        deadline = time.monotonic() + _validated_wait(wait_s)
+        deadline = time.monotonic() + validated_wait(wait_s)
         with self._guard:
             return self._take(fold_resource_name(resource), deadline)
 
@@ -522,7 +522,15 @@ class BenchMutex:
             return None if held is None else held.reclaimed_from
 
 
-def _validated_wait(wait_s: object) -> float:
+def validated_wait(wait_s: object) -> float:
+    """The wait a caller asked for, as a number of seconds, or a named refusal.
+
+    Public because the MCP surface has to reach it *before* it converts: a
+    frontend that ran `float()` over the payload first handed this a value that
+    had already lost the distinction it makes — `float(True)` is `1.0`, and a
+    wait nobody could have meant became a one-second wait instead of an
+    `invalid_argument`. Taking the raw object is the whole contract.
+    """
     if wait_s is None or wait_s is False:
         return 0.0
     if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)):

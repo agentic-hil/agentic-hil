@@ -584,8 +584,10 @@ def ensure_safe_state_root() -> list[str]:
 def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
     """Remove group/other write from the *current user's own* directories (and a
     final regular file such as a launcher) along ``target``'s chain, so the
-    fail-closed executable trust check accepts a umask-002 / private-group home
-    without the operator hand-fixing permissions.
+    fail-closed executable trust check accepts a launcher an installer wrote
+    under a umask-002 / private-group home without the operator hand-fixing
+    permissions. Since #143 that check reads the mode of the launcher itself and
+    not of its ancestors, so the file is what this still has to reach.
 
     Only components owned by the current user are ever changed; the walk stops at
     the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
@@ -1596,6 +1598,34 @@ def write_generated_config(target_path: Path, workspace: Path, text: str) -> Non
     secure_atomic_write_text(target_path, text)
 
 
+def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_uids: frozenset[int]) -> str | None:
+    """Why a POSIX MCP launcher's ancestor directory cannot be trusted, or None.
+
+    Who *else* may write the directory is deliberately not asked. Until this
+    change the walk refused every ancestor carrying group or other write, which
+    is the ordinary state of a home directory on a distribution that combines
+    ``umask 002`` with per-user groups: ``~`` and ``~/.local`` at ``0775`` were
+    enough to have `mcp-config` reject every candidate and then recommend the
+    user-level tool installer that had produced exactly that layout. The rule
+    could only ever defend against a different account on the same machine —
+    never a guarantee of this project — and it could not defend against the
+    operator's own processes, which own these directories and can rewrite them
+    regardless of their mode. Windows dropped the equivalent ACL walk in 0.8.0
+    and holds the chain open instead; this is that line, on POSIX.
+
+    What remains is about identity rather than permissions: the launcher's own
+    parent must belong to root or to this user, because a directory owned by a
+    third account can have the validated file renamed out from under it between
+    the check and the registration, and no mode expresses that. The passed
+    ``info`` is a stat of an already-opened directory descriptor, and
+    ``trusted_uids`` is supplied by the caller so this stays answerable on hosts
+    that have no ``os.geteuid``.
+    """
+    if final and info.st_uid not in trusted_uids:
+        return "owned by another user"
+    return None
+
+
 def trusted_persistent_executable(
     executable: str | Path,
     *,
@@ -1648,14 +1678,14 @@ def trusted_persistent_executable(
         return str(path)
 
     def trusted_parent_chain(candidate: Path) -> list[int]:
+        trusted_uids = frozenset({0, os.geteuid()})
         descriptors = _hold_posix_directory_chain(candidate.parent)
         try:
             for index, descriptor in enumerate(descriptors):
                 opened = os.fstat(descriptor)
-                mode = stat.S_IMODE(opened.st_mode)
                 final = index == len(descriptors) - 1
-                unsafe_write = bool(mode & 0o022) and (final or not bool(mode & stat.S_ISVTX))
-                if unsafe_write or (final and opened.st_uid not in {0, os.geteuid()}):
+                reason = untrusted_launcher_directory(opened, final=final, trusted_uids=trusted_uids)
+                if reason is not None:
                     # Name the component and its mode: the caller cannot fix a
                     # directory the message does not identify, and one bad
                     # ancestor of a shared prefix condemns every launcher below.
@@ -1664,8 +1694,8 @@ def trusted_persistent_executable(
                     ancestor = parents[position] if 0 <= position < len(parents) else candidate.parent
                     raise ConfigError(
                         "mcp_command_untrusted",
-                        "The MCP server executable has an untrusted or replaceable parent directory.",
-                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                        f"The MCP server executable has a parent directory that is {reason}.",
+                        {"path": str(candidate), "directory": str(ancestor), "mode": f"{stat.S_IMODE(opened.st_mode):04o}", "uid": opened.st_uid},
                     )
             return descriptors
         except BaseException:
@@ -1681,7 +1711,15 @@ def trusted_persistent_executable(
                 opened = os.fstat(handle.fileno())
                 mode = stat.S_IMODE(opened.st_mode)
                 if opened.st_uid not in {0, os.geteuid()} or mode & 0o022 or not mode & 0o111:
-                    raise ConfigError("mcp_command_untrusted", "The MCP server executable must be trusted, executable, and not writable by other users.", {"path": str(candidate)})
+                    # The mode and the owner travel with the refusal for the same
+                    # reason the directory's do: this is the last thing between an
+                    # operator and a registration, and a caller told only that the
+                    # file is untrusted has to go and stat it to learn why.
+                    raise ConfigError(
+                        "mcp_command_untrusted",
+                        "The MCP server executable must be trusted, executable, and not writable by other users.",
+                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                    )
         finally:
             for descriptor in reversed(target_descriptors):
                 os.close(descriptor)

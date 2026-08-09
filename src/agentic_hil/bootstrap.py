@@ -8,7 +8,7 @@ import yaml
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
-from agentic_hil.config import generated_permissions
+from agentic_hil.config import ConfigError, generated_permissions
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -224,6 +224,37 @@ def port_device_name(matched_port: JsonObject) -> str:
     return str(matched_port["device"])
 
 
+def profile_baudrate(profile_port: JsonObject, port_name: str) -> int:
+    """The baudrate a workspace profile asks for, or a refusal naming the key.
+
+    `agentic-hil.config.example.yaml` is hand-written and reaches this with no
+    schema in front of it, unlike the file it helps generate. A bare `int()` over
+    it turned `baudrate: fast` into a `ValueError` out of a generation that had
+    already read the board — a traceback where the project's own rule is that a
+    refusal names the field, says what was expected and is safe to act on.
+
+    `bool` is refused rather than converted for the reason `validated_wait`
+    refuses it: `int(True)` is `1`, which the configuration schema accepts as a
+    baudrate, so a `baudrate: true` nobody meant would be written into the file
+    and opened on the port.
+    """
+    requested = profile_port.get("baudrate", 115200)
+    if isinstance(requested, bool):
+        raise ConfigError(
+            "invalid_argument",
+            f"{PROJECT_PROFILE} names a boolean baudrate; a baudrate is a positive whole number of bits per second, such as 115200.",
+            {"field": f"com_ports.{port_name}.baudrate", "value": requested, "profile": PROJECT_PROFILE},
+        )
+    try:
+        return int(requested)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(
+            "invalid_argument",
+            f"{PROJECT_PROFILE} names a baudrate that is not a number; a baudrate is a positive whole number of bits per second, such as 115200.",
+            {"field": f"com_ports.{port_name}.baudrate", "value": requested, "profile": PROJECT_PROFILE},
+        ) from error
+
+
 def apply_discovery_to_template(template: JsonObject, profile: JsonObject, discovery: JsonObject) -> JsonObject:
     target_profile = profile.get("target") if isinstance(profile.get("target"), dict) else {}
     detected_target = discovery.get("target") if isinstance(discovery.get("target"), dict) else {}
@@ -276,7 +307,8 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
 
     matched_port = discovery.get("com_port")
     profile_ports = profile.get("com_ports") if isinstance(profile.get("com_ports"), dict) else {}
-    profile_port = next((value for value in profile_ports.values() if isinstance(value, dict)), None)
+    profile_entry = next(((key, value) for key, value in profile_ports.items() if isinstance(value, dict)), None)
+    profile_port = None if profile_entry is None else profile_entry[1]
     if isinstance(matched_port, dict) and profile_port is not None:
         requested_io = profile_port.get("permissions") if isinstance(profile_port.get("permissions"), dict) else {}
         # The vendor and product ids off the same enumeration record, because a
@@ -291,7 +323,7 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
         template["com_ports"] = {
             "dut_uart": {
                 "device": port_device_name(matched_port),
-                "baudrate": int(profile_port.get("baudrate", 115200)),
+                "baudrate": profile_baudrate(profile_port, str(profile_entry[0] if profile_entry else "<name>")),
                 **({"serial_number": serial_number} if serial_number else {}),
                 **usb_ids,
                 # The template this fills in says `version: 3`, where an entry

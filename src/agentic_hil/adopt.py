@@ -1143,6 +1143,36 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     return {**committed, **refusal, "report_path": committed.get("report_path"), "audit_ok": committed.get("audit_ok")}
 
 
+def _discovery_side_effect(discovery: JsonObject) -> JsonObject:
+    """What the discovery said about its own side effect, carried without inventing one.
+
+    ``bool(discovery.get("side_effect_committed", False))`` rendered a marker
+    that was never set as the positive claim that nothing was committed, and the
+    status beside it defaulted to `not_started` from the same absence. Absence
+    means unknown here as everywhere else — ``mark_side_effect`` turns a missing
+    marker into `side_effect_status: unknown` precisely because a backend that
+    could not tell must not be read as one that said no.
+
+    So an absent marker stays absent and the status says `unknown`. A discovery
+    that stated its own status keeps it; one that stated only the marker gets the
+    status ``mark_side_effect`` would give it. Unreachable from the discovery
+    path as it stands — every result it returns carries the marker — which is
+    what makes the coercion worth removing rather than relying on.
+    """
+    committed = discovery.get("side_effect_committed")
+    status = discovery.get("side_effect_status")
+    fields: JsonObject = {}
+    if isinstance(committed, bool):
+        fields["side_effect_committed"] = committed
+    if isinstance(status, str) and status:
+        fields["side_effect_status"] = status
+    elif isinstance(committed, bool):
+        fields["side_effect_status"] = "partial" if committed else "not_started"
+    else:
+        fields["side_effect_status"] = "unknown"
+    return fields
+
+
 def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
     """The probe was read and this process could not give it back.
 
@@ -1164,9 +1194,9 @@ def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> Js
         "hardware_discovery": discovery,
         "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
         # The read is what happened; the release is what did not. Both are said,
-        # and neither is inferred from the other.
-        "side_effect_committed": bool(discovery.get("side_effect_committed", False)),
-        "side_effect_status": str(discovery.get("side_effect_status") or "not_started"),
+        # and neither is inferred from the other — including where the discovery
+        # said neither.
+        **_discovery_side_effect(discovery),
         "hardware_state": str(discovery.get("hardware_state") or "unknown"),
         **remediation_fields("resource_quarantined"),
         **status,

@@ -196,7 +196,7 @@ init --force     start over, everything goes
 * **Do not delete the configuration to get an open one back.** It works, and it costs you every setting in the file — the same bill `init --force` comes with. Removing that trap is what this command is for.
 * **Which key?** Name anything that is not a permission and the refusal prints every permission key your configuration actually has, entry names included. Both `can_buses.dut.allow_write` and the long `can_buses.dut.permissions.allow_write` are accepted.
 * **Restart the MCP server afterwards.** A running server parses permissions once, at startup, and `project_config_reload_description` re-reads devices and deliberately no permission. Until that restart the agent keeps being refused with the old value — the command's own result says so.
-* **`permission_change_in_open_run`** means something on this machine is holding the bench: a run, a COM or CAN session, another terminal. Permissions do not move under an active hold. `agentic-hil lease-status` names the holder; wait or ask for it to be closed, then repeat the command.
+* **`permission_change_in_open_run`** means something on this machine is holding the bench: a run, a COM or CAN session, another terminal. Permissions do not move under an active hold. `agentic-hil lease-status` names the holder; wait or ask for it to be closed, then repeat the command. `agentic-hil init --force` answers `config_write_in_open_run` under the same rule and for the same reason — a regeneration replaces every permission, baudrate and device binding those holds were taken under — and it refuses before reading the board, so nothing on the bench is touched to reach the answer.
 * **It is a command, not a tool.** An agent cannot run it and will not find it in any tool list. When an agent reports that a permission is missing, it is asking you for this line.
 
 ## 9. Artifact Not Found Or Fails Validation
@@ -273,6 +273,14 @@ Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can
 Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, sending is refused because `permissions.allow_write` is disabled (reading needs no permission, and on a version 1 file — one with no `version:` key — it still needs `permissions.allow_read`), `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0` — `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
+
+### A `process` bridge that fails its own `open`
+
+Symptom: a `process` bridge answers `ok: false` to `open`, and the session start reports `side_effect_committed: false`, `side_effect_status: not_started`, `retry_safe: true`.
+
+That is the right answer for the usual cause — a channel name the bridge could not use, refused before the bridge opened anything — and it is the default for every bridge. Fix the `channel` value and call again; nothing was touched and no incident was raised.
+
+It is the wrong answer for one case the bridge alone can recognise: the bridge opened its channel and then failed at a later step of its own initialization. It is on the bus, ACKing, at the moment it reports the failure, so "the session never started" is not true of it. Protocol v2 is one request and one response, and the error type names what went wrong rather than when, so a bridge in that position has to say so: put `"channel_open": true` on its error response. The session start then withholds the marker and reports `side_effect_status: unknown` instead — the treatment a direct adapter's post-contact failure gets. The bridge protocol version does not change, only a literal `true` counts, and a bridge that never sets the field keeps the answer above.
 
 ### `can_listen_only_unsupported` / `can_listen_only_unconfirmed`
 
