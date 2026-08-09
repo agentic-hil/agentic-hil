@@ -37,29 +37,41 @@ The project half reads the profile: where `agentic-hil agent-install` has alread
 
 Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. The profile declares requirements; the project half resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
 
-## Run the loop from an agent (MCP)
+## Run the loop (start here)
 
-With the MCP host started from this project root as described in the [top-level README](../../README.md), `agentic-hil mcp-stdio` lets an agent drive:
+The loop is a declared test plan, and running it is one command:
+
+```bash
+agentic-hil test-reactor --test-config testconfig.yaml
+```
+
+[testconfig.yaml](testconfig.yaml) is the whole loop in five steps — flash, open the port with a clean buffer, reset, wait for `Hello World`, close. This is the path to reach for, including from an agent: the reactor validates every device name, permission and session order *before* the first hardware action, and closes the UART session even when a step fails. A banner that never arrives fails the run and reports the tail of what the port did say, so a silent board and a wrong banner read differently.
+
+Waiting on a fixed substring is `text:`; when the check is that the board answered with the *right* value — a counter, a measurement, a version string — a step writes `pattern:` instead and gets a Python regular expression (`re.search`, so it is anchored only where the pattern says). Exactly one of the two per step.
+
+## Drive the loop tool by tool (MCP)
+
+The same steps, driven rather than declared. With the MCP host started from this project root as described in the [top-level README](../../README.md), `agentic-hil mcp-stdio` exposes the individual tools the plan above calls:
 
 ```text
 flash_firmware     {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
-com_session_start  {"port_id": "dut_uart"}
+com_session_start  {"port_id": "dut_uart", "clear_buffer": true}
 reset_target       {"mode": "run"}
 com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
 → feedback contains "Hello World"
 ```
 
-## Run the loop from a test plan
+Reach for this when a step needs something the plan vocabulary has no word for; otherwise the plan says the same thing in one command and checks it before touching the board.
 
-[testconfig.yaml](testconfig.yaml) is the same five steps declared rather than driven — flash, open the port, reset, wait for `Hello World`, close. Run it with `agentic-hil test-reactor --test-config testconfig.yaml`; a banner that never arrives fails the run and reports the tail of what the port did say instead.
-
-## Run the loop from pytest
+## Embed the loop in a pytest suite
 
 ```bash
 pytest tests/
 ```
 
-[tests/test_firmware.py](tests/test_firmware.py) flashes the ELF, resets the target, and asserts the boot banner on the UART. The pytest plugin uses the same discovered config or `AGENTIC_HIL_CONFIG` override as `doctor` and MCP. Without an available config the test skips; with a config but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
+[tests/test_firmware.py](tests/test_firmware.py) is the variant for CI suites that already run pytest: it drives the same tools by hand — flash the ELF, reset the target, read until the boot banner appears — so the hardware check sits alongside a project's other tests and reports through the same runner. The `agentic_hil` fixture uses the same discovered config or `AGENTIC_HIL_CONFIG` override as `doctor`, MCP and the reactor. Without an available config the test skips; with a config but no board attached it fails — that is the point of a hardware-in-the-loop regression test.
+
+A suite that only needs the loop itself can call the reactor instead of restating it in Python; the plan is the shorter and better-checked way to say the same thing.
 
 ## Adapting to another board
 
