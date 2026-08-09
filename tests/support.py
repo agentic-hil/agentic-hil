@@ -19,12 +19,12 @@ LAUNCHER_ROOT = REAL_HOME / f"agentic-hil-pytest-launcher-{os.getpid()}"
 def trusted_launcher() -> Path:
     """A launcher the product's trust rule accepts, created once per session.
 
-    The rule rejects an executable whose ancestors group or other may write, and
-    a CI runner's Python lives under exactly such a prefix, so `sys.executable`
-    cannot stand in for an installed launcher: it is untrusted there and trusted
-    here, which is why this only ever failed away from a developer machine.
-    `tempfile.gettempdir()` is a forbidden root for an MCP command, so `tmp_path`
-    cannot hold it either.
+    The rule rejects an executable that group or other may write, and a CI
+    runner's Python lives under a tool cache that hands out exactly such modes,
+    so `sys.executable` cannot stand in for an installed launcher: it is
+    untrusted there and trusted here, which is why this only ever failed away
+    from a developer machine. `tempfile.gettempdir()` is a forbidden root for an
+    MCP command, so `tmp_path` cannot hold it either.
     """
     launcher = LAUNCHER_ROOT / "bin" / ("agentic-hil.exe" if os.name == "nt" else "agentic-hil")
     if not launcher.is_file():
