@@ -367,6 +367,36 @@ def com_port_carries_hardware_identity(port: ComPortConfig) -> bool:
 
 
 @dataclass(frozen=True)
+class CanFilterConfig:
+    """One identifier acceptance term of a participant's view of the bus.
+
+    ``(frame_id & mask) == (identifier & mask)``, the acceptance filter every CAN
+    controller expresses. It is a *view*, not a permission: a frame outside it is
+    not delivered to the participant and may not be sent by it, while the medium
+    carries whatever the other participants put on it."""
+
+    identifier: int
+    mask: int
+    extended: bool = False
+
+
+@dataclass(frozen=True)
+class CanShareConfig:
+    """One named participant view of a shared physical bus.
+
+    A share is what a run attaches to; the ``can_buses`` entry above it is what
+    the broker owns. ``requires_listen_only`` is a participant's side of a
+    bus-level property: it says this view is only meaningful while nothing
+    transmits, and the broker refuses to seat it beside a writer rather than
+    silently downgrading either one."""
+
+    filters: tuple[CanFilterConfig, ...] = ()
+    max_frames: int = 1024
+    requires_listen_only: bool = False
+    permissions: IoPermissions = field(default_factory=IoPermissions)
+
+
+@dataclass(frozen=True)
 class CanBusConfig:
     adapter: Literal["peak", "socketcan", "process"]
     channel: str
@@ -389,6 +419,17 @@ class CanBusConfig:
     max_frame_data_bytes: int
     resource_id: str | None = None
     permissions: IoPermissions = field(default_factory=IoPermissions)
+    # What `listen_only` above is worth on this bus, said out loud. `controller`
+    # is the per-controller proof `can.LISTEN_ONLY_ENFORCEMENT` obtains from the
+    # adapter; `service` is the broker filtering frames in software, which is a
+    # different and weaker claim and is reported as software filtering wherever
+    # it is reported at all. Defaulted to `controller` so an entry that never
+    # named the key keeps meaning exactly what it meant before shares existed.
+    listen_only_enforcement: Literal["controller", "service"] = "controller"
+    # Named participant views. Empty is not "a bus with one anonymous share": it
+    # is the single-owner bus this project has always had, and no broker is
+    # started for it.
+    shares: dict[str, CanShareConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
