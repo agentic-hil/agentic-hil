@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **`agentic-hil init --force` refuses while a run holds any configured device.** Every other write of the authoritative configuration already refused one — `project_config_create`, `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all answer while a run, a lease or another terminal holds the bench — and the regeneration had none. What stopped it was incidental: a run that declared the probe owns the lock the board read takes between enumerating and connecting, so the read answered `device_busy`. A run that declared only a COM port or only a CAN bus holds no probe, so nothing stood in the way and the whole file was replaced — permissions, baudrate, bitrate and device bindings — underneath live measurements taken under the policy it had just discarded. `init --force` now asks `bench_open_holds`, the same question the permission commands ask, and answers `config_write_in_open_run` with `open_holds`, `retry_safe: true` and a next step naming `agentic-hil lease-status` for the holder, which is usually another process. The refusal is raised before the board is read, so a `--force` typed by accident during somebody's run costs neither a HOTPLUG connect nor a line in the audit trail, and it is refused as what it is rather than as a busy device. A workspace with no loadable configuration names no devices and is unaffected: the first `init` of a workspace still goes through, for the same reason it still reads the board without a lease. (#138)
+
 ## [0.10.0] - 2026-08-09
 
 ### Added
