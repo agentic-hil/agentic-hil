@@ -691,6 +691,72 @@ def test_a_run_declared_with_bare_resource_names_still_works(tmp_path: Path) -> 
         coordinator.close()
 
 
+def test_a_declaration_mixing_devices_and_names_is_refused(tmp_path: Path) -> None:
+    """Half a declaration locked and all of it reported as held is worse than no run.
+
+    The acquisition picks its branch on whether any Device is present, so one
+    Device sends the whole declaration down the device branch and every
+    hand-written name beside it is never taken — while the declared set covers
+    both and every later answer names them as held. A foreign BenchMutex could
+    then take the named board out from under a run counting it as its own, which
+    is invisible from inside the run. No caller needs the mixed form, so it is
+    refused before anything is locked."""
+    config = four_device_config(tmp_path)
+    device = uart_device(config, "port_a")
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        with pytest.raises(CoordinationError) as excinfo:
+            coordinator.begin_run([device, "physical:board-b"], label="mixed")
+
+        result = excinfo.value.result
+        assert result["error_type"] == "invalid_argument"
+        # Both halves are named, so the refusal says which declaration was made
+        # instead of leaving the caller to work out which item was the problem.
+        assert result["device_lock_keys"] == ["physical:board-a"]
+        assert result["declared_resource_names"] == ["physical:board-b"]
+        assert result["retry_safe"] is False
+        assert result["side_effect_committed"] is False
+        # Refused before the acquisition: no run is open, and the device half is
+        # not left locked by a run that never began.
+        assert coordinator.run_active is False
+        assert coordinator.bench.held_resources() == frozenset()
+        # Neither board is claimed, which is the honest state — the failure being
+        # refused here is a board that is reported as held and never locked.
+        stranger = BenchMutex(frontend="stranger")
+        try:
+            assert stranger.acquire(["physical:board-a", "physical:board-b"]) == ["physical:board-a", "physical:board-b"]
+        finally:
+            stranger.release_all()
+    finally:
+        coordinator.close()
+
+
+def test_both_homogeneous_declarations_still_take_every_key_they_declare(tmp_path: Path) -> None:
+    """Refusing the mixed form costs neither of the two forms callers use.
+
+    Devices are what the MCP path and the reactor hand over, and bare names are
+    what the older suite declares; each must still lock everything it names, or
+    the refusal would have bought a narrower boundary by breaking a working one."""
+    config = four_device_config(tmp_path)
+    coordinator = HardwareCoordinator(config, "owner")
+    try:
+        started = coordinator.begin_run([uart_device(config, "port_a"), uart_device(config, "port_b")], label="devices-only")
+
+        assert started["declared_devices"] == ["physical:board-a", "physical:board-b"]
+        assert [entry["id"] for entry in started["devices"]] == ["port_a", "port_b"]
+        assert coordinator.bench.held_resources() == frozenset({"physical:board-a", "physical:board-b"})
+        coordinator.end_run()
+
+        started = coordinator.begin_run(["physical:board-c", "physical:board-d"], label="names-only")
+
+        assert started["declared_devices"] == ["physical:board-c", "physical:board-d"]
+        assert "devices" not in started
+        assert coordinator.bench.held_resources() == frozenset({"physical:board-c", "physical:board-d"})
+    finally:
+        coordinator.end_run()
+        coordinator.close()
+
+
 def test_a_run_is_refused_before_it_holds_anything_when_a_device_is_unknown(tmp_path: Path) -> None:
     """Resolution finishes before acquisition starts."""
     config = four_device_config(tmp_path)
