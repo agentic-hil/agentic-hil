@@ -1204,11 +1204,15 @@ version: 3
 # `agentic-hil init --force` writes this file again at the defaults below.
 #
 # allow_recover is not about this file. It lets an agent clear a quarantine over
-# MCP for the reasons that name no hardware contact — a dead owner that never
-# reached the board, a host-side persistence fault. Confirming that a board is
-# still and holds the firmware you expect is a statement about the physical
-# world, so those reasons refuse over MCP whatever this says, and name
-# `agentic-hil recover --confirm-safe-state` for you instead.
+# MCP. Reasons that name no hardware contact — a dead owner that never reached
+# the board, a host-side persistence fault — clear with no argument. Confirming
+# that a board is still and holds the firmware you expect is a statement about
+# the physical world, and no agent may make it; but it may relay one, so a
+# physical reason clears over MCP only when the agent passes back an
+# operator_statement you actually gave it, recorded as your word relayed by the
+# agent. The audit-broken family keeps `agentic-hil recover
+# --confirm-safe-state` as its only route, and so does any case with nobody to
+# ask; a statement is never invented.
 # allow_upgrade is the odd one out: it is not about this file but about the
 # package. The tool it opens takes no version and can only lift to the newest
 # release, so it is no way around anything you close here.

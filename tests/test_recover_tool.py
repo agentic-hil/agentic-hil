@@ -368,6 +368,47 @@ def test_the_schema_offers_no_way_to_confirm_a_safe_state() -> None:
         assert spelling not in serialized, spelling
 
 
+def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
+    """The generated template, the public schema, and the embedded MCP workflow
+    must all describe the boundary the tool contract enforces, so a reader of
+    policy cannot be told the physical route does not exist while the tool has
+    implemented it.
+
+    The boundary, in one line: a reason that names no hardware contact clears
+    with no argument, a reason that needs somebody at the board clears only by
+    relaying an operator_statement, and the audit-broken and nobody-to-ask cases
+    keep the operator's own command line. This is the consistency assertion the
+    finding asked for — before it, the schema and generated comments said
+    physical reasons are refused over MCP with no such argument, which the tool
+    stopped being true of when operator_statement arrived."""
+    from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE
+    from agentic_hil.knowledge import config_schema_document
+    from agentic_hil.mcp import AGENTIC_HIL_WORKFLOW_PROMPT
+
+    contract = next(tool["description"] for tool in MCP_TOOLS if tool["name"] == TOOL)
+    schema_description = config_schema_document()["properties"]["permissions"]["properties"]["allow_recover"]["description"]
+    surfaces = {
+        "tool_contract": contract,
+        "config_template": DEFAULT_CONFIG_TEMPLATE,
+        "config_schema": schema_description,
+        "mcp_workflow_prompt": AGENTIC_HIL_WORKFLOW_PROMPT,
+    }
+    for name, text in surfaces.items():
+        lowered = text.lower()
+        # A physical reason is cleared by relaying a statement, not refused outright.
+        assert "operator_statement" in lowered, name
+        # A no-contact reason still clears with none.
+        assert "no argument" in lowered or "no arguments" in lowered or "no hardware contact" in lowered, name
+
+    # None of the generated surfaces still claims the physical route does not
+    # exist over MCP — the exact stale wordings this finding removed.
+    for name in ("config_template", "config_schema", "mcp_workflow_prompt"):
+        lowered = surfaces[name].lower()
+        assert "no argument on the mcp tool" not in lowered, name
+        assert "refuse over mcp whatever" not in lowered, name
+        assert "refused whatever this says" not in lowered, name
+
+
 def test_an_invented_confirmation_argument_is_refused_on_the_wire(tmp_path: Path) -> None:
     """Not only absent from the schema: rejected by the validator, so a caller
     cannot smuggle one past a host that forwards unknown keys."""

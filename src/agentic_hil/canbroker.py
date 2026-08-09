@@ -180,26 +180,85 @@ def endpoint_family() -> str:
     return "AF_PIPE" if os.name == "nt" else "AF_UNIX"
 
 
+# The kernel's ``sockaddr_un.sun_path`` bound: 108 bytes on Linux, 104 on the
+# BSDs and macOS. An address at or above it cannot be bound and fails at bind
+# time as a truncated path rather than as anything a caller can read, so the
+# length is checked *here*, before a broker is ever spawned, and an address that
+# cannot fit is refused structurally instead.
+_UNIX_PATH_MAX = 108 if sys.platform.startswith(("linux", "android")) else 104
+
+
+def _abstract_sockets_supported() -> bool:
+    """Whether this host has the Linux abstract socket namespace.
+
+    An abstract socket lives in no directory, so its length cannot be grown by a
+    long ``TMPDIR`` or a long home-derived lock root — it is the one address
+    guaranteed to fit wherever it exists. The authkey handshake is the boundary
+    for it exactly as it is for a filesystem socket; what it gives up is the
+    owner-only directory, which was defence in depth, not the defence."""
+    return os.name != "nt" and sys.platform.startswith(("linux", "android"))
+
+
+def _endpoint_is_path(endpoint: str) -> bool:
+    """Whether this endpoint is a filesystem socket file to unlink.
+
+    A named pipe is not, and neither is an abstract socket: its address begins
+    with a NUL, and ``os.unlink`` on one raises ``ValueError`` for the embedded
+    NUL rather than a suppressible ``OSError``, so the two callers that sweep a
+    stale socket file must skip it."""
+    return os.name != "nt" and bool(endpoint) and not endpoint.startswith("\0")
+
+
+def _socket_root() -> Path:
+    """A short, per-user base for CAN broker sockets, preferred over ``TMPDIR``.
+
+    ``XDG_RUNTIME_DIR`` is the standard home for a user's runtime sockets and is
+    already short and owner-only; where it is absent the system temp directory is
+    used, but the caller validates the final path against ``sockaddr_un`` and
+    falls back to an abstract socket rather than trusting either root to be
+    short."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isabs(runtime) and os.path.isdir(runtime):
+        return Path(runtime)
+    return Path(tempfile.gettempdir())
+
+
 def endpoint_address(bus_key: str, lock_root: Path) -> str:
     """The local IPC address for this bus, on this lock root.
 
-    Deliberately *not* under the lock root on POSIX. An ``AF_UNIX`` path is
-    capped near 108 bytes by the kernel, and the lock root follows the user's
-    home — under a test sandbox or a long profile name a socket there simply
-    cannot be bound, and the failure would arrive as a truncated path rather than
-    as anything readable. The address is published in the descriptor, so it does
-    not have to be derivable by anyone; it only has to be short, per user, and
-    distinct per lock root, which is what the tag is."""
+    Short by construction, and validated to fit ``sockaddr_un`` before it is ever
+    bound. An ``AF_UNIX`` path is capped near 108 bytes by the kernel, and both
+    the lock root (which follows the user's home) and ``TMPDIR`` can be long
+    enough on a supported host — a test sandbox, a long profile — that a socket
+    under either simply cannot be bound. So a filesystem path under a short,
+    per-user, owner-only directory is tried first, and where even that does not
+    fit the address falls back to a Linux abstract socket, which lives in no
+    directory that could lengthen it; where neither fits the bus is refused here,
+    structurally, rather than at bind time as a truncated path. The address is
+    published in the descriptor, so it does not have to be derivable by anyone;
+    it only has to be short, per user, and distinct per lock root, which the tag
+    is."""
     tag = hashlib.sha256(f"{os.path.normcase(str(lock_root))}\0{bus_key}".encode()).hexdigest()[:20]
     if os.name == "nt":
         return rf"\\.\pipe\agentic-hil-can-{tag}"
-    directory = Path(tempfile.gettempdir()) / f"agentic-hil-can-{os.getuid()}"
-    directory.mkdir(mode=0o700, exist_ok=True)
-    entry = os.stat(directory)
-    if entry.st_uid != os.getuid() or not stat.S_ISDIR(entry.st_mode):
-        raise ConfigError("config_invalid", "The CAN broker socket directory is not owned by this user.", {"path": str(directory)})
-    os.chmod(directory, 0o700)
-    return str(directory / f"{tag}.sock")
+    directory = _socket_root() / f"agentic-hil-can-{os.getuid()}"
+    address = str(directory / f"{tag}.sock")
+    if len(os.fsencode(address)) < _UNIX_PATH_MAX:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        entry = os.stat(directory)
+        if entry.st_uid != os.getuid() or not stat.S_ISDIR(entry.st_mode):
+            raise ConfigError("config_invalid", "The CAN broker socket directory is not owned by this user.", {"path": str(directory)})
+        os.chmod(directory, 0o700)
+        return address
+    if _abstract_sockets_supported():
+        abstract = f"\0agentic-hil-can-{tag}"
+        if len(os.fsencode(abstract)) < _UNIX_PATH_MAX:
+            return abstract
+    raise ConfigError(
+        "config_invalid",
+        "No CAN broker socket address short enough for AF_UNIX is available for this bus; set XDG_RUNTIME_DIR or a shorter TMPDIR.",
+        {"path": address, "sockaddr_un_limit": _UNIX_PATH_MAX},
+    )
 
 
 @dataclass(frozen=True)
@@ -396,11 +455,18 @@ def wire_frame_valid(value: object) -> bool:
     return 0 <= value["id"] <= maximum
 
 
-def filter_accepts(share: CanShareConfig, frame_id: int) -> bool:
-    """Whether a participant's view carries this identifier. No filter is every identifier."""
+def filter_accepts(share: CanShareConfig, frame_id: int, extended: bool) -> bool:
+    """Whether a participant's view carries this identifier *of this frame type*.
+
+    A term's ``extended`` is part of the term, not a decoration: a standard 0x123
+    and an extended 0x123 are two different frames on the wire, so a term matches
+    only when its frame type matches too — otherwise a view configured for
+    standard frames would carry (and let its participant send) an extended frame
+    of the same masked number, and vice versa. No filter is every identifier of
+    either type."""
     if not share.filters:
         return True
-    return any((frame_id & term.mask) == (term.identifier & term.mask) for term in share.filters)
+    return any(term.extended == extended and (frame_id & term.mask) == (term.identifier & term.mask) for term in share.filters)
 
 
 def share_view(share: CanShareConfig) -> JsonObject:
@@ -489,9 +555,10 @@ class CanBroker:
 
     def publish(self) -> None:
         self._endpoint = endpoint_address(self.bus_key, self.lock_root)
-        if os.name != "nt":
+        if _endpoint_is_path(self._endpoint):
             # The bus lock is already ours, so no other broker for this bus can
-            # exist and a socket file here is the corpse of one the OS reaped.
+            # exist and a socket file here is the corpse of one the OS reaped. An
+            # abstract socket has no such file and is skipped.
             with suppress(FileNotFoundError):
                 os.unlink(self._endpoint)
         self._listener = Listener(self._endpoint, endpoint_family(), authkey=self._authkey)
@@ -554,9 +621,19 @@ class CanBroker:
         self.stop("no_participant_attached")
 
     def stop(self, reason: str) -> None:
-        if self._stopping.is_set():
-            return
-        self._stopping.set()
+        with self._guard:
+            if self._stopping.is_set():
+                return
+            self._stopping.set()
+        self._finish_stop(reason)
+
+    def _finish_stop(self, reason: str) -> None:
+        """Log the stop and wake the serve loop; the guarded flag flip is done.
+
+        Split from `stop` so the last-participant path in `_detach` can flip
+        `_stopping` inside the critical section that removed the participant —
+        closing the attach window — and still run this outside the guard, where
+        the throwaway connection's I/O belongs."""
         self._log_bus({"event": "broker_stop", "bus_id": self.bus_id, "reason": reason, "frames_seen": self.frame_seq})
         # `accept()` is blocked in the serve loop; a throwaway connection is what
         # wakes it, and it is authenticated like any other so the wake cannot come
@@ -576,7 +653,7 @@ class CanBroker:
         for path in (descriptor_path(self.bus_key, self.lock_root), authkey_path(self.bus_key, self.lock_root)):
             with suppress(FileNotFoundError, OSError):
                 os.unlink(path)
-        if os.name != "nt" and self._endpoint:
+        if _endpoint_is_path(self._endpoint):
             with suppress(FileNotFoundError, OSError):
                 os.unlink(self._endpoint)
         with suppress(BaseException):
@@ -626,6 +703,21 @@ class CanBroker:
 
     def _handle_attach(self, message: JsonObject, connection: Connection) -> tuple[JsonObject, _Attached | None]:
         with self._guard:
+            if self._stopping.is_set():
+                # The last participant's detach flips `_stopping` under this same
+                # guard before it releases it (see `_detach`), so an attach that
+                # reaches here after that decision is refused rather than seated
+                # onto a bus the shutdown is already closing beneath it. Retrying
+                # finds the descriptor gone and starts a fresh broker.
+                return {
+                    "ok": False,
+                    "error_type": "can_broker_stopping",
+                    "summary": "This CAN broker is shutting down after its last participant detached and accepts no new participant; a retry starts or finds a fresh broker.",
+                    "bus_key": self.bus_key,
+                    "participant": message.get("participant"),
+                    "retry_safe": True,
+                    "side_effect_committed": False,
+                }, None
             if message.get("protocol_version") != PROTOCOL_VERSION or message.get("protocol_digest") != PROTOCOL_DIGEST:
                 return {
                     "ok": False,
@@ -730,9 +822,15 @@ class CanBroker:
             if self.participants.get(attached.name) is attached:
                 self.participants.pop(attached.name, None)
                 self._log_bus({"event": "participant_detach", "bus_id": self.bus_id, "participant": attached.name, "reason": reason, "frames_used": attached.frames_used})
-            stop = not self.participants and self.attach_total > 0
+            if not self.participants and self.attach_total > 0 and not self._stopping.is_set():
+                # Decide to stop *and* refuse further attaches in the one critical
+                # section that emptied `participants`: an attach that took `_guard`
+                # after this would otherwise be seated onto a bus the shutdown is
+                # about to close. `_finish_stop` runs the rest outside the guard.
+                self._stopping.set()
+                stop = True
         if stop:
-            self.stop("last_participant_detached")
+            self._finish_stop("last_participant_detached")
 
     # -- requests ----------------------------------------------------------
 
@@ -805,7 +903,7 @@ class CanBroker:
         if not wire_frame_valid(wire):
             return {"ok": False, "error_type": "invalid_argument", "summary": "The CAN broker received a frame it cannot read.", "participant": attached.name, "side_effect_committed": False}
         assert isinstance(wire, dict)
-        if not filter_accepts(attached.share, int(wire["id"])):
+        if not filter_accepts(attached.share, int(wire["id"]), bool(wire["extended"])):
             return {"ok": False, "error_type": "can_participant_filter_violation", "summary": "This CAN participant's view does not carry that identifier, so it may not send it.", "bus_id": self.bus_id, "participant": attached.name, "frame": wire, "view": share_view(attached.share), "retry_safe": False, "side_effect_committed": False}
         budget = self._spend_budget(attached)
         if budget is not None:
@@ -872,11 +970,60 @@ class CanBroker:
                 self.frame_seq += 1
                 seq = self.frame_seq
                 wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
-                delivered = sorted(name for name, item in self.participants.items() if item.share.permissions.allow_read and filter_accepts(item.share, wire["id"]))
-                self._log_bus({"event": "frame", "seq": seq, "direction": "rx", "bus_id": self.bus_id, "frame": wire, "delivered_to": delivered})
-                for name in delivered:
-                    self.participants[name].queue.append({**wire, "frame_seq": seq})
+                delivered: list[str] = []
+                overflowed: list[str] = []
+                for name, item in sorted(self.participants.items()):
+                    if not item.share.permissions.allow_read or not filter_accepts(item.share, wire["id"], wire["extended"]):
+                        continue
+                    if item.abort is not None:
+                        # Already aborted — a spent budget, an earlier overflow, a
+                        # bus incident — so it will never drain, and growing its
+                        # queue is the very leak this bound exists to close.
+                        continue
+                    bound = self._receive_queue_bound(item)
+                    if len(item.queue) >= bound:
+                        self._overflow_participant(item, bound)
+                        overflowed.append(name)
+                        continue
+                    item.queue.append({**wire, "frame_seq": seq})
+                    delivered.append(name)
+                event = {"event": "frame", "seq": seq, "direction": "rx", "bus_id": self.bus_id, "frame": wire, "delivered_to": delivered}
+                if overflowed:
+                    event["overflowed_participants"] = overflowed
+                self._log_bus(event)
         return None
+
+    def _receive_queue_bound(self, attached: _Attached) -> int:
+        """The most frames that may sit unread in one participant's queue.
+
+        A participant cannot consume more than its own ``max_frames`` budget, so
+        buffering past what remains of it is dead weight; and never above the
+        bus's ``max_buffer_frames`` either. Bounding here is what stops an idle
+        participant's queue from growing without limit while another draws the
+        medium continuously — the broker would otherwise hold every matching
+        frame for a participant that reads none of them."""
+        return max(1, min(attached.share.max_frames - attached.frames_used, self.bus_config.max_buffer_frames))
+
+    def _overflow_participant(self, attached: _Attached, bound: int) -> None:
+        """Abort a participant whose receive queue reached its bound.
+
+        Reached only while *another* participant's read is fanning frames out, so
+        it cannot answer the overflowed participant directly: it records the same
+        shape of participant-scoped abort a spent budget does, and the
+        participant learns of it on its next call or ``poll_incident``. The bus
+        and every other participant keep running — an unconsumed queue is this
+        participant's problem, not the medium's."""
+        if attached.abort is not None:
+            return
+        abort = {
+            "scope": "participant",
+            "reason": "can_participant_receive_overflow",
+            "detail": {"max_queued_frames": bound, "max_frames": attached.share.max_frames, "max_buffer_frames": self.bus_config.max_buffer_frames},
+            "recovery_action": self.config.recovery.auto_recover,
+            "at": utc_now_iso(),
+        }
+        attached.abort = abort
+        self._log_bus({"event": "incident", "bus_id": self.bus_id, "scope": "participant", "reason": abort["reason"], "reported_by": "broker", "aborted_participants": [attached.name], "bus_gated": self.bus_gated})
 
     def _spend_budget(self, attached: _Attached) -> JsonObject | None:
         with self._guard:
@@ -1057,6 +1204,15 @@ def attach_participant(
 
 def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool) -> Participant:
     lock_root = owner.root
+    # Validate the IPC address before a broker is ever spawned. A broker started
+    # on an address that cannot fit `sockaddr_un` would fail at bind time in its
+    # own process, and the client would learn of it only as the start timeout
+    # elapsing with no descriptor; deriving the same address here turns that into
+    # an immediate, structured refusal.
+    try:
+        endpoint_address(bus_key, lock_root)
+    except ConfigError as error:
+        raise ParticipantError({**error.to_dict(), "bus_id": bus_id, "participant": participant, "retry_safe": False, "side_effect_committed": False}) from error
     deadline = time.monotonic() + start_timeout_s
     started: subprocess.Popen | None = None
     last: JsonObject = {"ok": False, "error_type": "can_broker_unavailable", "summary": "No CAN broker for this bus could be reached or started.", "bus_id": bus_id, "bus_key": bus_key}
