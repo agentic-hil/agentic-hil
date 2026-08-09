@@ -262,6 +262,18 @@ def read_descriptor(bus_key: str, lock_root: Path) -> BrokerDescriptor | None:
         return None
 
 
+def _remove_stale_broker(bus_key: str, lock_root: Path) -> None:
+    """Clear the rendezvous of a broker that is provably not on the bus.
+
+    Only ever called after a lock probe has shown the bus lock free, which is the
+    one state a live broker cannot be in: it holds that lock from before it
+    publishes until after it unpublishes. The authkey goes with the descriptor
+    because a key without an endpoint authenticates nothing."""
+    for path in (descriptor_path(bus_key, lock_root), authkey_path(bus_key, lock_root)):
+        with suppress(FileNotFoundError, OSError):
+            os.unlink(path)
+
+
 def _write_authkey(path: Path, key: bytes) -> None:
     """Write the HMAC key owner-only, replacing whatever was there.
 
@@ -498,7 +510,7 @@ class CanBroker:
         )
         atomic_write_text(descriptor_path(self.bus_key, self.lock_root), json.dumps(descriptor.as_json(), indent=2) + "\n")
 
-    def serve(self) -> int:
+    def serve(self, first_attach_timeout_s: float = BROKER_FIRST_ATTACH_TIMEOUT_S) -> int:
         """Accept participants until the last one detaches.
 
         The first-attach deadline is not tidiness: a client that spawned a broker
@@ -506,7 +518,7 @@ class CanBroker:
         the bus lock with nobody able to say why, which is exactly the orphan the
         automatic lifecycle exists to avoid."""
         assert self._listener is not None
-        deadline = time.monotonic() + BROKER_FIRST_ATTACH_TIMEOUT_S
+        deadline = time.monotonic() + first_attach_timeout_s
         handlers: list[threading.Thread] = []
         waiter = threading.Thread(target=self._first_attach_watchdog, args=(deadline,), daemon=True)
         waiter.start()
@@ -1059,6 +1071,22 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
             if outcome.get("error_type") == "can_broker_counter_mismatch" and attempts <= ATTACH_COUNTER_RETRIES:
                 time.sleep(BROKER_POLL_INTERVAL_S)
                 continue
+            if allow_start and outcome.get("error_type") == "can_broker_not_bus_owner" and outcome.get("bus_lock_held") is False:
+                # A descriptor whose bus lock is free is a broker that was killed
+                # before it could clean up after itself: `shutdown` removes the
+                # descriptor *before* releasing the lock, so the two states can
+                # only be seen together when nothing ran the cleanup at all.
+                #
+                # Refusing here would let one hard-killed broker brick the bus
+                # until somebody deleted a file by hand. Removing the corpse is
+                # safe precisely because the probe already failed: the endpoint
+                # behind it owns nothing, so nothing is taken from anybody — and
+                # an impostor's planted descriptor gets the same treatment,
+                # having never been spoken to. When starting a broker is not
+                # allowed there is nothing to replace it with, so the refusal
+                # stands and the caller is told the peer is not the bus owner.
+                _remove_stale_broker(bus_key, lock_root)
+                continue
             if outcome.get("retry_safe") is not True:
                 raise ParticipantError(outcome)
             time.sleep(BROKER_POLL_INTERVAL_S)
@@ -1135,27 +1163,59 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
     return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started)
 
 
+def _detached_spawn_kwargs() -> dict[str, object]:
+    """Process-creation flags for a child that outlives the run that started it.
+
+    Deliberately *not* :func:`agentic_hil.process.process_group_kwargs`, and the
+    difference is the whole point of this function existing. That helper is half
+    of a two-part contract: on Windows it adds ``CREATE_SUSPENDED``, and the
+    child stays frozen until :func:`~agentic_hil.process.register_process_group`
+    resumes it — which also puts it in a kill-on-close Job Object owned by the
+    spawning process. Both halves are wrong here. A broker that dies with the
+    handle of whichever run happened to attach first is not a shared bus; the
+    second participant would lose the medium because the first one's run ended.
+
+    So the broker gets process-group isolation without the containment: its own
+    group so a Ctrl-C in the first run's console does not take the bus out from
+    under the others, and no console of its own, since nobody is at a terminal
+    for it. Its lifetime is bounded by its own rules instead — the last
+    participant detaching, and the first-attach deadline below."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+    return {"start_new_session": True}
+
+
 def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root: Path) -> subprocess.Popen:
-    """Start a broker for this bus in its own process group.
+    """Start a broker for this bus, detached from the run that started it.
 
-    Its own group deliberately: a broker outlives the run that happened to be
-    first, and a Ctrl-C in that run's console must not take the bus out from
-    under the other participants. Losing the race for the bus lock is a clean
-    exit, not an error — the winner's descriptor is what the loser's client
-    then finds."""
-    from agentic_hil.process import process_group_kwargs
+    Losing the race for the bus lock is a clean exit, not an error — the
+    winner's descriptor is what the loser's client then finds.
 
+    The first-attach deadline travels on the command line rather than being read
+    from this module in the child. A constant read in the child is a constant a
+    caller cannot influence, and a test that sets it here would be quietly
+    testing nothing."""
     # The child's diagnostics go to a file rather than to a pipe: nobody is left
     # reading a broker's stderr once the run that started it has moved on, and a
     # full pipe would block the broker mid-bus.
     with open(broker_log_path(bus_key, lock_root), "ab") as handle:
         return subprocess.Popen(
-            [sys.executable, "-m", "agentic_hil.canbroker", "--workspace-root", str(config.work_dir), "--bus-id", bus_id],
+            [
+                sys.executable,
+                "-m",
+                "agentic_hil.canbroker",
+                "--workspace-root",
+                str(config.work_dir),
+                "--bus-id",
+                bus_id,
+                "--first-attach-timeout-s",
+                str(BROKER_FIRST_ATTACH_TIMEOUT_S),
+            ],
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=handle,
             cwd=str(config.work_dir),
-            **process_group_kwargs(),
+            **_detached_spawn_kwargs(),
         )
 
 
@@ -1167,6 +1227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentic-hil-can-broker", description="Own one physical CAN bus for its named participants.")
     parser.add_argument("--workspace-root", required=True)
     parser.add_argument("--bus-id", required=True)
+    parser.add_argument("--first-attach-timeout-s", type=float, default=BROKER_FIRST_ATTACH_TIMEOUT_S)
     arguments = parser.parse_args(argv)
     try:
         config = load_authoritative_config(arguments.workspace_root)
@@ -1189,7 +1250,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(opened, default=str), file=sys.stderr)
             return BROKER_EXIT_ADAPTER
         broker.publish()
-        return broker.serve()
+        return broker.serve(arguments.first_attach_timeout_s)
     finally:
         broker.shutdown()
 

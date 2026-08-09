@@ -199,10 +199,19 @@ def test_broker_starts_on_first_attach_and_exits_on_last_detach(tmp_path: Path, 
     except ParticipantError as error:  # pragma: no cover - only on a broken broker
         pytest.fail(f"{error.result}\n{broker_diagnostics(config, bus_key)}")
     assert alpha.broker_process is not None, "the first participant is the one that started the broker"
-    assert alpha.broker_pid == alpha.broker_process.pid
+    assert alpha.broker_process.poll() is None, "and it is still running while the participant is attached"
     lock_root = alpha.mutex.root
+    # Deliberately not `broker_pid == broker_process.pid`. A venv `python.exe` may
+    # be a launcher trampoline that execs the real interpreter as a separate
+    # process, so the pid the parent gets from `Popen` is the launcher's, not the
+    # broker's. Every pid that matters is one the broker wrote about itself: the
+    # descriptor and the bus-lock holder record both come from its `os.getpid()`,
+    # and the probe compares those two. Agreement between them is the identity
+    # this feature rests on, so that is what is checked.
     assert descriptor_path(bus_key, lock_root).exists()
     assert read_descriptor(bus_key, lock_root).pid == alpha.broker_pid
+    holder = json.loads((lock_root / f"{canbroker.resource_digest(bus_key)}.holder.json").read_text(encoding="utf-8"))
+    assert holder["owner"]["pid"] == alpha.broker_pid, "the process holding the bus lock is the process that answered"
 
     detached = alpha.detach()
     assert detached["ok"] is True
