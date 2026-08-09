@@ -39,9 +39,10 @@ from agentic_hil.types import (
     ComPortConfig,
     DebuggerConfig,
     JsonObject,
+    com_port_carries_hardware_identity,
+    com_port_identity_source,
     fold_device_path,
     fold_hardware_id,
-    is_stable_device_name,
 )
 
 DEVICE_KINDS = ("debugger", "uart", "can")
@@ -417,13 +418,13 @@ class UartDevice(Device):
         strongest first, so the answer is something an operator can go and read.
         ``vid_pid`` — or ``vid``/``pid`` alone, when only one is set — is the
         honest name for the type check: it says the entry names a kind of
-        adapter and not a unit, which is exactly what those keys are."""
-        if self.port.resource_id:
-            return "resource_id"
-        if self.port.serial_number:
-            return "serial_number"
-        usb_ids = "_".join(name for name, value in (("vid", self.port.vid), ("pid", self.port.pid)) if value is not None)
-        return usb_ids or "device"
+        adapter and not a unit, which is exactly what those keys are.
+
+        Computed in `types.com_port_identity_source`, because a version 3
+        configuration declares this answer in the file and that declaration is
+        checked against it at load. One function, so what the file has to say and
+        what this reports cannot come apart."""
+        return com_port_identity_source(self.port)
 
     @property
     def identity_warning(self) -> str | None:
@@ -446,7 +447,7 @@ class UartDevice(Device):
         a different sentence rather than the same one. A `serial_number` without
         them is complete and warns about nothing — the serial is the anchor and
         the ids only narrow it."""
-        if self.port.resource_id or self.port.serial_number or is_stable_device_name(self.port.device):
+        if com_port_carries_hardware_identity(self.port):
             return None
         return TYPE_ONLY_SERIAL_DEVICE_WARNING if self.identity_source != "device" else VOLATILE_SERIAL_DEVICE_WARNING
 
