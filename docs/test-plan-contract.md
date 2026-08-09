@@ -54,17 +54,22 @@ and its data bytes, a frame budget, a deadline. Paths are resolved inside
 the repository — it is a statement about the build layout, which travels with
 the repository, not about a filesystem, which does not.
 
-**Expectations are a `comparator`.** A feedback action (`uart_read` today)
-takes an optional `comparator:` object: `equals` for a complete decoded match,
-`pattern` for a Python regular expression (`re.search` semantics), or `pattern`
-with a single capture group plus `range: {min, max}` to bound the numeric value
-it extracts. Exactly one of `equals`/`pattern` per comparator; a range without a
-capturing pattern, or a pattern that does not compile, is refused before the run
-starts. The comparator is an object deliberately, so preprocessing keys (scale,
-convert) can be added later without breaking the format. `uart_expect` with
-`text`/`pattern` remains valid as the v2 spelling. Every other step states its
-expectation by existing: the step must succeed, and the plan stops at the first
-one that does not.
+**Expectations are a `comparator`.** A feedback action — `uart_read` on a serial
+line, `can_read` on a bus — takes an optional `comparator:` object: `equals` for
+a complete decoded match, `pattern` for a Python regular expression (`re.search`
+semantics), or `pattern` with a single capture group plus `range: {min, max}` to
+bound the numeric value it extracts. Exactly one of `equals`/`pattern` per
+comparator; a range without a capturing pattern, or a pattern that does not
+compile, is refused before the run starts. A bus comparator also names the
+identifier of the frame it is about — `id`, optionally widened by `id_mask` into
+a family — and it is required rather than optional, because a bus carries every
+node's traffic and a payload matched without saying whose frame it was is a green
+another ECU can produce; on that medium `equals` and `pattern` read the payload
+as hexadecimal, and a `range` capture is read in that same base. The comparator
+is an object deliberately, so preprocessing keys (scale, convert) can be added
+later without breaking the format. `uart_expect` with `text`/`pattern` remains
+valid as the v2 spelling. Every other step states its expectation by existing:
+the step must succeed, and the plan stops at the first one that does not.
 
 Nothing in that list identifies a machine. A plan is a document about firmware
 and about the shape of a test, and it is reviewable as such —
@@ -211,13 +216,17 @@ plan that opens a debug session states, implicitly, that its bench runs OpenOCD.
 These are limits of what a plan can currently express, verified against the
 schema and the reactor rather than inferred:
 
-- **No expectation on CAN traffic.** `can_read` returns frames and the step
-  succeeds if the read succeeds. There is no `can_expect`, so a plan cannot
-  state which frame, which identifier or which payload it requires — the
-  assertion has to happen outside the plan, by reading the report or the log.
-- **No expectation on dumped memory.** `dump_memory` writes an Intel HEX file
-  and succeeds on having written it. The plan cannot state what the buffer
-  should contain.
+- **No expectation on a value in target memory.** The debugger's two feedback
+  actions assert reaching a place, not reading a value: `run_until_breakpoint`
+  asserts that the target stopped where the plan said, and `dump_memory` writes
+  an Intel HEX file and succeeds on having written it. A `read_symbol` action
+  with a `comparator:` over the value would be one decorated method like any
+  other — the plan format already carries the vocabulary — but there is nothing
+  underneath it to call: of the two symbol tools, `debug_symbol_info` answers
+  with an address and a size, and `debug_dump_symbol_ihex` answers with a file.
+  The debug backend does read a symbol's bytes on the way to writing that file;
+  no tool returns them to a caller. This gap therefore closes with a
+  value-returning debug tool, not with a plan format change.
 - **No control flow, no reuse, no parameters.** `steps` is a flat sequence of at
   most 128 items, executed in order and stopped at the first failure. There is
   no branch, no loop, no retry, no include, and no variable or substitution: an
