@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- `reset_target(mode="halt")` on the stlink backend can report success: each reset mode is confirmed on the success line its own command prints (`-halt` on `Core halted`), instead of every mode being held to the two lines only `-rst` prints — which had turned a correct halt into `reset_unconfirmed` with an unknown side effect, quarantined the bench, and left recovery's reset-into-halt unable to attest a safe state on this backend. The connect banner is deliberately not a marker; it prints before the halt is attempted. Verified against captured vendor output and green on a real board (#142)
+
 ## [0.11.0] - 2026-08-10
 
 ### Added
