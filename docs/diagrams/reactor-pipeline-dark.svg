@@ -33,7 +33,7 @@
   <rect class="accent" x="242" y="137" width="230" height="86" rx="8"/>
   <text><tspan x="357" y="168" class="t acc_text">preflight</tspan><tspan x="357" y="188" class="d">every step validated,</tspan><tspan x="357" y="205" class="d">no hardware touched</tspan></text>
   <rect class="warn" x="600" y="35.5" width="250" height="69" rx="8"/>
-  <text><tspan x="725" y="66.5" class="t warn_text">rejected —</tspan><tspan x="725" y="86.5" class="d">zero steps executed</tspan></text>
+  <text><tspan x="725" y="66.5" class="t warn_text">rejected:</tspan><tspan x="725" y="86.5" class="d">zero steps executed</tspan></text>
   <rect class="plain" x="24" y="275.5" width="230" height="69" rx="8"/>
   <text><tspan x="139" y="306.5" class="t text">sequential execution</tspan><tspan x="139" y="326.5" class="d">fail-fast</tspan></text>
   <rect class="plain" x="302" y="267" width="250" height="86" rx="8"/>

@@ -43,7 +43,7 @@
   <rect class="plain" x="660" y="224" width="216" height="52" rx="8"/>
   <text><tspan x="768" y="255" class="t text">structured JSON result</tspan></text>
   <rect class="danger" x="68" y="355.5" width="288" height="69" rx="8"/>
-  <text><tspan x="212" y="386.5" class="t danger_text">quarantine —</tspan><tspan x="212" y="406.5" class="d">operator recovery required</tspan></text>
+  <text><tspan x="212" y="386.5" class="t danger_text">quarantine:</tspan><tspan x="212" y="406.5" class="d">operator recovery required</tspan></text>
   <path class="edge" d="M170.0 80.0 L206.0 80.0"/>
   <path class="edge" d="M414.0 80.0 L450.0 80.0"/>
   <path class="edge" d="M686.0 80.0 L722.0 80.0"/>
