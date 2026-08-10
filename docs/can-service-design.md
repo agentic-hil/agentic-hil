@@ -8,7 +8,7 @@ single-owner configurations.
 
 A `can_buses` entry models the bus as a device with a single owner:
 `can:<adapter>:<channel>` is one exclusive, machine-wide lock. CAN is a shared
-medium — several devices under test on one physical bus is the ordinary case,
+medium. Several devices under test on one physical bus is the ordinary case,
 and several projects testing against the same bus is the ordinary bench. The
 current model serialises all of them against one lock and cannot express
 sharing at all.
@@ -16,7 +16,7 @@ sharing at all.
 ## Shape
 
 One broker process owns one physical bus. It takes the existing exclusive bus
-lock — the same key runs take today — and holds it for its lifetime, so
+lock (the same key runs take today) and holds it for its lifetime, so
 everything the single-owner model enforces keeps being enforced, by one
 process, exactly once. It opens the adapter once.
 
@@ -35,8 +35,8 @@ racing for the device lock.
 - Participants take logical participant locks (`<bus-key>#<name>`), so two
   runs may not share one participant name, while any number of distinctly
   named participants proceed in parallel.
-- Operations that change the whole bus — bitrate change, adapter
-  reconfiguration, diagnostics that must own the medium — need the bus
+- Operations that change the whole bus (bitrate change, adapter
+  reconfiguration, diagnostics that must own the medium) need the bus
   exclusively: they are refused while any other participant is attached.
 
 ### Configuration
@@ -57,8 +57,8 @@ racing for the device lock.
   the last one detaches. No daemon management, nothing to install.
 - A connection counter is the compatibility contract: it increments on every
   attach, and also on every change to the wire format or participant surface.
-  A client whose counter expectation does not match is refused at attach —
-  cleanly, with both values named.
+  A client whose counter expectation does not match is refused at attach,
+  cleanly and with both values named.
 - The broker protocol carries a version and a digest of its message surface;
   a client and broker from different releases refuse each other at attach
   instead of misparsing frames mid-run.
@@ -88,9 +88,9 @@ racing for the device lock.
 
 ## Phases
 
-1. **Broker with participant views** — several projects, one bus, the rules
+1. **Broker with participant views**: several projects, one bus, the rules
    above. The adapter abstraction underneath is unchanged.
-2. **Per-participant stimulus/expect vocabulary in the test reactor** — CAN
+2. **Per-participant stimulus/expect vocabulary in the test reactor**: CAN
    steps address a participant, not the raw bus.
 3. **Exclusive-mode operations** (bitrate, diagnostics) behind the
    all-detached gate.

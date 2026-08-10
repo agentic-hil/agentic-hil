@@ -29,9 +29,9 @@
     </marker>
   </defs>
   <rect class="cluster" x="16" y="182" width="210" height="114" rx="12"/>
-  <text class="cluster-label" x="32" y="206">project workspace — agent-writable</text>
+  <text class="cluster-label" x="32" y="206">project workspace (agent-writable)</text>
   <rect class="cluster" x="700" y="16" width="344" height="392" rx="12"/>
-  <text class="cluster-label" x="716" y="40">operator-controlled host — outside the workspace</text>
+  <text class="cluster-label" x="716" y="40">operator-controlled host, outside the workspace</text>
   <rect class="plain" x="36" y="213" width="170" height="52" rx="8"/>
   <text><tspan x="121" y="244" class="t text">AI agent / CI</tspan></text>
   <rect class="accent" x="336" y="213" width="170" height="52" rx="8"/>

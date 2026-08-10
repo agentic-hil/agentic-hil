@@ -50,5 +50,5 @@
   <rect class="board" x="290" y="200" width="500" height="56" rx="8"/>
   <text class="label board-label" x="540" y="234">real board on your bench</text>
 
-  <text class="note caption" x="440" y="288">your agent, unattended — you review the pull request</text>
+  <text class="note caption" x="440" y="288">your agent, unattended; you review the pull request</text>
 </svg>

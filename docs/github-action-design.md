@@ -42,7 +42,7 @@ a permission, install a debugger toolchain, or clear a quarantine.
 
 **There is no hosted or remote bench, by design.** The `bench` input exists so
 that this is stated rather than implied: `local` is the only accepted value, and
-anything else — a hostname, a bench identifier, `remote`, `auto` — is refused
+anything else (a hostname, a bench identifier, `remote`, `auto`) is refused
 before anything is installed, with an error that says remote execution is not
 available. Agentic HIL's whole safety model rests on one machine holding one
 physical device under an operating-system lock, with the policy file on that
@@ -55,8 +55,8 @@ promise the product cannot keep.
 an input, not a file the workflow writes, and not something the action
 generates. It is discovered on the runner exactly as every other entry point
 discovers it, or selected by an `AGENTIC_HIL_CONFIG` the operator set in the
-runner's own environment — see [the authoritative
-configuration](configuration.md). This is already enforced below the action: a
+runner's own environment (see [the authoritative
+configuration](configuration.md)). This is already enforced below the action: a
 configuration stored inside the workspace is refused at load
 (`config_invalid`, "The authoritative config must be stored outside the
 workspace"), and so is one whose `workspace_root` is not the directory being
@@ -72,7 +72,7 @@ The last two are the action's own refusals, and they are the second line.
 
 1. **Self-hosted runner, owned by the repository or organisation.** Only such a
    runner has a bench. Runner groups and the repository's fork-PR approval
-   settings decide who can reach it, and those settings — not the action — are
+   settings decide who can reach it, and those settings, not the action, are
    what stops fork code from executing at all.
 2. **Explicit workflow opt-in.** The job carries `drives-hardware: true`. There
    is no default that reaches hardware, so no workflow acquires a bench by
@@ -98,14 +98,14 @@ green the whole product is built to avoid.
 
 | Input | Required | Default | Meaning |
 |---|---|---|---|
-| `plan` | yes | — | Path to the test plan, relative to `working-directory`. Must resolve inside the workspace. |
-| `version` | yes | — | The exact Agentic HIL version to run. An exact version only: a range, `latest`, or a git reference is refused. |
+| `plan` | yes | n/a | Path to the test plan, relative to `working-directory`. Must resolve inside the workspace. |
+| `version` | yes | n/a | The exact Agentic HIL version to run. An exact version only: a range, `latest`, or a git reference is refused. |
 | `bench` | no | `local` | Only `local` is accepted. Any other value is refused (see above). |
-| `drives-hardware` | yes | — | Must be literally `true`. The opt-in. |
+| `drives-hardware` | yes | n/a | Must be literally `true`. The opt-in. |
 | `working-directory` | no | `.` | The project root. Must be the configuration's `workspace_root`; a mismatch is refused below the action with `config_invalid`. |
 | `wait-s` | no | `0` | Passed to `--wait-s`. Bounded wait for a device another run holds, instead of failing immediately. |
 | `doctor` | no | `true` | Run `agentic-hil doctor` first and fail the job on a red result, before the plan gets near the board. |
-| `require-clean-bench` | no | `true` | Fail the job when the run left the bench held — a `recovery` block whose outcome is not a clean one, or a standing quarantine. |
+| `require-clean-bench` | no | `true` | Fail the job when the run left the bench held: a `recovery` block whose outcome is not a clean one, or a standing quarantine. |
 | `junit` | no | `true` | Write the JUnit XML file. |
 | `artifact-name` | no | `agentic-hil-run` | Base name for the uploaded artifact. |
 | `upload-artifacts` | no | `true` | Upload the evidence bundle. When false the paths are still emitted as outputs, so a workflow can upload them its own way. |
@@ -123,7 +123,7 @@ test plan](test-plan-contract.md).
 | `error-type` | The report's `error_type`, or the action's own refusal code |
 | `failed-step` | The 1-based index of the step that failed, when there was one |
 | `plan-name` | The plan's `name`, or the file stem |
-| `config-digest` | `config_in_force.digest` — which policy the run was decided by |
+| `config-digest` | `config_in_force.digest` (which policy the run was decided by) |
 | `report-path` | The run report JSON |
 | `summary-path` | The JSON run summary |
 | `junit-path` | The JUnit XML file, when written |
@@ -150,18 +150,18 @@ identify the bench.
 One bundle, uploaded with `if: always()` so a failed or cancelled run still
 produces it:
 
-- **`junit.xml`** — the run report as JUnit, for the test-report UIs that
+- **`junit.xml`**: the run report as JUnit, for the test-report UIs that
   consume it. The mapping is below.
-- **`logs/`** — the JSONL event logs the run wrote under the configuration's
+- **`logs/`**, the JSONL event logs the run wrote under the configuration's
   `logs.directory` (`.agentic-hil/logs/` by default): one `com-*.jsonl` per
   serial session and one `can-*.jsonl` per bus session, plus the debugger
   backend's own per-invocation log files. These are the workspace mirrors. The
   canonical, hash-chained copies stay under `state_root` on the runner and are
-  not uploaded — they are the trusted ledger, and shipping them to an artifact
+  not uploaded: they are the trusted ledger, and shipping them to an artifact
   store would be publishing the thing they exist to be checked against.
-- **`report.json`** — the run report as written, including `config_in_force`,
+- **`report.json`**: the run report as written, including `config_in_force`,
   every step result, `cleanup`, and `recovery`.
-- **`run-summary.json`** — the summary described next.
+- **`run-summary.json`**: the summary described next.
 
 ### The JSON run summary
 
@@ -206,7 +206,7 @@ commit is recorded beside it rather than instead of it. Tool versions come from
 `agentic-hil --version` after installation and from `agentic-hil doctor`, whose
 per-debugger `debugger_info` result carries the backend's own version line.
 Bench identity is the configuration digest plus the logical device names and the
-target — never the hardware identities, for the reason given under the job
+target, never the hardware identities, for the reason given under the job
 summary. That exclusion has to include the lock keys a refused run reports in
 `declared_devices`: they are keyed on the physical device (`probe:<serial>`,
 `com:<device>`, `can:<adapter>:<channel>`), so they carry exactly the
@@ -226,10 +226,10 @@ mapping states it explicitly rather than approximating:
   carries `<failure type="<error_type>" message="<summary>">` with the step
   result as the body.
 - Steps after the failing one never ran, and are `<skipped>` with a message
-  saying the run stopped earlier — not passes.
+  saying the run stopped earlier, not passes.
 - A plan refused at preflight produces a suite whose every case is `<skipped>`,
   plus one `<testcase name="preflight">` carrying `<error>` with the report's
-  `validation_error` — the field, the route, the action and the summary. No
+  `validation_error`: the field, the route, the action and the summary. No
   hardware was touched, and a reader must not mistake that for a bench failure.
 - A cleanup failure adds a final `<testcase name="cleanup">` with a `<failure>`,
   because a run whose sessions did not close is not a passing run whatever its
@@ -254,7 +254,7 @@ mapping states it explicitly rather than approximating:
 | Plan file missing, or outside the workspace | Action, then the reactor's own `test_config_invalid` | `failure` |
 | No configuration on the runner, or one bound to another workspace, or one inside the workspace | `doctor`, then the reactor | `failure`, `config_invalid` |
 | Debugger toolchain missing or unusable | `doctor` | `failure`, before any plan step |
-| Plan contradicts the bench — unknown device name, missing permission, disallowed symbol, artifact outside the allowed roots, session order, `can_send` on a listen-only bus | Reactor preflight | `failure`, `test_config_invalid`, no hardware touched |
+| Plan contradicts the bench (unknown device name, missing permission, disallowed symbol, artifact outside the allowed roots, session order, `can_send` on a listen-only bus) | Reactor preflight | `failure`, `test_config_invalid`, no hardware touched |
 | A device is held by another run | Coordination | `failure`, `device_busy` naming the holder; `wait-s` bounds the waiting |
 | A resource is quarantined | Coordination | `failure`, `resource_quarantined`; the summary carries the `quarantine_guidance` |
 | A step failed on the board | Reactor | `failure` with `failed_step` and `step_error_type`; the `recovery` block says what state the bench was left in |
@@ -265,7 +265,7 @@ mapping states it explicitly rather than approximating:
 Two rules about what the action must never do on failure. It must not run
 `agentic-hil recover`: that command requires `--confirm-safe-state`, which is an
 operator's statement that they have physically checked the bench, and a workflow
-cannot make that statement. And it must not retry a failed run automatically —
+cannot make that statement. And it must not retry a failed run automatically:
 `retry_safe` is a per-result claim about one call, not about a plan, and a
 re-run that flashes a board whose state is unknown is exactly the situation
 quarantine exists for. Both belong to a person, with
@@ -282,7 +282,7 @@ the benches this serves run on all three platforms.
 It runs `agentic-hil test-reactor --test-config <plan> [--wait-s N]` in
 `working-directory` and reads the single JSON object the command writes to
 standard output. That is the report, and the CLI's exit status is already the
-composite success predicate — a run is successful only when `ok` is true and
+composite success predicate: a run is successful only when `ok` is true and
 nothing else in the result contradicts it, so the action does not re-derive
 success from `ok` alone. It also reads the persisted report from
 `reports.directory` when the process was interrupted and printed nothing.
@@ -302,8 +302,8 @@ These are genuinely open, and each changes the action's shape:
   first keeps the workflow the single source of truth for the version and needs
   network access on a machine that may be deliberately offline; the second
   matches operators who pin their whole toolchain and makes `version` a check
-  rather than an instruction. A hybrid — install only when the present version
-  does not match — has the worst property of both, which is that the workflow
+  rather than an instruction. A hybrid (install only when the present version
+  does not match) has the worst property of both, which is that the workflow
   cannot tell which happened, unless the run summary says so.
 - **Who uploads.** Whether the action calls the upload action itself, or only
   emits paths and leaves uploading to the workflow. Calling it pins a third-party
@@ -320,7 +320,7 @@ These are genuinely open, and each changes the action's shape:
   `<skipped>` cases for the steps after a failure, the action must read the plan
   file itself and count. That is a second reader of the plan schema living
   outside the package, and it will drift the first time the schema gains a step
-  kind — unless the report grows a total step count, which is a small change to
+  kind, unless the report grows a total step count, which is a small change to
   the reactor and removes the need entirely.
 - **Whether `doctor` should run at all by default.** It spawns the debugger
   toolchain and takes seconds, and the reactor's own preflight already refuses
@@ -342,6 +342,6 @@ These are genuinely open, and each changes the action's shape:
 
 ## Related
 
-- [The portable test plan, the bench configuration, and the run attestation](test-plan-contract.md) — what the plan may say, and what the report attests.
-- [Running hardware tests](testing.md) — the reactor and the pytest plugin, which is the other way a CI job can drive this bench.
-- [Safety model](safety-model.md) and [security design](security-design.md) — the locks, the incidents, and the audit chain the artifacts above are evidence from.
+- [The portable test plan, the bench configuration, and the run attestation](test-plan-contract.md): what the plan may say, and what the report attests.
+- [Running hardware tests](testing.md): the reactor and the pytest plugin, which is the other way a CI job can drive this bench.
+- [Safety model](safety-model.md) and [security design](security-design.md): the locks, the incidents, and the audit chain the artifacts above are evidence from.
