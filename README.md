@@ -25,9 +25,9 @@ AI agent / CI  ──MCP (stdio)──▶  Agentic HIL  ──authoritative conf
 
 Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away: [the safety model](docs/safety-model.md) is the short version, [docs/security-design.md](docs/security-design.md) the long one.
 
-## The supported first path
+## What it drives
 
-An ST Nucleo-F446RE with its on-board ST-LINK, driven through OpenOCD, on Python 3.10 or newer. That is the bench the worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) is built and tested against, and the one to start from unless your project already says otherwise. Linux, macOS, and Windows are all CI-tested; pyOCD and the STM32CubeProgrammer CLI are the other two debugger backends, and CAN comes as an optional extra — [installation](docs/installation.md) has the rest.
+Three debugger backends — OpenOCD, pyOCD, and the STM32CubeProgrammer CLI — plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE; [installation](docs/installation.md) has every backend and platform in detail.
 
 ## Install
 
