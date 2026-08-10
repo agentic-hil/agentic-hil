@@ -236,7 +236,11 @@ class OpenOCDBackend:
     def debug_symbol_info(self, symbol: str) -> JsonObject:
         return self._debug.symbol_info(symbol)
 
-    def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject:
+    def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject, symbol_elf: JsonObject | None = None) -> JsonObject:
+        # `symbol_elf` is the service's offer of an ELF to resolve a symbol
+        # against, for a backend with no loaded image to ask. This one has one:
+        # the session holds the artifact it started with, and answering out of
+        # any other file could describe a build the target is not running.
         return self._debug.dump_symbol_ihex(symbol, output)
 
     def target_support(self) -> JsonObject:

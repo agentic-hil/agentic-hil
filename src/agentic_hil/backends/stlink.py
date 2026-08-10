@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from agentic_hil.artifacts import looks_like_intel_hex
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
@@ -18,7 +19,14 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.backends.gdbdebug import DEBUG_SYMBOL_PATTERN, resolve_gdb_executable
+from agentic_hil.config import (
+    ConfigError,
+    display_path,
+    resolve_work_path,
+    safe_configured_directory,
+    safe_write_text,
+)
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
@@ -55,13 +63,33 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
+    "memory_read_unconfirmed": "memory_read_failed",
 }
 
+# One entry per tool, and every entry is a line the operation itself prints.
+# The connect banner is not in any of them: STM32CubeProgrammer prints the
+# ST-Link serial and the device name whenever it opens a probe, so a reset that
+# connected and then did nothing would confirm itself out of the banner alone.
+# `reset_target` therefore waits for "MCU Reset", and a memory read waits for
+# "Data read successfully" — measured against a NUCLEO-F446RE on
+# STM32CubeProgrammer v2.23.0, which prints it after the UPLOADING block and
+# before the elapsed-time line.
 STLINK_SUCCESS_CONFIRMATION = {
     "probe_target": ["ST-LINK SN", "Device name"],
     "flash_firmware": ["Download verified successfully"],
     "reset_target": ["MCU Reset", "reset is performed"],
+    "debug_dump_symbol_ihex": ["Data read successfully"],
 }
+# What the offline symbol query prints, and what is read back out of it. Named
+# markers rather than GDB's own `$1 = ...` value history: a command that failed
+# prints an error and no marker at all, so a missing answer can never be
+# mistaken for a parsed one, and the reply survives GDB versions that number or
+# decorate the echo differently.
+GDB_SYMBOL_ADDRESS_MARKER = "AGENTIC_HIL_SYMBOL_ADDRESS="
+GDB_SYMBOL_SIZE_MARKER = "AGENTIC_HIL_SYMBOL_SIZE="
+GDB_SYMBOL_QUERY_TIMEOUT_S = 30.0
+GDB_SYMBOL_MISSING_MARKERS = ["no symbol", "not defined"]
+
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_DEVICE_PATTERN = re.compile(r"^\s*Device\s+name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link detected", "0 stlink detected"]
@@ -205,8 +233,65 @@ class STLinkBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
-    def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_dump_symbol_ihex")
+    def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
+        """Read one allowed symbol out of target memory and write Intel HEX.
+
+        The only typed-debug tool this backend serves, because it is the only
+        one STM32CubeProgrammer can do without a GDB session: `-r <address>
+        <size> <file.hex>` uploads device memory and picks Intel HEX off the
+        file extension. Everything a caller can observe is the OpenOCD path's —
+        the same arguments, the same allowlist and `debug.max_dump_size_bytes`
+        refusals word for word, the same success fields — so a plan that dumps a
+        symbol does not have to know which probe it is running on. What differs
+        is where the symbol table comes from, and that difference is stated
+        rather than hidden: with no session there is no loaded image to ask, so
+        the answer is resolved offline from the ELF this service flashed, whose
+        sha256 travels in the result.
+        """
+        tool = "debug_dump_symbol_ihex"
+        validated = self._validate_symbol(tool, symbol)
+        if not validated["ok"]:
+            return validated
+        resolved = self._resolve_symbol_offline(tool, symbol, symbol_elf)
+        if not resolved["ok"]:
+            return resolved
+        size_bytes = int(resolved["size_bytes"])
+        if size_bytes > self.config.debug.max_dump_size_bytes:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol dump exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes}
+        assert output is not None
+        output_path = Path(str(output["resolved_path"]))
+        try:
+            # The CLI writes the file itself and will not create a missing
+            # parent, so the directory is made here — through the same guarded
+            # helper the OpenOCD path uses, so a dump cannot mkdir its way out
+            # of the workspace.
+            safe_configured_directory(self.config, str(output_path.parent), f"{tool}.output_path")
+        except (ConfigError, OSError) as error:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "output_write_failed", "summary": "Intel HEX output directory could not be prepared.", "backend_error": str(error), "symbol": symbol, **NOT_CONTACTED}
+        address_value = int(resolved["address_value"])
+        result = self._run_stlink(tool, [*self._connection_args("NORMAL"), "-r", hex(address_value), str(size_bytes), str(output_path)])
+        result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "output": output, "symbol_source": resolved["symbol_source"]})
+        if not result.get("ok") and "side_effect_status" not in result:
+            # The reset family's answer to the same question. A read drives no
+            # write, but it is still a probe attached to a live core: an
+            # STM32CubeProgrammer that exited without printing "Data read
+            # successfully" leaves no evidence of where it stopped, and a
+            # backend that called that harmless would be inventing the one
+            # claim it does not have. Branches that *did* prove their abort
+            # point — "no ST-LINK detected" — arrive carrying not_started and
+            # keep it.
+            result.update({"side_effect_status": "unknown", "retry_safe": False})
+        if result.get("ok"):
+            # The CLI confirmed the read, so the bytes left the target; whether
+            # what landed on disk is the Intel HEX a caller was promised is a
+            # separate question, and it is asked with the same parser artifact
+            # validation uses on an uploaded .hex.
+            if not output_path.is_file() or not looks_like_intel_hex(output_path):
+                result.update({"ok": False, "error_type": "output_write_failed", "summary": "STM32CubeProgrammer confirmed the read but did not leave a parseable Intel HEX file.", "target_contacted": True})
+                result.pop("success_confirmed", None)
+                return self._write_action_report(result)
+            result["summary"] = "Symbol memory dumped as Intel HEX."
+        return self._write_action_report(result)
 
     def close(self) -> None:
         return None
@@ -340,7 +425,7 @@ class STLinkBackend:
         return {"confirmed": len(matched) == len(expected), "matched": matched, "expected": expected}
 
     def _unconfirmed_backend_error_type(self, tool: str) -> str:
-        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed"}.get(tool, "unknown_debugger_error")
+        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed", "debug_dump_symbol_ihex": "memory_read_unconfirmed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, mark_side_effect(result))
@@ -360,6 +445,76 @@ class STLinkBackend:
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
         return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "not_supported", "summary": "Typed debug sessions require the OpenOCD backend."}
+
+    def _validate_symbol(self, tool: str, symbol: str) -> JsonObject:
+        """The OpenOCD path's two refusals, word for word.
+
+        Copied deliberately rather than approximated: `debug.allowed_symbols` is
+        the operator's statement about what may leave this bench at all, and a
+        caller that reads the refusal must not be able to tell which backend
+        wrote it, or the allowlist would look like a property of the debugger
+        instead of a property of the project.
+        """
+        if not isinstance(symbol, str) or DEBUG_SYMBOL_PATTERN.match(symbol) is None:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "symbol must be a valid C/C++ identifier."}
+        if not self.config.debug.allow_all_symbols and symbol not in self.config.debug.allowed_symbols:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol is not allowed by debug.allowed_symbols.", "symbol": symbol}
+        return {"ok": True}
+
+    def _resolve_symbol_offline(self, tool: str, symbol: str, symbol_elf: JsonObject | None) -> JsonObject:
+        """Address and size for one symbol, from an ELF and nothing else.
+
+        A debug session resolves a symbol by asking the GDB that already has the
+        image loaded and the target attached. There is no session here, so the
+        same GDB is asked in batch mode against the ELF alone: no `target`
+        command is issued, nothing is attached, and the probe is not opened
+        until the read itself. That keeps the query harmless on a running board
+        and means a bad symbol name costs a refusal rather than a hardware
+        contact.
+
+        The ELF is the one this service flashed, so the symbol table provably
+        describes what is on the target — the guarantee a session gets from
+        having loaded the image. Nothing else is accepted: resolving against
+        some other build would answer with an address that is right about the
+        file and wrong about the board.
+        """
+        if symbol_elf is None:
+            return {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "symbol_source_not_available",
+                "summary": "No ELF with debug symbols has been flashed through this service, so no symbol table describes what is on the target. Flash the ELF with flash_firmware first.",
+                "symbol": symbol,
+                "likely_causes": ["no flash_firmware call has succeeded in this session", "the firmware that was flashed was a .hex or .bin, which carries no symbols", "the firmware on the target was flashed outside Agentic HIL"],
+                **NOT_CONTACTED,
+            }
+        gdb = resolve_gdb_executable(self.config, self.backend_name)
+        if not gdb["ok"]:
+            return {**gdb, "tool": tool, "symbol": symbol}
+        elf_path = str(symbol_elf["resolved_path"])
+        args = gdb_symbol_query_args(str(gdb["executable"]), elf_path, symbol)
+        completed = spawn_command(args, str(Path(elf_path).parent), min(self.config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
+        if completed.not_found:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "symbol": symbol, **NOT_CONTACTED}
+        if completed.timed_out:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
+        output = f"{completed.stdout}{completed.stderr}"
+        address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
+        size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
+        if address_value is None or size_value is None:
+            lower = output.lower()
+            error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
+            summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, **NOT_CONTACTED}
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "address": hex(address_value),
+            "address_value": address_value,
+            "size_bytes": size_value,
+            "symbol_source": {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")},
+        }
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
@@ -385,10 +540,46 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+
+
+def gdb_symbol_query_args(gdb_executable: str, elf_path: str, symbol: str) -> list[str]:
+    """A GDB that reads one symbol out of an ELF and attaches to nothing.
+
+    `--batch` runs the two commands and exits; `-nx` keeps a developer's
+    `.gdbinit` — which can define, alias or hook anything — out of a bench
+    answer; `-q` drops the banner. No `target`, `attach` or `monitor` command
+    appears, and none can: this is the whole command line, so the query cannot
+    reach a probe even if one is connected.
+
+    `printf` rather than `print` because it emits exactly the marker line and
+    nothing on failure. The casts to `unsigned long` are what make the two
+    values plain decimal integers regardless of the symbol's own type.
+    """
+    return [
+        *invocation(gdb_executable),
+        "--batch",
+        "-nx",
+        "-q",
+        "-ex",
+        f'printf "{GDB_SYMBOL_ADDRESS_MARKER}%lu\\n", (unsigned long)&{symbol}',
+        "-ex",
+        f'printf "{GDB_SYMBOL_SIZE_MARKER}%lu\\n", (unsigned long)sizeof({symbol})',
+        elf_path,
+    ]
+
+
+def gdb_symbol_marker_value(output: str, marker: str) -> int | None:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(marker):
+            digits = stripped[len(marker) :].strip()
+            if digits.isdigit():
+                return int(digits)
+    return None
 
 
 def version_line(output: str) -> str:

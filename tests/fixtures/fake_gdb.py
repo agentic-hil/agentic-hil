@@ -14,6 +14,12 @@ ASYNC_STOP_DELAY_S = 0.02
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
+BATCH_ADDRESS_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)&(?P<symbol>\w+)$')
+BATCH_SIZE_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)sizeof\((?P<symbol>\w+)\)$')
+# What the ELF's symbol table holds, for the offline query. Address and size
+# match the values this fake answers over MI, so a dump resolves to the same
+# place whether it went through a session or through the batch query.
+BATCH_SYMBOLS = {"CTC_array": (CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE), "big_buffer": (0x20001000, 4096)}
 BEHAVIOR_MARKER = b"FAKE_GDB_BEHAVIOR="
 behavior_override = ""
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
@@ -62,8 +68,40 @@ def read_memory(token: str, address_text: str, length_text: str) -> None:
     emit(f'{token}^done,memory=[{{begin="{hex(address)}",offset="0x0",end="{hex(address + length)}",contents="{contents}"}}]')
 
 
+def batch_query(args: list[str]) -> int:
+    """`--batch -nx -q -ex ... <elf>`: read the ELF's symbol table and exit.
+
+    No stdin is read and no target is selected, because the real invocation has
+    no way to reach one: this branch exists to prove the offline query answers
+    from the file alone. A symbol the table does not hold produces GDB's own
+    words on stderr and no marker line, which is the only signal the caller
+    parses.
+    """
+    if "-ex" not in args:
+        print("No commands were given.", file=sys.stderr)
+        return 1
+    for index, argument in enumerate(args[:-1]):
+        if argument != "-ex":
+            continue
+        command = args[index + 1]
+        match = BATCH_ADDRESS_PATTERN.match(command) or BATCH_SIZE_PATTERN.match(command)
+        if match is None:
+            print(f'Undefined command: "{command}".', file=sys.stderr)
+            continue
+        entry = BATCH_SYMBOLS.get(match.group("symbol"))
+        if entry is None:
+            print(f'No symbol "{match.group("symbol")}" in current context.', file=sys.stderr)
+            continue
+        value = entry[0] if BATCH_ADDRESS_PATTERN.match(command) else entry[1]
+        emit(f"{match.group('marker')}{value}")
+    return 0
+
+
 def main() -> int:
     global behavior_override
+
+    if "--batch" in sys.argv[1:]:
+        return batch_query(sys.argv[1:])
 
     emit('=thread-group-added,id="i1"')
     emit("(gdb)")
