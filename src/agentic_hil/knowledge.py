@@ -2162,7 +2162,8 @@ permissions:
   # Taken back: this bench is not to be regenerated from hardware discovery.
   allow_config_write: false
   # Also still true: the agent may clear an incident that names no hardware
-  # contact. The ones that need somebody at the board refuse regardless of it.
+  # contact with no argument, and may clear one that needs somebody at the board
+  # only by relaying an operator_statement a person gave it — never invented.
   allow_recover: true
 
 target:

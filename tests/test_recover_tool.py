@@ -368,6 +368,94 @@ def test_the_schema_offers_no_way_to_confirm_a_safe_state() -> None:
         assert spelling not in serialized, spelling
 
 
+def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
+    """The generated template, the public schema, and the embedded MCP workflow
+    must all describe the boundary the tool contract enforces, so a reader of
+    policy cannot be told the physical route does not exist while the tool has
+    implemented it.
+
+    The boundary, in one line: a reason that names no hardware contact clears
+    with no argument, a reason that needs somebody at the board clears only by
+    relaying an operator_statement, and the audit-broken and nobody-to-ask cases
+    keep the operator's own command line. This is the consistency assertion the
+    finding asked for — before it, the schema and generated comments said
+    physical reasons are refused over MCP with no such argument, which the tool
+    stopped being true of when operator_statement arrived.
+
+    The authoritative agent instructions — `AGENTS.md` and both shipped skill
+    copies — are held to the same boundary here. Round 1 left them still telling
+    an agent that every remaining quarantine is the operator's to clear from a
+    shell, which sends a host with no operator shell away from the very route
+    `operator_statement` opened; the round-2 finding asked that these surfaces be
+    pinned to the boundary too, so a reader of the instructions cannot be steered
+    off the MCP route the tool implements."""
+    from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE
+    from agentic_hil.knowledge import config_schema_document
+    from agentic_hil.mcp import AGENTIC_HIL_WORKFLOW_PROMPT
+
+    contract = next(tool["description"] for tool in MCP_TOOLS if tool["name"] == TOOL)
+    schema_description = config_schema_document()["properties"]["permissions"]["properties"]["allow_recover"]["description"]
+    repository_root = Path(__file__).resolve().parents[1]
+    instruction_surfaces = {
+        "agents_md": repository_root / "AGENTS.md",
+        "skill_src": repository_root / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md",
+        "skill_plugin": repository_root / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md",
+    }
+    surfaces = {
+        "tool_contract": contract,
+        "config_template": DEFAULT_CONFIG_TEMPLATE,
+        "config_schema": schema_description,
+        "mcp_workflow_prompt": AGENTIC_HIL_WORKFLOW_PROMPT,
+        **{name: path.read_text(encoding="utf-8") for name, path in instruction_surfaces.items()},
+    }
+    for name, text in surfaces.items():
+        lowered = text.lower()
+        # A physical reason is cleared by relaying a statement, not refused outright.
+        assert "operator_statement" in lowered, name
+        # A no-contact reason still clears with none.
+        assert "no argument" in lowered or "no arguments" in lowered or "no hardware contact" in lowered, name
+
+    # The agent-facing instructions must name the MCP recovery tool, not send
+    # every physical incident to the shell as round 1 still did.
+    for name in instruction_surfaces:
+        assert "hardware_recover" in surfaces[name], name
+
+    # None of the generated surfaces still claims the physical route does not
+    # exist over MCP — the exact stale wordings this finding removed.
+    for name in ("config_template", "config_schema", "mcp_workflow_prompt"):
+        lowered = surfaces[name].lower()
+        assert "no argument on the mcp tool" not in lowered, name
+        assert "refuse over mcp whatever" not in lowered, name
+        assert "refused whatever this says" not in lowered, name
+
+    # Pin the instruction-surface repair itself, not merely the presence of terms
+    # that predated it. Both parent-commit skill copies already carried
+    # `operator_statement`, `hardware_recover`, and a no-argument clause inside
+    # their `hardware_recover` section, so every assertion above stays green even
+    # after reverting the relay-guidance paragraph to the round-1 wording that
+    # routed every chat-confirmed physical recovery back to the operator's shell.
+    # Reject that obsolete directive on each surface directly. The skills wrapped
+    # the CLI line, so whitespace is collapsed before matching.
+    def collapse_whitespace(text: str) -> str:
+        return " ".join(text.split())
+
+    obsolete_shell_routing = {
+        "skill_src": "ask them to run `agentic-hil recover --confirm-safe-state --quarantine-id <id>` after that check",
+        "skill_plugin": "ask them to run `agentic-hil recover --confirm-safe-state --quarantine-id <id>` after that check",
+        "agents_md": "otherwise ask the operator to inspect `agentic-hil lease-status` and resolve it with `agentic-hil recover",
+    }
+    for name, obsolete in obsolete_shell_routing.items():
+        assert obsolete not in collapse_whitespace(surfaces[name]).lower(), name
+
+    # And positively: the skills' relay path now hands what is left to
+    # `hardware_recover` carrying the operator's statement, not to a shell. This
+    # phrase is unique to the repaired paragraph — the unchanged `hardware_recover`
+    # section says "carry their sentence", never "carrying their statement" — so a
+    # revert of the repair drops it and this assertion fails.
+    for name in ("skill_src", "skill_plugin"):
+        assert "carrying their statement" in collapse_whitespace(surfaces[name]).lower(), name
+
+
 def test_an_invented_confirmation_argument_is_refused_on_the_wire(tmp_path: Path) -> None:
     """Not only absent from the schema: rejected by the validator, so a caller
     cannot smuggle one past a host that forwards unknown keys."""
