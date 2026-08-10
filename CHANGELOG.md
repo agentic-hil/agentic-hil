@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- `can_send` on a CAN bus configured `listen_only: true` is refused as `can_listen_only_mode` before any driver call, whatever `permissions.allow_write` says: the mode gate is settled first and the permission is never reached. The same refusal answers on every adapter, from the tool, from a test plan's `can_send` step, and from a broker participant, naming both ways out (a second `can_buses` entry without the flag, or the configuration edit). Measured against the installed python-can: its PCAN send never reads the bus state, so this gate is the only defence, and the `listen_only` guarantee is restated as reaching exactly as far as the driver's or the kernel's own report of its mode (#189)
+
 ### Added
 
 - The stlink backend serves `debug_dump_symbol_ihex` through STM32CubeProgrammer's `-r` memory read: the symbol is resolved offline from the ELF a confirmed flash put on the board, via the configured `debug.gdb_executable` in a batch query that never attaches to the target; the allowlist, `debug.max_dump_size_bytes` and the result fields match the OpenOCD path, success is confirmed on the measured `Data read successfully` line, and typed debug sessions stay OpenOCD-only (#185)
