@@ -46,6 +46,7 @@ class RecordingService:
         fail_call: str | None = None,
         uart_reads: list[bytes] | None = None,
         uart_encoding: str = "utf-8",
+        can_reads: list[list[dict]] | None = None,
         reset_result: dict | None = None,
     ) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -59,6 +60,10 @@ class RecordingService:
         # never printed its banner looks like from here.
         self.uart_reads = list(uart_reads or [])
         self.uart_encoding = uart_encoding
+        # What the bus carries, one entry per can_read, in the order it carries
+        # it. An exhausted list is a quiet bus — which is what a node that never
+        # sent the frame a plan is waiting for looks like from here.
+        self.can_reads = list(can_reads or [])
         self.reset_result = reset_result
         self.breakpoint_id = 0
         self.recovery_calls: list[list[str]] = []
@@ -80,7 +85,8 @@ class RecordingService:
         if name == "can_session_stop":
             return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "was_active": True}
         if name == "can_read":
-            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "frames": [], "frames_read": 0}
+            frames = self.can_reads.pop(0) if self.can_reads else []
+            return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "frames": frames, "frames_read": len(frames)}
         if name == "can_send":
             return {"ok": True, "tool": name, "bus_id": arguments.get("bus_id"), "frame": {"id": arguments.get("frame_id")}}
         if name == "flash_firmware" and self.raise_flash:
@@ -688,6 +694,130 @@ def test_reactor_builds_one_service_per_named_debugger(tmp_path: Path) -> None:
     finally:
         reactor.close()
     assert built[0].closed is True
+
+
+def test_a_failed_multi_debugger_run_recovers_through_the_touched_probes(tmp_path: Path) -> None:
+    # The base service is unbound in the multi-probe CLI (`config.debugger` is
+    # None), and debugger steps run on per-probe services. Recovery has to follow
+    # them: recovering through the unbound base withholds reset as
+    # `allow_reset_missing` while the probes the plan drove are left as the failed
+    # run put them, and it must never reach for a probe the run never named.
+    from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+            )
+        )
+    )
+    assert config.debugger_id is None, "a config with several probes leaves the base service unbound"
+
+    class ClosableRecordingService(RecordingService):
+        def close(self) -> None:
+            self.closed = True
+
+    base = ClosableRecordingService()
+    built: dict[str, ClosableRecordingService] = {}
+
+    def factory(bound_config) -> ClosableRecordingService:
+        svc = ClosableRecordingService(fail_call="reset_target" if bound_config.debugger_id == "probe_b" else None)
+        built[bound_config.debugger_id] = svc
+        return svc
+
+    plan = TestConfig(
+        path=str(tmp_path / "plan.yaml"),
+        name="multi-probe-abort",
+        steps=[
+            TestStep("reset", {"mode": "run"}, debugger="dut"),
+            TestStep("reset", {"mode": "run"}, debugger="probe_b"),
+        ],
+    )
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(plan)
+    finally:
+        reactor.close()
+
+    assert result["ok"] is False, result
+    assert result["failed_step"] == 2
+
+    # Each touched probe recovered through its own bound service; the base
+    # service — bound to no probe — was never asked to.
+    assert built["dut"].recovery_calls == [["dut"]]
+    assert built["probe_b"].recovery_calls == [["probe_b"]]
+    assert base.recovery_calls == [], "the unbound base service must not be the one recovered"
+    # A probe the plan never named is neither built nor touched.
+    assert "probe_c" not in built
+
+    recovery = result["recovery"]
+    assert recovery["outcome"] == "recovered", recovery
+    assert recovery["devices"] == ["dut", "probe_b"]
+    assert recovery["recovered_debuggers"] == ["dut", "probe_b"]
+    assert set(recovery["recoveries"]) == {"dut", "probe_b"}
+
+
+def test_a_probe_used_only_as_a_delay_route_is_not_recovered(tmp_path: Path) -> None:
+    # `delay` is declared `touches_device=False`: it routes to a named probe and
+    # is recorded as a step, but drives no hardware. A run that delays on one probe
+    # and then fails a real reset on another must recover only the probe it drove —
+    # resetting and halting a board no hardware action in the plan ever reached is
+    # exactly what recovery must not do.
+    from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+            )
+        )
+    )
+    assert config.debugger_id is None
+
+    class ClosableRecordingService(RecordingService):
+        def close(self) -> None:
+            self.closed = True
+
+    base = ClosableRecordingService()
+    built: dict[str, ClosableRecordingService] = {}
+
+    def factory(bound_config) -> ClosableRecordingService:
+        svc = ClosableRecordingService(fail_call="reset_target" if bound_config.debugger_id == "probe_b" else None)
+        built[bound_config.debugger_id] = svc
+        return svc
+
+    plan = TestConfig(
+        path=str(tmp_path / "plan.yaml"),
+        name="delay-then-abort",
+        steps=[
+            TestStep("delay", {"duration_ms": 1}, debugger="dut"),
+            TestStep("reset", {"mode": "run"}, debugger="probe_b"),
+        ],
+    )
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(plan)
+    finally:
+        reactor.close()
+
+    assert result["ok"] is False, result
+    assert result["failed_step"] == 2
+
+    # The delay step still built dut's device and per-probe service, so absence
+    # from `devices` is not why it is spared — it is spared because it drove nothing.
+    assert "dut" in built, "the delay step builds dut's device and service"
+    assert built["dut"].recovery_calls == [], "a delay-only probe must not be recovered"
+    assert built["probe_b"].recovery_calls == [["probe_b"]]
+    assert base.recovery_calls == []
+    assert "probe_c" not in built
+
+    recovery = result["recovery"]
+    assert recovery["outcome"] == "recovered", recovery
+    # Exactly one probe was driven, so recovery took the single-probe path — there
+    # is no per-probe aggregate that could name the delay-only dut.
+    assert "recoveries" not in recovery
 
 
 def test_config_rejects_named_debuggers_that_share_a_physical_probe(tmp_path: Path) -> None:
@@ -2464,6 +2594,295 @@ steps:
     assert service.calls == []
 
 
+def can_frame(frame_id: int, data_hex: str = "", *, extended: bool = False) -> dict:
+    """One received frame, in the shape `can_read` normalizes every adapter's
+    answer to — so a test that passes here is a test the real read path feeds."""
+    data = bytes.fromhex(data_hex)
+    return {"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": False, "data_hex": data.hex(), "dlc": len(data)}
+
+
+def can_comparator_plan(tmp_path: Path, comparator: str, *, timeout_s: str = "5") -> Path:
+    return write_test_config(
+        tmp_path,
+        f"""version: 3
+name: bus-expectation
+steps:
+  - {{device: dut_can, action: can_open}}
+  - {{device: dut_can, action: can_read, comparator: {comparator}, timeout_s: {timeout_s}}}
+""",
+    )
+
+
+def test_can_comparator_matches_the_frame_the_plan_named(tmp_path: Path) -> None:
+    # The identifier says which frame, the payload says what it must carry, and
+    # neither alone is the claim: the first read here carries the expected
+    # payload under another id and the expected id with another payload, and
+    # both are passed over.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01 ff"}')
+    service = RecordingService(can_reads=[[can_frame(0x120, "01ff"), can_frame(0x123, "0000")], [can_frame(0x123, "01ff")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "A frame on the CAN bus carried the expected payload."
+    assert read["frame"]["id_hex"] == "0x123"
+    assert read["frame"]["data_hex"] == "01ff"
+    # The plan's own spelling is echoed back; the whitespace in it was a spelling
+    # of the bytes, not part of the claim.
+    assert read["comparator"] == {"id": "0x123", "equals": "01 ff"}
+    # The frame was not in the queue the first read drained, so the step read
+    # again — which is the whole difference from a plain read.
+    assert read["reads"] == 2
+    assert read["frames_read"] == 3
+
+
+def test_can_comparator_ignores_a_frame_carrying_the_payload_under_another_id(tmp_path: Path) -> None:
+    # A bus carries every node's traffic. The payload this plan is waiting for is
+    # on the wire twice and never under the identifier it named, so the step is
+    # red — and says which frames it did see, because "the id is wrong in the
+    # plan" and "the board never sent it" are different repairs.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x120, "01ff"), can_frame(0x7FF, "01ff")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "comparator_unmet"
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["summary"] == "No frame on the CAN bus carried the expected payload before this step's timeout."
+    assert read["frames_tail"] == [{"id_hex": "0x120", "data_hex": "01ff", "extended": False}, {"id_hex": "0x7ff", "data_hex": "01ff", "extended": False}]
+    assert read["frames_tail_truncated"] is False
+    assert read["frames_read"] == 2
+
+
+def test_can_comparator_reads_an_identifier_family_through_a_mask(tmp_path: Path) -> None:
+    # `id` plus `id_mask` is a family rather than one value, which is how a plan
+    # waits for any frame of a protocol that encodes a node in the low bits.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x120", id_mask: "0x7f0", pattern: "^dead"}')
+    service = RecordingService(can_reads=[[can_frame(0x100, "deadbeef"), can_frame(0x12F, "deadbeef")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "Expected pattern matched the payload of a frame on the CAN bus."
+    # 0x100 is outside the family the mask describes; 0x12f is inside it, and
+    # both carry the payload the pattern would otherwise match.
+    assert read["frame"]["id_hex"] == "0x12f"
+
+
+def test_a_can_comparator_selects_by_frame_type_not_identifier_alone(tmp_path: Path) -> None:
+    # A standard 0x123 and an extended 0x123 are two different frames on the wire.
+    # A comparator that does not say `extended` waits for the standard one, so the
+    # extended twin carrying the expected payload is passed over and the standard
+    # twin behind it is the match — the same distinction the broker's participant
+    # filters draw. Without the discriminator the extended twin was a false accept.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}')
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff", extended=True)], [can_frame(0x123, "01ff")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["frame"]["extended"] is False
+    assert read["reads"] == 2, "the extended twin was passed over; the standard frame in the next read is the match"
+
+
+def test_a_can_comparator_marked_extended_waits_for_the_extended_frame(tmp_path: Path) -> None:
+    # The mirror: `extended: true` matches the extended frame of that number and
+    # passes over its standard twin, so the type match is a match and not a
+    # blanket refusal.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", extended: true, equals: "01ff"}')
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff")], [can_frame(0x123, "01ff", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["frame"]["extended"] is True
+    assert read["comparator"]["extended"] is True
+    assert read["reads"] == 2, "the standard twin was passed over; the extended frame in the next read is the match"
+
+
+def test_a_masked_can_comparator_still_separates_the_frame_types(tmp_path: Path) -> None:
+    # The type match holds under a mask too: an id_mask widens which numbers a
+    # comparator selects, never which frame namespace, so an extended frame inside
+    # a standard-typed family is still not the frame the plan asked about.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x120", id_mask: "0x7f0", extended: false, pattern: "^dead"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x12F, "deadbeef", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    # The rejected frame was the extended twin inside a standard-typed family, and
+    # the tail keeps `extended` so the failure shows the frame type rather than a
+    # frame that reads as identical to the one the plan asked for.
+    assert read["frames_tail"] == [{"id_hex": "0x12f", "data_hex": "deadbeef", "extended": True}]
+
+
+def test_a_standard_comparator_shows_the_frame_type_of_the_extended_twin_it_rejected(tmp_path: Path) -> None:
+    # The reproduction the review named: an extended 0x123 carrying the expected
+    # payload, judged by a standard comparator. It is rejected on frame type, and
+    # its `frames_tail` entry must carry `extended: true` — otherwise the failure
+    # shows an id and a payload identical to the requested frame and omits the only
+    # field that explains why it did not match.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["frames_tail"] == [{"id_hex": "0x123", "data_hex": "01ff", "extended": True}]
+
+
+def test_can_comparator_range_reads_its_capture_in_the_base_the_payload_is_written_in(tmp_path: Path) -> None:
+    # The signal, not merely the frame: the pattern says where in the payload the
+    # value is and the range says which values are acceptable. The capture comes
+    # out of hexadecimal, so `19` here is 25 — read as decimal it would be 19 and
+    # this bench would report a settled reading as out of range.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: 513, pattern: "^02(..)$", range: {min: 20, max: 30}}')
+    service = RecordingService(can_reads=[[can_frame(0x201, "0291")], [can_frame(0x201, "0219")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "A value captured from a frame's payload fell inside the expected range."
+    assert read["captured_text"] == "19"
+    assert read["captured_value"] == 25.0
+    assert read["reads"] == 2
+
+
+def test_can_comparator_range_fails_naming_the_value_it_did_capture(tmp_path: Path) -> None:
+    # A signal that was merely out of range and a bus that never carried the
+    # frame are different failures, so the red result carries the number it read.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x201", pattern: "^02(..)$", range: {min: 20, max: 30}}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x201, "0291")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["summary"] == "No value captured from a frame's payload fell inside the expected range before this step's timeout."
+    assert read["captured_value"] == 145.0
+    assert read["comparator"]["range"] == {"min": 20, "max": 30}
+    assert read["frames_tail"] == [{"id_hex": "0x201", "data_hex": "0291", "extended": False}]
+
+
+def test_can_comparator_caps_the_frames_it_reports(tmp_path: Path) -> None:
+    # The `received_tail` honesty in this medium's unit: a busy bus must not turn
+    # one red step into an unbounded result, and a truncated tail says so rather
+    # than reading as the whole of what the bus carried.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x7ff", equals: "ff"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x300 + number, "00") for number in range(20)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["frames_read"] == 20
+    assert len(read["frames_tail"]) == 16
+    assert read["frames_tail_truncated"] is True
+    # The last frames, not the first: what the bus was doing when the step gave
+    # up is what an operator reads next.
+    assert read["frames_tail"][-1] == {"id_hex": "0x313", "data_hex": "00", "extended": False}
+
+
+def test_a_can_comparator_saying_two_things_at_once_is_refused(tmp_path: Path) -> None:
+    path = write_test_config(
+        tmp_path,
+        'version: 3\nsteps:\n  - {device: dut_can, action: can_read, comparator: {id: 1, equals: "01", pattern: "01"}, timeout_s: 5}\n',
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["exactly_one_of"] == ["equals", "pattern"]
+
+
+def test_a_can_range_without_a_capture_group_is_refused_before_the_run(tmp_path: Path) -> None:
+    # The same refusal the serial comparator gives, in the same shape and under
+    # the same field name, because what a pattern must satisfy is a property of
+    # the claim rather than of the medium it is judged against.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x201", pattern: "^02..$", range: {min: 20, max: 30}}')
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].comparator.pattern"
+    assert refusal["capture_groups"] == 0
+    # Refused before the bus was opened at all.
+    assert service.calls == []
+
+
+def test_a_can_comparator_beside_a_per_read_wait_is_refused(tmp_path: Path) -> None:
+    # Two deadlines with different owners. Honouring one and ignoring the other
+    # is how a plan comes to carry a number nothing reads.
+    config = can_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+steps:
+  - {device: dut_can, action: can_open}
+  - {device: dut_can, action: can_read, comparator: {id: 1, equals: "01"}, timeout_s: 5, wait_timeout_s: 1}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[1].wait_timeout_s"
+    assert "timeout_s" in result["validation_error"]["summary"]
+    assert service.calls == []
+
+
+def test_can_read_without_a_comparator_is_the_version_2_step_unchanged(tmp_path: Path) -> None:
+    # No claim, no reading again: the step is one `can_read` with the plan's own
+    # arguments, and it answers exactly as `can_read` answers.
+    config = can_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+name: plain
+steps:
+  - {bus_id: dut_can, action: can_open}
+  - {bus_id: dut_can, action: can_read, max_frames: 4, wait_timeout_s: 0.5}
+""",
+    )
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["tool"] == "can_read"
+    assert read["frames"] == [can_frame(0x123, "01ff")]
+    assert "comparator" not in read
+    assert [arguments for name, arguments in service.calls if name == "can_read"] == [{"max_frames": 4, "wait_timeout_s": 0.5, "bus_id": "dut_can"}]
+
+
 def test_an_action_a_kind_does_not_declare_answers_not_supported(tmp_path: Path) -> None:
     # By construction, not by a forgotten special case: dispatch looks the string
     # up among the declarations and there is nothing else to look in.
@@ -2583,6 +3002,9 @@ def test_a_delay_longer_than_the_cap_is_refused(tmp_path: Path) -> None:
         ("{port_id: dut_uart, action: uart_read, timeout_s: 1}", "uart_read"),
         ("{port_id: dut_uart, action: uart_write, text: hi}", "uart_write"),
         ("{port_id: dut_uart, action: delay, duration_ms: 5}", "delay"),
+        # `can_read` is a version 2 action; what is new on it is the claim, so
+        # the key is what the gate names rather than the step.
+        ('{bus_id: dut_can, action: can_read, comparator: {id: 1, equals: "01"}, timeout_s: 1}', "comparator"),
     ],
 )
 def test_a_version_2_plan_cannot_reach_for_version_3(tmp_path: Path, step: str, named: str) -> None:

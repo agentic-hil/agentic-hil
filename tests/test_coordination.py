@@ -32,7 +32,6 @@ from agentic_hil.mcp import call_tool
 from agentic_hil.process import (
     cleanup_registered_processes,
     managed_process_owner,
-    process_group_kwargs,
     spawn_managed_process,
     terminate_process_tree,
 )
@@ -172,9 +171,9 @@ def test_stale_resource_keeps_project_cleanup_required(tmp_path: Path) -> None:
 
 def test_process_cleanup_is_scoped_to_service_owner() -> None:
     with managed_process_owner("first-owner"):
-        first = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(60)"], **process_group_kwargs())
+        first = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(60)"])
     with managed_process_owner("second-owner"):
-        second = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(60)"], **process_group_kwargs())
+        second = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         assert cleanup_registered_processes(owner_marker="first-owner") == []
         assert first.poll() is not None

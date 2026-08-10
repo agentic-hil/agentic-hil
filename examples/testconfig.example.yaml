@@ -56,10 +56,23 @@ steps:
     location: capture_done
     timeout_s: 5
 
+  # What the read is claiming on a bus: which frame, and what it must carry.
+  # `id:` is required — a bus carries every node's traffic, so a payload matched
+  # without saying whose frame it was is a green another ECU can produce — and
+  # `id_mask:` widens it into a family where a protocol encodes a node in the
+  # low bits. The payload claim reads the payload as hexadecimal, so a `range:`
+  # capture is read in that base too. `max_frames` is how many frames one read
+  # drains; the step reads again until the claim is met or `timeout_s` passes.
+  # Without a comparator this is a plain read of whatever the session has,
+  # exactly as version 2 wrote it.
   - device: dut_can
     action: can_read
+    comparator:
+      id: "0x201"
+      pattern: "^02(..)$"
+      range: { min: 20, max: 30 }
     max_frames: 64
-    wait_timeout_s: 1
+    timeout_s: 5
 
   - device: dut
     action: dump_memory

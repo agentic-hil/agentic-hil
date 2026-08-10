@@ -10,7 +10,6 @@ from pathlib import Path
 
 from agentic_hil.process import (
     CHILD_REAP_TIMEOUT_S,
-    process_group_kwargs,
     spawn_managed_process,
     terminate_process_tree,
 )
@@ -97,7 +96,6 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            **process_group_kwargs(),
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)

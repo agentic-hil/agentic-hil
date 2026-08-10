@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from fixtures import fake_openocd
 from support import trusted_launcher
 
 from agentic_hil import __version__
+from agentic_hil import process as process_module
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends import openocd as openocd_backend
 from agentic_hil.backends.common import command_for_log
@@ -68,7 +70,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
-from agentic_hil.process import ProcessImage, process_group_kwargs, register_process_group, terminate_process_tree
+from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import CURRENT_CONFIG_VERSION
@@ -3608,7 +3610,7 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
 time.sleep(30)
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
         for _ in range(100):
             if pid_file.exists():
@@ -3633,7 +3635,7 @@ import signal, subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
 open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
         child.wait(timeout=5)
         descendant_pid = int(pid_file.read_text(encoding="utf-8"))
@@ -3654,7 +3656,7 @@ import subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
 open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 """
-    child = register_process_group(subprocess.Popen([sys.executable, "-c", code, str(pid_file)], **process_group_kwargs()))
+    child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     child.wait(timeout=5)
     descendant_pid = int(pid_file.read_text(encoding="utf-8"))
 
@@ -3664,14 +3666,26 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended-start regression")
-def test_windows_process_does_not_run_before_job_registration(tmp_path: Path) -> None:
+def test_windows_managed_spawn_holds_child_until_contained_then_runs_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suspended start is still there, and it still ends in a running child.
+
+    Both halves in one call means neither is observable from outside any more,
+    so the freeze is caught where it happens: at Job Object setup the child must
+    not have run a line yet, and by the time the call returns it must have.
+    """
     marker = tmp_path / "started"
-    child = subprocess.Popen([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)], **process_group_kwargs())
+    original = process_module._create_windows_kill_job
+    frozen_at_containment: list[bool] = []
+
+    def watched(process: subprocess.Popen) -> int:
+        frozen_at_containment.append(not marker.exists())
+        return original(process)
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", watched)
+    child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)])
     try:
-        time.sleep(0.1)
-        assert not marker.exists()
-        register_process_group(child)
         child.wait(timeout=5)
+        assert frozen_at_containment == [True]
         assert marker.read_text(encoding="utf-8") == "started"
         terminate_process_tree(child, 1.0)
     finally:
@@ -3681,24 +3695,150 @@ def test_windows_process_does_not_run_before_job_registration(tmp_path: Path) ->
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows fail-closed registration regression")
 def test_windows_job_setup_failure_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
-    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: (_ for _ in ()).throw(OSError("job setup failed")))
+    spawned: list[subprocess.Popen] = []
+
+    def fail(process: subprocess.Popen) -> int:
+        spawned.append(process)
+        raise OSError("job setup failed")
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", fail)
 
     with pytest.raises(OSError, match="job setup failed"):
-        register_process_group(child)
+        spawn_managed_process([sys.executable, "-c", "import time; time.sleep(30)"])
 
-    assert child.poll() is not None
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows missing Job Object regression")
 def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **process_group_kwargs())
-    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", lambda process: None)
+    spawned: list[subprocess.Popen] = []
+
+    def no_handle(process: subprocess.Popen) -> None:
+        spawned.append(process)
+        return None
+
+    monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", no_handle)
 
     with pytest.raises(OSError, match="no containment handle"):
-        register_process_group(child)
+        spawn_managed_process([sys.executable, "-c", "import time; time.sleep(30)"])
 
-    assert child.poll() is not None
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+
+
+SPAWNER_SOURCE = """
+import subprocess, sys
+from agentic_hil.process import {function}
+child = {function}(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+open(sys.argv[1], "w", encoding="utf-8").write(str(child.pid))
+"""
+
+
+def grandchild_pid_after_spawner_exit(function: str, pid_file: Path) -> int:
+    """Start a child through ``function`` from a process that then exits, and report its pid.
+
+    The spawner is a plain ``subprocess.Popen`` on purpose: it must belong to no
+    Job Object of this test's making, so the only containment in the picture is
+    the one ``function`` itself creates.
+
+    Two details are the difference between a proof and a hang. The grandchild's
+    standard streams go to ``DEVNULL``, because on POSIX a child inherits its
+    parent's fds 0-2 and would hold the write end of any pipe open for its whole
+    life — leaving this reader blocked on an EOF that only arrives once the
+    process it is asking about has died. It is the same reason
+    :func:`agentic_hil.canbroker._spawn_broker` hands the broker a log file
+    rather than a pipe. And the pid travels through a file rather than that
+    stream, so nothing here depends on a descriptor the grandchild shares.
+    """
+    spawner = subprocess.Popen([sys.executable, "-c", SPAWNER_SOURCE.format(function=function), str(pid_file)])
+    assert spawner.wait(timeout=60) == 0
+    return int(pid_file.read_text(encoding="utf-8"))
+
+
+def pid_alive_after_settling(pid: int, *, awaiting: bool, timeout_s: float = 5.0) -> bool:
+    """Poll until the pid reaches ``awaiting`` or the deadline passes, then answer.
+
+    Waiting for the answer the caller is *not* asserting is the point: a child
+    that was going to die has the full window in which to do it, so "still
+    alive" is a proof rather than a race won.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        alive = pid_alive(pid)
+        if alive == awaiting or time.monotonic() >= deadline:
+            return alive
+        time.sleep(0.05)
+
+
+def kill_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+    with suppress(ProcessLookupError):
+        os.kill(pid, 9)
+
+
+def test_managed_spawn_hands_back_a_child_that_is_already_running(tmp_path: Path) -> None:
+    """The regression this surface exists for: the caller owes no second call.
+
+    On Windows the child is born suspended, so a spawn that forgot to resume it
+    would sit here until the wait timed out — alive, silent, nothing to read.
+    """
+    marker = tmp_path / "ran"
+    child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')", str(marker)])
+    assert child.wait(timeout=10) == 0
+    assert marker.read_text(encoding="utf-8") == "ran"
+    terminate_process_tree(child, 5.0)
+
+
+def test_detached_spawn_child_outlives_the_process_that_started_it(tmp_path: Path) -> None:
+    """What the CAN broker needs: a bus that does not end with the first run to attach."""
+    pid = grandchild_pid_after_spawner_exit("spawn_detached_process", tmp_path / "detached.pid")
+    try:
+        assert pid_alive_after_settling(pid, awaiting=False) is True
+    finally:
+        kill_pid(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Job Object containment is what the detached variant opts out of")
+def test_managed_spawn_child_dies_with_the_process_that_started_it(tmp_path: Path) -> None:
+    """The contrast that gives the detached variant its meaning: same shape, opposite lifetime."""
+    pid = grandchild_pid_after_spawner_exit("spawn_managed_process", tmp_path / "managed.pid")
+    try:
+        assert pid_alive_after_settling(pid, awaiting=False) is False
+    finally:
+        kill_pid(pid)
+
+
+def test_the_spawn_contract_has_no_half_a_caller_can_hold() -> None:
+    """Neither half is reachable by the name it used to have."""
+    assert not hasattr(process_module, "process_group_kwargs")
+    assert not hasattr(process_module, "register_process_group")
+
+
+def test_registration_refuses_a_child_it_did_not_spawn() -> None:
+    """Reaching past the underscore does not get the old two-step back either."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        with pytest.raises(RuntimeError, match="not a standalone step"):
+            process_module._register_process_group(child)
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("function", ["spawn_managed_process", "spawn_detached_process"])
+@pytest.mark.parametrize(("keyword", "value"), [("creationflags", 0), ("start_new_session", True)])
+def test_spawn_refuses_caller_supplied_creation_flags(function: str, keyword: str, value: object) -> None:
+    """The flags are the contract, so a caller cannot re-open the hole from outside."""
+    with pytest.raises(TypeError, match="spawn contract"):
+        getattr(process_module, function)([sys.executable, "-c", "pass"], **{keyword: value})
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object verification regression")

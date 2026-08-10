@@ -85,11 +85,11 @@ the target back into a known state and carry on. A recovery action that answers
 the reason the incident names clears it, with a ledger line. A refusal carrying
 `auto_recovery_attempted: true` means the automatic attempt already ran and did
 not confirm the safe state, so drive the reset yourself or ask. Relay the result's `quarantine_guidance`
-entries to the operator instead — per reason: what was attempted, what is
+entries to the operator — per reason: what was attempted, what is
 confirmed, what remains unknown, and the `physical_check` to perform on the
-board — and ask them to run `agentic-hil recover --confirm-safe-state
---quarantine-id <id>` after that check. Never clear the server's own state
-files yourself.
+board — and then clear what is left with `hardware_recover`, below, carrying
+their statement rather than sending them to a shell. Never clear the server's own
+state files yourself.
 
 `hardware_recover` is how you clear what is left. With no arguments it clears
 an incident whose every reason names a call that never reached the hardware — a

@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -41,7 +42,7 @@ from agentic_hil.canbroker import (
     endpoint_family,
     read_descriptor,
 )
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.devices import can_device
 from agentic_hil.redact import redact_sensitive
 
@@ -636,6 +637,35 @@ def test_a_listen_only_bus_refuses_a_participant_that_may_transmit(tmp_path: Pat
         sniffer.broker_process.wait(timeout=30)
 
 
+def test_service_listen_only_opens_the_adapter_without_controller_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`listen_only_enforcement: service` is the broker filtering in software, not
+    the controller's own mode. Opening the adapter must not demand the controller
+    listen-only that `controller` enforcement proves, or a bench configured for the
+    documented weaker mode fails to open wherever that controller proof is
+    unavailable — while its status already reports software filtering. The
+    controller enforcement path is unchanged: the adapter is still asked for it."""
+    import agentic_hil.can as can_module
+    from agentic_hil.bench import BenchMutex
+
+    captured: list[bool] = []
+
+    def fake_open_adapter(cfg: object, bus_id: str, bus_config: object, clear_rx_queue: bool, contact: object = None) -> dict:
+        captured.append(bus_config.listen_only)
+        return {"ok": True, "session": object()}
+
+    monkeypatch.setattr(can_module, "open_adapter", fake_open_adapter)
+
+    service_config = shared_config(tmp_path, monkeypatch, listen_only=True, enforcement="service", shares=LISTEN_ONLY_SHARES)
+    service_broker = canbroker.CanBroker(service_config, "bench", mutex=BenchMutex(frontend="can-broker-test", root=tmp_path / "svc-locks"))
+    assert service_broker.open_bus()["ok"] is True
+    assert captured[-1] is False, "service enforcement opens the adapter in normal mode, not controller listen-only"
+
+    controller_config = shared_config(tmp_path, monkeypatch, listen_only=True, enforcement="controller", shares=LISTEN_ONLY_SHARES)
+    controller_broker = canbroker.CanBroker(controller_config, "bench", mutex=BenchMutex(frontend="can-broker-test", root=tmp_path / "ctl-locks"))
+    assert controller_broker.open_bus()["ok"] is True
+    assert captured[-1] is True, "controller enforcement still asks the adapter for the controller listen-only that backs it"
+
+
 def test_a_bus_incident_aborts_every_participant_and_gates_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
     """The adapter fails, not a participant, so the whole bus goes."""
     monkeypatch.setenv("FAKE_CAN_BRIDGE_FAIL_READ", "1")
@@ -695,6 +725,162 @@ def test_a_participant_scoped_failure_aborts_only_that_participant(tmp_path: Pat
         beta.detach()
         alpha.detach()
         alpha.broker_process.wait(timeout=30)
+
+
+def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("alpha", "beta")):
+    """A broker in this process, its participants seated by hand.
+
+    The subprocess tests above own the transport and the lifecycle; this owns the
+    send-decision logic — incident-versus-participant scope, the payload bound —
+    including the raise path no real adapter reaches, because both catch their own
+    backend errors and return a failure object. The mutex is rooted under the
+    test's own tmp_path so nothing touches the machine-wide lock."""
+    from agentic_hil.bench import BenchMutex
+
+    mutex = BenchMutex(frontend="can-broker-test", root=tmp_path / "locks")
+    broker = canbroker.CanBroker(config, bus_id, mutex=mutex)
+    seated = {}
+    for name in names:
+        share = config.can_buses[bus_id].shares[name]
+        attached = canbroker._Attached(name=name, share=share, connection=object(), client_pid=0, attached_at="t")
+        broker.participants[name] = attached
+        seated[name] = attached
+    return broker, seated
+
+
+def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """The adapter's own `send()` returns `ok: false` — the usual direct-adapter
+    failure path, since it catches backend errors rather than raising. The frame
+    may already be on the wire, so the effect is unknown and the whole bus goes,
+    not only the sender."""
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_FAIL_SEND", "1")
+    config = shared_config(tmp_path, monkeypatch)
+    alpha = attach_participant(config, "bench", "alpha")
+    beta = attach_participant(config, "bench", "beta")
+    try:
+        incident = alpha.send(0x101, b"\x01")
+        assert incident["ok"] is False
+        assert incident["error_type"] == "can_bus_incident"
+        assert incident["bus_gated"] is True
+        assert sorted(incident["aborted_participants"]) == ["alpha", "beta"]
+        # The effect is unknown, not disproven: a returned send failure may leave
+        # a frame on the wire, so the incident must not claim nothing committed.
+        assert incident["side_effect_status"] == "unknown"
+        assert "side_effect_committed" not in incident
+
+        # Every participant's run, not only the one that touched the adapter.
+        assert beta.poll_incident()["aborted"] is True
+        assert beta.send(0x202, b"\x02")["error_type"] == "can_bus_incident"
+        # And the gate holds against a further attach.
+        with pytest.raises(ParticipantError) as gated:
+            attach_participant(config, "bench", "gamma", allow_start=False, start_timeout_s=5.0)
+        assert gated.value.result["error_type"] in {"can_bus_gated", "can_participant_not_configured"}
+    finally:
+        beta.detach()
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both real adapters catch their own backend errors, so the raise path is
+    the broker's defensive catch-all — exercised here in process. An adapter whose
+    `send()` raises must gate the bus, abort every participant, and leave the
+    transmit effect unknown rather than claiming nothing committed."""
+    config = shared_config(tmp_path, monkeypatch)
+
+    class _Raising:
+        def send(self, frame: object) -> dict:
+            raise RuntimeError("controller wedged mid-send")
+
+    broker, seated = _inprocess_broker(tmp_path, config)
+    broker.adapter_session = _Raising()
+    bus_log = tmp_path / "bus.jsonl"
+    broker.bus_frame_log = str(bus_log)
+    wire = canbroker.frame_to_wire(0x101, b"\x01")
+    result = broker._handle_send(seated["alpha"], {"frame": wire})
+
+    assert result["error_type"] == "can_bus_incident"
+    assert result["bus_gated"] is True
+    assert sorted(result["aborted_participants"]) == ["alpha", "beta"]
+    assert result["side_effect_status"] == "unknown"
+    assert "side_effect_committed" not in result
+    assert broker.bus_gated is True
+    assert seated["beta"].abort is not None, "the neighbour is aborted too"
+
+    # The attempted transmit stays auditable even though its effect is unknown:
+    # the incident carries the frame and the sequence it was logged under, and the
+    # whole-bus log holds that same tx frame. A `Participant.send()` records this
+    # send under `result["frame_seq"]`, so the frame is attributable from either
+    # end — the invariant a returned send failure already keeps, now kept on the
+    # raise path too rather than leaving the bus log with only the incident.
+    seq = result["frame_seq"]
+    assert result["frame"] == wire
+    lines = [json.loads(line) for line in bus_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    tx = [line for line in lines if line.get("event") == "frame" and line.get("seq") == seq]
+    assert len(tx) == 1, lines
+    assert tx[0]["direction"] == "tx"
+    assert tx[0]["participant"] == "alpha"
+    assert tx[0]["frame"] == wire
+    assert tx[0]["ok"] is False
+
+
+def test_a_send_provably_not_started_aborts_only_that_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A send failure that positively proves the frame never left the controller
+    is one participant's, not the bus's: the neighbour and the gate are untouched,
+    and the failure keeps the `not_started` effect the adapter proved."""
+    config = shared_config(tmp_path, monkeypatch)
+
+    class _NotStarted:
+        def send(self, frame: object) -> dict:
+            return {"ok": False, "error_type": "can_send_failed", "summary": "refused before transmit", "side_effect_status": "not_started"}
+
+    broker, seated = _inprocess_broker(tmp_path, config)
+    broker.adapter_session = _NotStarted()
+    result = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\x01")})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "can_send_failed"
+    assert result["side_effect_status"] == "not_started"
+    assert result["retry_safe"] is True
+    assert broker.bus_gated is False
+    assert seated["beta"].abort is None, "the neighbour is untouched"
+    assert seated["alpha"].abort is None, "a provably-not-started send does not even abort its own participant"
+
+
+@pytest.mark.parametrize("fd, max_bytes, payload_len", [(False, 8, 9), (True, 64, 65)])
+def test_a_brokered_send_is_bounded_by_max_frame_data_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fd: bool, max_bytes: int, payload_len: int) -> None:
+    """`shares:` must not become a way past the payload bound the single-owner
+    `payload_frame()` path enforces. A frame longer than the bus's
+    `max_frame_data_bytes` is refused with `invalid_argument` before the budget is
+    spent or the adapter is called, for the classic-CAN and CAN-FD limits both."""
+    config = shared_config(tmp_path, monkeypatch)
+    bus = dataclasses.replace(config.can_buses["bench"], fd=fd, max_frame_data_bytes=max_bytes)
+    config = dataclasses.replace(config, can_buses={**config.can_buses, "bench": bus})
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.sends = 0
+
+        def send(self, frame: object) -> dict:
+            self.sends += 1
+            return {"ok": True, "backend": "recording"}
+
+    adapter = _Recording()
+    broker, seated = _inprocess_broker(tmp_path, config)
+    broker.adapter_session = adapter
+    result = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\x00" * payload_len)})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_argument"
+    assert result["bytes_requested"] == payload_len
+    assert result["max_frame_data_bytes"] == max_bytes
+    assert adapter.sends == 0, "the over-length frame never reached the adapter"
+    assert seated["alpha"].frames_used == 0, "and the participant budget was not spent"
+
+    # The in-bound frame of the same length as the limit still goes.
+    ok = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\x00" * max_bytes)})
+    assert ok["ok"] is True
+    assert adapter.sends == 1
 
 
 def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -855,3 +1041,288 @@ def test_a_broker_that_nobody_attaches_to_does_not_sit_on_the_bus(tmp_path: Path
         time.sleep(0.05)
     assert child.poll() == canbroker.BROKER_EXIT_OK, broker_diagnostics(config, bus_key)
     assert not descriptor_path(bus_key, lock_root).exists()
+
+
+# ---------------------------------------------------------------------------
+# The IPC address fits the kernel's AF_UNIX bound, whatever TMPDIR is.
+
+
+def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """A per-user temp directory long enough to overflow `sockaddr_un` must not
+    make a shared CAN bus unusable.
+
+    The filesystem socket path `<TMPDIR>/agentic-hil-can-<uid>/<tag>.sock` follows
+    `TMPDIR`, and a sandbox or a long profile can push it past the ~108-byte
+    kernel cap so the socket cannot be bound at all — the failure a caller used to
+    meet as the broker start timeout elapsing. The endpoint must instead be one
+    that fits, and a real broker must bind and serve on it with that same long
+    `TMPDIR` inherited by the child. That escape exists on Windows (named pipes)
+    and Linux (abstract sockets); a POSIX host without abstract sockets has
+    none, and there the honest answer is the named refusal — whose remediation,
+    a short `XDG_RUNTIME_DIR`, must itself work."""
+    import tempfile as tempfile_module
+
+    from agentic_hil.bench import BenchMutex
+
+    config = shared_config(tmp_path, monkeypatch)
+    bus_key = bus_lock_key(config, "bench")
+    lock_root = BenchMutex().root
+
+    long_tmp = tmp_path / ("d" * 90) / ("e" * 60)
+    long_tmp.mkdir(parents=True)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    for variable in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(variable, str(long_tmp))
+    # `gettempdir` caches its answer; clear it so the long TMPDIR is re-read here
+    # and in the child, which inherits the environment.
+    monkeypatch.setattr(tempfile_module, "tempdir", None)
+
+    if os.name != "nt" and not canbroker._abstract_sockets_supported():
+        # No named pipes, no abstract sockets: nothing can make this path fit,
+        # and pretending otherwise would bind nothing. The refusal names the
+        # way out, and the way out must actually work.
+        with pytest.raises(ConfigError) as refused:
+            canbroker.endpoint_address(bus_key, lock_root)
+        assert refused.value.error_type == "config_invalid"
+        assert "XDG_RUNTIME_DIR" in str(refused.value)
+        short_runtime = Path(tempfile_module.mkdtemp(prefix="ahil-", dir="/tmp"))
+        try:
+            monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_runtime))
+            remediated = canbroker.endpoint_address(bus_key, lock_root)
+            assert len(os.fsencode(remediated)) < canbroker._UNIX_PATH_MAX, remediated
+        finally:
+            shutil.rmtree(short_runtime, ignore_errors=True)
+        return
+
+    address = canbroker.endpoint_address(bus_key, lock_root)
+    assert len(os.fsencode(address)) < canbroker._UNIX_PATH_MAX, address
+    # On Linux the fallback is an abstract socket, which lives in no directory a
+    # long TMPDIR could lengthen.
+    if canbroker._abstract_sockets_supported():
+        assert address.startswith("\0"), address
+
+    alpha = attach_participant(config, "bench", "alpha")
+    try:
+        assert alpha.status()["ok"] is True
+        # The child inherited the long TMPDIR and derived the same fitting
+        # endpoint the client validated, byte for byte.
+        assert read_descriptor(bus_key, lock_root).endpoint == address
+    finally:
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_broker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """A client whose own environment yields no bindable address must still
+    attach to a broker that already published a valid one.
+
+    The published endpoint is what makes the address independent of client-side
+    derivation: two clients of the same machine-wide bus can carry different
+    temporary-directory environments, and a non-abstract-socket host (macOS, a
+    BSD) with a long local temp root derives no address that fits `sockaddr_un`.
+    Deriving one before consulting the descriptor would refuse such a client with
+    `config_invalid` even though the running broker's endpoint is short and
+    bindable — so the derived address is validated only on the branch that
+    spawns a broker, never before attaching to one that exists."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.config import ConfigError
+
+    config = shared_config(tmp_path, monkeypatch)
+    bus_key = bus_lock_key(config, "bench")
+    lock_root = BenchMutex().root
+
+    # A real broker publishes a short, bindable endpoint under a normal env.
+    alpha = attach_participant(config, "bench", "alpha")
+    try:
+        published = read_descriptor(bus_key, lock_root).endpoint
+        assert alpha.status()["ok"] is True
+
+        # On a POSIX host, reproduce the concrete derivation failure a
+        # non-abstract-socket machine with a long temp root hits: the filesystem
+        # path overflows the AF_UNIX cap and there is no abstract-socket
+        # fallback, so `endpoint_address` refuses. Windows addresses are named
+        # pipes with no such length limit — `endpoint_address` returns one before
+        # it ever consults these two helpers — so patching them raises nothing
+        # there. This simulation is therefore POSIX-only, and the ordering it was
+        # meant to guard is asserted directly below on every OS.
+        if os.name != "nt":
+            with monkeypatch.context() as poisoned:
+                poisoned.setattr(canbroker, "_socket_root", lambda: tmp_path / ("t" * 100))
+                poisoned.setattr(canbroker, "_abstract_sockets_supported", lambda: False)
+                with pytest.raises(ConfigError) as raised:
+                    canbroker.endpoint_address(bus_key, lock_root)
+                assert raised.value.error_type == "config_invalid"
+
+        # The ordering itself, on every supported OS: attaching to a broker that
+        # already published an endpoint must never derive a local one. Replace the
+        # derivation with a spy that fails loudly, so a regression that consulted
+        # this client's own — possibly unusable — address before the descriptor
+        # would raise here instead of passing on a host where the derivation
+        # happens to succeed (Windows being exactly such a host).
+        def _forbidden_derivation(*args: object, **kwargs: object) -> str:
+            raise AssertionError("endpoint_address must not be derived when a broker is already published")
+
+        monkeypatch.setattr(canbroker, "endpoint_address", _forbidden_derivation)
+
+        # The client attaches on the broker's published endpoint regardless — its
+        # own derivation is never reached because a broker is not spawned.
+        beta = attach_participant(config, "bench", "beta")
+        try:
+            assert beta.status()["ok"] is True
+            assert beta.broker_process is None, "no broker was spawned for a bus that already had one"
+            assert read_descriptor(bus_key, lock_root).endpoint == published
+        finally:
+            beta.detach()
+    finally:
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# A filter term is a frame type as well as a number.
+
+
+def test_a_view_for_standard_frames_neither_sends_nor_receives_its_extended_twin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """A standard 0x123 and an extended 0x123 are two different frames on the
+    wire, so a view configured for one must carry neither the send nor the
+    receive of the other. The RX script puts an extended 0x123 on the medium; the
+    standard-only view must not be handed it, and must be refused sending it."""
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_RX", json.dumps([[{"id": 0x123, "data_hex": "aa", "extended": True}]]))
+    shares = (
+        "      alpha:\n"
+        "        filter:\n"
+        "          - {id: 291, mask: 2047, extended: false}\n"  # 0x123, standard only
+        "        permissions:\n"
+        "          allow_read: true\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, shares=shares)
+    alpha = attach_participant(config, "bench", "alpha")
+    try:
+        # Send: the standard twin is in view; the extended twin is not.
+        assert alpha.send(0x123, b"\x01", extended=False)["ok"] is True
+        refused = alpha.send(0x123, b"\x01", extended=True)
+        assert refused["ok"] is False
+        assert refused["error_type"] == "can_participant_filter_violation"
+        # Receive: the extended 0x123 on the medium is not delivered to a
+        # standard-only view.
+        received = alpha.read(max_frames=1, wait_timeout_s=0.2)
+        assert received["ok"] is True
+        assert received["frames_read"] == 0, "an extended 0x123 is not the standard 0x123 this view carries"
+    finally:
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+def test_an_extended_view_carries_the_extended_frame_its_number_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """The mirror: a view whose term is marked extended does carry the extended
+    frame of that number, so the type match is a match and not a blanket refusal."""
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_RX", json.dumps([[{"id": 0x123, "data_hex": "bb", "extended": True}]]))
+    shares = (
+        "      alpha:\n"
+        "        filter:\n"
+        "          - {id: 291, mask: 2047, extended: true}\n"
+        "        permissions:\n"
+        "          allow_read: true\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, shares=shares)
+    alpha = attach_participant(config, "bench", "alpha")
+    try:
+        assert alpha.send(0x123, b"\x01", extended=True)["ok"] is True
+        assert alpha.send(0x123, b"\x01", extended=False)["error_type"] == "can_participant_filter_violation"
+        received = alpha.read(max_frames=1, wait_timeout_s=0.2)
+        assert received["frames_read"] == 1
+        assert received["frames"][0]["extended"] is True
+    finally:
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# An idle participant's receive queue is bounded.
+
+
+def test_an_idle_participants_receive_queue_is_bounded_while_another_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
+    """One participant reading the medium continuously must not grow an idle
+    participant's queue without bound. Every adapter read fans matching frames to
+    every attached view, so an attached-but-idle participant would otherwise
+    accumulate frames it never consumes until the broker exhausts memory. The
+    idle one is aborted at its bound; the reader and the bus keep running."""
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_RX", json.dumps([[{"id": 0x100, "data_hex": "aa"}] for _ in range(6)]))
+    shares = (
+        "      alpha:\n"
+        "        max_frames: 2\n"
+        "        permissions:\n"
+        "          allow_read: true\n"
+        "          allow_write: false\n"
+        "      beta:\n"
+        "        max_frames: 16\n"
+        "        permissions:\n"
+        "          allow_read: true\n"
+        "          allow_write: false\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, shares=shares)
+    alpha = attach_participant(config, "bench", "alpha")
+    beta = attach_participant(config, "bench", "beta")
+    try:
+        # alpha never reads; beta draws the medium repeatedly, fanning each frame
+        # to alpha's queue too.
+        for _ in range(6):
+            beta.read(max_frames=1, wait_timeout_s=0.2)
+        polled = alpha.poll_incident()
+        assert polled["aborted"] is True, polled
+        assert polled["abort"]["scope"] == "participant"
+        assert polled["abort"]["reason"] == "can_participant_receive_overflow"
+        assert polled["abort"]["detail"]["max_queued_frames"] == 2
+        # The reader and the bus are untouched by the idle participant's overflow.
+        assert beta.status()["bus_gated"] is False
+        assert beta.poll_incident()["aborted"] is False
+        assert alpha.read(max_frames=1)["error_type"] == "can_participant_incident"
+    finally:
+        beta.detach()
+        alpha.detach()
+        alpha.broker_process.wait(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# An attach that arrives after the last-detach stop decision is refused.
+
+
+def test_an_attach_after_the_last_detach_stop_decision_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last detach flips the broker to stopping under the same guard that
+    emptied `participants`, so an attach arriving in that window is refused rather
+    than seated onto a bus the shutdown is about to close beneath it. Driven on a
+    broker object directly, which is the deterministic form of the race."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.canbroker import CanBroker, _Attached
+
+    config = shared_config(tmp_path, monkeypatch)
+    mutex = BenchMutex(frontend="can-broker-test", root=tmp_path / "locks")
+    broker = CanBroker(config, "bench", mutex=mutex)
+    share = config.can_buses["bench"].shares["alpha"]
+    attached = _Attached(name="alpha", share=share, connection=object(), client_pid=1234, attached_at="t")
+    broker.participants["alpha"] = attached
+    broker.attach_total = 1
+
+    broker._detach(attached, "requested")
+
+    assert broker._stopping.is_set(), "the last detach must flip stopping inside the guard that emptied participants"
+    assert broker.participants == {}
+
+    message = {
+        "message": "attach",
+        "protocol_version": PROTOCOL_VERSION,
+        "protocol_digest": PROTOCOL_DIGEST,
+        "expected_counter": broker.counter,
+        "bus_key": broker.bus_key,
+        "participant": "beta",
+        "requires_listen_only": False,
+        "client_pid": 4321,
+    }
+    reply, seated = broker._handle_attach(message, object())
+    assert seated is None
+    assert reply["ok"] is False
+    assert reply["error_type"] == "can_broker_stopping"
+    assert reply["retry_safe"] is True
+    assert broker.participants == {}, "no participant may be seated onto a stopping broker"

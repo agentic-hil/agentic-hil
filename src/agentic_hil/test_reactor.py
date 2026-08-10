@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
+from agentic_hil.can import parse_can_id, parse_hex_bytes
 from agentic_hil.comports import data_result, decode_bytes
 from agentic_hil.config import (
     ConfigError,
@@ -89,6 +90,33 @@ COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
         "No value captured from the COM port output fell inside the expected range before this step's timeout.",
     ),
 }
+# The same table for a bus. Separate sentences rather than one wording with the
+# medium substituted in: what went unmet on a bus is a frame, and a result that
+# said "output" would send an operator to a serial line that was never involved.
+CAN_COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
+    "equals": (
+        "A frame on the CAN bus carried the expected payload.",
+        "No frame on the CAN bus carried the expected payload before this step's timeout.",
+    ),
+    "pattern": (
+        "Expected pattern matched the payload of a frame on the CAN bus.",
+        "Expected pattern matched no frame's payload on the CAN bus before this step's timeout.",
+    ),
+    "range": (
+        "A value captured from a frame's payload fell inside the expected range.",
+        "No value captured from a frame's payload fell inside the expected range before this step's timeout.",
+    ),
+}
+# How many of the frames a `can_read` comparator saw are reported when its claim
+# went unmet. The `received_tail` honesty, in the unit this medium has: a red
+# step that cannot say what the bus did carry is a failure an operator has to
+# reproduce by hand — and a busy bus must not turn one red step into an
+# unbounded result, which is why it is the last few rather than all of them.
+CAN_COMPARATOR_TAIL_FRAMES = 16
+# How long a `can_read` comparator pass that read no frames waits before the
+# next one. Reached only when `can_read` returned early, so this paces a quiet
+# bus rather than spinning on it until the step's deadline.
+CAN_COMPARATOR_IDLE_POLL_S = 0.05
 # The longest a `delay` step may wait, in milliseconds. Ten minutes: a plan that
 # must wait longer than that is waiting for something it should be expecting
 # instead, and an unbounded wait in a plan is how a bench ends up held by a run
@@ -160,6 +188,16 @@ class StepComparator:
         """The plan's own string, which sizes the read window."""
         return self.equals or self.pattern or ""
 
+    def number(self, text: str) -> float:
+        """The number a capture holds, in the base the medium writes it in.
+
+        Decimal here, because a serial line carries text a human wrote a format
+        string for. A medium whose output is bytes rendered as hexadecimal reads
+        its captures in that base instead, and says so by overriding this — the
+        one place the two differ, so a `range` means the same thing either
+        way: bounds in decimal, held against the value that was really there."""
+        return float(text)
+
     def matches(self, decoded: str, final: bool) -> bool:
         """Whether what has been received meets this claim. `final` is true on
         the pass the step's deadline has run out on — the last look at the line,
@@ -177,7 +215,7 @@ class StepComparator:
         # the earliest occurrence would keep answering with the older reading.
         for match in self._finditer(decoded):
             try:
-                value = float(match.group(1))
+                value = self.number(match.group(1))
             except ValueError:
                 continue
             self.captured_text, self.captured_value = match.group(1), value
@@ -189,6 +227,50 @@ class StepComparator:
         if self.bounds is None:
             return {"comparator": self.raw}
         return {"comparator": self.raw, "captured_text": self.captured_text, "captured_value": self.captured_value}
+
+
+def pattern_refusal(index: int, step: TestStep, field_name: str, pattern: object, summary: str, needs_capture: bool) -> JsonObject | None:
+    """Refuse a regular expression this plan cannot mean, before the run.
+
+    A pattern that does not compile, or a `range` whose pattern captures nothing
+    to put in it, is a fault in the plan and is answered here: preflight builds
+    nothing, so a plan refused for either has opened no session and touched no
+    board. `re.error` carries the position it gave up at, which is the whole
+    reason this is not left to raise out of the run as a traceback."""
+    if pattern is None:
+        return None
+    try:
+        compiled = re.compile(str(pattern))
+    except re.error as error:
+        return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
+    if needs_capture and compiled.groups != 1:
+        return preflight_error(
+            index,
+            step,
+            field_name,
+            "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
+            {"error_type": "invalid_argument", "value": str(pattern)[:128], "capture_groups": compiled.groups},
+        )
+    return None
+
+
+def comparator_pattern_refusal(index: int, step: TestStep) -> JsonObject | None:
+    """A `comparator:`'s own pattern, refused before the run.
+
+    Written once for every medium a comparator judges: what a pattern must
+    satisfy is a property of the claim, not of the line or the bus it is read
+    against, so a serial step and a frame step are refused in the same shape and
+    under the same field name — which is what makes the two readable side by side
+    in a report."""
+    comparator = step.arguments.get("comparator") or {}
+    return pattern_refusal(
+        index,
+        step,
+        "comparator.pattern",
+        comparator.get("pattern"),
+        "Test step's comparator pattern is not a valid Python regular expression.",
+        needs_capture=comparator.get("range") is not None,
+    )
 
 
 @dataclass(frozen=True)
@@ -705,6 +787,11 @@ class StepDevice:
         self.device = device
         self.service = service
         self.cleanup_interrupts: list[BaseException] = []
+        # True once this device has actually run an action that drives it. A
+        # device object is built on first use, and `delay` routes to one without
+        # touching it, so being in the run's `devices` map is not proof the run
+        # drove this unit — failure recovery asks this instead.
+        self.drove_device = False
         # This device's actions, bound: the string a plan writes, the schema that
         # validates it and the method that runs it, in one place, built once.
         self.actions: dict[str, BoundStepAction] = {
@@ -823,6 +910,11 @@ class StepDevice:
         invalid = self.schema_refusal(bound.spec, step)
         if invalid is not None:
             return invalid
+        if bound.spec.touches_device:
+            # Recorded before the call, not after: an action that drove the probe
+            # and then failed — the reset this run is recovering from — still
+            # drove it, and is exactly the device recovery must not skip.
+            self.drove_device = True
         return bound.call(step)
 
     def schema_refusal(self, spec: StepActionSpec, step: TestStep) -> JsonObject | None:
@@ -1069,36 +1161,14 @@ class UartRunner(SessionDevice):
     def _pattern_refusal(cls, index: int, step: TestStep) -> JsonObject | None:
         """Refuse a regular expression this plan cannot mean, before the run.
 
-        A pattern that does not compile, or a `range` whose pattern captures
-        nothing to put in it, is a fault in the plan and is answered here:
-        preflight builds nothing, so a plan refused for either has opened no
-        session and touched no board. `re.error` carries the position it gave up
-        at, which is the whole reason this is not left to raise out of the run as
-        a traceback."""
+        The comparator's half of this is device-neutral and lives in
+        `comparator_pattern_refusal`; what is left here is the v2 `uart_expect`
+        spelling, whose `pattern:` is a bare key on the step and never carries a
+        range."""
         if step.action == "uart_expect":
-            field_name, pattern, needs_capture = "pattern", step.arguments.get("pattern"), False
-            summary = "Test step's uart_expect pattern is not a valid Python regular expression."
-        elif step.action == "uart_read":
-            comparator = step.arguments.get("comparator") or {}
-            field_name, pattern = "comparator.pattern", comparator.get("pattern")
-            needs_capture = comparator.get("range") is not None
-            summary = "Test step's comparator pattern is not a valid Python regular expression."
-        else:
-            return None
-        if pattern is None:
-            return None
-        try:
-            compiled = re.compile(str(pattern))
-        except re.error as error:
-            return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
-        if needs_capture and compiled.groups != 1:
-            return preflight_error(
-                index,
-                step,
-                field_name,
-                "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
-                {"error_type": "invalid_argument", "value": str(pattern)[:128], "capture_groups": compiled.groups},
-            )
+            return pattern_refusal(index, step, "pattern", step.arguments.get("pattern"), "Test step's uart_expect pattern is not a valid Python regular expression.", needs_capture=False)
+        if step.action == "uart_read":
+            return comparator_pattern_refusal(index, step)
         return None
 
     # --- reading the line ------------------------------------------------
@@ -1219,6 +1289,98 @@ class UartRunner(SessionDevice):
                 time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
+class CanFrameComparator(StepComparator):
+    """Which frame a `can_read` step requires.
+
+    The claim vocabulary is the base class's — `equals`, `pattern`, `pattern`
+    with `range` — asked of the medium a bus actually has. Two things follow from
+    a frame being a complete unit that arrives with an identifier on it, and they
+    are the whole of the difference:
+
+    The claim applies only to frames the identifier filter selects. A bus carries
+    every node's traffic, so a payload matched without saying whose frame it was
+    is a green another ECU can produce; a frame the filter rejects is not judged
+    at all, and nothing is captured from it.
+
+    A payload is compared whole, not against a rolling window. There is no
+    half-arrived frame to wait out and no seam to match across, so `equals` is an
+    exact comparison against the payload as hexadecimal rather than the
+    line-and-terminator reading a serial value needs."""
+
+    def __init__(self, raw: JsonObject):
+        super().__init__(raw)
+        # `equals` is bytes on this medium, so the plan's spelling is normalized
+        # once, here: `01 FF`, `01ff` and `01FF` are one claim, and the frames
+        # this is compared against already carry `data_hex` in that same form. A
+        # value the schema would have refused is left as written, so it simply
+        # equals no payload rather than quietly becoming a different claim.
+        if self.equals is not None:
+            parsed_equals = parse_hex_bytes(self.equals)
+            self.equals = self.equals if parsed_equals is None else parsed_equals.hex()
+        # The schema requires `id` and holds both it and `id_mask` to an integer
+        # or a hexadecimal string, so these parse. A comparator built by hand
+        # without an id selects nothing rather than everything — the safe
+        # direction, because the unsafe one is a step that passes on a frame
+        # nobody asked about.
+        self.frame_id: int | None = parse_can_id(raw.get("id"))
+        self.id_mask: int | None = None if raw.get("id_mask") is None else parse_can_id(raw["id_mask"])
+        # A standard 0x123 and an extended 0x123 are two different frames on the
+        # wire, so the frame type is part of the claim, not a decoration. The
+        # schema defaults it to `false`, so a comparator that does not say waits
+        # for a standard frame; the received frames each carry `extended`.
+        self.extended: bool = bool(raw.get("extended", False))
+
+    def number(self, text: str) -> float:
+        """A capture taken out of payload hexadecimal is a hexadecimal numeral."""
+        return float(int(text, 16))
+
+    def selects(self, frame: JsonObject) -> bool:
+        """Whether this is a frame the plan is asking about at all."""
+        if self.frame_id is None:
+            return False
+        if bool(frame.get("extended", False)) != self.extended:
+            # An identifier match across the two namespaces is not a match: a
+            # standard frame and its extended twin are distinct frames, the same
+            # distinction the broker's participant filters draw. A comparator can
+            # therefore never pass on traffic from the wrong frame type.
+            return False
+        if self.id_mask is None:
+            return int(frame["id"]) == self.frame_id
+        return int(frame["id"]) & self.id_mask == self.frame_id & self.id_mask
+
+    def matches_frame(self, frame: JsonObject) -> bool:
+        """Whether one received frame meets this claim."""
+        if not self.selects(frame):
+            return False
+        payload = str(frame.get("data_hex") or "")
+        if self.equals is not None:
+            return payload == self.equals
+        # `final` decides nothing on this medium — it exists so a serial value
+        # that never carried a terminator can still be judged when time runs out,
+        # and a frame is never in that state.
+        return self.matches(payload, False)
+
+
+@dataclass(frozen=True)
+class CanReadOutcome:
+    """What one bounded read of a CAN bus came back with."""
+
+    frame: JsonObject | None
+    reads: int
+    frames_read: int
+    # The last few frames seen, whether or not the identifier filter selected
+    # them: a plan waiting for the wrong id is the failure this makes readable.
+    tail: list[JsonObject]
+    # The read's own refusal, when `can_read` itself failed. A closed session, a
+    # denied permission or a broken audit latch is not a claim that went unmet,
+    # and answering it as a timeout would send an operator to look at firmware.
+    read_failure: JsonObject | None = None
+
+    @property
+    def tail_result(self) -> JsonObject:
+        return {"frames_tail": self.tail, "frames_tail_truncated": self.frames_read > len(self.tail)}
+
+
 class CanRunner(SessionDevice):
     """A configured CAN bus, as a plan opens it, drives it and closes it.
 
@@ -1259,9 +1421,55 @@ class CanRunner(SessionDevice):
     def _can_send(self, step: TestStep) -> JsonObject:
         return self.call_tool(step)
 
-    @step_action("can_read", schema="canRead", tool="can_read")
+    @step_action("can_read", schema="canRead", tool="can_read", forwards_arguments=False)
     def _can_read(self, step: TestStep) -> JsonObject:
-        return self.call_tool(step)
+        """Read the bus, and judge what came back if the plan said which frame it
+        wants.
+
+        With a `comparator:` this is read-until-match against the frames the same
+        `can_read` tool yields, failing with the tail of what the bus did carry.
+        Without one it is the v2 step unchanged: one `can_read`, the plan's own
+        `max_frames` and `wait_timeout_s`, answered exactly as the tool answers
+        it."""
+        raw = step.arguments.get("comparator")
+        if not raw:
+            return self.call_tool(step)
+        return self._compare(CanFrameComparator(raw), step.arguments.get("max_frames"), float(step.arguments["timeout_s"]))
+
+    @classmethod
+    def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
+        """A `can_read` reads its own arguments when it carries a comparator — a
+        deadline and a claim are not `can_read` arguments — so the call preflight
+        checks is the one this step will really make, built the same way."""
+        name = cls.step_config_id(config, step)
+        if step.action != "can_read" or not step.arguments.get("comparator") or name is None:
+            return super().tool_calls(config, step)
+        arguments: JsonObject = {"bus_id": name, "wait_timeout_s": step.arguments["timeout_s"]}
+        if step.arguments.get("max_frames") is not None:
+            arguments["max_frames"] = step.arguments["max_frames"]
+        return [("can_read", arguments)]
+
+    @classmethod
+    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+        if step.action == "can_read":
+            refusal = comparator_pattern_refusal(index, step)
+            if refusal is not None:
+                return refusal
+            if step.arguments.get("comparator") and step.arguments.get("wait_timeout_s") is not None:
+                # Two deadlines with different owners. `timeout_s` is the step's,
+                # and each read under a comparator waits out whatever is left of
+                # it; `wait_timeout_s` is one read's, which is not the plan's
+                # business once the step is waiting for a claim. Honouring one
+                # and ignoring the other is how a plan comes to say a number
+                # nothing reads.
+                return preflight_error(
+                    index,
+                    step,
+                    "wait_timeout_s",
+                    "A `can_read` with a `comparator:` waits out its own `timeout_s`, reading again until the claim is met, so `wait_timeout_s` — how long one read waits — has nothing left to mean. Name one of the two.",
+                    {"error_type": "invalid_argument"},
+                )
+        return super().preflight(reactor, index, step, state)
 
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
@@ -1294,6 +1502,66 @@ class CanRunner(SessionDevice):
                 {"listen_only": True, "config_field": f"can_buses.{cls.step_config_id(reactor.config, step)}.listen_only"},
             )
         return None
+
+    # --- reading the bus -------------------------------------------------
+
+    def _compare(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> JsonObject:
+        """Read until a frame meets the comparator, or fail saying which frames
+        the bus did carry — and, for a range, which value was captured against
+        which bounds."""
+        met, unmet = CAN_COMPARATOR_SUMMARIES[comparator.claim]
+        outcome = self._read_until(comparator, max_frames, timeout_s)
+        if outcome.read_failure is not None:
+            return outcome.read_failure
+        common = {"bus_id": self.id, **comparator.report(), "timeout_s": timeout_s, "frames_read": outcome.frames_read, "reads": outcome.reads}
+        if outcome.frame is not None:
+            return {"ok": True, "tool": "test_reactor", "summary": met, **common, "frame": outcome.frame}
+        return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
+
+    def _read_until(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> CanReadOutcome:
+        """Read this bus until a frame meets the claim or the deadline passes.
+
+        The plan's own read path and nothing else: each pass is one `can_read` —
+        the tool an agent would call by hand — waiting out whatever is left of the
+        step's deadline, and every frame it yields is judged as it arrives. A
+        frame is atomic, so nothing is carried across passes the way a serial
+        line's bytes are; what the passes are for is that the frame this plan
+        wants may simply not be among the ones already queued.
+
+        Frames the identifier filter rejects are ignored for the claim and still
+        recorded, because a plan waiting on the wrong identifier is the failure a
+        red step must be able to show rather than merely assert."""
+        deadline = time.monotonic() + timeout_s
+        seen: list[JsonObject] = []
+        frames_read = 0
+        reads = 0
+        while True:
+            arguments: JsonObject = {"bus_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())}
+            if max_frames is not None:
+                arguments["max_frames"] = int(max_frames)  # type: ignore[arg-type]
+            result = self.service.call("can_read", arguments)
+            reads += 1
+            if result_failed(result):
+                return CanReadOutcome(None, reads, frames_read, seen, result)
+            frames = result.get("frames") or []
+            frames_read += len(frames)
+            for frame in frames:
+                # Keep `extended` beside id/payload: the comparator treats a
+                # standard 0x123 and its extended twin as distinct frames, so a
+                # tail entry that dropped the frame type would show a rejected
+                # extended frame as identical to the requested standard one and
+                # omit the only field that explains the mismatch.
+                seen.append({"id_hex": frame.get("id_hex"), "data_hex": frame.get("data_hex"), "extended": bool(frame.get("extended", False))})
+                del seen[:-CAN_COMPARATOR_TAIL_FRAMES]
+                if comparator.matches_frame(frame):
+                    return CanReadOutcome(frame, reads, frames_read, seen)
+            if time.monotonic() >= deadline:
+                return CanReadOutcome(None, reads, frames_read, seen)
+            if not frames:
+                # A read that returned nothing while time was left had its own
+                # wait cut short, so pace the next pass rather than spinning on a
+                # bus that is quiet.
+                time.sleep(min(CAN_COMPARATOR_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
 class DebuggerRunner(StepDevice):
@@ -1809,8 +2077,62 @@ class TestReactor:
             # Reached for a failed cleanup as well as for a failed step —
             # cleanup is where the unconfirmed-effect incidents come from, and
             # those are precisely the ones that used to sit until a person came.
-            result["recovery"] = self.service.recover_after_failed_run(sorted(self.devices))
+            result["recovery"] = self._recover_after_failed_run()
         return result
+
+    def _recover_after_failed_run(self) -> JsonObject:
+        """Recover every probe the run drove, each through its own bound service.
+
+        Debugger steps run on per-probe services (see `DebuggerRunner.service_for`),
+        and both reset-into-halt and the probe re-read act on one probe's backend.
+        The base service is either unbound — the multi-probe CLI leaves
+        `config.debugger` None — or bound to a probe this run may never have
+        driven, so recovering through it resets the wrong board, or withholds
+        reset as `allow_reset_missing`, while the probes the plan actually drove
+        are left as the failed run put them. So each touched probe is recovered
+        through the service that drove it, no probe the run never named is
+        touched, and the per-probe outcomes are aggregated.
+
+        A run that drove no probe keeps the old base-service behaviour: a
+        single-probe bench recovers its one board, and an unbound base service
+        reports honestly that nothing here establishes a target's state.
+
+        Only a probe the run actually drove is recovered — `device.drove_device`,
+        not mere presence in `devices`. A probe used solely as a `delay` route is
+        constructed like any other but touched nothing, so resetting and halting
+        it here would drive a board no hardware action in the plan ever reached."""
+        touched = [(config_id, device) for (kind, config_id), device in sorted(self.devices.items()) if kind == DebuggerRunner.kind and device.drove_device]
+        if not touched:
+            return self.service.recover_after_failed_run(sorted({config_id for _, config_id in self.devices}))
+        if len(touched) == 1:
+            config_id, device = touched[0]
+            return device.service.recover_after_failed_run([config_id])
+        blocks = {config_id: device.service.recover_after_failed_run([config_id]) for config_id, device in touched}
+        return self._aggregate_recovery(blocks)
+
+    @staticmethod
+    def _aggregate_recovery(blocks: dict[str, JsonObject]) -> JsonObject:
+        """One `recovery` block for a run that drove several probes.
+
+        Each probe's own block is kept whole under `recoveries`, and the
+        top-level fields answer the run's question — did recovery run, and did
+        every probe it drove come back — without a caller having to walk the map.
+        The bench is recovered only when every touched probe is; any probe left
+        failed, errored or withheld pulls the aggregate down to the worst of
+        them."""
+        outcomes = [str(block.get("outcome", "skipped")) for block in blocks.values()]
+        if all(name == "recovered" for name in outcomes):
+            outcome = "recovered"
+        else:
+            outcome = next((name for name in ("error", "failed", "skipped") if name in outcomes), "failed")
+        return {
+            "attempted": any(bool(block.get("attempted")) for block in blocks.values()),
+            "outcome": outcome,
+            "devices": sorted(blocks),
+            "recovered_debuggers": sorted(config_id for config_id, block in blocks.items() if block.get("outcome") == "recovered"),
+            "recoveries": blocks,
+            "summary": f"Recovery ran on {len(blocks)} probes the failed run drove; aggregate outcome {outcome}.",
+        }
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
         """Refuse a plan before its first step runs, or None.
