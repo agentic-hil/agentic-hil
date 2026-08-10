@@ -1,6 +1,6 @@
 ---
 name: agentic-hil
-description: Use when a request operates this project's connected target board through the configured bench — flashing, resetting, probing, debugging, UART and CAN stimulus and feedback, firmware artifacts, test reports — or configures Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly. Not for designing hardware — PCB layout, schematic capture, EDA, mechanical design — and not for firmware authoring that never touches a board.
+description: Use when a request operates this project's connected target board through the configured bench (flashing, resetting, probing, debugging, UART and CAN stimulus and feedback, firmware artifacts, test reports) or configures Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly. Not for designing hardware (PCB layout, schematic capture, EDA, mechanical design), and not for firmware authoring that never touches a board.
 metadata:
   origin: Agentic HIL
   agentic_hil_version: "0.11.0"
@@ -13,8 +13,8 @@ target board goes through its MCP tools, which enforce the authoritative
 configuration's workspace binding, permissions, and limits. A direct debugger,
 serial, or CAN invocation bypasses that gate.
 
-The gate is the whole of the scope. Designing hardware — PCB layout, schematic
-capture, EDA, mechanical design — and authoring firmware that never reaches a
+The gate is the whole of the scope. Designing hardware (PCB layout, schematic
+capture, EDA, mechanical design) and authoring firmware that never reaches a
 board have no tool here: nothing below applies to them, so do that work
 directly.
 
@@ -52,8 +52,8 @@ you are stepping outside the gate.
 
 Reading the configuration file tells you what is *configured*; it never tells
 you what the hardware is doing, so it does not answer the question. Call the
-tool that matches the question — `probe_target`, `debugger_probes_list`,
-`com_ports_list`, `get_last_report` — and report what it returns.
+tool that matches the question (`probe_target`, `debugger_probes_list`,
+`com_ports_list`, `get_last_report`) and report what it returns.
 
 A refusal is an answer, and it is not the end of the job. When the authoritative
 configuration denies an action the tool returns `permission_denied`. Reading a
@@ -67,32 +67,32 @@ what the attempt recorded and why it failed, and `debugger_info` or
 
 A failed call and quarantined hardware are two different refusals, and the
 result says which one you have. A failure that proves it never reached the
-board — a toolchain that is not installed, an unplugged probe or adapter, a
-port that would not open, a read whose backend reports that no target answered
-— carries `target_contacted: false`, `retry_safe: true` and no
+board (a toolchain that is not installed, an unplugged probe or adapter, a port
+that would not open, a read whose backend reports that no target answered)
+carries `target_contacted: false`, `retry_safe: true` and no
 `quarantined: true`: the bench stays in service, so report the named cause, fix
 it or ask for it to be fixed, and retry. Being a read is not the proof; the
 backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
-anything else when the backend named no abort point — a call killed at its
-deadline, an exit without complete confirmation — because an SWD attach halts the core
-and nothing there says whether it got that far. `quarantined: true` means the
-physical state is genuinely unknown. An incident is not a padlock on the bench:
-a failed run aborts with its verdict, the abort drives a recovery action, and
-the calls that *are* the remedy — `probe_target`, `reset_target`,
-`flash_firmware` — keep working while the incident stands. What waits for it is
+anything else when the backend named no abort point (a call killed at its
+deadline, an exit without complete confirmation), because an SWD attach halts
+the core and nothing there says whether it got that far. `quarantined: true`
+means the physical state is genuinely unknown. An incident is not a padlock on
+the bench: a failed run aborts with its verdict, the abort drives a recovery
+action, and the calls that *are* the remedy (`probe_target`, `reset_target`,
+`flash_firmware`) keep working while the incident stands. What waits for it is
 the stimulus class: `com_write`, `can_send`, session starts, new runs. So put
 the target back into a known state and carry on. A recovery action that answers
 the reason the incident names clears it, with a ledger line. A refusal carrying
 `auto_recovery_attempted: true` means the automatic attempt already ran and did
-not confirm the safe state, so drive the reset yourself or ask. Relay the result's `quarantine_guidance`
-entries to the operator — per reason: what was attempted, what is
-confirmed, what remains unknown, and the `physical_check` to perform on the
-board — and then clear what is left with `hardware_recover`, below, carrying
-their statement rather than sending them to a shell. Never clear the server's own
-state files yourself.
+not confirm the safe state, so drive the reset yourself or ask. Relay the
+result's `quarantine_guidance` entries to the operator (per reason: what was
+attempted, what is confirmed, what remains unknown, and the `physical_check` to
+perform on the board), and then clear what is left with `hardware_recover`,
+below, carrying their statement rather than sending them to a shell. Never
+clear the server's own state files yourself.
 
 `hardware_recover` is how you clear what is left. With no arguments it clears
-an incident whose every reason names a call that never reached the hardware — a
+an incident whose every reason names a call that never reached the hardware: a
 release that could not persist its own record, an owner process that died before
 it touched the board. Everything else is refused with
 `recovery_requires_physical_check`, and that refusal tells you what to do:
@@ -104,21 +104,21 @@ ledger verbatim, recorded as their statement relayed by you.
 Never write an `operator_statement` you were not given, and never strengthen one
 on the way through. The ledger names you as the actor who cleared the bench, so
 a line that reflects no actual operator utterance is a false record with your
-name on it — and nobody reading it later can tell it from one somebody said.
+name on it, and nobody reading it later can tell it from one somebody said.
 "It should be fine" is not "the board is powered down". If there is nobody to
 ask, relay the `operator_command` instead and stop there; that is the operator's
-own route and it stays open. The boundary has not moved — a claim about a
-physical board still comes from a person — what moved is that you may carry
+own route and it stays open. The boundary has not moved (a claim about a
+physical board still comes from a person); what moved is that you may carry
 their sentence instead of sending them hunting for a shell.
 
-Call it before you retry a hardware call rather than after — taking a lease over
+Call it before you retry a hardware call rather than after: taking a lease over
 a dead owner's record adds `owner_process_exited_without_release` to the
 incident. If `permissions.allow_recover` is false, this bench has decided its
 incidents are the operator's, and the answer is the `operator_command` and
 nothing else.
 
 `com_port_identity_mismatch` is a refusal about *which board*, not about
-permissions. A serial device name — `/dev/ttyACM0`, `COM7` — is an enumeration
+permissions. A serial device name (`/dev/ttyACM0`, `COM7`) is an enumeration
 order, so attaching a second adapter can leave a configured entry pointing at a
 different board; the check at open time compares the entry's `serial_number` (or
 the probe serial it shares a `resource_id` with) against what is actually behind
@@ -132,21 +132,21 @@ When the entry also names `vid`/`pid`, the same refusal carries
 a USB serial number is unique only within a vendor, so a matching serial under a
 foreign device type is refused as well, and an adapter that publishes no serial
 at all is compared on the type alone. Never resolve any of it by writing the
-found values into `serial_number`, `vid` or `pid`, or by removing those keys —
+found values into `serial_number`, `vid` or `pid`, or by removing those keys:
 that makes the one check that noticed agree with whatever is plugged in, which is
 the silent wrong-board flash it exists to prevent.
 
 `can_listen_only_unsupported` and `can_listen_only_unconfirmed` are a third kind
 again, and the one most likely to look like an obstacle worth removing. The bus
 is configured `listen_only: true`, which is the claim that observing it sends
-nothing — a CAN controller outside listen-only sends dominant ACK bits, and on a
+nothing: a CAN controller outside listen-only sends dominant ACK bits, and on a
 bus with one other participant that ACK decides whether the sender considers its
 frame delivered. The adapter could not be held to that claim, so the session was
 refused instead of downgraded. `link_state` or `driver_state` on the result says
 what was found. Relay it and let the operator decide: put the interface into
 listen-only outside Agentic HIL, or set `listen_only: false` because this bus may
 be ACKed. Never clear it by removing the flag yourself, and never read the bus
-with `candump`, `ip link` or a python-can script instead — the controller mode is
+with `candump`, `ip link` or a python-can script instead: the controller mode is
 the same for those, and the only thing that changes is that no report says the
 bus was ACKed.
 
@@ -159,8 +159,8 @@ command, with the configuration file, or with the CLI.
 Use the `agentic-hil` MCP server, not the command line. That is the interface
 `setup` registers, the one an operator can reason about, and the one whose calls
 are coordinated and reported as hardware actions. Agent CLIs load MCP servers
-when they start, so when the server is missing — typically in the session that
-just installed it — say so and ask the user to restart the agent rather than
+when they start, so when the server is missing (typically in the session that
+just installed it), say so and ask the user to restart the agent rather than
 answering the hardware question another way.
 
 The CLI installs, configures, and diagnoses: `agentic-hil agent-install`,
@@ -172,8 +172,8 @@ writes the file rather than keeping one.
 
 Installation and project binding are separate commands with separate scopes.
 `agent-install` installs this skill and the user-level MCP registration once per
-user and agent — per user, per machine, so no other OS user on the host sees
-either — and needs no project. `init` writes and verifies one project's
+user and agent (per user, per machine, so no other OS user on the host sees
+either) and needs no project. `init` writes and verifies one project's
 authoritative configuration. `setup` runs both. A later project for the same
 user needs `init` alone, and a failing project step never removes the user-wide
 installation.
@@ -188,22 +188,22 @@ prints its path; ask the operator to review any permission change.
 
 When a project has none, every tool answers `config_file_not_found` and
 `project_config_create` is the way out. It takes no arguments and generates the
-file from the hardware attached to this machine, with every permission `true` —
-flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*`
-grants — except `allow_raw_debugger_commands` and `allow_mass_erase`, which it
+file from the hardware attached to this machine, with every permission `true`
+(flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*`
+grants) except `allow_raw_debugger_commands` and `allow_mass_erase`, which it
 writes `false`. Neither of those is a capability you are missing: there is no
 tool here for either, and while either is true `flash_firmware` on that probe is
 refused. The bench is workable from that file as it stands, flashing included:
 nobody has to open an editor between an empty project and the first hardware
 action. Report where the file is, that an agent generated it, and what it
 granted, then ask the operator which permissions this bench should not have.
-Never ask for those two to be turned on — that is the one change that stops
+Never ask for those two to be turned on: that is the one change that stops
 flashing working.
 Never edit the file with your own tools, and never delete or move one to get a
 different one. Regenerating carries over the permissions of the configuration
-this server loaded at startup for the entries already in it — not the file as it
+this server loaded at startup for the entries already in it (not the file as it
 stands now, so a permission you narrowed with `project_config_set` in this
-session comes back granted — while a configuration deleted first comes back as
+session comes back granted), while a configuration deleted first comes back as
 the skeleton at its generated defaults with every narrowing the operator asked
 for gone, and anything a regeneration discovers for the first time arrives at
 those defaults. Regenerating is the
@@ -215,9 +215,9 @@ takes no arguments and answers, for this configuration in this state, which keys
 you may change, which you may not, and which permission would open a locked one;
 reading needs no grant. `project_config_set` then sets named keys with scalar
 values checked against the shipped schema:
-`permissions.allow_config_description_write` opens what the bench *is* —
-`target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device` /
-`serial_number`, CAN bus settings — and `permissions.allow_config_permissions_write` opens every
+`permissions.allow_config_description_write` opens what the bench *is*
+(`target.*`, `debuggers.<name>.probe_id`, `com_ports.<name>.device` /
+`serial_number`, CAN bus settings), and `permissions.allow_config_permissions_write` opens every
 permission key: each `permissions:` block, plus the two grants that sit directly
 on a section, `artifacts.allow_upload` and `debug.allow_all_symbols`. The split
 is deliberate. The first is the one an operator
@@ -238,7 +238,7 @@ permission you never touched and not `true` for one you set to `false` a moment
 ago. Such a call is refused as `permission_widening_denied`, whichever key it
 named: the value you sent is checked, and the file's own permissions are
 compared before and after the write as well. A person reopens a configuration
-and no tool does — say that and stop.
+and no tool does; say that and stop.
 
 **Say which command, and name the key.** `agentic-hil grant <key>` in the project
 root opens one named permission and changes nothing else in the file:
@@ -246,15 +246,15 @@ root opens one named permission and changes nothing else in the file:
 several are needed, and `agentic-hil revoke <key>` to close one again. It takes
 effect once the operator restarts this server, because permissions are read at
 startup and `project_config_reload_description` re-reads none of them.
-`agentic-hil init --force` is the other command and is much larger — it
-regenerates the whole file from attached hardware — so ask for that one only when
+`agentic-hil init --force` is the other command and is much larger (it
+regenerates the whole file from attached hardware), so ask for that one only when
 the bench itself has to be rebuilt. Neither is in any tool list; there is nothing
 to call.
 
 Setting `permissions.allow_config_permissions_write: false` is the last
 permission change **that call** can make: after it, `project_config_set` cannot
 move any permission in that file again. The result of that call says so itself,
-under `permissions_frozen` — what stands frozen, that you cannot undo it, and the
+under `permissions_frozen`: what stands frozen, that you cannot undo it, and the
 commands a person reopens it with. Make it when that is what was asked for, never
 in passing.
 
@@ -266,7 +266,7 @@ commands; all three may write open permissions. Ask for one, do not engineer one
 A configuration written before the board was plugged in holds placeholders:
 `probe_id: null`, `executable: null`, `controller: "unknown-controller"`. Do not
 print those for a person to retype. `project_config_adopt_hardware` reads the
-attached probe and fills in the identity keys that are still unset — the probe
+attached probe and fills in the identity keys that are still unset: the probe
 serial, the backend's executable, the detected controller, and the probe's own
 COM device. It supplies no value of its own; its arguments only select, and it
 returns the plan unless you send `{"apply": true}`. A key that already holds
@@ -278,8 +278,8 @@ no plan at all. Reading the probe is a hardware call: it takes the same
 machine-wide lock every board read takes, so a board somebody else holds answers
 `device_busy` and nothing is read. Refused for
 want of `permissions.allow_config_description_write`, it still returns the exact
-keys and values, so the operator gets one command to run — `agentic-hil
-adopt-hardware` — and not a serial to transcribe.
+keys and values, so the operator gets one command to run (`agentic-hil
+adopt-hardware`) and not a serial to transcribe.
 
 `config_stale: true` on any result says the authoritative file is no longer the
 one this server is enforcing, so the backend that result names, the devices it
@@ -291,36 +291,37 @@ onto a newer document (`description_reloaded_at`, and `loaded_digest` is that
 document's) while the permissions stayed the startup ones (`loaded_at`). The
 `config_status` block names the file and says which of three states it is in:
 
-- `changed` — loaded_digest and current_digest differ. That is the whole of the
-  claim: the file on disk is not the one this server loaded. It says nothing
+- `changed` means loaded_digest and current_digest differ. That is the whole of
+  the claim: the file on disk is not the one this server loaded. It says nothing
   about what the file now contains and does not promise a restart will succeed.
   If what moved is the bench's description, call
-  `project_config_reload_description` — see below. Otherwise ask for the
+  `project_config_reload_description`; see below. Otherwise ask for the
   restart. If the server does not come back, the startup refusal
-  names what is wrong with the file — report that and have it repaired.
+  names what is wrong with the file; report that and have it repaired.
   `agentic-hil doctor` produces the same refusal without stopping anything.
-- `missing` — the file is gone and current_digest is `null`, so there is
+- `missing` means the file is gone and current_digest is `null`, so there is
   nothing to restart onto. It has to be put back first. `project_config_describe`
   still answers in this state, out of the loaded policy: permissions_in_force
   is what is still being enforced and `document_source: loaded_policy` says it
   came from memory rather than from a file.
-- `unreadable` — it is there and will not open: a permission on the file or a
-  directory above it, a path component that is no longer a directory, bytes that
-  are no longer UTF-8. current_digest is `null` and backend_error names what the
-  read failed on. It has to be made readable before it can be compared at all.
+- `unreadable` means it is there and will not open: a permission on the file or
+  a directory above it, a path component that is no longer a directory, bytes
+  that are no longer UTF-8. current_digest is `null` and backend_error names
+  what the read failed on. It has to be made readable before it can be compared
+  at all.
 
 `unknown` is not one of these and never sets `config_stale`: no comparison was
 made, so nothing is claimed either way and reload_required is `false`.
 `debugger_info` and
 `project_config_describe` carry the block either way, so a disagreement between
-`agentic-hil doctor` — which reads the file fresh every time — and
+`agentic-hil doctor` (which reads the file fresh every time) and
 `debugger_info` is this and nothing else. A revocation that binds before a
 restart is exactly three grants and two calls: `project_config_describe` and
 `project_config_set` take the narrower of what this server loaded and what the
 file now says for `allow_config_write`, `allow_config_description_write` and
 `allow_config_permissions_write`, so revoking one of those closes that surface
 on the next call and adding one does nothing until a restart. Every other
-permission is the startup object and moves for nobody — `allow_flash`,
+permission is the startup object and moves for nobody: `allow_flash`,
 `allow_reset`, `allow_write`, `allow_mass_erase`,
 `allow_raw_debugger_commands` and every per-device grant, plus
 `debug.allow_all_symbols` and `artifacts.allow_upload`, keep enforcing what was
@@ -330,21 +331,21 @@ close it: ask for the restart before you rely on it.
 
 **A board plugged in after this server started does not need a restart.**
 `project_config_reload_description` takes no arguments, needs no permission
-because it writes nothing, and re-reads exactly four sections — `target`,
-`debuggers`, `com_ports`, `can_buses` — minus every `permissions:` block inside
+because it writes nothing, and re-reads exactly four sections (`target`,
+`debuggers`, `com_ports`, `can_buses`) minus every `permissions:` block inside
 them. It re-reads **no permission at all**, in either direction, and there is no
 argument that changes that: a device this server has never seen arrives holding
 nothing, so you can probe and read it (from `version: 2` on, reading needs no
 grant) and cannot flash, reset, mass-erase or write to it until an operator
 restarts the server. A renamed entry is the same case. Everything outside those
-four sections — every permission, `version`, `workspace_root`, `state_root`,
-`debug`, `artifacts`, `validation`, `recovery`, `reports`, `logs` — is adopted by
+four sections (every permission, `version`, `workspace_root`, `state_root`,
+`debug`, `artifacts`, `validation`, `recovery`, `reports`, `logs`) is adopted by
 a restart and by nothing else; the result names them under
 `not_reloaded_sections`, and `permission_differences` lists every grant the file
 states that this server is not enforcing. The call is refused while a run or a
 session holds the bench (`config_reload_in_open_run`), while an incident is
 unresolved (`resource_quarantined`), and on a file that is missing, unreadable
-or will not load — report the refusal and stop. Ask the operator once for the
+or will not load. Report the refusal and stop. Ask the operator once for the
 restart when a permission is what moved, and do not try to make the server pick
 a change up by editing the file again or by calling a configuration write tool.
 
@@ -379,14 +380,14 @@ operating system's trust store instead of uv's bundled roots.
 project that pins exactly, because this file *is* the plugin's copy of the
 guidance for this release: a package a release ahead of the plugin answers
 differently from what you are reading. The cost is that `uv` records that exact
-pin, and `uv tool upgrade` — what `agentic-hil upgrade` runs underneath — cannot
+pin, and `uv tool upgrade` (what `agentic-hil upgrade` runs underneath) cannot
 move an installation off one. It exits successfully and prints the reason
 instead of upgrading, so `agentic-hil upgrade` reports it as
 `upgrade_blocked_by_pin`, changes nothing, and asks for no restart. **Move to a
 newer release by rerunning the line above from the newer plugin**, not by
 expecting `agentic-hil upgrade` to reach past the pin; that reinstall replaces
-the recorded requirement. Name any extras on that line as well —
-`uv tool install --upgrade "agentic-hil[can]==<that version>"` — because `uv`
+the recorded requirement. Name any extras on that line as well
+(`uv tool install --upgrade "agentic-hil[can]==<that version>"`), because `uv`
 records the requirement literally and uninstalls what it was not told about. An
 installation the operator wants upgraded on its own from now on takes the
 unpinned `uv tool install --upgrade agentic-hil` instead, at the price of the
@@ -407,7 +408,7 @@ interlocked against. The first two are available alone as
 Writing the agent's own skill directory and MCP registration is what a host's
 permission system is built to stop, so expect it to ask before `setup` runs.
 Say so before you call it and let the operator approve the prompt or add a
-standing rule for the command prefix — `Bash(agentic-hil setup:*)`. That
+standing rule for the command prefix, `Bash(agentic-hil setup:*)`. That
 refusal is the host's, not Agentic HIL's: it carries no `permission_denied`
 result and no report, and it stands until the operator lifts it. Never route
 around it with another shell or a permission-skipping flag, and never write the
