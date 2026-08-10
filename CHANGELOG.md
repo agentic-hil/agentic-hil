@@ -10,6 +10,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - The stlink backend serves `debug_dump_symbol_ihex` through STM32CubeProgrammer's `-r` memory read: the symbol is resolved offline from the ELF a confirmed flash put on the board, via the configured `debug.gdb_executable` in a batch query that never attaches to the target; the allowlist, `debug.max_dump_size_bytes` and the result fields match the OpenOCD path, success is confirmed on the measured `Data read successfully` line, and typed debug sessions stay OpenOCD-only (#185)
 
+### Fixed
+
+- `reset_target(mode="halt")` on the stlink backend can report success: each reset mode is confirmed on the success line its own command prints (`-halt` on `Core halted`), instead of every mode being held to the two lines only `-rst` prints — which had turned a correct halt into `reset_unconfirmed` with an unknown side effect, quarantined the bench, and left recovery's reset-into-halt unable to attest a safe state on this backend. The connect banner is deliberately not a marker; it prints before the halt is attempted. Verified against captured vendor output and green on a real board (#142)
+
 ## [0.11.0] - 2026-08-10
 
 ### Added
