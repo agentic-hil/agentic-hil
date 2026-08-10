@@ -128,6 +128,14 @@ class AgenticHILToolService:
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
         self._debug_artifact: JsonObject | None = None
+        # The last ELF this service put on the target, kept so a backend with no
+        # debug session of its own can still resolve a symbol against the image
+        # the board is actually running. Only a confirmed flash writes it, and
+        # only of a .elf: a .hex or .bin carries no symbol table, and an
+        # unconfirmed flash is exactly the case where nobody knows what is on
+        # the board. It is a fact about this bench, not an artifact handle —
+        # nothing is staged or held open by it.
+        self._symbol_elf: JsonObject | None = None
         self._debug_lease: HardwareLease | None = None
         # A one-shot lease that quarantined has no session handle to reach it
         # again. Without this the lease stays registered and unreachable for the
@@ -218,9 +226,26 @@ class AgenticHILToolService:
         if not staged["ok"]:
             return staged
         try:
-            return self.backend.flash_firmware(staged["artifact"], reset_after_flash)
+            result = self.backend.flash_firmware(staged["artifact"], reset_after_flash)
         finally:
             self.artifacts.release_stage(staged["artifact"])
+        self._remember_symbol_elf(validation["artifact"], result)
+        return result
+
+    def _remember_symbol_elf(self, artifact: JsonObject, result: JsonObject) -> None:
+        """Record the flashed ELF as this bench's symbol source, or leave it be.
+
+        `ok is True` is the whole condition, and it is the strict one: a flash
+        that could not confirm itself leaves the previous answer in place rather
+        than replacing it with an image that may never have landed. The
+        pre-staging artifact is kept, not the staged copy — staging is released
+        as soon as the backend returns, while this path stays readable for as
+        long as the file does."""
+        if result.get("ok") is not True:
+            return
+        if Path(str(artifact["resolved_path"])).suffix.lower() != ".elf":
+            return
+        self._symbol_elf = artifact
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
@@ -333,7 +358,7 @@ class AgenticHILToolService:
         output = self.artifacts.validate_output_path(output_path, "debug_dump_symbol_ihex")
         if not output["ok"]:
             return output
-        return self.backend.debug_dump_symbol_ihex(symbol.strip(), output["output"])
+        return self.backend.debug_dump_symbol_ihex(symbol.strip(), output["output"], self._symbol_elf)
 
     def get_last_report(self) -> JsonObject:
         report = read_last_report(self.config)

@@ -529,29 +529,7 @@ class GdbDebugSessions:
         return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
 
     def _resolve_gdb(self) -> JsonObject:
-        from agentic_hil.backends.common import which
-
-        configured = self.config.debug.gdb_executable
-        if configured:
-            has_path_separator = "/" in configured or "\\" in configured
-            if Path(configured).is_absolute() or has_path_separator:
-                from agentic_hil.config import resolve_work_path
-
-                resolved = Path(resolve_work_path(self.config, configured))
-                if resolved.is_file():
-                    return {"ok": True, "executable": str(resolved)}
-            else:
-                found = which(configured)
-                if found is not None:
-                    return {"ok": True, "executable": found}
-            # Resolved before the debug server is spawned, so a missing GDB is
-            # a call that never started anything: refuse, do not quarantine.
-            return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
-        for candidate in GDB_AUTODETECT_CANDIDATES:
-            found = which(candidate)
-            if found is not None:
-                return {"ok": True, "executable": found}
-        return {"ok": False, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        return resolve_gdb_executable(self.config, self.backend_name)
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
         commands = ["-gdb-set pagination off", "-gdb-set confirm off", f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
@@ -895,6 +873,41 @@ class GdbDebugSessions:
         if self._audit_broken is None:
             return result
         return self._report({**result, "ok": False, "error_type": "audit_broken", "cleanup_required": True, "quarantined": True})
+
+
+def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonObject:
+    """Find the GDB this bench is meant to use, by one rule for every backend.
+
+    Extracted from the debug backend unchanged so the stlink backend's offline
+    symbol query resolves GDB exactly as a debug session does: a configured
+    `debug.gdb_executable` wins and is never silently replaced by a different
+    GDB, and only an unconfigured bench falls back to autodetection. Both
+    refusals name `debug.gdb_executable`, because that is the one field an
+    operator sets to fix either.
+    """
+    from agentic_hil.backends.common import which
+
+    configured = config.debug.gdb_executable
+    if configured:
+        has_path_separator = "/" in configured or "\\" in configured
+        if Path(configured).is_absolute() or has_path_separator:
+            from agentic_hil.config import resolve_work_path
+
+            resolved = Path(resolve_work_path(config, configured))
+            if resolved.is_file():
+                return {"ok": True, "executable": str(resolved)}
+        else:
+            found = which(configured)
+            if found is not None:
+                return {"ok": True, "executable": found}
+        # Resolved before the debug server is spawned, so a missing GDB is
+        # a call that never started anything: refuse, do not quarantine.
+        return {"ok": False, "backend": backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+    for candidate in GDB_AUTODETECT_CANDIDATES:
+        found = which(candidate)
+        if found is not None:
+            return {"ok": True, "executable": found}
+    return {"ok": False, "backend": backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
 
 def _is_missing_breakpoint_error(response: object) -> bool:
