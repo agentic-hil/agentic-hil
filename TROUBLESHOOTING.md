@@ -23,7 +23,7 @@ Likely cause: Agentic HIL is not installed, `~/.local/bin` is not on `PATH`, or 
 Fix — all user-local, never with admin rights. Start with the PyPI/pip package:
 
 ```bash
-python -m pip install --user --upgrade "agentic-hil>=0.10.0"
+python -m pip install --user --upgrade "agentic-hil>=0.11.0"
 agentic-hil --version
 agentic-hil setup --help
 ```
@@ -31,12 +31,12 @@ agentic-hil setup --help
 If that fails, use `uv` or `pipx` instead:
 
 ```bash
-uvx --from "agentic-hil>=0.10.0" agentic-hil --version                           # transient diagnostic only
-uvx --from git+https://github.com/agentic-hil/agentic-hil@v0.10.0 agentic-hil --version # transient repository check
-uv tool install --upgrade "agentic-hil>=0.10.0"                                  # persistent user-local install
+uvx --from "agentic-hil>=0.11.0" agentic-hil --version                           # transient diagnostic only
+uvx --from git+https://github.com/agentic-hil/agentic-hil@v0.11.0 agentic-hil --version # transient repository check
+uv tool install --upgrade "agentic-hil>=0.11.0"                                  # persistent user-local install
 ```
 
-`pipx run --spec "agentic-hil>=0.10.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.10.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
+`pipx run --spec "agentic-hil>=0.11.0" agentic-hil --version` is also only a transient diagnostic; use `pipx install "agentic-hil>=0.11.0"` for a persistent installation. If `agentic-hil` is installed but not found, add the user-level executable directory to `PATH` with `uv tool update-shell` or `pipx ensurepath` and open a fresh shell. If neither `uv` nor `pipx` exists, install `uv` user-locally first (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Never use `sudo pip` or `pip install --break-system-packages`.
 
 Two Linux failures leave no installation behind and are not a broken machine. `error: externally-managed-environment` is PEP 668: Debian and Ubuntu mark the system Python as owned by the distribution and `pip` refuses it, `--user` included, so the pip block above does not apply on those hosts — `uv` and `pipx` install into environments of their own and need no exception. `invalid peer certificate: UnknownIssuer` from `uv`, or `self-signed certificate in certificate chain`, is a TLS-intercepting proxy: `uv` validates against roots bundled in its binary, while `curl` and `apt` on the same host read the system trust store and keep working, which is what makes the difference recognisable. `uv tool install --system-certs` (older releases: `--native-tls`) points `uv` at that same store. Prefer `UV_SYSTEM_CERTS=1` in the operator's environment over the flag on a single command line: `agentic-hil upgrade` shells out to `uv tool upgrade` and passes no TLS flags of its own, so a proxied host that fixed only the install command loses the upgrade path. If `--system-certs` does not help, the proxy's CA is missing from the system trust store itself; installing it there is the fix, and `--allow-insecure-host` or any other switch that disables verification is not a fallback.
 

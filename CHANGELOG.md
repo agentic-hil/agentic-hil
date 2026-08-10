@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-10
+
 ### Added
 
 - The test reactor's `can_read` takes a `comparator:`: an identifier filter (`id`, optionally `id_mask`) and a payload claim (`equals`, `pattern`, or `pattern` with `range` over a hex-captured value), read until met within `timeout_s` and failing with the frames the bus did carry (#168)
