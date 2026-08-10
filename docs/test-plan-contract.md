@@ -23,7 +23,7 @@ The plan schema is
 [`src/agentic_hil/schemas/testconfig.schema.json`](https://github.com/agentic-hil/agentic-hil/blob/master/src/agentic_hil/schemas/testconfig.schema.json),
 and it is closed: `additionalProperties: false` at the root and on every step,
 so a key the schema does not name is a refusal rather than something ignored.
-A plan document has exactly three root keys — `version: 2`, an optional `name`
+A plan document has exactly three root keys: `version: 2`, an optional `name`
 (defaulting to the file's stem), and `steps`, between 1 and 128 of them.
 
 A step is a route field, an action, and that action's arguments.
@@ -43,7 +43,7 @@ a debug session; `uart_open`, `uart_write`, `uart_read`, `uart_expect` and
 `uart_close` on a serial line; `can_open`, `can_send`, `can_read` and
 `can_close` on a bus; and `delay`, declared once on the base class and served by
 every kind. Each action is declared on the method that implements it, so the
-authoritative list is the set of declarations — an action a kind does not
+authoritative list is the set of declarations; an action a kind does not
 declare answers `not_supported` naming the kind. From plan format v3, `device:`
 is the one routing key for every step; the v2 route keys stay valid as aliases.
 
@@ -51,21 +51,21 @@ is the one routing key for every step; the v2 route keys stay valid as aliases.
 mode, a breakpoint location, a symbol to dump and where to write it, a frame id
 and its data bytes, a frame budget, a deadline. Paths are resolved inside
 `workspace_root`, so `build/app.elf` means the same thing on every checkout of
-the repository — it is a statement about the build layout, which travels with
+the repository: it is a statement about the build layout, which travels with
 the repository, not about a filesystem, which does not.
 
-**Expectations are a `comparator`.** A feedback action — `uart_read` on a serial
-line, `can_read` on a bus — takes an optional `comparator:` object: `equals` for
+**Expectations are a `comparator`.** A feedback action (`uart_read` on a serial
+line, `can_read` on a bus) takes an optional `comparator:` object: `equals` for
 a complete decoded match, `pattern` for a Python regular expression (`re.search`
 semantics), or `pattern` with a single capture group plus `range: {min, max}` to
 bound the numeric value it extracts. Exactly one of `equals`/`pattern` per
 comparator; a range without a capturing pattern, or a pattern that does not
 compile, is refused before the run starts. A bus comparator also names the
-identifier of the frame it is about — `id`, optionally widened by `id_mask` into
+identifier of the frame it is about: `id`, optionally widened by `id_mask` into
 a family, and `extended` for which frame namespace it lives in (default `false`,
 so a comparator that does not say waits for a standard frame; a standard `0x123`
 and an extended `0x123` are two different frames and neither satisfies the
-other's expectation) — and it is required rather than optional, because a bus
+other's expectation). Naming it is required rather than optional, because a bus
 carries every node's traffic and a payload matched without saying whose frame it
 was is a green another ECU can produce; on that medium `equals` and `pattern`
 read the payload as hexadecimal, and a `range` capture is read in that same base. The comparator
@@ -75,7 +75,7 @@ valid as the v2 spelling. Every other step states its expectation by existing:
 the step must succeed, and the plan stops at the first one that does not.
 
 Nothing in that list identifies a machine. A plan is a document about firmware
-and about the shape of a test, and it is reviewable as such —
+and about the shape of a test, and it is reviewable as such:
 [`examples/nucleo-f446re_demo/testconfig.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/nucleo-f446re_demo/testconfig.yaml)
 is five steps of flash, open, reset, and assert on a banner, and it names no COM
 port, no baudrate and no probe serial anywhere. The expanded form of every
@@ -103,7 +103,7 @@ permission does not allow, a breakpoint or dump symbol outside
 `debug.allowed_symbols`, a firmware artifact outside the allowed roots or
 extensions, a dump output path the artifact validator rejects, a session closed
 before it was opened, a `can_send` on a bus configured `listen_only: true`.
-Preflight builds nothing — no service, no lock, no directory — so a plan refused
+Preflight builds nothing (no service, no lock, no directory), so a plan refused
 there has touched no hardware at all, and the same plan asked twice gets the
 same answer.
 
@@ -122,8 +122,8 @@ mirrors, as everything in the workspace is. Five parts of that report are the
 attestation.
 
 **Which policy was in force.** `config_in_force` carries the digest of the exact
-configuration bytes the run was permitted by — `digest` under
-`digest_algorithm`, beside the configuration's `path` — together with
+configuration bytes the run was permitted by (`digest` under
+`digest_algorithm`, beside the configuration's `path`), together with
 `file_state`, `file_digest` and `diverged_from_file`: the comparison made
 *inside* the run against what was on disk at that moment. A report that named
 only the path would say nothing, because the path is constant over a project's
@@ -131,13 +131,13 @@ lifetime and the content is not. When a description reload has moved the loaded
 document out from under the grants still being enforced, `permissions_source`
 travels with the record and says so.
 
-**What each step did.** `steps` is one entry per executed step —
-`{index, route, action, result}` — where `result` is the tool result unchanged:
+**What each step did.** `steps` is one entry per executed step
+(`{index, route, action, result}`), where `result` is the tool result unchanged:
 its `ok`, `error_type`, `summary`, its `log_path`, and the effect fields
 (`side_effect_committed`, `side_effect_status`, `retry_safe`). `failed_step` and
 `step_error_type` name where a fail-fast run stopped. A plan refused before
 execution reports `validation_error` instead, naming the step index, the
-offending field, the route and the action — and `steps` is empty, because none
+offending field, the route and the action; and `steps` is empty, because none
 ran.
 
 **Whether the hardware was ever reached.** Session results carry the contact
@@ -151,9 +151,9 @@ the board, instead of quarantining a bench nobody touched.
 when it did not. Every agent-initiated hardware effect is mirrored into a
 tamper-evident canonical ledger under `state_root` before the workspace log is
 written, and a run whose audit could not be written fails whatever the board
-did. The trusted evidence pointer — `log_sequence`, `log_chain_sha256`, and
+did. The trusted evidence pointer (`log_sequence`, `log_chain_sha256`, and
 `workspace_log_verified`, which checks that every canonical line is still
-present in the workspace mirror in order — is served by `get_last_report` and
+present in the workspace mirror in order) is served by `get_last_report` and
 `classify_last_error` rather than being baked into the report file, so it is
 computed against the ledger at the moment it is read.
 
@@ -162,7 +162,7 @@ whether recovery was `attempted`, which `actions` ran, the `outcome`, the
 `devices` involved, and the `auto_recover_policy` with whether it came from the
 configuration or from the default. A bench that withholds recovery names the
 setting that withheld it in `reason_not_attempted`. Recovering the bench never
-un-fails a test — `ok` is not touched by this block — it only says whether the
+un-fails a test (`ok` is not touched by this block); it only says whether the
 next run can start.
 
 Two more things are worth knowing when reading a report by hand. Every device
@@ -180,14 +180,14 @@ test to another bench is therefore not a change to the test:
 
 1. The second bench declares its own `debuggers`, `com_ports` and `can_buses`
    entries under **the same logical names** the plan uses, pointing at whatever
-   hardware that bench actually has — a different probe serial, `COM5` instead
+   hardware that bench actually has: a different probe serial, `COM5` instead
    of a `/dev/serial/by-id/...` device, `peak` instead of `socketcan`.
 2. It grants the permissions that bench is willing to give.
 3. The same plan file runs.
 
 Everything that differs between the two machines is in the file the plan never
 reads, and everything the test asserts is in the file the machine never writes.
-The one agreement the two ends must keep is the set of logical names — that is
+The one agreement the two ends must keep is the set of logical names; that is
 the interface, and it is deliberately the only one.
 
 ## What is deliberately not portable
@@ -208,8 +208,8 @@ would make the repository carry another machine's hardware inventory, and would
 make the plan wrong the first time a board is swapped.
 
 **Two behaviours are backend-bound and therefore travel only as far as the
-backend does.** The typed debug actions — `debug_start`, `run_until_breakpoint`,
-`dump_memory`, `debug_stop` — currently require a debugger of type `openocd`,
+backend does.** The typed debug actions (`debug_start`, `run_until_breakpoint`,
+`dump_memory`, `debug_stop`) currently require a debugger of type `openocd`,
 and `reset` with `mode: init` is OpenOCD-only, refused by other backends with
 their own `not_supported`. A flash-and-serial plan runs on all three backends; a
 plan that opens a debug session states, implicitly, that its bench runs OpenOCD.
@@ -224,7 +224,7 @@ schema and the reactor rather than inferred:
   asserts that the target stopped where the plan said, and `dump_memory` writes
   an Intel HEX file and succeeds on having written it. A `read_symbol` action
   with a `comparator:` over the value would be one decorated method like any
-  other — the plan format already carries the vocabulary — but there is nothing
+  other (the plan format already carries the vocabulary), but there is nothing
   underneath it to call: of the two symbol tools, `debug_symbol_info` answers
   with an address and a size, and `debug_dump_symbol_ihex` answers with a file.
   The debug backend does read a symbol's bytes on the way to writing that file;
@@ -236,8 +236,8 @@ schema and the reactor rather than inferred:
   argument is the literal the file carries. Two plans that differ only in a
   firmware path are two files.
 - **No expected failure.** Every step must succeed. A plan cannot assert that an
-  action is refused — that a write to a read-only bus fails, that an out-of-range
-  input is rejected — because the first failing step ends the run.
+  action is refused (that a write to a read-only bus fails, that an out-of-range
+  input is rejected) because the first failing step ends the run.
 - **No declared requirements.** The plan states no preconditions about the bench
   it needs: no "requires a CAN bus with `allow_write`", no "requires an OpenOCD
   probe". A plan that cannot run here is discovered at preflight, which is safe

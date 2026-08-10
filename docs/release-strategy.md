@@ -32,7 +32,7 @@ links to relevant docs
 
 ## Distribution Channels
 
-PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`) — no long-lived PyPI API tokens. The synchronized package, registry, marketplace, plugin, changelog, install-eval, troubleshooting, and bundled-skill contracts are already settled before the merge by `tools/check_version_consistency.py` in CI; the release job runs the same module again with `--release-tag`, which is the one comparison a pull request cannot make. It then builds sdist and wheel and validates them with twine.
+PyPI first. Publishing runs through GitHub Actions trusted publishing with OIDC (`.github/workflows/workflow.yml`): no long-lived PyPI API tokens. The synchronized package, registry, marketplace, plugin, changelog, install-eval, troubleshooting, and bundled-skill contracts are already settled before the merge by `tools/check_version_consistency.py` in CI; the release job runs the same module again with `--release-tag`, which is the one comparison a pull request cannot make. It then builds sdist and wheel and validates them with twine.
 
 After PyPI accepts a release, the same workflow verifies the package's `mcp-name` ownership marker and publishes `server.json` to the preview MCP Registry through GitHub Actions OIDC. No MCP Registry secret is stored. The release tag, Python package version, top-level server version, and package version in `server.json` must match exactly. The registry is an additional discovery channel; the documented local CLI and MCP configuration path remains authoritative and host-independent.
 
@@ -40,7 +40,7 @@ If MCP Registry publication fails after PyPI succeeds, re-run only the failed jo
 
 Naming is part of the release contract: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
-Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge — add them only when they are reproducible and built by CI.
+Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge; add them only when they are reproducible and built by CI.
 
 ## Release Checklist
 
@@ -71,7 +71,7 @@ carries the version there; a file that starts carrying the version and is named
 in neither the check nor its declared exceptions is itself an error.
 
 That check is the single enforcement point for version agreement. It reads files
-and compares strings — no secret, no OIDC, no tag — so it runs pre-merge as the
+and compares strings (no secret, no OIDC, no tag), so it runs pre-merge as the
 `Release metadata consistency` job of `.github/workflows/ci.yml`, on every push
 and every pull request, with no `paths:` filter: the failure it exists to catch
 is a change that *forgets* a file, and a paths filter keys on the files a pull
@@ -90,9 +90,9 @@ MCP Registry acceptance         needs the published PyPI release to verify again
 ```
 
 Everything else the release job used to discover for the first time at
-`release: published` — every position `--list` prints, the three JSON manifests
+`release: published` (every position `--list` prints, the three JSON manifests
 byte for byte against their contracts, and the sweep that refuses a file
-carrying the version that no check covers — is now settled before the merge.
+carrying the version that no check covers) is now settled before the merge.
 That matters because publishing is the point of no return: a PyPI version
 cannot be re-uploaded.
 

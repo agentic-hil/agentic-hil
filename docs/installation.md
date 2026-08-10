@@ -1,7 +1,7 @@
 # Installing and Running Agentic HIL
 
-Everything installs user-local, **no admin rights required, ever** — whether an
-agent does it or you do. [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md) is
+Everything installs user-local, **no admin rights required, ever** (whether an
+agent does it or you do). [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md) is
 the agent's copy of this and carries the complete fallback chain;
 [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) covers what to do when something
 does not start.
@@ -17,7 +17,7 @@ agentic-hil setup                 # add --agent codex or --agent opencode for th
 
 `setup` installs the agent skill, registers the MCP server with a verified
 absolute executable path, creates the policy file outside the repository, and
-runs `doctor`. The bench works from that file as written — flashing included:
+runs `doctor`. The bench works from that file as written, flashing included:
 every permission in it is granted except `allow_raw_debugger_commands` and
 `allow_mass_erase`, which are false because either one being true refuses
 flashing. It prints where the file landed: review it, and take back whatever this
@@ -39,8 +39,8 @@ agentic-hil agent-install --agent <agent>   # skill + user-level MCP registratio
 agentic-hil init --agent <agent>            # this project's policy + doctor; once per project, from its root
 ```
 
-`agent-install` writes only under the invoking user's home — user-wide, per user
-and per machine, not shared with other OS users — and needs no project and no
+`agent-install` writes only under the invoking user's home (user-wide, per user
+and per machine, not shared with other OS users) and needs no project and no
 configuration. Each half rolls back only its own writes, so a project that will
 not configure still leaves a working agent, and the next repository for this
 user needs `init` alone.
@@ -65,15 +65,15 @@ agentic-hil --version` is a diagnostic only.
 
 ## Optional extras
 
-For direct PEAK/SocketCAN adapters add the CAN extra — `uv tool install
-'agentic-hil[can]'` — and for the pyOCD backend `agentic-hil[pyocd]`. Both are
+For direct PEAK/SocketCAN adapters add the CAN extra (`uv tool install
+'agentic-hil[can]'`), and for the pyOCD backend `agentic-hil[pyocd]`. Both are
 optional because they carry platform-specific drivers that flashing and UART do
 not need; without them those tools refuse with `can_backend_not_available`
 rather than failing at import.
 
 Adding one of them to an installation that already exists means rewriting that
-environment, so stop the agent host first — it runs the MCP server out of that
-environment — and name every extra you want on the command line, because `uv`
+environment, so stop the agent host first (it runs the MCP server out of that
+environment) and name every extra you want on the command line, because `uv`
 records the requirement literally and drops the extras it is not told about.
 [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) has the sequence and the way to add
 an extra without stopping the host.
@@ -85,16 +85,16 @@ that owns the installation running it, keeps the extras, and refuses before it
 removes anything if the MCP server is still running. It reports success only
 when the version actually moved, and names both numbers when it did. An
 installation that is already current and one the package manager holds at an
-exact version pin are two separate refusals, and neither asks for a restart —
+exact version pin are two separate refusals, and neither asks for a restart:
 there would be nothing new to load. Installing without an exact pin, as the
 lines above do, keeps the second one from arising at all; the Claude Code plugin
 pins on purpose and states the consequence where it does.
 
 ## Platforms and debugger backends
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]` — covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
-Installing pyOCD is not enough to reach an STM32 part. Most vendor target types — the whole STM32F4 family included — come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
+Installing pyOCD is not enough to reach an STM32 part. Most vendor target types, the whole STM32F4 family included, come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
 
 ```bash
 pyocd pack find stm32f446         # what packs offer this part
