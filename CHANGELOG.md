@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- The test reactor's `can_read` takes a `comparator:`: an identifier filter (`id`, optionally `id_mask`) and a payload claim (`equals`, `pattern`, or `pattern` with `range` over a hex-captured value), read until met within `timeout_s` and failing with the frames the bus did carry (#168)
+
+### Fixed
+
+- Spawning a contained child is one call, not two that a caller can hold half of: `spawn_managed_process()` sets its creation flags itself, `spawn_detached_process()` stands beside it for a child that must outlive its spawner, both halves of the old contract are private, and registration refuses a child it did not spawn — the shape that had shipped a broker born frozen (#169)
+- Recovery after a failed multi-probe run routes through the service bound to each probe the run drove, aggregating their outcomes, instead of the unbound base service that withheld reset as `allow_reset_missing` — or reset an unrelated probe — while the boards the plan actually drove were left as the failure put them; a probe used only as a `delay` route drives no hardware and is left untouched rather than reset and halted by recovery (#168)
+- A CAN broker send that fails after the bus is open — the adapter returning `ok: false`, which is the usual direct-adapter path, or raising — gates the bus and aborts every participant, and the incident reports the transmit effect as `unknown` rather than claiming nothing was committed, since a frame handed to a failing controller may already be on the wire; the attempted transmit is logged to the whole-bus frame log under its own sequence, which the incident carries back, so a raised send stays attributable from both the bus log and the participant's (#146)
+- A brokered CAN send is bounded by the bus's `max_frame_data_bytes`, refusing an over-length payload with the same `invalid_argument` the single-owner `payload_frame()` path returns, so adding `shares:` no longer forwards a frame larger than the configured classic-CAN or CAN-FD limit (#146)
+- A CAN bus with `listen_only_enforcement: service` opens its adapter without demanding the controller listen-only that `controller` enforcement proves, so the documented software-filtering mode no longer fails to open wherever controller listen-only is unavailable; the broker's attach and send checks provide the enforcement it declares (#146)
+- A `can_read` comparator distinguishes standard from extended frames through a new `extended` discriminator (default `false`), the same distinction the broker's participant filters draw, so a standard frame and its extended twin can no longer satisfy each other's expectations — including under an `id_mask`; a rejected frame keeps its type in the failure's `frames_tail`, so the twin cannot read as identical to the frame the plan asked for (#168)
+
+### Added
+
 - A CAN broker lets several runs share one physical bus: a `shares:` section under a `can_buses` entry names participant views (identifier filter, permissions, frame budget), and one broker process owns the adapter and the machine-wide bus lock for all of them. An entry without `shares:` is the single-owner bus it always was, unchanged (#146)
 - Test reactor step actions are declared on the methods that serve them (`@step_action`): dispatch is written once in the base class, adding a capability is one decorated method, and an action a device kind does not declare answers `not_supported` naming the kind by construction (#168)
 - Test plan format v3: `device:` as the one routing key (the v2 route keys stay valid as aliases), a `comparator:` object on `uart_read` with `equals`, `pattern` and `pattern`+`range`, the new `uart_write` and universal `delay` actions, and optional close steps — `version: 2` plans load and behave unchanged (#168)

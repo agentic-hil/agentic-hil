@@ -1151,6 +1151,9 @@ class AgenticHILToolService:
         ):
             return {"incident_resolved": False, "incident_open": True, "quarantine_id": quarantine_id}
         self._release_recovered_leases()
+        reblocked = self._lease_release_reblocked()
+        if reblocked is not None:
+            return reblocked
         return {"incident_resolved": True, "incident_open": False, "resolved_reason": reason, "resolved_quarantine_id": quarantine_id}
 
     def _settle_after_recovery_class_call(self, name: str, blocked_before: bool, result: JsonObject) -> JsonObject:
@@ -1187,6 +1190,13 @@ class AgenticHILToolService:
         if not resolved:
             return result
         self._release_recovered_leases()
+        reblocked = self._lease_release_reblocked()
+        if reblocked is not None:
+            # The reason cleared, but giving the lease back could not be confirmed
+            # and a fresh incident re-quarantined the bench. Forcing
+            # `cleanup_required`/`quarantined` to false here would tell a caller to
+            # continue on a bench `hardware_lease_status` still shows as held.
+            return {**result, **reblocked}
         # The envelope was stamped while the incident still stood; saying
         # `cleanup_required` on the call that just ended it would send a caller
         # looking for a quarantine that is no longer there.
@@ -1214,13 +1224,19 @@ class AgenticHILToolService:
         self._machine_recovery_attempts += 1
         return True
 
-    def _release_recovered_leases(self) -> None:
+    def _release_recovered_leases(self) -> bool:
         """Drop every lease handle the cleared incident left behind.
 
         Machine recovery only runs while no lease is active and it reaps this
         owner's debugger processes, so any debug session is definitively gone.
         Keeping its handle would let a later call act as if a live session were
-        still attached to the board."""
+        still attached to the board.
+
+        Returns whether every release confirmed. `HardwareLease.release()` fails
+        closed: a release that cannot persist its own record re-quarantines the
+        bench under a fresh `lease_release_unconfirmed` incident, and a caller
+        that stamped `incident_resolved: true` regardless would contradict what
+        `hardware_lease_status` then reports."""
         handles: list[HardwareLease] = []
         for lease in (self._debug_lease, self._quarantined_lease):
             if lease is not None and not any(lease is held for held in handles):
@@ -1230,8 +1246,35 @@ class AgenticHILToolService:
         if self._debug_artifact is not None:
             self.artifacts.release_stage(self._debug_artifact)
             self._debug_artifact = None
+        released = True
         for lease in handles:
-            lease.release()
+            if not lease.release():
+                released = False
+        return released
+
+    def _lease_release_reblocked(self) -> JsonObject | None:
+        """The open-incident envelope when giving the leases back re-quarantined the bench.
+
+        Inspected after `_release_recovered_leases`, and the coordinator's own
+        final state is the authority: a release that could not be confirmed fails
+        closed, so if the coordinator is blocked again the incident this run
+        raised was cleared but the bench is not free — a new
+        `lease_release_unconfirmed` incident stands in its place. Reporting
+        success here would tell a caller to continue on a quarantined bench, so
+        this returns the new open incident's cleanup/quarantine fields instead;
+        `None` when the release confirmed and the bench really is clear."""
+        if not self.coordinator.blocked:
+            return None
+        reasons = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
+        return {
+            "incident_resolved": False,
+            "incident_open": True,
+            "cleanup_required": True,
+            "quarantined": True,
+            "quarantine_id": self.coordinator.quarantine_id,
+            "cleanup_reasons": reasons,
+            "incident_summary": "The incident this run raised was cleared, but returning its hardware lease could not be confirmed, so the bench stays quarantined under a new incident.",
+        }
 
     def _invoke_dispatch(self, callback) -> JsonObject:
         self._dispatch_depth += 1

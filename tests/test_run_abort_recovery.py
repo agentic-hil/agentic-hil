@@ -319,6 +319,86 @@ def test_an_audit_broken_incident_is_not_settled_by_any_action(tmp_path: Path) -
         service.close()
 
 
+def test_a_recovery_whose_lease_release_cannot_be_confirmed_does_not_report_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clearing the reason is not the whole of it: the leases still have to be
+    given back, and a release that cannot persist its own record fails closed —
+    it re-quarantines the bench under a fresh `lease_release_unconfirmed`
+    incident. A result that stamped `incident_resolved: true` regardless would
+    tell a caller to continue on a bench `hardware_lease_status` still shows as
+    `cleanup_required`. The settlement must inspect the coordinator's final state
+    and report the new open incident instead."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        quarantine(service, RESET_REASON)
+        # The handle the recovery will try to give back once the reason clears.
+        lease = next(iter(service.coordinator.leases.values()))
+        service._quarantined_lease = lease
+
+        original_persist = service.coordinator._persist_lease
+
+        def failing_persist(lease_arg, state=None, incident_override=None):
+            # Only the release's durable "released" write fails; resolving the
+            # reason (which persists other states) is left to run.
+            if state == "released":
+                raise OSError("injected lease-release persistence failure")
+            return original_persist(lease_arg, state=state, incident_override=incident_override)
+
+        monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["incident_resolved"] is False, recovery
+        assert recovery["incident_open"] is True
+        assert recovery["cleanup_required"] is True
+        assert recovery["quarantined"] is True
+        assert LEASE_RELEASE_RETRY_REASON in recovery["cleanup_reasons"], recovery
+
+        # And the tool a caller would read next agrees: the bench is not free.
+        status = service.coordinator.status()
+        assert status["blocked"] is True
+        assert LEASE_RELEASE_RETRY_REASON in status["cleanup_reasons"], status
+    finally:
+        service.close()
+
+
+def test_a_recovery_class_call_does_not_force_cleared_when_lease_release_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second settlement path: a recovery-class call that clears its incident
+    forces `cleanup_required` and `quarantined` to false on the envelope it
+    returns. It must not do that when giving the lease back could not be
+    confirmed and a fresh incident re-quarantined the bench — the call's own
+    answer survives, but the stamped success does not."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        quarantine(service, "debug_session_cleanup_unconfirmed")
+        lease = next(iter(service.coordinator.leases.values()))
+        service._quarantined_lease = lease
+
+        original_persist = service.coordinator._persist_lease
+
+        def failing_persist(lease_arg, state=None, incident_override=None):
+            if state == "released":
+                raise OSError("injected lease-release persistence failure")
+            return original_persist(lease_arg, state=state, incident_override=incident_override)
+
+        monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
+
+        settled = service._settle_after_recovery_class_call(
+            "probe_target", True, {"ok": True, "tool": "probe_target", "target_detected": True}
+        )
+
+        assert settled["ok"] is True, settled  # the probe's own answer is not lost
+        assert settled["incident_resolved"] is False, settled
+        assert settled["cleanup_required"] is True
+        assert settled["quarantined"] is True
+        assert LEASE_RELEASE_RETRY_REASON in settled["cleanup_reasons"], settled
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+
 # ---------------------------------------------------------------------------
 # B. The recovery class runs during an incident; the stimulus class does not.
 
