@@ -27,7 +27,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 
 from agentic_hil.can import (
     CanBusService,
@@ -36,12 +36,18 @@ from agentic_hil.can import (
     socketcan_link_listen_only,
 )
 from agentic_hil.config import load_config
-from agentic_hil.knowledge import LISTEN_ONLY_UNCONFIRMED_ERROR, LISTEN_ONLY_UNSUPPORTED_ERROR
+from agentic_hil.knowledge import (
+    LISTEN_ONLY_MODE_ERROR,
+    LISTEN_ONLY_UNCONFIRMED_ERROR,
+    LISTEN_ONLY_UNSUPPORTED_ERROR,
+)
 
 PCAN_ERROR_OK = 0
 PCAN_LISTEN_ONLY = 8
 PCAN_PARAMETER_ON = 1
 PCAN_PARAMETER_OFF = 0
+
+FAKE_CAN_BRIDGE = Path(__file__).parent / "fixtures" / "fake_can_bridge.py"
 
 # Verbatim from `ip -details -json link show dev vcan0` on iproute2 6.1.0
 # (Debian bookworm), recorded in a container with NET_ADMIN. It is a literal on
@@ -59,7 +65,7 @@ IP_VCAN0 = (
 )
 
 
-def can_config(tmp_path: Path, adapter: str, channel: str, *, listen_only: bool, executable: str | None = None) -> object:
+def can_config(tmp_path: Path, adapter: str, channel: str, *, listen_only: bool, executable: str | None = None, allow_write: bool = True) -> object:
     lines = [
         "can_buses:\n",
         "  bench:\n",
@@ -69,7 +75,8 @@ def can_config(tmp_path: Path, adapter: str, channel: str, *, listen_only: bool,
     ]
     if executable is not None:
         lines.append(f'    executable: "{executable}"\n')
-    return load_config(str(write_config(tmp_path, can_buses_yaml="".join(lines))))
+    permissions = {**DEFAULT_TEST_PERMISSIONS, "allow_can_write": allow_write}
+    return load_config(str(write_config(tmp_path, can_buses_yaml="".join(lines), permissions=permissions)))
 
 
 class FakeBusState:
@@ -474,6 +481,195 @@ def test_a_bridge_answering_a_non_boolean_listen_only_is_a_protocol_error(tmp_pa
     assert result["error_type"] == "can_adapter_protocol_unsupported"
 
 
+# --- A transmit on a listen-only bus ------------------------------------------
+#
+# The defect these exist for was measured, not reasoned about: a PCAN-USB channel
+# configured `listen_only: true`, whose driver had confirmed the mode at open,
+# was granted `permissions.allow_write: true` and answered `can_send` with
+# `ok: true, "CAN frame sent."`. Single node, no ACKer, controller in PASSIVE —
+# a claimed side effect nobody could have observed.
+#
+# What is asserted below is the gate, not the silicon. No test here can say what
+# a controller does with a queued transmit; what they can say is that the frame
+# never reaches a driver to find out, on every adapter, through every route.
+
+
+def send_payload() -> dict[str, object]:
+    return {"frame_id": "0x123", "data_hex": "01ff"}
+
+
+@pytest.mark.parametrize(
+    ("adapter", "channel"),
+    [("peak", "PCAN_USBBUS1"), ("socketcan", "can0"), ("process", "vcan0")],
+)
+def test_can_send_refuses_by_name_on_a_listen_only_bus(tmp_path: Path, adapter: str, channel: str) -> None:
+    """Every adapter, one answer. `listen_only` is a property of the bus entry.
+
+    Writing is *permitted* here — `allow_write: true` — which is the whole point:
+    the bus is what refuses, so the permission is never consulted and cannot be
+    granted to make this go away. No session is started, and that is load-bearing
+    too: an answer of `session_not_active` would mean the gate sits behind the
+    session lookup, one step further in than "before any driver call" allows.
+    """
+    executable = tmp_path / "bridge.py"
+    executable.write_text("", encoding="utf-8")
+    config = can_config(tmp_path, adapter, channel, listen_only=True, executable=executable.as_posix() if adapter == "process" else None)
+    assert config.can_buses["bench"].permissions.allow_write is True
+    service = CanBusService(config)
+    try:
+        result = service.send("bench", send_payload())
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == LISTEN_ONLY_MODE_ERROR
+    assert result["error_type"] != "permission_denied"
+    assert result["error_type"] != "session_not_active"
+    assert result["listen_only"] is True
+    assert result["field"] == "can_buses.bench.listen_only"
+    # Refused before a driver was reached, so this is a clean no rather than an
+    # unknown — and not retry-safe, because the same call gets the same answer
+    # until the configuration changes.
+    assert result["side_effect_committed"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["retry_safe"] is False
+    # Both ways out are named in the refusal itself, not only in the catalogue.
+    assert "second can_buses entry" in result["summary"]
+    assert "listen_only: false" in result["summary"]
+    assert result["remediation"]
+
+
+def test_the_listen_only_refusal_is_word_for_word_the_same_on_every_adapter(tmp_path: Path) -> None:
+    """The flag is bus-level, so a caller cannot learn the adapter from the no.
+
+    Written as a comparison rather than three copies of an expected string: what
+    matters is that no per-adapter branch creeps in later, and a fixed literal
+    would not catch one that changed all three together.
+    """
+    answers = []
+    for index, (adapter, channel) in enumerate([("peak", "PCAN_USBBUS1"), ("socketcan", "can0"), ("process", "vcan0")]):
+        directory = tmp_path / f"bus{index}"
+        executable = directory / "bridge.py"
+        directory.mkdir(parents=True, exist_ok=True)
+        executable.write_text("", encoding="utf-8")
+        config = can_config(directory, adapter, channel, listen_only=True, executable=executable.as_posix() if adapter == "process" else None)
+        service = CanBusService(config)
+        try:
+            result = service.send("bench", send_payload())
+        finally:
+            service.close()
+        answers.append({key: result[key] for key in ("error_type", "summary", "field", "listen_only", "side_effect_status", "retry_safe")})
+
+    assert answers[0] == answers[1] == answers[2], answers
+
+
+def test_the_permission_refusal_still_fires_on_a_bus_that_is_not_listen_only(tmp_path: Path) -> None:
+    """Pinned unchanged. The mode gate wins first; it does not replace the other.
+
+    A bus with no claim on it and `allow_write: false` answers exactly what it
+    always answered, in the class it always answered in — `permission_denied` is
+    a caller-scoped refusal and stays `retry_safe` once the grant is added.
+    """
+    config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=False, allow_write=False)
+    service = CanBusService(config)
+    try:
+        result = service.send("bench", send_payload())
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "permission_denied"
+    assert result["error_type"] != LISTEN_ONLY_MODE_ERROR
+    assert result["side_effect_status"] == "not_started"
+    assert result["retry_safe"] is True
+
+
+def test_a_live_peak_session_never_hands_the_frame_to_the_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The decisive one, with a session actually open on the bus.
+
+    The refusal above is reached with nothing started, which proves the ordering
+    but not that a *running* listen-only session refuses too. Here the whole
+    service opens a PEAK channel, the driver confirms PASSIVE, and the adapter's
+    own `send` is a tripwire: reaching it is the defect.
+    """
+    config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=True)
+    bus = fake_pcan_bus()
+    bus.send = lambda *args, **kwargs: pytest.fail("the frame reached the driver on a listen_only bus")
+    module = fake_can_module(lambda **kwargs: bus)
+    module.Message = lambda **kwargs: SimpleNamespace(**kwargs)
+    monkeypatch.setitem(sys.modules, "can", module)
+    install_pcan_basic(monkeypatch)
+    service = CanBusService(config)
+    try:
+        started = service.session_start("bench", clear_rx_queue=False)
+        result = service.send("bench", send_payload())
+    finally:
+        service.close()
+
+    assert started["ok"] is True
+    assert bus.state == FakeBusState.PASSIVE, "the session really is the listen-only one"
+    assert result["ok"] is False
+    assert result["error_type"] == LISTEN_ONLY_MODE_ERROR
+
+
+def test_a_live_bridge_session_never_forwards_the_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same, one process further out, against the real fake bridge.
+
+    A bridge is code this project did not write, so the tripwire is the bridge's
+    own transmit log rather than anything mocked in this process: if the send
+    were forwarded, the file would have a line in it.
+    """
+    tx_log = tmp_path / "tx.jsonl"
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_TX_LOG", str(tx_log))
+    config = can_config(tmp_path, "process", "vcan0", listen_only=True, executable=FAKE_CAN_BRIDGE.as_posix())
+    service = CanBusService(config)
+    try:
+        started = service.session_start("bench", clear_rx_queue=False)
+        result = service.send("bench", send_payload())
+    finally:
+        service.close()
+
+    assert started["ok"] is True
+    assert started["adapter_result"]["listen_only"] is True, "the bridge confirmed the mode, so the session is the listen-only one"
+    assert result["ok"] is False
+    assert result["error_type"] == LISTEN_ONLY_MODE_ERROR
+    assert not tx_log.exists() or tx_log.read_text(encoding="utf-8").strip() == ""
+
+
+def test_python_can_accepts_a_passive_transmit_without_a_word(tmp_path: Path) -> None:
+    """Why the gate cannot be left to the backend, pinned against the real library.
+
+    Not a fake: this drives the installed `PcanBus.send` with a stand-in
+    PCANBasic and a bus whose state is `BusState.PASSIVE`. python-can 4.6.1 never
+    consults the state — it builds the message, calls `PCANBasic.Write`, and
+    raises only on a non-OK return code — so a listen-only channel's transmit is
+    accepted and reported as sent.
+
+    If a future python-can starts refusing this, the assertion below fails and
+    the honesty note on `PythonCanAdapterSession.send` should be revisited rather
+    than left standing on a premise that has moved. The gate itself would stay:
+    a refusal that arrives from the driver is already one driver call too late.
+    """
+    pytest.importorskip("can", reason="python-can is an optional extra")
+    from can import BusState, Message
+    from can.bus import CanProtocol
+    from can.interfaces.pcan.basic import PCAN_ERROR_OK
+    from can.interfaces.pcan.pcan import PcanBus
+
+    written: list[int] = []
+    passive = SimpleNamespace(
+        _state=BusState.PASSIVE,
+        state=BusState.PASSIVE,
+        _can_protocol=CanProtocol.CAN_20,
+        m_PcanHandle=0x51,
+        m_objPCANBasic=SimpleNamespace(Write=lambda handle, message: written.append(message.ID) or PCAN_ERROR_OK),
+    )
+
+    PcanBus.send(passive, Message(arbitration_id=0x123, data=b"\x01\xff", is_extended_id=False))
+
+    assert written == [0x123], "the transmit reached PCANBasic.Write while the channel was PASSIVE"
+
+
 # --- End to end, and what a caller can see before starting anything -----------
 
 
@@ -587,6 +783,7 @@ def test_the_pcan_read_back_constants_travel_with_any_real_pcan_bus() -> None:
         LISTEN_ONLY_UNCONFIRMED_ERROR,
         f"{LISTEN_ONLY_UNCONFIRMED_ERROR}:peak",
         f"{LISTEN_ONLY_UNCONFIRMED_ERROR}:process",
+        LISTEN_ONLY_MODE_ERROR,
     ],
 )
 def test_each_refusal_carries_its_own_fix(key: str) -> None:

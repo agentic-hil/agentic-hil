@@ -93,8 +93,13 @@ can_buses:
     adapter: "socketcan"     # or "peak", or "process" for a custom bridge
     channel: "can0"
     bitrate: 500000
-    listen_only: true        # receive without sending dominant ACK bits; enforced
-                             # per adapter, see docs/safety-model.md
+    listen_only: true        # receive without sending dominant ACK bits. A
+                             # transmit on this bus is refused as
+                             # can_listen_only_mode before any driver call,
+                             # whatever allow_write says. Enforcement and
+                             # verification reach as far as the driver's or the
+                             # kernel's own report of the mode and no further;
+                             # see docs/safety-model.md
     permissions:
       allow_write: false
 ```
