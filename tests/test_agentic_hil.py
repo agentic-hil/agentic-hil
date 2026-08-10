@@ -20,6 +20,7 @@ from conftest import (
     FAKE_OPENOCD,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
+    FAKE_STLINK_HALT_UNCONFIRMED,
     FAKE_STLINK_UNCONFIRMED,
     write_authoritative_config,
     write_config,
@@ -3235,6 +3236,76 @@ def test_stlink_rejects_unconfirmed_successful_exit(tmp_path: Path) -> None:
     assert result["backend_error_type"] == "reset_unconfirmed"
 
 
+# What STM32CubeProgrammer prints when each reset mode's own command did what it
+# says. Two commands, two success lines: `-rst` announces the reset it drove,
+# `-halt` announces the core it stopped. Measured on v2.23.0 against a
+# NUCLEO-F446RE and modelled in fake_stlink.py.
+STLINK_RESET_SUCCESS_TEXT = {
+    "run": ["MCU Reset", "reset is performed"],
+    "halt": ["Core halted"],
+}
+
+
+@pytest.mark.parametrize("mode", sorted(STLINK_RESET_SUCCESS_TEXT))
+def test_stlink_confirms_each_reset_mode_on_the_lines_its_own_command_prints(tmp_path: Path, mode: str) -> None:
+    """Mode `halt` can report success at all, and mode `run` is untouched by that.
+
+    `halt` sends `-halt`, which prints neither line `-rst` prints, and the
+    backend asked for the `-rst` pair whichever mode was requested — so a halt
+    that did exactly what was asked came back `reset_failed` /
+    `reset_unconfirmed`, quarantining the bench over a correct call (#142).
+    Confirmation is still all-or-nothing; what changed is which set is
+    selected. The `run` row is the old set unchanged and is here to keep it
+    that way."""
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": mode})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["mode"] == mode
+    assert result["success_confirmed"] is True
+    assert result["operation_result"] == {"confirmed": True, "matched_success_text": STLINK_RESET_SUCCESS_TEXT[mode]}
+    assert result["summary"] == f"Target reset with mode '{mode}'."
+    assert result["side_effect_status"] == "committed"
+    assert result.get("quarantined") is not True, result
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert BACKEND_RESET_COMMANDS[("stlink", mode)] in logged
+
+
+def test_a_halt_that_never_reported_the_core_stays_unconfirmed_however_much_the_connect_printed(tmp_path: Path) -> None:
+    """The connect banner is not a marker, and this is why.
+
+    This CLI connects, prints the whole banner including `Reset mode  :
+    Software reset` — the line that says mode `halt` resets before it halts —
+    and then never reports stopping the core. Connect runs before the halt is
+    attempted, so every line here is one a failed halt prints too; reading any
+    of them as confirmation would have confirmed exactly the run nobody can
+    account for. `Core halted` is the operation's own success line, it did not
+    arrive, and the result says so and quarantines."""
+    config = load_config(
+        str(write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_HALT_UNCONFIRMED)),
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "reset_target", {"mode": "halt"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "reset_failed"
+    assert result["backend_error_type"] == "reset_unconfirmed"
+    assert result["operation_result"] == {"confirmed": False, "expected_success_text": ["Core halted"], "matched_success_text": []}
+    # Nothing on the host knows whether the core is halted or running, so this
+    # is the branch that stops the bench rather than one that refuses.
+    assert result["side_effect_status"] == "unknown"
+    assert result["quarantined"] is True
+    # The banner did print, and it confirmed nothing.
+    assert "Reset mode  : Software reset" in json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["stdout"]
+
+
 def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None:
     firmware = tmp_path / "build" / "firmware.bin"
     firmware.parent.mkdir(parents=True)
@@ -3277,11 +3348,14 @@ def test_each_supported_reset_mode_sends_its_own_command_on_every_backend(tmp_pa
     that share a command line within one backend now fail here, whichever pair
     it is.
 
-    This asserts what went on the wire rather than `ok`, deliberately: mode
-    `halt` on stlink cannot be confirmed today, because STLINK_SUCCESS_CONFIRMATION
-    wants the two lines `-rst` prints and `-halt` prints neither. That is a
-    different defect from this one and is not fixed here - what this test has to
-    hold is that the argument reaching the CLI is the one the mode names."""
+    This asserts what went on the wire rather than `ok`, deliberately: what a
+    mode reports is a separate question from which command it sends, and the two
+    failed separately - stlink asked for the `-rst` confirmation lines whichever
+    mode ran, so `halt` sent the right command and could still never report
+    success (#142). That one is answered by
+    test_stlink_confirms_each_reset_mode_on_the_lines_its_own_command_prints;
+    what this test has to hold is that the argument reaching the CLI is the one
+    the mode names."""
     config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=reset_probe_id(backend))))
     service = AgenticHILToolService(config)
     try:
