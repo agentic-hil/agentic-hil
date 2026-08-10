@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- The stlink backend serves `debug_dump_symbol_ihex` through STM32CubeProgrammer's `-r` memory read: the symbol is resolved offline from the ELF a confirmed flash put on the board, via the configured `debug.gdb_executable` in a batch query that never attaches to the target; the allowlist, `debug.max_dump_size_bytes` and the result fields match the OpenOCD path, success is confirmed on the measured `Data read successfully` line, and typed debug sessions stay OpenOCD-only (#185)
+
 ## [0.11.0] - 2026-08-10
 
 ### Added
