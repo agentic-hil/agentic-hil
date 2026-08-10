@@ -847,6 +847,45 @@ def test_a_send_provably_not_started_aborts_only_that_participant(tmp_path: Path
     assert seated["alpha"].abort is None, "a provably-not-started send does not even abort its own participant"
 
 
+@pytest.mark.parametrize("enforcement", ["controller", "service"])
+def test_a_brokered_send_refuses_on_a_listen_only_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforcement: str) -> None:
+    """The same bus-level gate the single-owner `can_send` applies, by the same name.
+
+    `_listen_only_conflict` refuses a writer at attach, so this participant is
+    seated by hand — which is the point: the property belongs to the bus, not to
+    one check in the attach handler, and a share that reached the adapter by some
+    other door would still be transmitting onto a bus declared silent. The
+    adapter is a tripwire, and both enforcement levels answer alike, because
+    `listen_only: true` is the claim either way and `service` is the *weaker*
+    proof rather than a lesser claim.
+    """
+    config = shared_config(tmp_path, monkeypatch, listen_only=True, enforcement=enforcement)
+
+    class _Tripwire:
+        def send(self, frame: object) -> dict:
+            pytest.fail("the frame reached the adapter on a listen_only bus")
+
+    broker, seated = _inprocess_broker(tmp_path, config)
+    broker.adapter_session = _Tripwire()
+    assert seated["alpha"].share.permissions.allow_write is True, "writing is permitted; the bus is what refuses"
+    result = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\x01")})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "can_listen_only_mode"
+    assert result["error_type"] != "permission_denied"
+    assert result["participant"] == "alpha"
+    assert result["side_effect_status"] == "not_started"
+    assert result["retry_safe"] is False
+    # `listen_only_enforcement` is this bus's configured level, not the adapter's
+    # capability — the same renaming a brokered bus status performs, so a
+    # `service` claim is never printed as a controller state.
+    assert result["listen_only_enforcement"] == enforcement
+    assert result["listen_only_proof"] == ("controller" if enforcement == "controller" else "software_filter")
+    assert result["listen_only_adapter_capability"] == "bridge_confirmed"
+    assert broker.bus_gated is False, "a refused send is not a bus incident"
+    assert seated["alpha"].abort is None
+
+
 @pytest.mark.parametrize("fd, max_bytes, payload_len", [(False, 8, 9), (True, 64, 65)])
 def test_a_brokered_send_is_bounded_by_max_frame_data_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fd: bool, max_bytes: int, payload_len: int) -> None:
     """`shares:` must not become a way past the payload bound the single-owner

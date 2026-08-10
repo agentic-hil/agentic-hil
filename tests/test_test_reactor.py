@@ -8,6 +8,7 @@ from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_aut
 
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
 from agentic_hil.test_reactor import TestReactor, load_test_config, merge_result_status
 from agentic_hil.tools import AgenticHILToolService
 
@@ -1347,7 +1348,34 @@ steps:
     assert validation["listen_only"] is True
     assert validation["config_field"] == "can_buses.dut_can.listen_only"
     assert "listen_only" in validation["summary"]
+    # The same name the tool's own gate answers with, so this is one refusal with
+    # one catalogue entry rather than a plan-shaped rhyme of it. A reader who met
+    # `can_listen_only_mode` at the bench meets it here too.
+    assert validation["error_type"] == LISTEN_ONLY_MODE_ERROR
+    assert validation["error_type"] != "permission_denied", "the mode is not a permission, on either route"
     assert service.calls == []
+
+
+def test_a_can_send_step_is_refused_by_the_tool_even_if_preflight_is_bypassed(tmp_path: Path) -> None:
+    """The plan route's second line of defence, and the reason it is a second one.
+
+    Preflight is the better refusal — it names the plan's own contradiction
+    before a session exists — but it is a check the reactor performs, and a check
+    can be got round. The tool the step routes to answers the same way for a call
+    that arrives at it anyway, so the guarantee does not rest on preflight having
+    run.
+    """
+    from agentic_hil.can import CanBusService
+
+    config = can_config(tmp_path, listen_only=True, allow_write=True)
+    service = CanBusService(config)
+    try:
+        result = service.send("dut_can", {"frame_id": "0x7ff", "data_hex": "01"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == LISTEN_ONLY_MODE_ERROR
 
 
 def test_reactor_closes_an_open_can_session_after_a_failed_step(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from agentic_hil.coordination import (
 from agentic_hil.devices import can_device
 from agentic_hil.knowledge import (
     CAN_INTERFACE_NOT_FOUND_ERROR,
+    LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
     LISTEN_ONLY_UNSUPPORTED_ERROR,
     remediation_fields,
@@ -303,6 +304,15 @@ class CanBusService:
         bus = self._configured_bus(bus_id, "can_send")
         if not bus["ok"]:
             return self._write_report(bus)
+        # Mode before permission, and the order is the contract rather than an
+        # accident of layout. `allow_write: true` on a `listen_only: true` bus is
+        # a configuration that says two incompatible things, and answering it
+        # with `permission_denied` would name the half that is not the problem —
+        # the reader would grant the permission it already has. So the bus's own
+        # claim is settled first and the permission is never reached.
+        mode = listen_only_send_refusal(bus_id, bus["bus_config"])
+        if mode is not None:
+            return self._write_report(mode)
         if not bus["bus_config"].permissions.allow_write:
             return self._write_report(self._permission_denied("can_send", "Writing to this CAN bus is disabled by the authoritative config.", bus_id))
         session_result = self._active_session(bus_id, "can_send")
@@ -543,6 +553,55 @@ class CanBusService:
         return result
 
 
+def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = "can_send") -> JsonObject | None:
+    """The one gate that stops a transmit on a bus configured ``listen_only: true``.
+
+    Placed at the tool layer, once, and deliberately not per adapter. `listen_only`
+    is a property of the bus entry, so the answer cannot differ between PEAK,
+    SocketCAN and the process bridge without the flag meaning three things; and
+    the layer that has the `CanBusConfig` in hand is the only one that can refuse
+    *before* a driver is called, which is the requirement — a refusal produced by
+    an adapter would already have handed the frame over.
+
+    It also does not lean on the adapter to fail the send, because the installed
+    adapter does not. python-can 4.6.1's ``PcanBus.send()`` never reads the bus
+    state: it builds the TPCANMsg and calls ``PCANBasic.Write()``, raising only
+    when the driver's return code is not ``PCAN_ERROR_OK``. A PASSIVE channel's
+    transmit is therefore accepted and reported as sent, which is how a bench with
+    a driver-verified listen-only bus came to be told "CAN frame sent." with no
+    frame on the wire. ``test_can_listen_only.py`` pins that behaviour against the
+    installed library so this reasoning fails loudly if it ever stops being true.
+
+    Returns ``None`` for a bus that never made the claim, so the caller's ordinary
+    path is untouched.
+    """
+    if not bus_config.listen_only:
+        return None
+    return {
+        "ok": False,
+        "tool": tool,
+        "bus_id": bus_id,
+        "error_type": LISTEN_ONLY_MODE_ERROR,
+        "field": f"can_buses.{bus_id}.listen_only",
+        "listen_only": True,
+        "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter],
+        "summary": (
+            f"CAN bus {bus_id} is configured `listen_only: true` — the claim that observing it sends nothing — so a "
+            "transmit on it is refused before any driver is called, whatever permissions.allow_write says. To "
+            "transmit, add a second can_buses entry for this channel with `listen_only: false` and send on that one, "
+            f"or set `can_buses.{bus_id}.listen_only: false` if this bus may be transmitted on after all."
+        ),
+        # About this call, and true of every adapter: nothing was handed to a
+        # driver, so no frame can be in any transmit queue. Not `retry_safe` —
+        # the same call gets the same answer until the configuration changes,
+        # and calling it again is not the remedy.
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": False,
+        **remediation_fields(LISTEN_ONLY_MODE_ERROR),
+    }
+
+
 def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
     """Open the configured adapter, recording contact into ``contact``.
 
@@ -564,6 +623,27 @@ class PythonCanAdapterSession:
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
+        """Hand the frame to python-can. ``ok`` here is acceptance, not arrival.
+
+        Worth being exact about, because the layer above turns this into "CAN
+        frame sent." On PEAK, ``PcanBus.send()`` in the installed python-can
+        (4.6.1) builds a TPCANMsg, calls ``PCANBasic.Write()``, and raises only
+        when the return code is not ``PCAN_ERROR_OK`` — a code that reports the
+        frame was taken into the controller's transmit queue. It says nothing
+        about arbitration, about an ACK, or about any node having seen it.
+
+        The measured consequence: that ``send()`` never reads the bus state.
+        There is no ``BusState`` or ``PASSIVE`` check in it, so a channel put
+        into listen-only through ``state=BusState.PASSIVE`` accepts a transmit
+        and answers success, on hardware that emits no dominant bit. python-can
+        will not refuse this for us, which is why `listen_only_send_refusal()`
+        settles the mode at the tool layer before anything reaches here rather
+        than relying on a backend error that does not come.
+
+        Not widened into a claim this call cannot make: nothing here waits for an
+        ACK or reads a transmit-confirmation, so the honest report is that the
+        adapter accepted the frame, and the wire is a bench observation.
+        """
         try:
             import can
 

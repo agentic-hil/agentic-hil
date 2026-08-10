@@ -906,8 +906,33 @@ class CanBroker:
             return {"ok": True, "message": "incident_recorded", "scope": scope, "reason": reason, "bus_gated": self.bus_gated, "aborted_participants": aborted, "abort": abort}
 
     def _handle_send(self, attached: _Attached, message: JsonObject) -> JsonObject:
-        from agentic_hil.can import CanFrame
+        from agentic_hil.can import CanFrame, listen_only_send_refusal
 
+        # The same bus-level gate the single-owner `can_send` applies, in the
+        # same order — mode first, then this participant's permission. Reaching
+        # it means `_listen_only_conflict` let a writer onto a listen-only bus at
+        # attach, which it does not; the line is here so that the property being
+        # enforced belongs to the bus rather than to one check in the attach
+        # handler, and so a future share that transmits without
+        # `permissions.allow_write` cannot arrive at the adapter through a door
+        # the attach gate never watched.
+        mode = listen_only_send_refusal(self.bus_id, self.bus_config)
+        if mode is not None:
+            # `listen_only_enforcement` means the adapter's capability in the
+            # single-owner refusal and the configured enforcement level here, so
+            # it is restated in this bus's vocabulary rather than forwarded — the
+            # same renaming `_bus_status` performs, and for the same reason: a
+            # `driver_verified` printed above a `software_filter` proof reads as
+            # a controller state nobody put the controller into.
+            restated = {key: value for key, value in mode.items() if key != "tool"}
+            return {
+                **restated,
+                "participant": attached.name,
+                "bus_key": self.bus_key,
+                "listen_only_adapter_capability": mode["listen_only_enforcement"],
+                "listen_only_enforcement": self.bus_config.listen_only_enforcement,
+                "listen_only_proof": listen_only_proof(self.bus_config),
+            }
         if not attached.share.permissions.allow_write:
             return {"ok": False, "error_type": "permission_denied", "summary": "Writing this CAN bus is disabled for this participant by the authoritative config.", "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
         wire = message.get("frame")
