@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_GDB, write_config
+from conftest import FAKE_GDB, FAKE_STLINK, FAKE_STLINK_READ_UNCONFIRMED, write_config
 
+from agentic_hil.backends.common import command_for_log
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
@@ -1132,3 +1134,242 @@ def test_direct_debug_call_reenters_validation_for_invalid_timeout(tmp_path: Pat
         assert result["ok"] is False, (tool, result)
         assert result["error_type"] == "invalid_argument", (tool, result)
         assert result["field"] == "timeout_s", (tool, result)
+
+
+# --- the stlink backend's route to the same dump ---------------------------
+#
+# STM32CubeProgrammer reads target memory without a GDB session, so
+# `debug_dump_symbol_ihex` is served on that backend too. What these pin is that
+# a caller cannot tell which backend answered: the same arguments, the same
+# refusals, the same success fields. The differences that remain are the ones
+# honesty forces — where the symbol table comes from, and that a read whose
+# confirmation line never printed says so.
+
+
+def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLINK, **config_kwargs) -> AgenticHILToolService:
+    config_path = write_config(
+        tmp_path,
+        debugger_type="stlink",
+        debugger_executable=debugger_executable,
+        gdb_executable=FAKE_GDB,
+        **config_kwargs,
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def flash_symbol_source(service: AgenticHILToolService) -> dict:
+    return service.call("flash_firmware", {"image_path": "build/app.elf"})
+
+
+def test_stlink_dump_reads_target_memory_and_writes_intel_hex(tmp_path: Path) -> None:
+    """The whole route, end to end, on the backend that has no debug session.
+
+    The ELF is flashed first because that is what makes a symbol table describe
+    the board: the address this resolves is read out of the image the target is
+    running, not out of some file that happened to be lying in the workspace.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/new/nested/memory.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    assert dumped["backend"] == "stlink"
+    assert dumped["symbol"] == "CTC_array"
+    assert dumped["address"] == hex(CTC_ARRAY_ADDRESS)
+    assert dumped["size_bytes"] == CTC_ARRAY_SIZE
+    assert dumped["summary"] == "Symbol memory dumped as Intel HEX."
+    # Which image answered the symbol, so an operator reading the result can
+    # tell whether the address belongs to the build on the board.
+    assert dumped["symbol_source"]["path"] == "build/app.elf"
+    hex_lines = (tmp_path / "build" / "new" / "nested" / "memory.hex").read_text(encoding="ascii").splitlines()
+    assert hex_lines[0] == ":020000042000DA"
+    assert hex_lines[-1] == ":00000001FF"
+
+
+def test_stlink_dump_sends_the_measured_read_invocation(tmp_path: Path) -> None:
+    """`-r <address> <size> <file>` behind the reset family's connect arguments.
+
+    The address is hex and the size decimal because that is the form the CLI was
+    measured accepting; the connect block is `mode=NORMAL` because a read is
+    addressed to a target the way a reset is, not with the HOTPLUG connect a
+    bare probe uses.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    logged = json.loads((tmp_path / dumped["log_path"]).read_text(encoding="utf-8"))["command"]
+    assert logged.endswith(
+        command_for_log(["-c", "port=SWD", "mode=NORMAL", "-r", hex(CTC_ARRAY_ADDRESS), str(CTC_ARRAY_SIZE), str(tmp_path / "build" / "memory.hex")])
+    )
+
+
+def test_stlink_dump_confirms_success_only_on_the_measured_read_line(tmp_path: Path) -> None:
+    """A CLI that connected, printed its banner and never confirmed the read.
+
+    `Data read successfully` is the only line that means the bytes arrived. The
+    connect banner is not a substitute: this fixture prints the ST-Link serial,
+    the device name and the whole UPLOADING block, and none of that may be read
+    as a confirmed read. The result is also not allowed to call itself harmless
+    — the probe was attached to a live core and the CLI never said where it
+    stopped — so the side effect is unknown rather than not_started.
+    """
+    service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_READ_UNCONFIRMED)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is False, dumped
+    assert dumped["error_type"] == "memory_read_failed"
+    assert dumped["backend_error_type"] == "memory_read_unconfirmed"
+    assert dumped["operation_result"] == {"confirmed": False, "expected_success_text": ["Data read successfully"], "matched_success_text": []}
+    assert dumped["side_effect_status"] == "unknown"
+    assert dumped["retry_safe"] is False
+    assert dumped.get("target_contacted") is not False
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_stlink_dump_refuses_a_symbol_the_allowlist_does_not_carry(tmp_path: Path) -> None:
+    """The OpenOCD path's refusal, word for word, before anything is spawned."""
+    service = stlink_dump_service(tmp_path, allowed_symbols=["other_symbol"])
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == "Symbol is not allowed by debug.allowed_symbols."
+    assert refused["symbol"] == "CTC_array"
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_stlink_dump_refuses_a_symbol_larger_than_the_configured_cap(tmp_path: Path) -> None:
+    """`debug.max_dump_size_bytes` is enforced on the resolved size, not on a guess.
+
+    The cap is checked after the offline query and before the probe is opened,
+    so an oversized symbol costs a refusal rather than a partial read.
+    """
+    service = stlink_dump_service(tmp_path, max_dump_size_bytes=CTC_ARRAY_SIZE - 1)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == "Symbol dump exceeds debug.max_dump_size_bytes."
+    assert refused["size_bytes"] == CTC_ARRAY_SIZE
+    assert refused["max_dump_size_bytes"] == CTC_ARRAY_SIZE - 1
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_stlink_dump_names_the_gdb_it_needs_when_the_bench_has_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bench with no GDB is told which field to set, not that the symbol is bad.
+
+    The offline query is the one thing this route needs that the vendor CLI does
+    not provide, so its absence has to be named. With `debug.gdb_executable`
+    unset and nothing autodetectable on PATH, config load pins the disabled
+    placeholder and the dump refuses before it opens the probe.
+    """
+    monkeypatch.setenv("PATH", "")
+    config_path = write_config(tmp_path, debugger_type="stlink", gdb_executable=None)
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        service._symbol_elf = service.artifacts.validate_local_path("build/app.elf")["artifact"]
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "gdb_not_found"
+    assert refused["summary"] == "No GDB executable could be found."
+    assert "set debug.gdb_executable in the authoritative project config" in refused["likely_causes"]
+    assert refused["symbol"] == "CTC_array"
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_stlink_dump_refuses_before_a_symbol_table_describes_the_target(tmp_path: Path) -> None:
+    """No flashed ELF, no answer — and the refusal says what is missing.
+
+    A session gets its symbol table by loading the image; this backend has no
+    session, so the only image it may resolve against is the one it put on the
+    board. Guessing at a file in the workspace would answer with an address that
+    is right about a build and wrong about the target.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_source_not_available"
+    assert "flash_firmware" in refused["summary"]
+    assert refused["target_contacted"] is False
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path) -> None:
+    """One tool crossed over; the rest of the family still refuses and says why."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        results = {
+            "debug_start_session": service.call("debug_start_session", {"image_path": "build/app.elf"}),
+            "debug_set_breakpoint": service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}}),
+            "debug_symbol_info": service.call("debug_symbol_info", {"symbol": "CTC_array"}),
+        }
+    finally:
+        service.close()
+
+    for tool, result in results.items():
+        assert result["ok"] is False, (tool, result)
+        assert result["error_type"] == "not_supported", (tool, result)
+        assert result["summary"] == "Typed debug sessions require the OpenOCD backend.", (tool, result)
+
+
+def test_openocd_dump_still_resolves_through_its_own_session(tmp_path: Path) -> None:
+    """The service now carries a flashed ELF; the OpenOCD path must ignore it.
+
+    A session has the image loaded, so its symbol table is the target's by
+    construction. Resolving against the service's ELF instead would answer out
+    of whatever was flashed last, which is not necessarily what the session
+    attached to.
+    """
+    service = debug_service(tmp_path)
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        assert service._symbol_elf is not None
+        assert start_debug_session(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+        assert service.call("debug_stop_session")["ok"] is True
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    assert dumped["backend"] == "openocd"
+    assert dumped["address"] == hex(CTC_ARRAY_ADDRESS)
+    assert dumped["size_bytes"] == CTC_ARRAY_SIZE
+    assert dumped["summary"] == "Symbol memory dumped as Intel HEX."
+    # The session answered, so no ELF of the service's travels in the result.
+    assert "symbol_source" not in dumped
+    assert (tmp_path / "build" / "memory.hex").read_text(encoding="ascii").splitlines()[0] == ":020000042000DA"
