@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -41,7 +42,7 @@ from agentic_hil.canbroker import (
     endpoint_family,
     read_descriptor,
 )
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.devices import can_device
 from agentic_hil.redact import redact_sensitive
 
@@ -1055,7 +1056,10 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
     kernel cap so the socket cannot be bound at all — the failure a caller used to
     meet as the broker start timeout elapsing. The endpoint must instead be one
     that fits, and a real broker must bind and serve on it with that same long
-    `TMPDIR` inherited by the child."""
+    `TMPDIR` inherited by the child. That escape exists on Windows (named pipes)
+    and Linux (abstract sockets); a POSIX host without abstract sockets has
+    none, and there the honest answer is the named refusal — whose remediation,
+    a short `XDG_RUNTIME_DIR`, must itself work."""
     import tempfile as tempfile_module
 
     from agentic_hil.bench import BenchMutex
@@ -1072,6 +1076,23 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
     # `gettempdir` caches its answer; clear it so the long TMPDIR is re-read here
     # and in the child, which inherits the environment.
     monkeypatch.setattr(tempfile_module, "tempdir", None)
+
+    if os.name != "nt" and not canbroker._abstract_sockets_supported():
+        # No named pipes, no abstract sockets: nothing can make this path fit,
+        # and pretending otherwise would bind nothing. The refusal names the
+        # way out, and the way out must actually work.
+        with pytest.raises(ConfigError) as refused:
+            canbroker.endpoint_address(bus_key, lock_root)
+        assert refused.value.error_type == "config_invalid"
+        assert "XDG_RUNTIME_DIR" in str(refused.value)
+        short_runtime = Path(tempfile_module.mkdtemp(prefix="ahil-", dir="/tmp"))
+        try:
+            monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_runtime))
+            remediated = canbroker.endpoint_address(bus_key, lock_root)
+            assert len(os.fsencode(remediated)) < canbroker._UNIX_PATH_MAX, remediated
+        finally:
+            shutil.rmtree(short_runtime, ignore_errors=True)
+        return
 
     address = canbroker.endpoint_address(bus_key, lock_root)
     assert len(os.fsencode(address)) < canbroker._UNIX_PATH_MAX, address
