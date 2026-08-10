@@ -934,8 +934,16 @@ class CanBroker:
             # The adapter itself raised: that is the bus, not this participant.
             # The frame was already handed to the controller, so the effect is
             # unknown — not the `side_effect_committed: false` a raise used to
-            # claim.
-            return self._raise_bus_incident("can_adapter_send_raised", f"{type(error).__name__}: {error}", extra={"side_effect_status": "unknown"})
+            # claim. Allocate the sequence and log the attempted transmit first,
+            # exactly as the returned-failure path does: the participant records
+            # this send under the `frame_seq` the incident carries back, so the
+            # whole-bus log stays complete and the frame is attributable from
+            # either end even when the effect is unknown.
+            with self._guard:
+                self.frame_seq += 1
+                seq = self.frame_seq
+                self._log_bus({"event": "frame", "seq": seq, "direction": "tx", "bus_id": self.bus_id, "participant": attached.name, "frame": wire, "ok": False})
+            return self._raise_bus_incident("can_adapter_send_raised", f"{type(error).__name__}: {error}", extra={"side_effect_status": "unknown", "frame_seq": seq, "frame": wire})
         with self._guard:
             self.frame_seq += 1
             seq = self.frame_seq

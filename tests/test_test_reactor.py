@@ -758,6 +758,68 @@ def test_a_failed_multi_debugger_run_recovers_through_the_touched_probes(tmp_pat
     assert set(recovery["recoveries"]) == {"dut", "probe_b"}
 
 
+def test_a_probe_used_only_as_a_delay_route_is_not_recovered(tmp_path: Path) -> None:
+    # `delay` is declared `touches_device=False`: it routes to a named probe and
+    # is recorded as a step, but drives no hardware. A run that delays on one probe
+    # and then fails a real reset on another must recover only the probe it drove —
+    # resetting and halting a board no hardware action in the plan ever reached is
+    # exactly what recovery must not do.
+    from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+            )
+        )
+    )
+    assert config.debugger_id is None
+
+    class ClosableRecordingService(RecordingService):
+        def close(self) -> None:
+            self.closed = True
+
+    base = ClosableRecordingService()
+    built: dict[str, ClosableRecordingService] = {}
+
+    def factory(bound_config) -> ClosableRecordingService:
+        svc = ClosableRecordingService(fail_call="reset_target" if bound_config.debugger_id == "probe_b" else None)
+        built[bound_config.debugger_id] = svc
+        return svc
+
+    plan = TestConfig(
+        path=str(tmp_path / "plan.yaml"),
+        name="delay-then-abort",
+        steps=[
+            TestStep("delay", {"duration_ms": 1}, debugger="dut"),
+            TestStep("reset", {"mode": "run"}, debugger="probe_b"),
+        ],
+    )
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(plan)
+    finally:
+        reactor.close()
+
+    assert result["ok"] is False, result
+    assert result["failed_step"] == 2
+
+    # The delay step still built dut's device and per-probe service, so absence
+    # from `devices` is not why it is spared — it is spared because it drove nothing.
+    assert "dut" in built, "the delay step builds dut's device and service"
+    assert built["dut"].recovery_calls == [], "a delay-only probe must not be recovered"
+    assert built["probe_b"].recovery_calls == [["probe_b"]]
+    assert base.recovery_calls == []
+    assert "probe_c" not in built
+
+    recovery = result["recovery"]
+    assert recovery["outcome"] == "recovered", recovery
+    # Exactly one probe was driven, so recovery took the single-probe path — there
+    # is no per-probe aggregate that could name the delay-only dut.
+    assert "recoveries" not in recovery
+
+
 def test_config_rejects_named_debuggers_that_share_a_physical_probe(tmp_path: Path) -> None:
     # Two names, one probe serial: both entries would drive the same board while
     # a plan believes it addressed two.
@@ -2592,7 +2654,7 @@ def test_can_comparator_ignores_a_frame_carrying_the_payload_under_another_id(tm
     read = result["steps"][1]["result"]
     assert read["error_type"] == "comparator_unmet"
     assert read["summary"] == "No frame on the CAN bus carried the expected payload before this step's timeout."
-    assert read["frames_tail"] == [{"id_hex": "0x120", "data_hex": "01ff"}, {"id_hex": "0x7ff", "data_hex": "01ff"}]
+    assert read["frames_tail"] == [{"id_hex": "0x120", "data_hex": "01ff", "extended": False}, {"id_hex": "0x7ff", "data_hex": "01ff", "extended": False}]
     assert read["frames_tail_truncated"] is False
     assert read["frames_read"] == 2
 
@@ -2662,6 +2724,28 @@ def test_a_masked_can_comparator_still_separates_the_frame_types(tmp_path: Path)
     assert result["ok"] is False
     read = result["steps"][1]["result"]
     assert read["error_type"] == "comparator_unmet"
+    # The rejected frame was the extended twin inside a standard-typed family, and
+    # the tail keeps `extended` so the failure shows the frame type rather than a
+    # frame that reads as identical to the one the plan asked for.
+    assert read["frames_tail"] == [{"id_hex": "0x12f", "data_hex": "deadbeef", "extended": True}]
+
+
+def test_a_standard_comparator_shows_the_frame_type_of_the_extended_twin_it_rejected(tmp_path: Path) -> None:
+    # The reproduction the review named: an extended 0x123 carrying the expected
+    # payload, judged by a standard comparator. It is rejected on frame type, and
+    # its `frames_tail` entry must carry `extended: true` — otherwise the failure
+    # shows an id and a payload identical to the requested frame and omits the only
+    # field that explains why it did not match.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["frames_tail"] == [{"id_hex": "0x123", "data_hex": "01ff", "extended": True}]
 
 
 def test_can_comparator_range_reads_its_capture_in_the_base_the_payload_is_written_in(tmp_path: Path) -> None:
@@ -2698,7 +2782,7 @@ def test_can_comparator_range_fails_naming_the_value_it_did_capture(tmp_path: Pa
     assert read["summary"] == "No value captured from a frame's payload fell inside the expected range before this step's timeout."
     assert read["captured_value"] == 145.0
     assert read["comparator"]["range"] == {"min": 20, "max": 30}
-    assert read["frames_tail"] == [{"id_hex": "0x201", "data_hex": "0291"}]
+    assert read["frames_tail"] == [{"id_hex": "0x201", "data_hex": "0291", "extended": False}]
 
 
 def test_can_comparator_caps_the_frames_it_reports(tmp_path: Path) -> None:
@@ -2718,7 +2802,7 @@ def test_can_comparator_caps_the_frames_it_reports(tmp_path: Path) -> None:
     assert read["frames_tail_truncated"] is True
     # The last frames, not the first: what the bus was doing when the step gave
     # up is what an operator reads next.
-    assert read["frames_tail"][-1] == {"id_hex": "0x313", "data_hex": "00"}
+    assert read["frames_tail"][-1] == {"id_hex": "0x313", "data_hex": "00", "extended": False}
 
 
 def test_a_can_comparator_saying_two_things_at_once_is_refused(tmp_path: Path) -> None:

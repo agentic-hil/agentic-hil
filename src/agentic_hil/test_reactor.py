@@ -787,6 +787,11 @@ class StepDevice:
         self.device = device
         self.service = service
         self.cleanup_interrupts: list[BaseException] = []
+        # True once this device has actually run an action that drives it. A
+        # device object is built on first use, and `delay` routes to one without
+        # touching it, so being in the run's `devices` map is not proof the run
+        # drove this unit — failure recovery asks this instead.
+        self.drove_device = False
         # This device's actions, bound: the string a plan writes, the schema that
         # validates it and the method that runs it, in one place, built once.
         self.actions: dict[str, BoundStepAction] = {
@@ -905,6 +910,11 @@ class StepDevice:
         invalid = self.schema_refusal(bound.spec, step)
         if invalid is not None:
             return invalid
+        if bound.spec.touches_device:
+            # Recorded before the call, not after: an action that drove the probe
+            # and then failed — the reset this run is recovering from — still
+            # drove it, and is exactly the device recovery must not skip.
+            self.drove_device = True
         return bound.call(step)
 
     def schema_refusal(self, spec: StepActionSpec, step: TestStep) -> JsonObject | None:
@@ -1536,7 +1546,12 @@ class CanRunner(SessionDevice):
             frames = result.get("frames") or []
             frames_read += len(frames)
             for frame in frames:
-                seen.append({"id_hex": frame.get("id_hex"), "data_hex": frame.get("data_hex")})
+                # Keep `extended` beside id/payload: the comparator treats a
+                # standard 0x123 and its extended twin as distinct frames, so a
+                # tail entry that dropped the frame type would show a rejected
+                # extended frame as identical to the requested standard one and
+                # omit the only field that explains the mismatch.
+                seen.append({"id_hex": frame.get("id_hex"), "data_hex": frame.get("data_hex"), "extended": bool(frame.get("extended", False))})
                 del seen[:-CAN_COMPARATOR_TAIL_FRAMES]
                 if comparator.matches_frame(frame):
                     return CanReadOutcome(frame, reads, frames_read, seen)
@@ -2080,8 +2095,13 @@ class TestReactor:
 
         A run that drove no probe keeps the old base-service behaviour: a
         single-probe bench recovers its one board, and an unbound base service
-        reports honestly that nothing here establishes a target's state."""
-        touched = [(config_id, device) for (kind, config_id), device in sorted(self.devices.items()) if kind == DebuggerRunner.kind]
+        reports honestly that nothing here establishes a target's state.
+
+        Only a probe the run actually drove is recovered — `device.drove_device`,
+        not mere presence in `devices`. A probe used solely as a `delay` route is
+        constructed like any other but touched nothing, so resetting and halting
+        it here would drive a board no hardware action in the plan ever reached."""
+        touched = [(config_id, device) for (kind, config_id), device in sorted(self.devices.items()) if kind == DebuggerRunner.kind and device.drove_device]
         if not touched:
             return self.service.recover_after_failed_run(sorted({config_id for _, config_id in self.devices}))
         if len(touched) == 1:

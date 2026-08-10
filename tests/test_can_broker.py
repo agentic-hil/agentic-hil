@@ -793,7 +793,10 @@ def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path
 
     broker, seated = _inprocess_broker(tmp_path, config)
     broker.adapter_session = _Raising()
-    result = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\x01")})
+    bus_log = tmp_path / "bus.jsonl"
+    broker.bus_frame_log = str(bus_log)
+    wire = canbroker.frame_to_wire(0x101, b"\x01")
+    result = broker._handle_send(seated["alpha"], {"frame": wire})
 
     assert result["error_type"] == "can_bus_incident"
     assert result["bus_gated"] is True
@@ -802,6 +805,22 @@ def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path
     assert "side_effect_committed" not in result
     assert broker.bus_gated is True
     assert seated["beta"].abort is not None, "the neighbour is aborted too"
+
+    # The attempted transmit stays auditable even though its effect is unknown:
+    # the incident carries the frame and the sequence it was logged under, and the
+    # whole-bus log holds that same tx frame. A `Participant.send()` records this
+    # send under `result["frame_seq"]`, so the frame is attributable from either
+    # end — the invariant a returned send failure already keeps, now kept on the
+    # raise path too rather than leaving the bus log with only the incident.
+    seq = result["frame_seq"]
+    assert result["frame"] == wire
+    lines = [json.loads(line) for line in bus_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    tx = [line for line in lines if line.get("event") == "frame" and line.get("seq") == seq]
+    assert len(tx) == 1, lines
+    assert tx[0]["direction"] == "tx"
+    assert tx[0]["participant"] == "alpha"
+    assert tx[0]["frame"] == wire
+    assert tx[0]["ok"] is False
 
 
 def test_a_send_provably_not_started_aborts_only_that_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
