@@ -60,7 +60,26 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 STLINK_SUCCESS_CONFIRMATION = {
     "probe_target": ["ST-LINK SN", "Device name"],
     "flash_firmware": ["Download verified successfully"],
-    "reset_target": ["MCU Reset", "reset is performed"],
+}
+# One row per reset mode, holding the argument that goes on the wire and the
+# lines STM32CubeProgrammer prints when that argument did what it says. The two
+# belong to the same command and are kept together for that reason: `-rst` and
+# `-halt` are different commands with different success lines, and a single
+# marker set for `reset_target` carried the `-rst` lines only — mode `halt` did
+# exactly what it was asked, printed neither of them, and could therefore never
+# report anything but an unconfirmed outcome (#142).
+#
+# `-halt` measured on STM32CubeProgrammer v2.23.0 against a NUCLEO-F446RE: the
+# NORMAL connect banner carries `Reset mode  : Software reset` and the run ends
+# with `Core halted`. The banner settles what this mode does — a software reset
+# and then a halt, the same operation OpenOCD's and pyOCD's `reset halt`
+# perform — but it is not a second marker: connect prints it before the halt is
+# attempted, so a run that connected and then failed to halt prints it
+# unchanged. Only `Core halted` is the operation's own success line, and it is
+# the only one of the two a failure withholds.
+STLINK_RESET_MODES: dict[str, dict[str, list[str]]] = {
+    "run": {"args": ["-rst"], "success_text": ["MCU Reset", "reset is performed"]},
+    "halt": {"args": ["-halt"], "success_text": ["Core halted"]},
 }
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_DEVICE_PATTERN = re.compile(r"^\s*Device\s+name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
@@ -168,8 +187,8 @@ class STLinkBackend:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         if mode == "init":
             return reset_init_unsupported(self.backend_name, "STM32CubeProgrammer's CLI has no equivalent")
-        mode_args = {"run": ["-rst"], "halt": ["-halt"]}
-        result = self._run_stlink("reset_target", [*self._connection_args("NORMAL"), *mode_args[mode]])
+        selected = STLINK_RESET_MODES[mode]
+        result = self._run_stlink("reset_target", [*self._connection_args("NORMAL"), *selected["args"]], selected["success_text"])
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = f"Target reset with mode '{mode}'."
@@ -247,7 +266,7 @@ class STLinkBackend:
             return dict(STLINK_NOT_FOUND)
         return {"ok": True, "executable": found, "executable_path": found}
 
-    def _run_stlink(self, tool: str, action_args: list[str]) -> JsonObject:
+    def _run_stlink(self, tool: str, action_args: list[str], success_text: list[str] | None = None) -> JsonObject:
         started_at = utc_now_iso()
         start = time.perf_counter()
         resolved = self._resolve_executable()
@@ -268,7 +287,7 @@ class STLinkBackend:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
-            confirmation = self._confirm_operation_success(output, tool)
+            confirmation = self._confirm_operation_success(output, STLINK_SUCCESS_CONFIRMATION.get(tool, []) if success_text is None else success_text)
             if not confirmation["confirmed"]:
                 # Confirmation is all-or-nothing here, so this branch is also
                 # reached with some of the expected lines present — a read that
@@ -331,8 +350,9 @@ class STLinkBackend:
             return backend_error_type
         return None
 
-    def _confirm_operation_success(self, output: str, tool: str) -> JsonObject:
-        expected = STLINK_SUCCESS_CONFIRMATION.get(tool, [])
+    def _confirm_operation_success(self, output: str, expected: list[str]) -> JsonObject:
+        # All-or-nothing over whichever set the caller selected: a command is
+        # confirmed by every line it prints on success, and by nothing less.
         if not expected:
             return {"confirmed": True, "matched": None, "expected": expected}
         lower = output.lower()
