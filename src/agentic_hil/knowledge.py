@@ -118,6 +118,14 @@ EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase"
 # to "listening anyway" is the defect these exist to prevent.
 LISTEN_ONLY_UNSUPPORTED_ERROR = "can_listen_only_unsupported"
 LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
+# A transmit asked for on a bus configured `listen_only: true`. Not a shade of
+# `permission_denied`, and the distinction is the whole point: permission is
+# about what this caller may do on a bus that can carry the frame, while this is
+# about a bus that was declared to carry none. So the mode is settled first and
+# `allow_write` never gets to speak — a bus is not made transmit-capable by
+# granting a permission on it, and answering "denied" would have invited exactly
+# that fix. The two gates coexist in that order and only in that order.
+LISTEN_ONLY_MODE_ERROR = "can_listen_only_mode"
 # A SocketCAN channel that is not a netdev on this host. Its own error_type
 # rather than a shade of `can_adapter_open_failed`, because it is the one open
 # failure whose outcome is not merely unproven: the bind had nothing to bind to,
@@ -1205,6 +1213,39 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not answer `listen_only: true` unconditionally to clear the refusal. That reintroduces the defect one "
             "process further out, where nothing in this repository can see it.",
+        ),
+    ),
+    LISTEN_ONLY_MODE_ERROR: ErrorRemedy(
+        meaning=(
+            "A transmit was asked for on a CAN bus configured `can_buses.<name>.listen_only: true`, and was refused "
+            "before the frame reached any driver. `listen_only` is a bus-level claim — that observing this bus sends "
+            "nothing — and a controller held to it emits no dominant bit, so the frame could not have left it. This is "
+            "not a permission: `permissions.allow_write` is never consulted, because a bus is not made "
+            "transmit-capable by granting a permission on it. The refusal is the same on every adapter and through "
+            "every route — the direct tool, a test plan's `can_send` step, a broker participant — because the flag "
+            "describes the medium rather than the caller."
+        ),
+        remediation=(
+            "If this bench really must not be disturbed, the send is the thing that is wrong. Drop it, or read the "
+            "bus instead: `can_read` is what a `listen_only` bus is for.",
+            "If some traffic must be transmitted and some observed, declare a second `can_buses` entry for the "
+            "transmitting side — its own name, `listen_only: false` — and send on that one. Two entries make the two "
+            "intentions separately readable, which one entry with a flag flipped mid-run never does.",
+            "If the bus may be transmitted on after all, set `listen_only: false` on that entry. That is an honest "
+            "configuration and the refusal goes away, because nothing is being claimed any more.",
+            "`can_buses_list` reports `listen_only` and `listen_only_enforcement` for every configured bus, so which "
+            "buses will refuse a transmit is readable before anything is started.",
+        ),
+        do_not=(
+            "Do not grant `permissions.allow_write` in the hope of clearing this. The mode is settled first and the "
+            "permission is never read; adding it only widens what the config allows without changing this answer.",
+            "Do not flip `listen_only: false` on a bus carrying somebody else's traffic — a vehicle, a rig, hardware "
+            "that is not yours — merely to get one frame out. That is the exact case the flag is for, and the "
+            "controller would begin ACKing every frame on the medium, not only the one being sent.",
+            "Do not reach past Agentic HIL to a python-can script or `cansend` to transmit anyway. On PEAK, "
+            "python-can's `send()` does not consult the bus state at all: it hands the frame to `PCANBasic.Write` and "
+            "reports success for queue acceptance, so a script would answer `sent` and tell you nothing about the "
+            "wire.",
         ),
     ),
     "can_adapter_protocol_unsupported": ErrorRemedy(

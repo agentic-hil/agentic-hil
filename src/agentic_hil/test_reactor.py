@@ -37,6 +37,7 @@ from agentic_hil.devices import (
     debugger_device,
     uart_device,
 )
+from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
@@ -1494,12 +1495,22 @@ class CanRunner(SessionDevice):
             # settles the mode when the session opens, long before the send step
             # would be reached. Refusing the plan says which of its two halves to
             # change; refusing at the bench would only say the frame did not go.
+            #
+            # Named `can_listen_only_mode`, the same as the tool's own gate. The
+            # plan route reaches it earlier — at preflight, before a session is
+            # opened — but it is one refusal with one catalogue entry, so a
+            # reader who has met it once has met it everywhere. Note the ordering
+            # above: `allow_write` is checked first here and the mode first in
+            # the tool. A plan that names a bus it cannot write is a plan to
+            # correct whichever way round, and preflight answers about the plan;
+            # the tool answers about the bench, where the mode is the fact that
+            # cannot be granted away.
             return preflight_error(
                 index,
                 step,
                 "action",
-                "This CAN bus is configured `listen_only: true` — the claim that observing it sends nothing — so a plan cannot also send on it. Send on a bus configured `listen_only: false`, or drop the send step.",
-                {"listen_only": True, "config_field": f"can_buses.{cls.step_config_id(reactor.config, step)}.listen_only"},
+                "This CAN bus is configured `listen_only: true` — the claim that observing it sends nothing — so a plan cannot also send on it. Send on a second `can_buses` entry configured `listen_only: false`, drop the send step, or set `listen_only: false` on this entry if the bus may be transmitted on.",
+                {"error_type": LISTEN_ONLY_MODE_ERROR, "listen_only": True, "config_field": f"can_buses.{cls.step_config_id(reactor.config, step)}.listen_only"},
             )
         return None
 
