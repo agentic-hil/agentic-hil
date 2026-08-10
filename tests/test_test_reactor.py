@@ -696,6 +696,68 @@ def test_reactor_builds_one_service_per_named_debugger(tmp_path: Path) -> None:
     assert built[0].closed is True
 
 
+def test_a_failed_multi_debugger_run_recovers_through_the_touched_probes(tmp_path: Path) -> None:
+    # The base service is unbound in the multi-probe CLI (`config.debugger` is
+    # None), and debugger steps run on per-probe services. Recovery has to follow
+    # them: recovering through the unbound base withholds reset as
+    # `allow_reset_missing` while the probes the plan drove are left as the failed
+    # run put them, and it must never reach for a probe the run never named.
+    from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: openocd\n    resource_id: rb\n  probe_c:\n    type: openocd\n    resource_id: rc\n",
+            )
+        )
+    )
+    assert config.debugger_id is None, "a config with several probes leaves the base service unbound"
+
+    class ClosableRecordingService(RecordingService):
+        def close(self) -> None:
+            self.closed = True
+
+    base = ClosableRecordingService()
+    built: dict[str, ClosableRecordingService] = {}
+
+    def factory(bound_config) -> ClosableRecordingService:
+        svc = ClosableRecordingService(fail_call="reset_target" if bound_config.debugger_id == "probe_b" else None)
+        built[bound_config.debugger_id] = svc
+        return svc
+
+    plan = TestConfig(
+        path=str(tmp_path / "plan.yaml"),
+        name="multi-probe-abort",
+        steps=[
+            TestStep("reset", {"mode": "run"}, debugger="dut"),
+            TestStep("reset", {"mode": "run"}, debugger="probe_b"),
+        ],
+    )
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(plan)
+    finally:
+        reactor.close()
+
+    assert result["ok"] is False, result
+    assert result["failed_step"] == 2
+
+    # Each touched probe recovered through its own bound service; the base
+    # service — bound to no probe — was never asked to.
+    assert built["dut"].recovery_calls == [["dut"]]
+    assert built["probe_b"].recovery_calls == [["probe_b"]]
+    assert base.recovery_calls == [], "the unbound base service must not be the one recovered"
+    # A probe the plan never named is neither built nor touched.
+    assert "probe_c" not in built
+
+    recovery = result["recovery"]
+    assert recovery["outcome"] == "recovered", recovery
+    assert recovery["devices"] == ["dut", "probe_b"]
+    assert recovery["recovered_debuggers"] == ["dut", "probe_b"]
+    assert set(recovery["recoveries"]) == {"dut", "probe_b"}
+
+
 def test_config_rejects_named_debuggers_that_share_a_physical_probe(tmp_path: Path) -> None:
     # Two names, one probe serial: both entries would drive the same board while
     # a plan believes it addressed two.
@@ -2550,6 +2612,56 @@ def test_can_comparator_reads_an_identifier_family_through_a_mask(tmp_path: Path
     # 0x100 is outside the family the mask describes; 0x12f is inside it, and
     # both carry the payload the pattern would otherwise match.
     assert read["frame"]["id_hex"] == "0x12f"
+
+
+def test_a_can_comparator_selects_by_frame_type_not_identifier_alone(tmp_path: Path) -> None:
+    # A standard 0x123 and an extended 0x123 are two different frames on the wire.
+    # A comparator that does not say `extended` waits for the standard one, so the
+    # extended twin carrying the expected payload is passed over and the standard
+    # twin behind it is the match — the same distinction the broker's participant
+    # filters draw. Without the discriminator the extended twin was a false accept.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}')
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff", extended=True)], [can_frame(0x123, "01ff")]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["frame"]["extended"] is False
+    assert read["reads"] == 2, "the extended twin was passed over; the standard frame in the next read is the match"
+
+
+def test_a_can_comparator_marked_extended_waits_for_the_extended_frame(tmp_path: Path) -> None:
+    # The mirror: `extended: true` matches the extended frame of that number and
+    # passes over its standard twin, so the type match is a match and not a
+    # blanket refusal.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x123", extended: true, equals: "01ff"}')
+    service = RecordingService(can_reads=[[can_frame(0x123, "01ff")], [can_frame(0x123, "01ff", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["frame"]["extended"] is True
+    assert read["comparator"]["extended"] is True
+    assert read["reads"] == 2, "the standard twin was passed over; the extended frame in the next read is the match"
+
+
+def test_a_masked_can_comparator_still_separates_the_frame_types(tmp_path: Path) -> None:
+    # The type match holds under a mask too: an id_mask widens which numbers a
+    # comparator selects, never which frame namespace, so an extended frame inside
+    # a standard-typed family is still not the frame the plan asked about.
+    config = can_config(tmp_path)
+    plan_path = can_comparator_plan(tmp_path, '{id: "0x120", id_mask: "0x7f0", extended: false, pattern: "^dead"}', timeout_s="0.05")
+    service = RecordingService(can_reads=[[can_frame(0x12F, "deadbeef", extended=True)]])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
 
 
 def test_can_comparator_range_reads_its_capture_in_the_base_the_payload_is_written_in(tmp_path: Path) -> None:

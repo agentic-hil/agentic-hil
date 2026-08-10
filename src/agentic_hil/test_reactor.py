@@ -1314,6 +1314,11 @@ class CanFrameComparator(StepComparator):
         # nobody asked about.
         self.frame_id: int | None = parse_can_id(raw.get("id"))
         self.id_mask: int | None = None if raw.get("id_mask") is None else parse_can_id(raw["id_mask"])
+        # A standard 0x123 and an extended 0x123 are two different frames on the
+        # wire, so the frame type is part of the claim, not a decoration. The
+        # schema defaults it to `false`, so a comparator that does not say waits
+        # for a standard frame; the received frames each carry `extended`.
+        self.extended: bool = bool(raw.get("extended", False))
 
     def number(self, text: str) -> float:
         """A capture taken out of payload hexadecimal is a hexadecimal numeral."""
@@ -1322,6 +1327,12 @@ class CanFrameComparator(StepComparator):
     def selects(self, frame: JsonObject) -> bool:
         """Whether this is a frame the plan is asking about at all."""
         if self.frame_id is None:
+            return False
+        if bool(frame.get("extended", False)) != self.extended:
+            # An identifier match across the two namespaces is not a match: a
+            # standard frame and its extended twin are distinct frames, the same
+            # distinction the broker's participant filters draw. A comparator can
+            # therefore never pass on traffic from the wrong frame type.
             return False
         if self.id_mask is None:
             return int(frame["id"]) == self.frame_id
@@ -2051,8 +2062,57 @@ class TestReactor:
             # Reached for a failed cleanup as well as for a failed step —
             # cleanup is where the unconfirmed-effect incidents come from, and
             # those are precisely the ones that used to sit until a person came.
-            result["recovery"] = self.service.recover_after_failed_run(sorted(self.devices))
+            result["recovery"] = self._recover_after_failed_run()
         return result
+
+    def _recover_after_failed_run(self) -> JsonObject:
+        """Recover every probe the run drove, each through its own bound service.
+
+        Debugger steps run on per-probe services (see `DebuggerRunner.service_for`),
+        and both reset-into-halt and the probe re-read act on one probe's backend.
+        The base service is either unbound — the multi-probe CLI leaves
+        `config.debugger` None — or bound to a probe this run may never have
+        driven, so recovering through it resets the wrong board, or withholds
+        reset as `allow_reset_missing`, while the probes the plan actually drove
+        are left as the failed run put them. So each touched probe is recovered
+        through the service that drove it, no probe the run never named is
+        touched, and the per-probe outcomes are aggregated.
+
+        A run that drove no probe keeps the old base-service behaviour: a
+        single-probe bench recovers its one board, and an unbound base service
+        reports honestly that nothing here establishes a target's state."""
+        touched = [(config_id, device) for (kind, config_id), device in sorted(self.devices.items()) if kind == DebuggerRunner.kind]
+        if not touched:
+            return self.service.recover_after_failed_run(sorted({config_id for _, config_id in self.devices}))
+        if len(touched) == 1:
+            config_id, device = touched[0]
+            return device.service.recover_after_failed_run([config_id])
+        blocks = {config_id: device.service.recover_after_failed_run([config_id]) for config_id, device in touched}
+        return self._aggregate_recovery(blocks)
+
+    @staticmethod
+    def _aggregate_recovery(blocks: dict[str, JsonObject]) -> JsonObject:
+        """One `recovery` block for a run that drove several probes.
+
+        Each probe's own block is kept whole under `recoveries`, and the
+        top-level fields answer the run's question — did recovery run, and did
+        every probe it drove come back — without a caller having to walk the map.
+        The bench is recovered only when every touched probe is; any probe left
+        failed, errored or withheld pulls the aggregate down to the worst of
+        them."""
+        outcomes = [str(block.get("outcome", "skipped")) for block in blocks.values()]
+        if all(name == "recovered" for name in outcomes):
+            outcome = "recovered"
+        else:
+            outcome = next((name for name in ("error", "failed", "skipped") if name in outcomes), "failed")
+        return {
+            "attempted": any(bool(block.get("attempted")) for block in blocks.values()),
+            "outcome": outcome,
+            "devices": sorted(blocks),
+            "recovered_debuggers": sorted(config_id for config_id, block in blocks.items() if block.get("outcome") == "recovered"),
+            "recoveries": blocks,
+            "summary": f"Recovery ran on {len(blocks)} probes the failed run drove; aggregate outcome {outcome}.",
+        }
 
     def preflight(self, test_config: TestConfig) -> JsonObject | None:
         """Refuse a plan before its first step runs, or None.

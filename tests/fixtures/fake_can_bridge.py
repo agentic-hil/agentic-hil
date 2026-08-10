@@ -15,6 +15,11 @@ carries without a second channel:
 ``FAKE_CAN_BRIDGE_FAIL_READ``
     ``read`` answers ``ok: false`` from this call number on, which is how a
     controller error is staged.
+``FAKE_CAN_BRIDGE_FAIL_SEND``
+    ``send`` answers ``ok: false`` with no ``side_effect_status``, the way a
+    direct adapter's own ``send()`` reports a backend error whose transmit effect
+    it cannot disprove. This is the returned-failure path, distinct from the
+    adapter raising.
 ``FAKE_CAN_BRIDGE_TX_LOG``
     Path a line of JSON is appended to per accepted ``send``, so a test can see
     what actually reached the medium rather than what the broker said it sent.
@@ -52,6 +57,7 @@ def _normalized(frame: dict) -> dict:
 def main() -> int:
     reads = _scripted_reads()
     fail_read_from = int(os.environ.get("FAKE_CAN_BRIDGE_FAIL_READ", "0") or 0)
+    fail_send = bool(os.environ.get("FAKE_CAN_BRIDGE_FAIL_SEND", ""))
     tx_log = os.environ.get("FAKE_CAN_BRIDGE_TX_LOG", "")
     read_calls = 0
     for line in sys.stdin:
@@ -66,10 +72,13 @@ def main() -> int:
         elif method == "close":
             result = {"ok": True, "protocol_version": PROTOCOL_VERSION, "safe_state_confirmed": True}
         elif method == "send":
-            if tx_log:
-                with open(tx_log, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(params.get("frame")) + "\n")
-            result = {"ok": True, "backend": "fake-can-bridge"}
+            if fail_send:
+                result = {"ok": False, "error_type": "can_send_failed", "summary": "Fake CAN bridge controller send error.", "backend_error": "staged send failure"}
+            else:
+                if tx_log:
+                    with open(tx_log, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(params.get("frame")) + "\n")
+                result = {"ok": True, "backend": "fake-can-bridge"}
         elif method == "read":
             read_calls += 1
             if fail_read_from and read_calls >= fail_read_from:

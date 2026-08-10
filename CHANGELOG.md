@@ -13,6 +13,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Fixed
 
 - Spawning a contained child is one call, not two that a caller can hold half of: `spawn_managed_process()` sets its creation flags itself, `spawn_detached_process()` stands beside it for a child that must outlive its spawner, both halves of the old contract are private, and registration refuses a child it did not spawn — the shape that had shipped a broker born frozen (#169)
+- Recovery after a failed multi-probe run routes through the service bound to each probe the run drove, aggregating their outcomes, instead of the unbound base service that withheld reset as `allow_reset_missing` — or reset an unrelated probe — while the boards the plan actually drove were left as the failure put them (#168)
+- A CAN broker send that fails after the bus is open — the adapter returning `ok: false`, which is the usual direct-adapter path, or raising — gates the bus and aborts every participant, and the incident reports the transmit effect as `unknown` rather than claiming nothing was committed, since a frame handed to a failing controller may already be on the wire (#146)
+- A brokered CAN send is bounded by the bus's `max_frame_data_bytes`, refusing an over-length payload with the same `invalid_argument` the single-owner `payload_frame()` path returns, so adding `shares:` no longer forwards a frame larger than the configured classic-CAN or CAN-FD limit (#146)
+- A CAN bus with `listen_only_enforcement: service` opens its adapter without demanding the controller listen-only that `controller` enforcement proves, so the documented software-filtering mode no longer fails to open wherever controller listen-only is unavailable; the broker's attach and send checks provide the enforcement it declares (#146)
+- A `can_read` comparator distinguishes standard from extended frames through a new `extended` discriminator (default `false`), the same distinction the broker's participant filters draw, so a standard frame and its extended twin can no longer satisfy each other's expectations — including under an `id_mask` (#168)
 
 ### Added
 

@@ -62,10 +62,13 @@ bound the numeric value it extracts. Exactly one of `equals`/`pattern` per
 comparator; a range without a capturing pattern, or a pattern that does not
 compile, is refused before the run starts. A bus comparator also names the
 identifier of the frame it is about — `id`, optionally widened by `id_mask` into
-a family — and it is required rather than optional, because a bus carries every
-node's traffic and a payload matched without saying whose frame it was is a green
-another ECU can produce; on that medium `equals` and `pattern` read the payload
-as hexadecimal, and a `range` capture is read in that same base. The comparator
+a family, and `extended` for which frame namespace it lives in (default `false`,
+so a comparator that does not say waits for a standard frame; a standard `0x123`
+and an extended `0x123` are two different frames and neither satisfies the
+other's expectation) — and it is required rather than optional, because a bus
+carries every node's traffic and a payload matched without saying whose frame it
+was is a green another ECU can produce; on that medium `equals` and `pattern`
+read the payload as hexadecimal, and a `range` capture is read in that same base. The comparator
 is an object deliberately, so preprocessing keys (scale, convert) can be added
 later without breaking the format. `uart_expect` with `text`/`pattern` remains
 valid as the v2 spelling. Every other step states its expectation by existing:

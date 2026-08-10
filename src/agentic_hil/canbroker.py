@@ -57,7 +57,7 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from multiprocessing.connection import AuthenticationError, Client, Connection, Listener
 from pathlib import Path
 
@@ -546,7 +546,18 @@ class CanBroker:
 
         self.bus_frame_log = str(Path(logs_directory(self.config)) / f"can-bus-{timestamp_for_filename()}-{safe_filename(self.bus_id, 'bus')}.jsonl")
         safe_append_text(self.bus_frame_log, "")
-        opened = open_adapter(self.config, self.bus_id, self.bus_config, False)
+        adapter_config = self.bus_config
+        if self.bus_config.listen_only and self.bus_config.listen_only_enforcement == "service":
+            # `service` listen-only is the broker declining to forward writes —
+            # `_listen_only_conflict` already refuses any participant that may
+            # transmit onto a listen-only bus, whatever the enforcement — not the
+            # controller's own mode. Opening the adapter must not demand the
+            # controller listen-only that `controller` enforcement proves, or a
+            # bench configured for the documented weaker mode would fail to open
+            # wherever that controller proof is unavailable, while its own status
+            # already reports software filtering as what backs the claim.
+            adapter_config = replace(self.bus_config, listen_only=False)
+        opened = open_adapter(self.config, self.bus_id, adapter_config, False)
         if not opened.get("ok"):
             return {key: value for key, value in opened.items() if key != "session"}
         self.adapter_session = opened["session"]
@@ -905,21 +916,42 @@ class CanBroker:
         assert isinstance(wire, dict)
         if not filter_accepts(attached.share, int(wire["id"]), bool(wire["extended"])):
             return {"ok": False, "error_type": "can_participant_filter_violation", "summary": "This CAN participant's view does not carry that identifier, so it may not send it.", "bus_id": self.bus_id, "participant": attached.name, "frame": wire, "view": share_view(attached.share), "retry_safe": False, "side_effect_committed": False}
+        data = bytes.fromhex(str(wire["data_hex"]))
+        if len(data) > self.bus_config.max_frame_data_bytes:
+            # The single-owner `payload_frame()` path rejects an over-length
+            # payload against this same bound, so a brokered send must too: adding
+            # `shares:` cannot quietly forward a frame larger than the configured
+            # classic-CAN or CAN-FD limit. Rejected before the budget is spent or
+            # the adapter is called, with the same details that path returns.
+            return {"ok": False, "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bus_id": self.bus_id, "participant": attached.name, "frame": wire, "bytes_requested": len(data), "max_frame_data_bytes": self.bus_config.max_frame_data_bytes, "retry_safe": False, "side_effect_committed": False}
         budget = self._spend_budget(attached)
         if budget is not None:
             return budget
-        frame = CanFrame(id=int(wire["id"]), extended=bool(wire["extended"]), rtr=bool(wire["rtr"]), data=bytes.fromhex(str(wire["data_hex"])))
+        frame = CanFrame(id=int(wire["id"]), extended=bool(wire["extended"]), rtr=bool(wire["rtr"]), data=data)
         try:
             sent = self.adapter_session.send(frame)  # type: ignore[union-attr]
         except BaseException as error:
             # The adapter itself raised: that is the bus, not this participant.
-            return self._raise_bus_incident("can_adapter_send_raised", f"{type(error).__name__}: {error}")
+            # The frame was already handed to the controller, so the effect is
+            # unknown — not the `side_effect_committed: false` a raise used to
+            # claim.
+            return self._raise_bus_incident("can_adapter_send_raised", f"{type(error).__name__}: {error}", extra={"side_effect_status": "unknown"})
         with self._guard:
             self.frame_seq += 1
             seq = self.frame_seq
             self._log_bus({"event": "frame", "seq": seq, "direction": "tx", "bus_id": self.bus_id, "participant": attached.name, "frame": wire, "ok": bool(sent.get("ok"))})
         if not sent.get("ok"):
-            return {"ok": False, "error_type": "can_send_failed", "summary": str(sent.get("summary", "The CAN adapter failed to send a frame.")), "bus_id": self.bus_id, "participant": attached.name, "frame_seq": seq, "frame": wire, "backend_error": sent.get("backend_error"), "side_effect_status": "unknown"}
+            if sent.get("side_effect_status") == "not_started":
+                # The adapter positively proved the frame never left the
+                # controller, so this is one participant's failed send and the
+                # bus keeps running for the others.
+                return {"ok": False, "error_type": "can_send_failed", "summary": str(sent.get("summary", "The CAN adapter failed to send a frame.")), "bus_id": self.bus_id, "participant": attached.name, "frame_seq": seq, "frame": wire, "backend_error": sent.get("backend_error"), "side_effect_status": "not_started", "retry_safe": True}
+            # Every other post-open send failure leaves the effect unknown: a
+            # returned `ok: false` from the adapter's own `send()` does not prove
+            # the frame stayed off the wire, and the controller may now be wedged.
+            # So gate the bus and abort every participant, rather than let another
+            # keep transmitting over a controller that has failed.
+            return self._raise_bus_incident("can_adapter_send_failed", str(sent.get("summary", "The CAN adapter failed to send a frame.")), extra={"side_effect_status": "unknown", "backend_error": sent.get("backend_error"), "frame_seq": seq, "frame": wire})
         return {"ok": True, "message": "sent", "frame_seq": seq, "participant": attached.name, "frame": wire, "frames_used": attached.frames_used, "max_frames": attached.share.max_frames}
 
     def _handle_read(self, attached: _Attached, message: JsonObject) -> JsonObject:
@@ -1039,7 +1071,7 @@ class CanBroker:
             self._log_bus({"event": "incident", "bus_id": self.bus_id, "scope": "participant", "reason": abort["reason"], "reported_by": attached.name, "aborted_participants": [attached.name], "bus_gated": self.bus_gated})
         return {"ok": False, "error_type": "can_participant_frame_budget_exhausted", "summary": "This CAN participant used its whole configured frame budget; its run is aborted and the bus keeps running.", "bus_id": self.bus_id, "participant": attached.name, "frames_used": attached.frames_used, "max_frames": attached.share.max_frames, "abort": abort, "retry_safe": False, "side_effect_committed": False}
 
-    def _raise_bus_incident(self, reason: str, detail: object) -> JsonObject:
+    def _raise_bus_incident(self, reason: str, detail: object, *, extra: JsonObject | None = None) -> JsonObject:
         abort = {"scope": "bus", "reason": reason, "detail": detail, "recovery_action": self.config.recovery.auto_recover, "at": utc_now_iso()}
         with self._guard:
             self.bus_gated = True
@@ -1048,7 +1080,13 @@ class CanBroker:
                 participant.abort = abort
             aborted = sorted(self.participants)
             self._log_bus({"event": "incident", "bus_id": self.bus_id, "scope": "bus", "reason": reason, "reported_by": "broker", "aborted_participants": aborted, "bus_gated": True})
-        return {"ok": False, "error_type": "can_bus_incident", "summary": "A physical CAN bus incident aborted every participant's run and gated the bus.", "bus_id": self.bus_id, "abort": abort, "aborted_participants": aborted, "bus_gated": True, "retry_safe": False, "side_effect_committed": False}
+        result = {"ok": False, "error_type": "can_bus_incident", "summary": "A physical CAN bus incident aborted every participant's run and gated the bus.", "bus_id": self.bus_id, "abort": abort, "aborted_participants": aborted, "bus_gated": True, "retry_safe": False}
+        # A read incident (the default) transmitted nothing, so it says nothing
+        # was committed. A send incident passes its own effect — `side_effect_status:
+        # unknown`, and no `side_effect_committed` — because a frame handed to a
+        # controller that then failed may already be on the wire.
+        result.update(extra if extra is not None else {"side_effect_committed": False})
+        return result
 
     def _log_bus(self, event: JsonObject) -> None:
         if not self.bus_frame_log:
