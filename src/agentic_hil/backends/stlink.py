@@ -258,7 +258,13 @@ class STLinkBackend:
         size_bytes = int(resolved["size_bytes"])
         if size_bytes > self.config.debug.max_dump_size_bytes:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol dump exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes}
-        assert output is not None
+        if output is None:
+            # The service validates the output path before it gets here, so this
+            # is unreachable through a tool call. It is a refusal rather than an
+            # assert because an assert is stripped under `python -O`, and what
+            # would follow it is a probe opened for a read with nowhere to put
+            # what it read.
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "output_path must be a non-empty string.", **NOT_CONTACTED}
         output_path = Path(str(output["resolved_path"]))
         try:
             # The CLI writes the file itself and will not create a missing
