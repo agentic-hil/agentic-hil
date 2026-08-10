@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentic_hil.config import atomic_write_text
-from agentic_hil.process import process_group_kwargs, spawn_managed_process, terminate_process_tree
+from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.types import JsonObject
 
 GDB_MI_ARGS = ["--nx", "--quiet", "--interpreter=mi2", "--init-eval-command=set auto-load off"]
@@ -56,7 +56,6 @@ class GdbMiClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            **process_group_kwargs(),
         )
         self.lock = threading.Lock()
         self.next_token = 0

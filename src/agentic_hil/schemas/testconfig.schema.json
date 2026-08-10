@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions, `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional." },
+    "version": { "enum": [2, 3], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions — a serial line's on `uart_read`, a bus's on `can_read` — `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional." },
     "name": { "type": "string", "minLength": 1 },
     "steps": {
       "type": "array",
@@ -61,6 +61,35 @@
           "additionalProperties": false,
           "required": ["min", "max"],
           "description": "Inclusive bounds the number captured by `pattern`'s one capture group must fall inside. The pattern must have exactly one capture group, which is refused before the run starts when it does not. A step that times out reports the last value it did capture against these bounds, so a reading that was merely out of range and a board that said nothing read differently.",
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          }
+        }
+      }
+    },
+    "canComparator": {
+      "type": "object",
+      "additionalProperties": false,
+      "x-since-version": 3,
+      "description": "Which frame a `can_read` step requires: an identifier filter and a claim about the payload, in the same vocabulary a serial comparator uses. `id` is mandatory because a bus carries every node's traffic — a payload matched without saying whose frame it was is a green another ECU can produce. Frames are judged one at a time as they arrive, never concatenated: a frame is a complete unit, so there is no half-arrived value to wait out and no seam to match across. A step whose claim is never met fails with the tail of the frames the bus did carry, so a wrong identifier and a silent bus read differently.",
+      "required": ["id"],
+      "oneOf": [
+        { "required": ["equals"], "not": { "required": ["pattern"] } },
+        { "required": ["pattern"], "not": { "required": ["equals"] } }
+      ],
+      "dependentRequired": { "range": ["pattern"] },
+      "properties": {
+        "id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }], "description": "The identifier of the frame this step is waiting for, as an integer or a hexadecimal string such as `0x123`. Matched exactly unless `id_mask` widens it." },
+        "id_mask": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }], "description": "A bit mask making the identifier a family rather than one value: a frame matches when `frame_id & mask` equals `id & mask`. This is how a plan waits for any frame of a protocol that encodes a node or a priority in the low bits of the identifier." },
+        "extended": { "type": "boolean", "default": false, "description": "Which frame namespace the identifier lives in. A standard 0x123 and an extended 0x123 are two different frames on the wire, so a comparator matches only frames of the type it names: the identifier alone does not select across the namespaces. Defaults to `false`, so a comparator that does not say waits for a standard frame; set it `true` to wait for the extended twin." },
+        "equals": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "description": "The exact payload bytes the frame must carry, as hexadecimal. Whitespace and case are ignored, so `01 FF` and `01ff` are the same claim. The empty string is the claim that the frame carries no data at all. Mutually exclusive with `pattern`." },
+        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression matched against the payload rendered as lowercase hexadecimal without separators, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the byte position is part of the claim. A pattern that does not compile is refused before the run starts. Mutually exclusive with `equals`." },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "description": "Inclusive bounds the number captured by `pattern`'s one capture group must fall inside. The capture is read as hexadecimal, because what the pattern is matching against is the payload written in hexadecimal: `pattern: \"^01(..)\"` with `range: {min: 20, max: 30}` says the second byte of that frame is between 20 and 30, with the bounds in decimal as every number in a plan is. The pattern must have exactly one capture group, which is refused before the run starts when it does not. A step that times out reports the last value it did capture against these bounds, so a signal that was merely out of range and a bus that never carried the frame read differently.",
           "properties": {
             "min": { "type": "number" },
             "max": { "type": "number" }
@@ -249,13 +278,20 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action"],
+      "description": "Read a CAN bus this plan has opened. With a `comparator:` the step reads until a frame meets the claim or its `timeout_s` passes, reporting the tail of the frames the bus did carry when none does. Without one it is a plain read of whatever the session has, answered exactly as `can_read` answers it.",
       "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_read" },
-        "max_frames": { "type": "integer", "minimum": 1, "description": "Defaults to the bus's configured max_buffer_frames, which is also the ceiling." },
-        "wait_timeout_s": { "$ref": "#/$defs/timeout" }
+        "comparator": { "$ref": "#/$defs/canComparator" },
+        "max_frames": { "type": "integer", "minimum": 1, "description": "Defaults to the bus's configured max_buffer_frames, which is also the ceiling. With a `comparator:` this is how many frames one read drains, not how many the step may look at: it reads again until the claim is met or the deadline passes." },
+        "timeout_s": { "$ref": "#/$defs/positiveTimeout", "x-since-version": 3, "description": "How long the step waits for a frame meeting its `comparator:`. Belongs to the step rather than to one read, which is why it is refused beside `wait_timeout_s`: with a comparator each read waits out whatever is left of this deadline." },
+        "wait_timeout_s": { "$ref": "#/$defs/timeout", "description": "How long a plain read waits for frames. Without a `comparator:` this is the whole of the step's waiting; with one, name `timeout_s` instead." }
+      },
+      "dependentRequired": { "timeout_s": ["comparator"] },
+      "dependentSchemas": {
+        "comparator": { "required": ["timeout_s"] }
       }
     },
     "debugStart": {
