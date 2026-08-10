@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="400" viewBox="0 0 1060 400" role="img" aria-label="An AI agent or CI reaches Agentic HIL over MCP stdio only. The authoritative configuration, owned by the operator outside the workspace, gates every action. Agentic HIL drives debug probes through OpenOCD, pyOCD or the STM32CubeProgrammer CLI, serial ports through pyserial, and CAN through PEAK, SocketCAN or a bridge, with buses shared through the broker. Every action answers with structured results, reports and a SHA-256 audit chain.">
+  <title>The architecture</title>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; text-anchor: middle; }
+    .t { font-size: 15px; font-weight: 600; }
+    .d { font-size: 13px; fill: #656d76; }
+    .text { fill: #1f2328; }
+    .acc_text { fill: #0a3069; }
+    .warn_text { fill: #5c4813; }
+    .plain { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .accent { fill: #ddf4ff; stroke: #0969da; stroke-width: 1.75; }
+    .warn { fill: #fff8c5; stroke: #d4a72c; stroke-width: 1.75; }
+    .edge { fill: none; stroke: #656d76; stroke-width: 1.75; marker-end: url(#head); }
+    .wire { fill: none; stroke: #0969da; stroke-width: 1.75; marker-end: url(#head-accent); }
+    .lbl { font-size: 12.5px; fill: #656d76; }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#656d76"/></marker>
+    <marker id="head-accent" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 z" fill="#0969da"/></marker>
+  </defs>
+
+  <rect class="accent" x="20" y="150" width="190" height="76" rx="8"/>
+  <text class="t acc_text" x="115" y="182">AI agent / CI</text>
+  <text class="d" x="115" y="204">Claude Code, Codex, pytest</text>
+
+  <path class="wire" d="M210,188 L360,188"/>
+  <text class="lbl" x="285" y="178">MCP (stdio)</text>
+
+  <rect class="warn" x="370" y="24" width="250" height="64" rx="8"/>
+  <text class="t warn_text" x="495" y="50">authoritative configuration</text>
+  <text class="d" x="495" y="70">operator-owned, outside the workspace</text>
+  <path class="edge" d="M495,88 L495,142"/>
+
+  <rect class="accent" x="370" y="150" width="250" height="76" rx="8"/>
+  <text class="t acc_text" x="495" y="182">Agentic HIL</text>
+  <text class="d" x="495" y="204">narrow tools, test reactor, audit</text>
+
+  <path class="edge" d="M620,168 L780,120"/>
+  <path class="edge" d="M620,188 L780,188"/>
+  <path class="edge" d="M620,208 L780,256"/>
+
+  <rect class="plain" x="790" y="88" width="250" height="58" rx="8"/>
+  <text class="t text" x="915" y="112">debug probes</text>
+  <text class="d" x="915" y="132">OpenOCD, pyOCD, STM32CubeProgrammer</text>
+
+  <rect class="plain" x="790" y="160" width="250" height="58" rx="8"/>
+  <text class="t text" x="915" y="184">serial ports</text>
+  <text class="d" x="915" y="204">pyserial, exclusive opens</text>
+
+  <rect class="plain" x="790" y="232" width="250" height="58" rx="8"/>
+  <text class="t text" x="915" y="256">CAN buses</text>
+  <text class="d" x="915" y="276">PEAK, SocketCAN, bridge; shared via broker</text>
+
+  <path class="edge" d="M495,226 L495,296"/>
+  <rect class="plain" x="345" y="304" width="300" height="64" rx="8"/>
+  <text class="t text" x="495" y="330">structured results</text>
+  <text class="d" x="495" y="350">JSON verdicts, reports, SHA-256 audit chain</text>
+  <circle cx="915" cy="308" r="2.6" fill="#656d76"/>
+  <circle cx="915" cy="322" r="2.6" fill="#656d76"/>
+  <circle cx="915" cy="336" r="2.6" fill="#656d76"/>
+</svg>

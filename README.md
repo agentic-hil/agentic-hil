@@ -15,19 +15,24 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes boun
 
 A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
 
-```
-AI agent / CI  ──MCP (stdio)──▶  Agentic HIL  ──authoritative config──▶  OpenOCD / pyOCD / STM32CubeProgrammer
-                                    │                        serial ports (pyserial)
-                                    │                        CAN (PEAK / SocketCAN / bridge)
-                                    ▼
-                       structured results, reports, logs
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture-dark.svg">
+  <img alt="An AI agent or CI reaches Agentic HIL over MCP stdio only. The authoritative configuration, owned by the operator outside the workspace, gates every action. Agentic HIL drives debug probes (OpenOCD, pyOCD, STM32CubeProgrammer), serial ports, and CAN buses shared through the broker, and answers with structured results, reports, and a SHA-256 audit chain." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture.svg">
+</picture>
 
-Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away: [the safety model](docs/safety-model.md) is the short version, [docs/security-design.md](docs/security-design.md) the long one.
+Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away.
 
 ## What it drives
 
 Three debugger backends (OpenOCD, pyOCD, and the STM32CubeProgrammer CLI), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE; [installation](docs/installation.md) has every backend and platform in detail.
+
+## The test reactor
+
+One YAML plan drives the whole bench: flash, reset, write, read with a comparator (exact text, a pattern, or a numeric range over a captured value), delays, and sessions that close themselves. Plans name logical devices; the bench configuration binds them to real hardware, so the same plan runs unchanged on every machine that has one. A failing step aborts the run, and the bench recovers itself: reap, reset into halt, probe, all attested in the run result. [How plans work.](docs/testing.md)
+
+## Security by construction
+
+Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Quarantine presupposes contact: a failure that provably never reached the board answers with a named refusal and a safe retry instead of freezing your bench. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
 
 ## Install
 
