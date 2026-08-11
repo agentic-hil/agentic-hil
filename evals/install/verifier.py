@@ -46,12 +46,46 @@ HOME = Path("/home/eval")
 WORKSPACE = Path("/workspace/project")
 SOURCE = Path("/workspace/source")
 OTHER_WORKSPACE = Path("/tmp/agentic-hil-other-project")
+# The container's one writable filesystem. A state root under it survives no
+# run, so an install that put the project's state there configured a bench that
+# forgets what it did — named here so the rule reads as one thing, and so a test
+# on a host whose own temporary directory is this one can say which is which.
+TEMPORARY_ROOT = Path("/tmp")
+# Where the probes put the state a read-only home cannot hold. The verifier
+# container mounts /home/eval read-only on purpose — that mount is what makes
+# the evidence under it evidence — while the runtime opens the configured
+# state_root for writing as it loads. So the probes load a copy of the agent's
+# configuration with that one field moved here, onto the one tmpfs this
+# container has.
+PROBE_STATE_ROOT = Path("/tmp/install-eval-probe-state")
+PROBE_CONFIG_ROOT = Path("/tmp/install-eval-probe-config")
 RESPONSE_TIMEOUT_SECONDS = 10.0
 PROBE_DIAGNOSTIC_CHARS = 800
 # The project-scoped permissions this release defines, listed here rather than
 # imported: the verifier checks an installed distribution and must not read its
-# expectations out of the thing it is verifying.
-PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_upgrade")
+# expectations out of the thing it is verifying. A release that both added a
+# permission and wrote it would otherwise move this expectation along with
+# itself, which is the one thing this check exists to catch.
+#
+# The price of spelling it out is drift, and drift stranded a whole matrix once:
+# `allow_recover` shipped and every job failed here on a permission the release
+# was right to write. So the list is pinned against the product's own
+# `GENERATED_PROJECT_PERMISSIONS` by a test in the repository suite, which fails
+# in the pull request that adds the next permission rather than in the next
+# eval run.
+PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_recover", "allow_upgrade")
+# The config schema versions this release reads, and the one from which the read
+# model is exclusivity rather than a permission. Spelled out and pinned by the
+# same test, for the same reason.
+LEGACY_CONFIG_VERSION = 1
+READ_FREE_CONFIG_VERSION = 2
+SUPPORTED_CONFIG_VERSIONS = (1, 2, 3)
+# The hardware tool the wrong-workspace probe asks for. Any of them would do — a
+# server with no configuration refuses all of them — and this one is named
+# because it touches a probe, so a server that answered it would be a server
+# that had found a bench it must not have. Pinned to the tool contract by the
+# repository suite, so a rename cannot leave the probe calling nothing.
+UNPROVISIONED_PROBE_TOOL = "probe_target"
 # The two debugger permissions an install must write *false*, listed here for the
 # same reason and mattering more: while either is true the flash interlock refuses
 # flash_firmware on that probe, so an install that granted them shipped a bench
@@ -97,18 +131,55 @@ def overall_success(result: object) -> bool:
     return result.get("hardware_state") != "unknown"
 
 
-def trusted_environment() -> dict[str, str]:
-    return {
+def trusted_environment(config: Path | None = None, *, config_home: Path | None = None) -> dict[str, str]:
+    environment = {
         "HOME": str(HOME),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "USERPROFILE": str(HOME),
-        "XDG_CONFIG_HOME": str(HOME / ".config"),
+        "XDG_CONFIG_HOME": str(config_home or HOME / ".config"),
         "XDG_DATA_HOME": str(HOME / ".local" / "share"),
         "XDG_STATE_HOME": str(HOME / ".local" / "state"),
     }
+    if config is not None:
+        environment["AGENTIC_HIL_CONFIG"] = str(config)
+    return environment
+
+
+def probe_config(authoritative: Path) -> Path:
+    """The agent's configuration, with the one field a read-only home forbids.
+
+    Everything the install decided is carried over: the workspace binding, the
+    debuggers, every permission. Only `state_root` moves, onto the tmpfs,
+    because the runtime opens that directory for writing while it loads and this
+    container mounts the home read-only so that the evidence under it cannot be
+    rewritten by the thing being verified. Moving the field rather than the
+    mount keeps that boundary exactly where it is, and leaves the state root the
+    agent's own run wrote intact for `tool_dispatch_recorded` to read.
+
+    Nothing about the real state_root goes unchecked for it. What it is stays
+    checked against the real file in `valid_authoritative_config`; that the
+    runtime could really write it is checked harder than a write probe could
+    check it, by the report the agent's own run already left there.
+
+    The copy is staged where discovery looks rather than handed over by name,
+    under the project directory the workspace hashes to, so the probes that
+    found the configuration by starting in the workspace still find it that way
+    and still prove they can.
+    """
+    import yaml
+
+    document = yaml.safe_load(authoritative.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"authoritative config is not a mapping: {authoritative}")
+    PROBE_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    document["state_root"] = str(PROBE_STATE_ROOT)
+    written = PROBE_CONFIG_ROOT / "agentic-hil" / "projects" / authoritative.parent.name / authoritative.name
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return written
 
 
 def trusted_command(arguments: list[str]) -> list[str]:
@@ -142,12 +213,14 @@ def run_trusted(
     arguments: list[str],
     *,
     cwd: Path = WORKSPACE,
+    config: Path | None = None,
+    config_home: Path | None = None,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         trusted_command(arguments),
         cwd=cwd,
-        env=trusted_environment(),
+        env=trusted_environment(config, config_home=config_home),
         text=True,
         capture_output=True,
         timeout=timeout,
@@ -834,7 +907,7 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
         return False, f"state_root is not a directory: {resolved_state_root}"
     if any(
         resolved_state_root == forbidden or forbidden in resolved_state_root.parents
-        for forbidden in (WORKSPACE, SOURCE, Path("/tmp"))
+        for forbidden in (WORKSPACE, SOURCE, TEMPORARY_ROOT)
     ):
         return False, f"state_root is not external: {resolved_state_root}"
     safe, detail = safe_owned_path(resolved_state_root, HOME)
@@ -857,14 +930,17 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
     if not isinstance(debuggers, dict) or not debuggers:
         return False, "debuggers missing"
     # Which permission model this file is written under decides which flags must
-    # be there. Version 2 has no read permission at all -- exclusivity for the
-    # duration of a run replaced it -- so allow_probe and allow_read must be
+    # be there. From version 2 on there is no read permission at all -- exclusivity
+    # for the duration of a run replaced it -- so allow_probe and allow_read must be
     # ABSENT there, while a file with no `version:` key is still read under
-    # version 1 and must carry them.
-    version = data.get("version", 1)
-    if version not in (1, 2):
+    # version 1 and must carry them. Later versions tighten other things and
+    # inherit that read model, so what is tested is the family and not one
+    # number: pinning the newest failed this check on the first release that
+    # bumped the schema without touching a permission, which version 3 did.
+    version = data.get("version", LEGACY_CONFIG_VERSION)
+    if version not in SUPPORTED_CONFIG_VERSIONS:
         return False, f"unsupported config version: {version!r}"
-    read_free = version == 2
+    read_free = version >= READ_FREE_CONFIG_VERSION
     if not read_free and "version" in data:
         return False, "install wrote a superseded config version"
     for section, entries, required_flags, forbidden_flag in (
@@ -946,7 +1022,7 @@ def receive_line(lines: queue.Queue[str | None]) -> dict[str, Any]:
             return json.loads(line)
 
 
-def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str], list[str]]:
+def mcp_probe(arguments: list[str], cwd: Path, config_home: Path | None = None) -> tuple[dict[str, Any], set[str], list[str]]:
     """Initialize, list the tools, and report which of them arrived bare.
 
     The third element is the names whose `tools/list` entry carries no
@@ -957,7 +1033,7 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
     process = subprocess.Popen(
         trusted_command(arguments),
         cwd=cwd,
-        env=trusted_environment(),
+        env=trusted_environment(config_home=config_home),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1045,38 +1121,126 @@ def mcp_probe(arguments: list[str], cwd: Path) -> tuple[dict[str, Any], set[str]
         error_thread.join(timeout=1)
 
 
-def wrong_workspace_fails(arguments: list[str]) -> tuple[bool, str]:
-    OTHER_WORKSPACE.mkdir(exist_ok=True)
-    payload = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "wrong-workspace-probe", "version": "1"},
-            },
-        }
-    )
+def initialize_request(client: str) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": client, "version": "1"},
+        },
+    }
+
+
+def one_shot_session(
+    arguments: list[str],
+    cwd: Path,
+    requests: list[dict[str, Any]],
+    *,
+    config: Path | None = None,
+    config_home: Path | None = None,
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+    """Drive a whole MCP conversation down one pipe and read what came back."""
     result = subprocess.run(
         trusted_command(arguments),
-        cwd=OTHER_WORKSPACE,
-        env=trusted_environment(),
-        input=payload + "\n",
+        cwd=cwd,
+        env=trusted_environment(config, config_home=config_home),
+        input="".join(json.dumps(request) + "\n" for request in requests),
         text=True,
         capture_output=True,
         timeout=RESPONSE_TIMEOUT_SECONDS,
         check=False,
     )
-    responses = []
+    responses: list[dict[str, Any]] = []
     for line in result.stdout.splitlines():
         with contextlib.suppress(json.JSONDecodeError):
-            responses.append(json.loads(line))
-    initialized = any(
-        response.get("result", {}).get("serverInfo") for response in responses if isinstance(response, dict)
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                responses.append(parsed)
+    return result, responses
+
+
+def tool_result(responses: list[dict[str, Any]], request_id: int) -> dict[str, Any]:
+    """A tool's own document, out of the MCP envelope it travelled in."""
+    for response in responses:
+        if response.get("id") != request_id:
+            continue
+        content = response.get("result", {}).get("content", [])
+        if content and isinstance(content[0], dict):
+            with contextlib.suppress(json.JSONDecodeError):
+                parsed = json.loads(content[0].get("text", ""))
+                if isinstance(parsed, dict):
+                    return parsed
+    return {}
+
+
+def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str]:
+    """A server started outside the workspace its configuration binds serves nothing of it.
+
+    Two arms, because the release answers the two ways of getting there
+    differently and both answers are part of the contract.
+
+    Named outright from the wrong directory, the configuration is refused before
+    anything is served: mandatory `workspace_root` binds the file to one project
+    root and to no other. That is the arm with the teeth, and it is why the probe
+    hands the configuration over explicitly rather than hoping discovery misses it.
+
+    Found by discovery it is not found at all — the other directory hashes to a
+    project of its own that has no configuration — and since 0.7.0 that starts a
+    server bound to *that* directory with every hardware tool refusing, so that an
+    agent has a route to generating one. It initializes, which the old form of
+    this check read as a failure and which is not one; what would be a failure is
+    that server reaching the bench this configuration describes. So the arm asks
+    it to, and requires the refusal to name the directory it was started in.
+    """
+    OTHER_WORKSPACE.mkdir(exist_ok=True)
+    named, named_responses = one_shot_session(
+        arguments,
+        OTHER_WORKSPACE,
+        [initialize_request("wrong-workspace-probe")],
+        config=config,
     )
-    return not initialized, f"exit={result.returncode}; initialized={initialized}"
+    bound = any(response.get("result", {}).get("serverInfo") for response in named_responses)
+    refusal: dict[str, Any] = {}
+    with contextlib.suppress(json.JSONDecodeError):
+        parsed = json.loads(named.stdout)
+        if isinstance(parsed, dict):
+            refusal = parsed
+    if bound:
+        return False, f"the configuration was named from {OTHER_WORKSPACE} and the server initialized anyway; exit={named.returncode}"
+    if named.returncode == 0:
+        return False, f"the configuration was refused but the server exited 0; error_type={refusal.get('error_type')}"
+    if refusal and refusal.get("error_type") != "config_invalid":
+        # A `config_file_not_found` here would mean the configuration never
+        # reached the server, and the arm proved nothing about the binding.
+        return False, f"refused for the wrong reason: error_type={refusal.get('error_type')}"
+
+    discovered, discovered_responses = one_shot_session(
+        arguments,
+        OTHER_WORKSPACE,
+        [
+            initialize_request("wrong-workspace-probe"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": UNPROVISIONED_PROBE_TOOL, "arguments": {}}},
+        ],
+        config_home=PROBE_CONFIG_ROOT,
+    )
+    hardware = tool_result(discovered_responses, 2)
+    if hardware.get("ok") is not False or hardware.get("error_type") != "config_file_not_found":
+        return False, (
+            f"{UNPROVISIONED_PROBE_TOOL} from {OTHER_WORKSPACE} was not refused as unconfigured: "
+            f"ok={hardware.get('ok')}; error_type={hardware.get('error_type')}"
+        )
+    served = hardware.get("workspace_root")
+    if served != str(OTHER_WORKSPACE):
+        return False, f"a server started in {OTHER_WORKSPACE} bound {served!r}"
+    return True, (
+        f"named: exit={named.returncode}, {refusal.get('error_type', '<no document>')}; "
+        f"discovered: exit={discovered.returncode}, {UNPROVISIONED_PROBE_TOOL} refused with "
+        f"config_file_not_found for {served}"
+    )
 
 
 def source_copied_into_project() -> tuple[bool, str]:
@@ -1203,6 +1367,20 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
 
     configs = config_files()
     installed_skill = skill_path(agent)
+    probe_configuration: Path | None = None
+    probe_configuration_error = "no single authoritative config to copy"
+
+    def probe_configuration_path() -> Path:
+        """The configuration the runtime probes load, or why there is none."""
+        if probe_configuration is None:
+            raise RuntimeError(f"no probe configuration: {probe_configuration_error}")
+        return probe_configuration
+
+    def probe_configuration_home() -> Path:
+        """Where they discover it, once it is staged."""
+        probe_configuration_path()
+        return PROBE_CONFIG_ROOT
+
     if expected_success:
         add("one authoritative config exists", lambda: (len(configs) == 1, f"count={len(configs)}"))
         if len(configs) == 1:
@@ -1212,6 +1390,10 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     "hardware request answered through an Agentic HIL tool",
                     lambda: tool_dispatch_recorded(configs[0]),
                 )
+            try:
+                probe_configuration = probe_config(configs[0])
+            except Exception as error:
+                probe_configuration_error = f"{type(error).__name__}: {error}"
         if case.get("remove_skill_before_followup"):
             # The control arm measures the tools without the skill, so the run is
             # only valid if every copy of the skill's rules was gone when the
@@ -1270,14 +1452,15 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add(
                 "doctor succeeds through trusted verifier runtime",
                 lambda: (
-                    (result := run_trusted(["doctor"])).returncode == 0 and overall_success(json.loads(result.stdout)),
+                    (result := run_trusted(["doctor"], config_home=probe_configuration_home())).returncode == 0
+                    and overall_success(json.loads(result.stdout)),
                     result.stderr.strip() or result.stdout.strip(),
                 ),
             )
         if trusted_package_ready and registered_ok:
 
             def probe_check() -> tuple[bool, str]:
-                initialized, names, unannotated = mcp_probe(["mcp-stdio"], WORKSPACE)
+                initialized, names, unannotated = mcp_probe(["mcp-stdio"], WORKSPACE, probe_configuration_home())
                 server = initialized.get("result", {}).get("serverInfo", {})
                 expected_tools = target_mcp_tools(target)
                 ok = (
@@ -1292,7 +1475,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 return ok, detail
 
             add("MCP initialize and tools/list succeed", probe_check)
-            add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"]))
+            add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"], probe_configuration_path()))
     else:
         add("setup conflict left no config of its own", lambda: rejected_setup_owns_no_config(configs))
         add("setup conflict left no skill of its own", lambda: rejected_setup_owns_no_skill(installed_skill))

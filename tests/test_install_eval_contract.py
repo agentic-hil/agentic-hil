@@ -3,10 +3,21 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
+from agentic_hil.config import GENERATED_PROJECT_PERMISSIONS
+from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS
+from agentic_hil.types import (
+    CURRENT_CONFIG_VERSION,
+    LEGACY_CONFIG_VERSION,
+    READ_FREE_CONFIG_VERSION,
+    SUPPORTED_CONFIG_VERSIONS,
+    ProjectPermissions,
+)
+from evals.install import verifier
 from evals.install.config import load_matrix
 from evals.install.runner import expected_mcp_tools, job_payload
 from evals.install.verifier import target_mcp_tools
@@ -150,3 +161,44 @@ def test_eval_image_allocates_an_unused_non_root_uid() -> None:
     assert "useradd --create-home --user-group --shell /bin/bash eval" in dockerfile
     assert "--uid 1000" not in dockerfile
     assert "\nUSER eval\n" in dockerfile
+
+
+def test_the_verifier_permission_whitelist_is_the_one_this_release_generates() -> None:
+    """The drift that stranded a full matrix, caught in the pull request instead.
+
+    The verifier spells this list out rather than importing it, on purpose: it
+    checks an installed distribution and must not read its expectations out of
+    the thing it is verifying, or a release that both added a permission and
+    wrote it would move the expectation along with itself. The price of spelling
+    it out is that `allow_recover` shipped and every job in a full matrix failed
+    on a config the install was right to write. This is where that price is
+    paid instead — one release ahead of the eval, in the change that adds the
+    permission, where the fix is one word.
+    """
+    assert verifier.PROJECT_PERMISSION_FLAGS == GENERATED_PROJECT_PERMISSIONS
+    # Stated against the schema as well as against the generation: a permission
+    # the type declares and no generation writes is still one this eval must
+    # recognise in a file an operator edited.
+    assert set(verifier.PROJECT_PERMISSION_FLAGS) == {field.name for field in fields(ProjectPermissions)}
+
+
+def test_the_verifier_flash_interlock_pair_is_the_one_the_interlock_refuses_on() -> None:
+    assert set(verifier.EXCLUSIVE_FLASH_PERMISSIONS) == set(EXCLUSIVE_FLASH_PERMISSIONS)
+
+
+def test_the_verifier_reads_every_config_version_this_release_writes() -> None:
+    """Version 3 was the second half of the same stranding, unread behind the first."""
+    assert verifier.SUPPORTED_CONFIG_VERSIONS == SUPPORTED_CONFIG_VERSIONS
+    assert verifier.LEGACY_CONFIG_VERSION == LEGACY_CONFIG_VERSION
+    assert verifier.READ_FREE_CONFIG_VERSION == READ_FREE_CONFIG_VERSION
+    # What an install writes today has to be inside the family the check treats
+    # as read-free, or it demands the read permissions this model removed.
+    assert CURRENT_CONFIG_VERSION >= verifier.READ_FREE_CONFIG_VERSION
+    assert CURRENT_CONFIG_VERSION in verifier.SUPPORTED_CONFIG_VERSIONS
+
+
+def test_the_wrong_workspace_probe_calls_a_tool_this_server_serves() -> None:
+    """A renamed tool would leave the probe asking for nothing and reading a refusal into it."""
+    contract = set(expected_mcp_tools(REPOSITORY_ROOT))
+
+    assert verifier.UNPROVISIONED_PROBE_TOOL in contract
