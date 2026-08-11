@@ -2707,7 +2707,7 @@ Set in the authoritative configuration; decides how far the owning process may g
 |---|---|---|
 | `off` | nothing; only an operator clears a quarantine | any bench where a machine decision is unacceptable |
 | `readonly` | reap this owner's debugger processes and re-read the probe; nothing physical | peripherals react to a reset |
-| `reset_halt` (default) | additionally drive a reset-into-halt to settle an unconfirmed flash, reset, or session start | default bench |
+| `reset_halt` (default) | additionally drive a reset-into-halt and read it back, which settles every reason except the audit-broken families | default bench |
 
 `reset_halt` degrades to `readonly` when the bound debugger lacks `allow_reset`. `recovery.max_attempts` (default 3, range 1-10) caps machine attempts per incident before the owner defers to an operator.
 

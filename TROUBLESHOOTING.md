@@ -332,7 +332,7 @@ What decides it is the backend's claim, not that the call was a read. A read nam
 For a quarantine, read `cleanup_reasons`, `quarantine_guidance`, and `auto_recoverable` from `lease-status` before doing anything physical. They name what is actually unresolved and whether an operator is needed at all:
 
 - `auto_recoverable: true` means the running owner clears this incident itself on the next hardware tool call, then runs it. It reaps this owner's leftover debugger processes, verifies the safe state, records the attestation as `recovery: machine_attested`, and proceeds. No operator step. If verification fails the call returns `resource_quarantined` with `auto_recovery_attempted: true` and the quarantine stands; after `recovery.max_attempts` failures for the same incident it stops retrying.
-- `auto_recoverable: false` means a broken audit (`*_audit_broken`), an incident adopted from an owner that died, or an unconfirmed physical effect on a bench whose policy does not allow the stronger predicate. This needs a person.
+- `auto_recoverable: false` means a broken audit (`*_audit_broken`), or an unconfirmed physical effect on a bench whose policy does not allow the stronger predicate. This needs a person. An incident adopted from an owner that died is not in this list any more: what that owner left unconfirmed is exactly what a reset-into-halt erases, so a `reset_halt` bench settles it itself.
 
 Which reasons are machine-recoverable is the bench's `recovery.auto_recover` policy, reported as `auto_recover_policy`:
 
@@ -340,7 +340,7 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 | --- | --- | --- |
 | `off` | none | nothing (operator only) |
 | `readonly` | reap this owner's debugger processes, re-read the probe (connects without resetting) | toolchain faults: `debug_session_cleanup_unconfirmed`, `debug_target_state_unconfirmed`, `debugger_readonly_result_unconfirmed`, … |
-| `reset_halt` (default) | the above, plus a reset-into-halt that establishes a defined state | additionally `debugger_result_unconfirmed` (unconfirmed flash/reset), `debugger_readonly_target_state_unconfirmed` (a read that named no abort point) and `debug_session_start_unconfirmed` |
+| `reset_halt` (default) | the above, plus a reset-into-halt that establishes a defined state and a read-back of it | every reason except the audit-broken families: an unconfirmed flash or reset, a read that named no abort point, an unconfirmed session start, an unconfirmed CAN or COM open, and an incident inherited from an owner that died |
 
 `reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
