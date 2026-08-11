@@ -878,6 +878,26 @@ def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert (Path.home() / ".claude.json").read_bytes() == registration_before
 
 
+def test_the_user_half_hands_back_the_project_line_that_carries_the_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This is where a split first run hands back to the operator.
+
+    A bare `agentic-hil init` finishes the project and writes no rule, so the
+    line this half offers has to name the agent it just installed.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude")
+
+    assert result["ok"] is True, result
+    assert "agentic-hil init --agent claude-code" in result["next_step"]
+
+
 def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

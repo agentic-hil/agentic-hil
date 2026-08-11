@@ -667,7 +667,11 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
             "steps": {"skill_install": skill_result, "mcp_config": mcp_result},
-            "next_step": "Bind a project to it with `agentic-hil init` from that project root. This half never has to run again for this user on this machine.",
+            # `--agent`, not a bare `init`: this half is where the split first
+            # run hands back, and naming the agent is what carries its own
+            # write-permission step into the project, on a config that is
+            # already there as much as on one this creates.
+            "next_step": f"Bind a project to it with `agentic-hil init --agent {resolved_agent.id}` from that project root. Naming the agent there settles that agent's own write permissions on the project's config and state root, whether the config is written by that run or already there. This half never has to run again for this user on this machine.",
         }
         if not result["ok"]:
             surviving = _skill_rollback_did_not_own(snapshots, _agent_skill_target(resolved_agent))
