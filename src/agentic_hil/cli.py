@@ -199,9 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor")
+    init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
-    init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root")
+    init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
     init_parser.add_argument("--force", action="store_true")
 
     adopt_parser = subparsers.add_parser(
@@ -676,6 +676,14 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
         return result
 
 
+_NO_AGENT_NAMED = "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."
+_NO_AGENT_ON_EXISTING_CONFIG = (
+    "No agent was named and the config was already there, so nothing was written at all. "
+    "Run `agentic-hil init --agent <agent>` to add or refresh that agent's refusal of its own write tools on the config and the state root; "
+    "it leaves the config exactly as it is."
+)
+
+
 def init_project(config_path: str | None = None, agent: str | None = None, force: bool = False) -> JsonObject:
     """Set up one project: its authoritative config, verified by doctor.
 
@@ -685,6 +693,15 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     registration. Naming an agent is optional: without one the config is still
     written and verified, and only the step that asks that agent to refuse its
     own write tools is left out.
+
+    On a config that is already there, this completes the permission half and
+    nothing else: the file stays byte for byte as the operator left it, doctor
+    still runs, and the agent's rules for this workspace's config directory and
+    state root are added or refreshed. That is the only route to the write
+    refusal for a bench whose first run was split (a plain `init` by the agent,
+    `agent-install` by the operator) or whose config predates the rules; the
+    alternative would be `init --force`, which rewrites operator policy and is
+    not a remedy.
     """
     workspace = Path.cwd().resolve()
     resolved_agent: SkillAgent | None = None
@@ -696,7 +713,13 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     target_path = initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
     config_exists = _path_entry_exists(target_path)
+    # An existing config that is being kept is not this run's to write, so it
+    # stays out of the rollback set: an operator's read-only policy file must
+    # neither be locked nor restored by a later step that fails.
+    keep_existing = config_exists and not force
     mutation_paths = _project_mutation_paths(resolved_agent, target_path)
+    if keep_existing:
+        mutation_paths.remove(target_path)
     # Nothing project-side is smoothed. `state_root`, the authoritative config
     # and the agent's policy file were chmod-ed here to satisfy the configured
     # path trust check, which is gone; nothing left refuses any
@@ -708,23 +731,20 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     doctor_result = _skipped_setup_step("Doctor was not reached.")
     permission_result: JsonObject
     if resolved_agent is None:
-        permission_result = {"ok": True, "skipped": True, "summary": "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."}
+        # On an existing config this is the whole of what the run could still
+        # have done, so the report names the command that does it rather than
+        # the flag alone.
+        permission_result = {"ok": True, "skipped": True, "summary": _NO_AGENT_ON_EXISTING_CONFIG if keep_existing else _NO_AGENT_NAMED}
     else:
         permission_result = _skipped_setup_step("Agent write restriction was not reached.")
 
-    # An existing config that is being kept is not this run's to write, so it
-    # stays out of the rollback set: an operator's read-only policy file must
-    # neither be locked nor restored by a later step that fails.
-    keep_existing = config_exists and not force
-    if keep_existing:
-        mutation_paths.remove(target_path)
     with ExitStack() as locks:
         for path in sorted(mutation_paths, key=lambda item: os.path.normcase(str(item))):
             locks.enter_context(secure_user_file_lock(path))
         snapshots = _capture_file_snapshots(mutation_paths)
         try:
             if keep_existing:
-                config_result = {"ok": True, "skipped": True, "summary": "Existing authoritative config kept; this never replaces operator policy.", "path": str(target_path)}
+                config_result = {"ok": True, "skipped": True, "existing": True, "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy.", "path": str(target_path)}
             else:
                 config_result = init_config(config_path, force=force, _locked=True)
 
