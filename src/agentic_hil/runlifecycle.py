@@ -252,6 +252,9 @@ class RunRegistration:
         self._base: JsonObject = {}
         self._terminal = False
         self._last_write = 0.0
+        # The newest progress the throttle has not written yet, kept so the step
+        # a run is really on is never older than one throttle interval.
+        self._pending: JsonObject | None = None
         self._stop_seen: str | None = None
         self._stop_checked = 0.0
 
@@ -312,10 +315,26 @@ class RunRegistration:
         self._write(RUN_RUNNING, {}, force=True)
 
     def progress(self, progress: JsonObject) -> None:
-        self._write(RUN_RUNNING, {"progress": progress})
+        """Say which step the run is on, as often as the interval allows.
+
+        Held back rather than dropped, which is the whole of the difference. The
+        step this is about to name may be the one that then waits ten minutes,
+        so a throttle that discarded it would leave the record naming the step
+        before it for as long as that step lasts, which is exactly the moment
+        somebody watching a long run is watching. What the throttle skips is
+        kept and written by the next thing that gets the chance, and
+        `stop_requested` is that thing: the run asks it between every step and
+        once per slice of every wait."""
+        self._pending = progress
+        self._flush_pending()
+
+    def _flush_pending(self) -> None:
+        if self._pending is not None and self._write(RUN_RUNNING, {"progress": self._pending}):
+            self._pending = None
 
     def finish(self, result: JsonObject) -> None:
         """The one terminal record, written from the run's own result."""
+        self._pending = None
         stopped = bool(result.get("stopped"))
         self._write(
             RUN_STOPPED if stopped else RUN_FINISHED,
@@ -336,7 +355,12 @@ class RunRegistration:
 
         Cached once true, and asked of the filesystem at most every
         `STOP_POLL_INTERVAL_S`: this is called between every step, and a plan of
-        very short steps must not spend its time asking."""
+        very short steps must not spend its time asking.
+
+        It is also where a progress write the throttle held back gets written.
+        The two belong together because they are asked in the same places for
+        the same reason: this is what the run does while it is otherwise busy."""
+        self._flush_pending()
         if self._stop_seen is not None:
             return True
         now = time.monotonic()
@@ -346,18 +370,22 @@ class RunRegistration:
         self._stop_seen = stop_requested_at(self.config, self.handle)
         return self._stop_seen is not None
 
-    def _write(self, state: str, fields: JsonObject, *, force: bool = False) -> None:
+    def _write(self, state: str, fields: JsonObject, *, force: bool = False) -> bool:
+        """Publish the record, or say the throttle held this one back."""
         now = time.monotonic()
         if not force and now - self._last_write < PROGRESS_WRITE_INTERVAL_S:
-            return
+            return False
         self._last_write = now
         record = {**self._base, **fields, "state": state, "updated_at": utc_now_iso()}
         try:
             write_run_record(self.config, self.handle, record)
         except (ConfigError, OSError, ValueError):
             # A record that could not be written is a run nobody can watch, not
-            # a run that should stop. The plan is what the bench is for.
-            return
+            # a run that should stop. The plan is what the bench is for. Reported
+            # as written all the same: asking again forever would turn a
+            # read-only state directory into the run's main occupation.
+            return True
+        return True
 
 
 def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_s: float) -> JsonObject:
