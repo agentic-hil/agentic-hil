@@ -2140,10 +2140,13 @@ class TestReactor:
         session the plan holds is still held on the next one and end-of-run
         cleanup closes exactly what it would have closed without the loop.
 
-        `count` is asked before an iteration starts and `duration_s` between
-        iterations, so a cycle is never cut in half and a loop bounded only by
-        time always runs at least once. With both, the first bound reached ends
-        the loop, and reaching either is the green exit.
+        Both bounds are asked at the bottom of the loop and nowhere else, which
+        is what "between iterations" means structurally rather than by promise:
+        a cycle is never cut in half, and a block always runs at least one whole
+        iteration however small its `duration_s` is. `count` is asked first, so
+        a loop whose count is exhausted says so even when the same iteration
+        reached the time bound too; otherwise the first bound reached ends the
+        loop, and reaching either is the green exit.
 
         A failed nested step ends the run exactly as a failed top-level step
         does: the failure is handed back up, the loop stops where it is, and the
@@ -2157,12 +2160,6 @@ class TestReactor:
         started = time.monotonic()
         completed = 0
         while True:
-            if count is not None and completed >= count:
-                exit_reason = "count"
-                break
-            if duration_s is not None and completed > 0 and time.monotonic() - started >= duration_s:
-                exit_reason = "duration_s"
-                break
             nested: list[JsonObject] = []
             iterations.append({"iteration": completed + 1, "steps": nested})
             aborted = self.execute_steps(step.steps, nested)
@@ -2184,6 +2181,12 @@ class TestReactor:
                     "failed_nested_action": step.steps[failed_index - 1].action,
                 }
                 return failure
+            if count is not None and completed >= count:
+                exit_reason = "count"
+                break
+            if duration_s is not None and time.monotonic() - started >= duration_s:
+                exit_reason = "duration_s"
+                break
         record["result"] = {
             "ok": True,
             "tool": "test_reactor",
@@ -2270,14 +2273,14 @@ class TestReactor:
             "summary": "Test reactor sequence completed." if ok else "Test reactor sequence failed.",
         }
         propagate_result_status(result, [*step_results(completed), *(item["result"] for item in cleanup)])
-        if failed_step is not None:
+        if failure is not None:
             result["failed_step"] = failed_step
             # The failing step's own result, which inside a block step is the
             # nested step that failed rather than the block: `failed_step` says
-            # which top-level step the run stopped at, and `step_error_type`
-            # says what went wrong there, and a loop's own summary would answer
+            # which top-level step the run stopped at and `step_error_type` says
+            # what went wrong there, and a loop's own summary would answer
             # neither question.
-            step_error_type = result_error_type(failure or completed[-1]["result"])
+            step_error_type = result_error_type(failure)
             result["step_error_type"] = step_error_type
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
         elif not cleanup_ok:
