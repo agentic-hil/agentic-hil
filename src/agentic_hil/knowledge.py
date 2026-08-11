@@ -2697,7 +2697,7 @@ Both flags are mandatory. `--quarantine-id` must be the id `lease-status` report
 {"error_type": "config_changed", "recorded_config_sha256": "...", "current_config_sha256": "..."}
 ```
 
-The recorded config is what defined the resources, permissions, and limits under which the incident happened; recovering against a different one would clear an incident nobody assessed. The operator reviews the delta between the two configs and reruns with `--accept-config-change` to state explicitly that the change is understood and accepted. The override is recorded in the recovery audit log as `config_change_accepted`.
+The recorded config is what defined the resources, permissions, and limits under which the incident happened; recovering against a different one would clear an incident nobody assessed. The operator reviews the delta between the two configs and reruns with `--accept-config-change` to state explicitly that the change is understood and accepted. The `hardware_recover` MCP tool takes the same override as `accept_config_change: true`, for the agent that has just shown the operator both digests and been told to go ahead; the refusal names both spellings. Either way the override is recorded in the recovery audit log as `config_change_accepted`, beside `recorded_config_sha256` and `current_config_sha256`.
 
 ## `recovery.auto_recover` policy
 
@@ -2719,7 +2719,7 @@ Set in the authoritative configuration; decides how far the owning process may g
 | `quarantine_id_required` | `--quarantine-id` was not given |
 | `resource_not_quarantined` | nothing to recover |
 | `quarantine_changed` | the incident or a resource marker moved; re-read `lease-status` |
-| `config_changed` | see `--accept-config-change` above |
+| `config_changed` | see `--accept-config-change` above; over MCP, `accept_config_change: true` |
 | `resource_busy` | a live owner still holds project resources; stop it first |
 | `recovery_audit_failed` | the audit could not be persisted, so the quarantine stands |
 """
