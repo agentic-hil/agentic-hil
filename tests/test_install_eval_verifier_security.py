@@ -585,7 +585,7 @@ def test_the_probe_configuration_moves_the_state_root_and_nothing_else(
     The runtime opens `state_root` for writing while it loads, and the verifier
     mounts the home read-only so the evidence under it cannot be rewritten by
     what is being verified. So the probes load a copy with that one field moved
-    onto the tmpfs — and everything the install decided has to survive the copy,
+    onto the tmpfs, and everything the install decided has to survive the copy,
     or the probes stop proving anything about the install. It is staged where
     discovery looks, under the same project directory, so the probes still find
     it by starting in the workspace.

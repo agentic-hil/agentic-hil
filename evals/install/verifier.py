@@ -48,12 +48,12 @@ SOURCE = Path("/workspace/source")
 OTHER_WORKSPACE = Path("/tmp/agentic-hil-other-project")
 # The container's one writable filesystem. A state root under it survives no
 # run, so an install that put the project's state there configured a bench that
-# forgets what it did — named here so the rule reads as one thing, and so a test
+# forgets what it did. Named here so the rule reads as one thing, and so a test
 # on a host whose own temporary directory is this one can say which is which.
 TEMPORARY_ROOT = Path("/tmp")
 # Where the probes put the state a read-only home cannot hold. The verifier
-# container mounts /home/eval read-only on purpose — that mount is what makes
-# the evidence under it evidence — while the runtime opens the configured
+# container mounts /home/eval read-only on purpose, and that mount is what
+# makes the evidence under it evidence, while the runtime opens the configured
 # state_root for writing as it loads. So the probes load a copy of the agent's
 # configuration with that one field moved here, onto the one tmpfs this
 # container has.
@@ -80,8 +80,8 @@ PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_writ
 LEGACY_CONFIG_VERSION = 1
 READ_FREE_CONFIG_VERSION = 2
 SUPPORTED_CONFIG_VERSIONS = (1, 2, 3)
-# The hardware tool the wrong-workspace probe asks for. Any of them would do — a
-# server with no configuration refuses all of them — and this one is named
+# The hardware tool the wrong-workspace probe asks for. Any of them would do,
+# because a server with no configuration refuses all of them; this one is named
 # because it touches a probe, so a server that answered it would be a server
 # that had found a bench it must not have. Pinned to the tool contract by the
 # repository suite, so a rename cannot leave the probe calling nothing.
@@ -1187,8 +1187,8 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     root and to no other. That is the arm with the teeth, and it is why the probe
     hands the configuration over explicitly rather than hoping discovery misses it.
 
-    Found by discovery it is not found at all — the other directory hashes to a
-    project of its own that has no configuration — and since 0.7.0 that starts a
+    Found by discovery it is not found at all, because the other directory hashes
+    to a project of its own that has no configuration, and since 0.7.0 that starts a
     server bound to *that* directory with every hardware tool refusing, so that an
     agent has a route to generating one. It initializes, which the old form of
     this check read as a failure and which is not one; what would be a failure is

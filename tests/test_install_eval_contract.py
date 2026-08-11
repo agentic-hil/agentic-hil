@@ -172,7 +172,7 @@ def test_the_verifier_permission_whitelist_is_the_one_this_release_generates() -
     wrote it would move the expectation along with itself. The price of spelling
     it out is that `allow_recover` shipped and every job in a full matrix failed
     on a config the install was right to write. This is where that price is
-    paid instead — one release ahead of the eval, in the change that adds the
+    paid instead: one release ahead of the eval, in the change that adds the
     permission, where the fix is one word.
     """
     assert verifier.PROJECT_PERMISSION_FLAGS == GENERATED_PROJECT_PERMISSIONS
