@@ -298,6 +298,33 @@ def test_a_detached_start_answers_with_a_handle_and_the_report_path(tmp_path: Pa
     assert result["detached"] is True
 
 
+def test_a_detached_start_on_a_held_bench_answers_with_the_run_that_was_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
+    # The start command waits for the worker to say what it is doing, not for it
+    # to finish, and "what it is doing" includes having been refused the bench.
+    # Answering with a handle to go and ask about would put a refusal the caller
+    # could have had at once behind a second command.
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.cli import start_detached_test_reactor
+    from agentic_hil.test_reactor import declared_devices, load_test_config
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)))
+    try:
+        result = start_detached_test_reactor(str(plan))
+    finally:
+        stranger.release_all()
+
+    detached_runs.append((config, result["run"]))
+    assert result["state"] == "finished", result
+    report = json.loads((workspace / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
+    assert report["error_type"] == "device_busy"
+    assert report["holder"]["label"] == "other-bench-session"
+    assert report["steps"] == []
+    assert report["run"] == result["run"]
+
+
 def test_a_detached_run_holds_its_devices_and_refuses_another_caller_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
     # The concurrency story is the one the bench already had: locks are
     # machine-wide, a run holds what it declared from before its first step to
@@ -465,7 +492,7 @@ def test_a_synchronous_run_registers_a_handle_it_can_be_stopped_by(tmp_path: Pat
     # all the same: a plan running in one terminal can be asked to stop from
     # another instead of being killed, which is the dead-owner route.
     from agentic_hil.cli import run_test_reactor
-    from agentic_hil.runlifecycle import known_runs
+    from agentic_hil.runlifecycle import known_runs, run_status
 
     workspace, plan = bench_workspace(tmp_path, monkeypatch, "version: 3\nsteps:\n  - {device: dut, action: delay, duration_ms: 50}\n")
     config = load_authoritative_config(workspace)
@@ -477,3 +504,10 @@ def test_a_synchronous_run_registers_a_handle_it_can_be_stopped_by(tmp_path: Pat
     assert [item["state"] for item in listed["runs"]] == ["finished"]
     assert listed["runs"][0]["run"] == result["run"]
     assert listed["active_runs"] == []
+    # The record is the run's own verdict, not merely a note that a handle
+    # existed: a second terminal asks this and has to get the same answer the
+    # terminal that ran it got.
+    status = run_status(config, result["run"])
+    assert status["run_ok"] is True
+    assert status["error_type"] is None
+    assert status["report_path"] == ".agentic-hil/reports/last-report.json"
