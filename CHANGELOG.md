@@ -6,7 +6,9 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
-## [0.12.0] - 2026-08-11
+### Fixed
+
+- **A blocked `setup` left the bench unconfigured and the operator holding a menu.** A first run from the README's agent prompt ends, on a current Claude Code, with the host's permission classifier refusing `setup`, because `setup` writes the agent's own skill and user-level MCP registration and that is exactly what such a classifier is for. The quickstart now finishes what the machine is allowed to finish: on a blocked `setup` the agent runs `agentic-hil init` with no `--agent` (the project half touches no file of the agent's own), hands the operator the one line that stays theirs (`agentic-hil agent-install --agent <agent>`), and verifies with `doctor`; the pre-ask now offers the paste-ready line beside the prompt approval and the standing rule, and names what the split skips (the Claude Code write-refusal rules, which only `setup` and `init --agent` write). Agents are also pointed at the raw guide URL instead of the repository's web view, which is 290 KB of HTML around a 15 KB file. (#199)
 
 ### Added
 

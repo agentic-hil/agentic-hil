@@ -4,6 +4,8 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is the local MCP server for embedded 
 
 This file is for agents. Humans start with `README.md`; `TROUBLESHOOTING.md` is for operator diagnostics.
 
+Fetching this guide over HTTP? Take the raw file, not the repository's web view around it: `https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/AI_AGENT_QUICKSTART.md`.
+
 Two steps: install the package, then run `setup` in the firmware project. `setup` does the rest: skill, MCP registration, config, doctor.
 
 `setup` is two commands in one: `agent-install` (user scope, once per user and agent) and `init` (project scope, once per project). First time, run `setup`. Every later firmware repository under the same user, run `init` alone.
@@ -71,9 +73,11 @@ Those lines are for a machine that has no Agentic HIL yet. **Once one exists, up
 
 ## Set up the project
 
-Expect the host to stop you here. `setup` writes the agent's own skill file and its user-level MCP registration, and a permission classifier is built to catch exactly that, and rightly, because a program that can edit an agent's configuration can change what the agent may do. Say so before you run it and ask the operator for the grant, instead of letting them find out from a refusal: either an approval of the prompt when it appears, or a standing rule for the command prefix, which in Claude Code is `Bash(agentic-hil setup:*)` in user or project settings; other hosts take the same prefix in whatever allowlist they keep. The same applies to `agent-install`, the half that does the writing.
+Expect the host to stop you here. `setup` writes the agent's own skill file and its user-level MCP registration, and a permission classifier is built to catch exactly that, and rightly, because a program that can edit an agent's configuration can change what the agent may do. Say so before you run it and ask the operator for the grant, instead of letting them find out from a refusal: an approval of the prompt when it appears, or a standing rule for the command prefix, which in Claude Code is `Bash(agentic-hil setup:*)` in user or project settings (other hosts take the same prefix in whatever allowlist they keep), or the operator types the one line themselves; have `agentic-hil setup --agent <agent>` ready to paste when you ask. The same applies to `agent-install`, the half that does the writing.
 
 This is the host's permission system, not Agentic HIL's: it produces no `permission_denied` result, no report and no log, and it refuses before the command runs. That refusal stands until the operator lifts it. Do not reach for another shell, another user, or a flag that skips permission checks, and do not write the rule into the host's settings yourself: that file is what the rule protects.
+
+When the refusal has landed anyway, do not stop at a menu of ways the operator could unblock you while the bench sits unconfigured. Finish what you are allowed to finish: run `agentic-hil init` with no `--agent`. The project half writes the authoritative config outside the repository and touches no file of the agent's own, so it is not what the classifier catches, and it ends in its own `doctor`. Then hand the operator the one line that stays theirs, `agentic-hil agent-install --agent <agent>`, and when they have run it, confirm with `agentic-hil doctor` and report the bench. One thing this order skips, and you must say so: on Claude Code, `setup` and `init --agent` also write the agent's own refusal of its write tools on the config and the state root (SECURITY.md describes that lock), and after a plain `init` the config exists, so that write has no route left. The operator typing `agentic-hil setup --agent <agent>` before your `init` is the complete path; the split is the fallback that leaves a working bench instead of a menu.
 
 From the firmware project root:
 
