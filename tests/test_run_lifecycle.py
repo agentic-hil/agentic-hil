@@ -99,16 +99,26 @@ def worker_log(config, handle: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else "<no worker log>"
 
 
-def wait_for_progress_step(config, handle: str, step: int, timeout_s: float = 60.0) -> None:
-    """Wait until the run says it is on a given top-level step."""
-    from agentic_hil.runlifecycle import read_run_record
+def last_report(workspace: Path) -> dict:
+    path = workspace / ".agentic-hil" / "reports" / "last-report.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def wait_for_progress_step(workspace: Path, config, handle: str, step: int, timeout_s: float = 60.0) -> None:
+    """Wait until the run says it is on a given top-level step.
+
+    A run that reached a terminal state without ever getting there is not worth
+    waiting out: what it did instead is in its report, and that is what a reader
+    of the failure needs rather than a minute of nothing."""
+    from agentic_hil.runlifecycle import TERMINAL_RUN_STATES, read_run_record
 
     deadline = time.monotonic() + timeout_s
     while True:
         record = read_run_record(config, handle) or {}
         if (record.get("progress") or {}).get("step") == step:
             return
-        assert time.monotonic() < deadline, record
+        assert record.get("state") not in TERMINAL_RUN_STATES, (record, last_report(workspace))
+        assert time.monotonic() < deadline, (record, last_report(workspace))
         time.sleep(0.05)
 
 
@@ -445,7 +455,7 @@ def test_a_killed_worker_leaves_the_bench_to_the_machinery_that_already_owns_it(
     record = read_run_record(config, result["run"])
     # The reset step has to have run, so the worker is killed having driven the
     # board rather than having only declared it.
-    wait_for_progress_step(config, result["run"], 2)
+    wait_for_progress_step(workspace, config, result["run"], 2)
 
     kill_hard(int(record["pid"]))
     wait_for_state(config, result["run"], {"worker_gone"})
