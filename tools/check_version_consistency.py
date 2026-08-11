@@ -108,6 +108,15 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # comment records. Neither file pins a version anything installs against.
     "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
     "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
+    # OpenOCD's own current release is 0.12.0. These state the debugger's
+    # version, in its banner or as an example of one, and must never follow
+    # ours; they became visible to the sweep the day our release number caught
+    # up with OpenOCD's.
+    ".github/ISSUE_TEMPLATE/bug_report.yml": "an example OpenOCD version, not this project's",
+    "tests/fixtures/fake_openocd_missing_cfg.py": "the fake prints OpenOCD's own banner version",
+    "tests/fixtures/fake_openocd_no_target.py": "the fake prints OpenOCD's own banner version",
+    "tests/fixtures/fake_openocd_post_init_unconfirmed.py": "the fake prints OpenOCD's own banner version",
+    "tests/fixtures/fake_openocd_unconfirmed.py": "the fake prints OpenOCD's own banner version",
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",
