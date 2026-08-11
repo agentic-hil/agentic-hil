@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 from types import TracebackType
 
-from agentic_hil.bench import MAX_WAIT_S, _LifetimeLock, utc_now_iso
+from agentic_hil.bench import MAX_WAIT_S, _LifetimeLock, utc_now_iso, validated_wait
 from agentic_hil.config import (
     ConfigError,
     atomic_write_text,
@@ -438,7 +438,21 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     state before it could be caught at ``running`` — a refusal published at once,
     or a plan short enough to finish inside the window — is reported with its own
     verdict, not as a successful launch: launch success is reserved for a running
-    worker and for an already-finished run only when it passed."""
+    worker and for an already-finished run only when it passed.
+
+    The wait is validated here, before a worker is spawned. The worker refuses a
+    bad wait too — it runs the same validator when it acquires its devices — but
+    a non-finite wait handed to a detached process would strand it: a NaN deadline
+    is one ``time.monotonic()`` never reaches, so a worker holding for a device
+    polls forever, past the window this command waits in, and the caller is told
+    the start failed while a live process keeps waiting. Refusing the value up
+    front keeps an invalid wait out of a process nobody is watching, and the one
+    validated finite value is what both the worker and the publication window are
+    built from."""
+    try:
+        wait_s = validated_wait(wait_s)
+    except ConfigError as error:
+        return {"ok": False, "tool": "test_reactor_start", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
     handle = new_run_handle()
     report = display_path(config, last_report_path(config))
     worker = spawn_run_worker(config, handle, test_config_path, wait_s=wait_s)

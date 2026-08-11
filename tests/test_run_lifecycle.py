@@ -308,6 +308,36 @@ def test_a_detached_start_answers_with_a_handle_and_the_report_path(tmp_path: Pa
     assert result["detached"] is True
 
 
+@pytest.mark.parametrize("bad_wait", [float("nan"), float("inf"), float("-inf")])
+def test_a_detached_start_refuses_a_non_finite_wait_before_spawning_a_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_wait: float) -> None:
+    """A non-finite wait is refused up front, never handed to a detached worker.
+
+    A NaN wait becomes a deadline `time.monotonic()` never reaches, so a worker
+    holding for a device would poll it forever — past the window the start command
+    waits in, leaving a live process behind a caller told the start failed.
+    `start_detached_run` validates the wait before it spawns anything, so the
+    value can never reach a process nobody is watching. The CLI's `type=float`
+    accepts `nan`, so this path is externally reachable.
+    """
+    import agentic_hil.runlifecycle as runlifecycle_module
+    from agentic_hil.runlifecycle import start_detached_run
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+
+    def fail_if_spawned(*args: object, **kwargs: object):
+        raise AssertionError("a worker must not be spawned for a non-finite wait")
+
+    monkeypatch.setattr(runlifecycle_module, "spawn_run_worker", fail_if_spawned)
+
+    result = start_detached_run(config, str(plan), wait_s=bad_wait)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument"
+    assert result["side_effect_committed"] is False
+    assert result["side_effect_status"] == "not_started"
+
+
 def test_a_detached_start_on_a_held_bench_answers_with_the_run_that_was_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
     # The start command waits for the worker to say what it is doing, not for it
     # to finish, and "what it is doing" includes having been refused the bench.
@@ -359,6 +389,29 @@ def test_the_publish_window_grows_with_the_bounded_device_wait() -> None:
     assert worker_publish_window_s(10_000) == WORKER_PUBLISH_TIMEOUT_S + MAX_WAIT_S
     assert worker_publish_window_s(-5) == WORKER_PUBLISH_TIMEOUT_S
     assert worker_publish_window_s(True) == WORKER_PUBLISH_TIMEOUT_S
+    # A NaN the worker would refuse also falls back to the base window here rather
+    # than producing a NaN deadline the start command would never reach.
+    assert worker_publish_window_s(float("nan")) == WORKER_PUBLISH_TIMEOUT_S
+
+
+def test_a_non_finite_device_wait_is_refused_by_the_shared_validator() -> None:
+    """NaN and infinity are not waits: the one validator every acquisition shares
+    refuses them.
+
+    A NaN wait slips past a range check — every comparison against it is false —
+    and would become a NaN deadline `time.monotonic()` never reaches, polling a
+    held device forever. Refusing it in `validated_wait` closes that for every
+    caller at once, the interactive acquisition and the detached worker alike,
+    while a finite in-range wait still passes through unchanged.
+    """
+    from agentic_hil.bench import validated_wait
+    from agentic_hil.config import ConfigError
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ConfigError) as caught:
+            validated_wait(bad)
+        assert caught.value.error_type == "invalid_argument", bad
+    assert validated_wait(12.5) == 12.5
 
 
 def test_a_terminal_detached_record_is_answered_with_its_own_verdict() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -1389,6 +1390,90 @@ def test_stlink_dump_refuses_a_source_that_no_longer_matches_the_flashed_image(t
     assert refused["target_contacted"] is False
     assert refused["side_effect_status"] == "not_started"
     assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_flash_that_raises_drops_the_previously_trusted_symbol_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flash that raises may have changed the image, so the old ELF is dropped.
+
+    ``_remember_symbol_elf`` runs only on a returned result; a backend that raises
+    after it may have contacted or partly written the target never reaches it. The
+    coordination wrapper reports the effect as unknown, so the previously trusted
+    ELF — which a later ST-Link dump would resolve a symbol against — must not
+    survive a flash whose outcome is unproven, or a symbol could resolve against a
+    build the failed flash may have replaced.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        # A prior confirmed ELF flash makes it this bench's symbol source.
+        assert flash_symbol_source(service)["ok"] is True
+        assert service._symbol_elf is not None
+
+        def raising_flash(artifact: dict, reset_after_flash: bool = False) -> dict:
+            raise RuntimeError("link lost mid-write")
+
+        monkeypatch.setattr(service.backend, "flash_firmware", raising_flash)
+        result = service.call("flash_firmware", {"image_path": "build/app.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    # The dispatch wrapper reports the physical effect as unknown, exactly the
+    # state in which the old source must not be left trusted.
+    assert result["side_effect_status"] == "unknown"
+    assert service._symbol_elf is None
+
+
+def test_stlink_dump_resolves_from_an_immutable_copy_not_the_racing_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rebuild landing after the digest check must not reach the GDB query.
+
+    The flashed ELF is hashed and then a separately spawned GDB is pointed at it;
+    a rebuild replacing the workspace file in that window would make GDB answer
+    from bytes the digest never covered while the result still carried the flashed
+    image's digest. The resolution copies the verified bytes into a private file
+    first, so a replacement of the caller's path lands too late to be read.
+    """
+    import agentic_hil.backends.stlink as stlink_module
+
+    service = stlink_dump_service(tmp_path)
+    workspace_elf = tmp_path / "build" / "app.elf"
+    flashed_bytes = workspace_elf.read_bytes()
+    captured: dict = {}
+
+    real_sha256_file = stlink_module.sha256_file
+
+    def racing_sha256_file(path: Path) -> str:
+        digest = real_sha256_file(path)
+        # A rebuild lands in the window the digest check used to leave open.
+        workspace_elf.write_bytes(b"\x7fELF" + b"\x22" * 64)
+        return digest
+
+    real_spawn_command = stlink_module.spawn_command
+
+    def capturing_spawn_command(command, *args, **kwargs):
+        elf_arg = next((item for item in command if isinstance(item, str) and item.endswith(".elf")), None)
+        if elf_arg is not None:
+            captured["gdb_elf_path"] = Path(elf_arg)
+            captured["gdb_elf_bytes"] = Path(elf_arg).read_bytes()
+        return real_spawn_command(command, *args, **kwargs)
+
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        # Only the offline resolution, not the flash, races the rebuild.
+        monkeypatch.setattr(stlink_module, "sha256_file", racing_sha256_file)
+        monkeypatch.setattr(stlink_module, "spawn_command", capturing_spawn_command)
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    # GDB read the flashed image, not the rebuild that raced the resolution.
+    assert captured["gdb_elf_bytes"] == flashed_bytes
+    # And it was handed a private copy, not the mutable workspace path.
+    assert captured["gdb_elf_path"] != workspace_elf
+    # The provenance the result reports is now honest about what GDB read.
+    assert dumped["symbol_source"]["sha256"] == hashlib.sha256(flashed_bytes).hexdigest()
+    # The rebuild really did land; the copy is what made it harmless.
+    assert workspace_elf.read_bytes() != flashed_bytes
 
 
 def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path) -> None:

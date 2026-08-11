@@ -227,6 +227,18 @@ class AgenticHILToolService:
             return staged
         try:
             result = self.backend.flash_firmware(staged["artifact"], reset_after_flash)
+        except BaseException:
+            # A backend that raised may have contacted or partly written the
+            # target, so the ELF this bench remembered no longer provably
+            # describes the image on the board. `_remember_symbol_elf` runs only
+            # on a returned result and is never reached here, so drop the source
+            # explicitly before the failure propagates: the coordination wrapper
+            # reports the effect as unknown, and a later ST-Link dump must not
+            # resolve a symbol against a build a failed flash may have replaced.
+            # Only a returned result that proves the flash never started keeps the
+            # old source (see `_remember_symbol_elf`).
+            self._symbol_elf = None
+            raise
         finally:
             self.artifacts.release_stage(staged["artifact"])
         self._remember_symbol_elf(validation["artifact"], result)
