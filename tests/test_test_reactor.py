@@ -1477,6 +1477,7 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
 
     from agentic_hil.test_reactor import (
         ACTION_SCHEMAS,
+        REACTOR_ACTION_SCHEMAS,
         ROUTE_FIELDS,
         STEP_ACTION_DECLARATIONS,
         STEP_DEVICE_CLASSES,
@@ -1502,13 +1503,24 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
             if spec.tool is not None:
                 assert spec.tool in device_class.device_class.tools, f"{spec.tool} is not a tool {device_class.device_class.__name__} owns"
 
-    assert set(claimed) == set(ACTION_SCHEMAS)
+    # Every action, less the ones the reactor serves itself. `repeat` routes to
+    # no device and drives no hardware, so no kind can declare it and the old
+    # equality would now demand a device class for a step about the sequence.
+    # The two halves are still required to cover the whole vocabulary and to
+    # stay disjoint, which is the property the equality was really pinning.
+    assert set(claimed) == set(ACTION_SCHEMAS) - set(REACTOR_ACTION_SCHEMAS)
+    assert not set(claimed) & set(REACTOR_ACTION_SCHEMAS)
     assert {"can_open", "can_close", "can_send", "can_read"} <= set(claimed)
     assert {"uart_write", "uart_read", "delay"} <= set(claimed)
-    # Every step shape the schema offers is served, and every action a kind
-    # serves has a shape. A `$def` nobody dispatches is a step a plan can be
-    # written against and no device will run.
-    offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["properties"]["steps"]["items"]["oneOf"]}
+    for action, schema_name in REACTOR_ACTION_SCHEMAS.items():
+        # A reactor action answers for itself exactly as a declared one does: a
+        # shape in the bundled schema, and no device kind claiming it.
+        assert schema_name in schema["$defs"], f"{action} names a schema $def that does not exist"
+        assert step_device_classes(action) == ()
+    # Every step shape the schema offers is served, and every action has a
+    # shape. A `$def` nobody dispatches is a step a plan can be written against
+    # and nothing will run.
+    offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["$defs"]["steps"]["items"]["oneOf"]}
     assert offered == set(ACTION_SCHEMAS.values())
 
 
