@@ -23,10 +23,11 @@ The plan schema is
 [`src/agentic_hil/schemas/testconfig.schema.json`](https://github.com/agentic-hil/agentic-hil/blob/master/src/agentic_hil/schemas/testconfig.schema.json),
 and it is closed: `additionalProperties: false` at the root and on every step,
 so a key the schema does not name is a refusal rather than something ignored.
-A plan document has exactly three root keys: `version: 2`, an optional `name`
-(defaulting to the file's stem), and `steps`, between 1 and 128 of them.
+A plan document has exactly three root keys: `version:` (2, 3 or 4), an optional
+`name` (defaulting to the file's stem), and `steps`, between 1 and 128 of them.
 
-A step is a route field, an action, and that action's arguments.
+A step is a route field, an action, and that action's arguments. One step is
+not: `repeat` is a block, and it is described below.
 
 **Route fields name a configured entry, never a machine.** A debugger step
 carries `debugger: <name of a debuggers entry>`, a serial step
@@ -73,6 +74,24 @@ is an object deliberately, so preprocessing keys (scale, convert) can be added
 later without breaking the format. `uart_expect` with `text`/`pattern` remains
 valid as the v2 spelling. Every other step states its expectation by existing:
 the step must succeed, and the plan stops at the first one that does not.
+
+**One step is a block, not a route.** From plan format v4, `repeat` carries a
+nested `steps:` list and no route field at all: it drives nothing, and the
+reactor runs it rather than any device kind. `count:` bounds it by iterations
+and `duration_s:` by wall time; at least one is required, because a plan may not
+loop unbounded, and with both the first bound reached ends the loop. Both are
+asked between iterations and nowhere else, so a cycle is never cut in half and a
+block runs at least one whole iteration however small its `duration_s` is.
+Reaching a bound is the green exit. The nested list is the same `#/$defs/steps`
+the plan's own is, so a `repeat` may contain a `repeat`, and validation, the
+version gate, preflight and the run's lock declaration all descend into it: a
+nested step is refused at the path that names its nesting
+(`steps[2].steps[1].timeout_s`), and a device a plan touches only inside a loop
+is a device the run locks. The block adds nothing to the session model: nothing
+is opened, closed or reset between iterations, and a session opened inside a
+loop is opened once and closed by the same end-of-run cleanup as any other.
+There is no retry, no until and no conditional exit; a nested step that fails
+ends the run exactly as a failed top-level step does.
 
 Nothing in that list identifies a machine. A plan is a document about firmware
 and about the shape of a test, and it is reviewable as such:
@@ -135,10 +154,17 @@ travels with the record and says so.
 (`{index, route, action, result}`), where `result` is the tool result unchanged:
 its `ok`, `error_type`, `summary`, its `log_path`, and the effect fields
 (`side_effect_committed`, `side_effect_status`, `retry_safe`). `failed_step` and
-`step_error_type` name where a fail-fast run stopped. A plan refused before
-execution reports `validation_error` instead, naming the step index, the
-offending field, the route and the action; and `steps` is empty, because none
-ran.
+`step_error_type` name where a fail-fast run stopped. A `repeat` block's entry
+additionally carries `iterations`, one `{iteration, steps}` record per cycle
+holding that cycle's step entries in the same shape, and its own `result` says
+how the loop ended: `exit_reason` (`count`, `duration_s` or `step_failed`),
+`iterations_run`, `elapsed_s`, and on a failure `failed_iteration`,
+`failed_nested_step` and `failed_nested_action`. `failed_step` stays the
+top-level number of the block and `step_error_type` the inner step's own error,
+so the two questions a reader asks (which step, and what went wrong) keep their
+answers whether or not the plan nests. A plan refused before execution reports
+`validation_error` instead, naming the step index, the offending field, the
+route and the action; and `steps` is empty, because none ran.
 
 **Whether the hardware was ever reached.** Session results carry the contact
 marker (`first_contact_at`, `first_contact_by`) recorded at the one point in a
@@ -230,11 +256,11 @@ schema and the reactor rather than inferred:
   The debug backend does read a symbol's bytes on the way to writing that file;
   no tool returns them to a caller. This gap therefore closes with a
   value-returning debug tool, not with a plan format change.
-- **No control flow, no reuse, no parameters.** `steps` is a flat sequence of at
-  most 128 items, executed in order and stopped at the first failure. There is
-  no branch, no loop, no retry, no include, and no variable or substitution: an
-  argument is the literal the file carries. Two plans that differ only in a
-  firmware path are two files.
+- **No branch, no reuse, no parameters.** From v4 there is one control-flow
+  construct, `repeat`, and it repeats: it does not decide. There is no branch,
+  no retry, no until, no include, and no variable or substitution: an argument
+  is the literal the file carries. Two plans that differ only in a firmware path
+  are two files. Each step list holds at most 128 items, a block's own included.
 - **No expected failure.** Every step must succeed. A plan cannot assert that an
   action is refused (that a write to a read-only bus fails, that an out-of-range
   input is rejected) because the first failing step ends the run.

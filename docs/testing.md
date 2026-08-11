@@ -18,6 +18,23 @@ Feedback steps say what they are claiming, not merely that they read something. 
 
 Close steps are optional: end-of-run cleanup closes every session the run opened, so a plan that never closes is complete. Write an explicit close where the plan means to close, reconfigure and reopen a line or a bus mid-run.
 
+A plan states a cycle once and says how often it runs it. `repeat` is a block step the reactor serves itself: it routes to no device, the steps nested under its own `steps:` are the subset that repeats, and it is bounded by `count:` (iterations), by `duration_s:` (wall time), or by both, where the first bound reached ends the loop. At least one bound is required, so a plan cannot loop unbounded. Both bounds are asked between iterations and nowhere else, so a cycle is never cut in half and a block always runs at least one whole iteration however small its `duration_s` is; reaching a bound is the green exit. The nested list has the same shape as the plan's own, so a `repeat` may contain a `repeat`.
+
+Nothing is opened, closed or reset between iterations: a port opened before the loop is still open inside it, a port opened inside the loop is opened once and closed by end-of-run cleanup like any other, and the loop adds no cleanup of its own. There is no retry and no until: a nested step that fails ends the run exactly as a failed top-level step does, with the same cleanup, the same report and the same recovery action after it. The report says where it stopped: `failed_step` is the top-level number of the block, `step_error_type` is the inner step's own error, and the block's record carries the step records of every iteration beside `exit_reason`, `iterations_run`, `elapsed_s`, and, on a failure, `failed_iteration` and `failed_nested_step`. Validation, the version gate, preflight and the run's lock declaration all descend into the nested steps, so a nested step is refused at the path that names its nesting (`steps[2].steps[1].timeout_s`) and a device a plan touches only inside a loop is a device the run locks.
+
+```yaml
+version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - action: repeat
+    count: 1000
+    steps:
+      - {device: dut_can, action: can_send, frame_id: "0x100", data_hex: "01"}
+      - {device: dut, action: delay, duration_ms: 500}
+      - {device: dut_uart, action: uart_read, comparator: {equals: "cycle done"}, timeout_s: 2}
+  - {device: dut, action: reset}
+```
+
 Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. `uart_write` on a port whose entry does not grant `permissions.allow_write` is refused by name in the same pass, as is a `range:` whose pattern captures nothing to put in it. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple. It validates everything, then executes, then always cleans up:
@@ -44,7 +61,7 @@ steps:
 
 `dut_can` above is the `listen_only: true` bus from the [configuration example](configuration.md#what-it-declares), so the plan only reads it. A `can_send` step belongs on a bus whose entry sets `listen_only: false` and grants `allow_write`. The plan closes neither the port nor the bus, because it does not have to. Cleanup does.
 
-A plan already written against `version: 2` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 2` plan reaching for a version 3 action or key is refused by name rather than working on one install and failing on an older one for no stated reason.
+A plan already written against `version: 2` or `version: 3` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 3` plan reaching for the version 4 block step is refused by name rather than working on one install and failing on an older one for no stated reason.
 
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
