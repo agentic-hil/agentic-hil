@@ -74,8 +74,15 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success, write_report
+from agentic_hil.runlifecycle import (
+    RunRegistration,
+    new_run_handle,
+    request_run_stop,
+    run_status,
+    start_detached_run,
+)
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestReactor, load_test_config, plan_devices
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestConfig, TestReactor, load_test_config, plan_devices
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
@@ -265,6 +272,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="wait up to this many seconds for a device another run holds, instead of refusing immediately; bounded and never implicit",
     )
+    reactor_parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="run the plan in its own process and return at once with a run handle and the report path, instead of holding this terminal until the report exists",
+    )
+    # The handle a detached worker was started under. Not an operator's
+    # argument: the start command mints the handle, registers nothing itself and
+    # hands it to the worker it spawned, so a value supplied by hand here would
+    # be a second process claiming a run it did not start.
+    reactor_parser.add_argument("--run-handle", default=None, help=argparse.SUPPRESS)
+
+    reactor_status_parser = subparsers.add_parser("test-reactor-status", help="say what a test run handle is doing: running (which step), finished, stopped, or its worker gone")
+    reactor_status_parser.add_argument("--run", default=None, help="the handle the run was started under; without it, list the runs this bench still has records of")
+
+    reactor_stop_parser = subparsers.add_parser("test-reactor-stop", help="ask a test run to end after the step it is in, close its devices and write its report")
+    reactor_stop_parser.add_argument("--run", required=True, help="the handle the run was started under")
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
@@ -324,7 +347,13 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         config = load_cli_authoritative_config(args.config)
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
-        return run_test_reactor(args.test_config, wait_s=args.wait_s)
+        if args.detach:
+            return start_detached_test_reactor(args.test_config, wait_s=args.wait_s)
+        return run_test_reactor(args.test_config, wait_s=args.wait_s, run_handle=args.run_handle)
+    if args.command == "test-reactor-status":
+        return run_status(load_cli_authoritative_config(None), args.run)
+    if args.command == "test-reactor-stop":
+        return request_run_stop(load_cli_authoritative_config(None), args.run)
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -1436,9 +1465,41 @@ def initialized_config_path(workspace: Path) -> Path:
     return authoritative_config_target(workspace)
 
 
-def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
+def start_detached_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
+    """Start a run in its own process and answer at once.
+
+    The plan is loaded here as well as in the worker, and deliberately: a plan
+    that does not load is a fault in the file, and answering it with a handle to
+    go and ask about would put a refusal a caller could have had immediately
+    behind a second command."""
+    config = load_authoritative_config(Path.cwd())
+    load_test_config(test_config_path, config.work_dir)
+    return start_detached_run(config, test_config_path or DEFAULT_TEST_CONFIG_PATH, wait_s=wait_s)
+
+
+def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None) -> JsonObject:
+    """Run a plan to its end and answer with the report.
+
+    Registered under a run handle either way. A detached worker is handed the
+    handle its start command printed; a synchronous run mints its own, so a
+    plan running in one terminal can still be asked to stop from another
+    instead of being killed, which is the dead-owner route."""
     config = load_authoritative_config(Path.cwd())
     test_config = load_test_config(test_config_path, config.work_dir)
+    registration = RunRegistration.take(
+        config,
+        run_handle or new_run_handle(),
+        name=test_config.name,
+        test_config_path=test_config.path,
+        detached=run_handle is not None,
+    )
+    with registration:
+        result = run_registered_test_reactor(config, test_config, wait_s=wait_s, registration=registration)
+        registration.finish(result)
+    return result
+
+
+def run_registered_test_reactor(config: AgenticHILConfig, test_config: TestConfig, *, wait_s: float, registration: RunRegistration) -> JsonObject:
     service = AgenticHILToolService(config, frontend="reactor")
     # The plan's devices are held from before its first step to after its last,
     # not around each call: between two steps there would otherwise be no lock at
@@ -1465,8 +1526,14 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
                     "declared_devices": devices,
                     **error.result,
                     "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
+                    "run": registration.handle,
                 },
             )
+    # Published only now: a run says it is running once it holds the devices it
+    # declared, so a handle reported as running is a handle that has the bench.
+    # A run refused the bench above never reaches this and is answered as the
+    # finished run it is.
+    registration.running()
     # A step naming another probe gets its own service driving that debugger,
     # sharing the base coordinator so the whole project stays one owner.
     def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
@@ -1478,7 +1545,13 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     reactor: TestReactor | None = None
     primary_error: BaseException | None = None
     try:
-        reactor = TestReactor(service.config, service, service_factory=debugger_service_factory)
+        reactor = TestReactor(
+            service.config,
+            service,
+            service_factory=debugger_service_factory,
+            stop_requested=registration.stop_requested,
+            on_progress=registration.progress,
+        )
         result = reactor.run(test_config)
     except BaseException as error:
         primary_error = error
@@ -1543,7 +1616,7 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
         result["summary"] = "Test reactor sequence failed during cleanup."
         if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
             primary_error = error
-    written = write_report(config, result)
+    written = write_report(config, {**result, "run": registration.handle})
     if primary_error is not None:
         if written.get("audit_ok") is False:
             primary_error.args = (*primary_error.args, "Final reactor audit failed.")

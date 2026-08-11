@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable, Mapping
-from copy import deepcopy
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import resources
@@ -48,6 +47,12 @@ TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
 # is held to what its own `version:` contains, and the schema is what says which
 # version each action and each key arrived in.
 PLAN_FEATURE_VERSION_KEY = "x-since-version"
+# The one action the reactor serves itself. It routes to no device and drives no
+# hardware: what it does is run the subset of steps nested under it again, which
+# is a property of the sequence rather than of anything the bench has. So it is
+# not a `StepDevice` action, and the dispatch that resolves a step to a device
+# never sees it.
+REPEAT_ACTION = "repeat"
 # What a `uart_expect` that timed out answers with: the last of what the line
 # actually said. Capped, because a chatty port must not turn one red step into an
 # unbounded result — but never zero, because a red step that cannot say what the
@@ -123,6 +128,26 @@ CAN_COMPARATOR_IDLE_POLL_S = 0.05
 # instead, and an unbounded wait in a plan is how a bench ends up held by a run
 # nobody is watching.
 DELAY_MAX_MS = 600_000
+# The longest a `delay` sleeps in one piece. A stop is answered between steps,
+# and a step that waits ten minutes would make "between steps" mean ten minutes;
+# slicing the wait is what makes the wait itself somewhere a stop can be
+# answered. The total is unchanged, because the slices are counted against the
+# step's own deadline rather than added up.
+DELAY_STOP_POLL_MS = 250
+# What a run that was asked to end reports as. Its own name, because a stop is
+# neither a pass nor a failure of the firmware: borrowing an existing error type
+# would send a reader looking for a board that misbehaved, and reporting success
+# would let a partial run be read as a complete one.
+RUN_STOPPED_ERROR = "run_stopped"
+
+
+def never_stopped() -> bool:
+    """The stop question, for a run nobody has addressed.
+
+    The default everywhere, so a reactor built without a run to stop behaves
+    exactly as one built before stopping existed: the question is asked between
+    every step, and it always answers no."""
+    return False
 
 
 def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
@@ -230,7 +255,7 @@ class StepComparator:
         return {"comparator": self.raw, "captured_text": self.captured_text, "captured_value": self.captured_value}
 
 
-def pattern_refusal(index: int, step: TestStep, field_name: str, pattern: object, summary: str, needs_capture: bool) -> JsonObject | None:
+def pattern_refusal(location: StepLocation, step: TestStep, field_name: str, pattern: object, summary: str, needs_capture: bool) -> JsonObject | None:
     """Refuse a regular expression this plan cannot mean, before the run.
 
     A pattern that does not compile, or a `range` whose pattern captures nothing
@@ -243,10 +268,10 @@ def pattern_refusal(index: int, step: TestStep, field_name: str, pattern: object
     try:
         compiled = re.compile(str(pattern))
     except re.error as error:
-        return preflight_error(index, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
+        return preflight_error(location, step, field_name, summary, {"error_type": "invalid_argument", "value": str(pattern)[:128], "regex_error": str(error)})
     if needs_capture and compiled.groups != 1:
         return preflight_error(
-            index,
+            location,
             step,
             field_name,
             "A `range` comparator reads its value out of the pattern's one capture group, so the pattern must have exactly one.",
@@ -255,7 +280,7 @@ def pattern_refusal(index: int, step: TestStep, field_name: str, pattern: object
     return None
 
 
-def comparator_pattern_refusal(index: int, step: TestStep) -> JsonObject | None:
+def comparator_pattern_refusal(location: StepLocation, step: TestStep) -> JsonObject | None:
     """A `comparator:`'s own pattern, refused before the run.
 
     Written once for every medium a comparator judges: what a pattern must
@@ -265,7 +290,7 @@ def comparator_pattern_refusal(index: int, step: TestStep) -> JsonObject | None:
     in a report."""
     comparator = step.arguments.get("comparator") or {}
     return pattern_refusal(
-        index,
+        location,
         step,
         "comparator.pattern",
         comparator.get("pattern"),
@@ -367,6 +392,10 @@ class TestStep:
     debugger: str | None = None
     port_id: str | None = None
     bus_id: str | None = None
+    # The subset a block step repeats, in order. Empty for every other action:
+    # only `repeat` nests, and nesting is what makes a plan a tree of steps
+    # rather than the flat list every version before 4 could write.
+    steps: tuple[TestStep, ...] = ()
 
     @property
     def route(self) -> str:
@@ -376,6 +405,54 @@ class TestStep:
     def route_keys(self) -> list[str]:
         """Every routing key this step actually set."""
         return [field_name for field_name in ROUTE_FIELDS if getattr(self, field_name) is not None]
+
+
+@dataclass(frozen=True)
+class StepOutcome:
+    """Why a list of steps did not run to its end.
+
+    Two reasons and no third: a step failed, or the run was asked to stop. Both
+    end the list where they are and travel the same way out of however many
+    blocks contain it, which is why they are one type: everything between here
+    and the run's own result treats them identically, and only the verdict at
+    the end tells them apart."""
+
+    # Where in *this* list it happened. For a failure, the step that failed; for
+    # a stop, the last step that ran, which is 0 when the stop came before the
+    # first one and the step itself when that step is what the stop cut short.
+    index: int
+    # The failing step's own result, or None for a stop. Nothing failed when a
+    # run is stopped, and inventing a failure to carry would be the whole of
+    # what makes a stop read as an incident.
+    failure: JsonObject | None
+
+    @property
+    def stopped(self) -> bool:
+        return self.failure is None
+
+
+@dataclass(frozen=True)
+class StepLocation:
+    """Where a step is in a plan: which top-level step contains it, and the path
+    that names it exactly.
+
+    Two things rather than one, because a report answers two questions with
+    them. ``step`` is the top-level step number a run stopped at, which is what
+    ``failed_step`` has always meant and what an operator counts down the file
+    to find. ``path`` is the field path, ``steps[2].steps[1]``, which is the
+    only way to point at a step inside a block that contains it."""
+
+    step: int
+    path: str
+
+    @classmethod
+    def top(cls, index: int) -> StepLocation:
+        return cls(index, f"steps[{index - 1}]")
+
+    def nested(self, index: int) -> StepLocation:
+        """One step of the subset this block step repeats. The top-level number
+        does not move: the step a run stopped at is still the block."""
+        return StepLocation(self.step, f"{self.path}.steps[{index - 1}]")
 
 
 @dataclass
@@ -449,15 +526,24 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
     reject_features_newer_than_plan_version(raw, str(path))
-    steps = [
-        TestStep(
-            action=str(step["action"]),
-            arguments={key: value for key, value in step.items() if key not in {"action", *ROUTE_FIELDS}},
-            **{name: None if step.get(name) is None else str(step[name]) for name in ROUTE_FIELDS},
-        )
-        for step in raw["steps"]
-    ]
-    return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=steps)
+    return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=[build_test_step(step) for step in raw["steps"]])
+
+
+def build_test_step(raw: JsonObject) -> TestStep:
+    """One validated step document, as the reactor holds it.
+
+    A block step's nested subset is built into `TestStep` objects rather than
+    left in `arguments` as raw mappings: everything downstream (preflight, the
+    lock declaration, the executor) walks steps, and a nested list that was not
+    also a list of steps would be a part of the plan none of them could see."""
+    nested = raw.get("steps") if raw["action"] == REPEAT_ACTION else None
+    excluded = {"action", *ROUTE_FIELDS} if nested is None else {"action", "steps", *ROUTE_FIELDS}
+    return TestStep(
+        action=str(raw["action"]),
+        arguments={key: value for key, value in raw.items() if key not in excluded},
+        steps=tuple(build_test_step(item) for item in nested or ()),
+        **{name: None if raw.get(name) is None else str(raw[name]) for name in ROUTE_FIELDS},
+    )
 
 
 def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> None:
@@ -509,17 +595,30 @@ def reject_features_newer_than_plan_version(raw: JsonObject, path: str | None = 
     version = raw.get("version")
     if not isinstance(version, int):
         return
-    schema = test_config_schema()
-    for index, step in enumerate(raw["steps"]):
+    reject_newer_features_in_steps(raw["steps"], version, test_config_schema(), "steps", path)
+
+
+def reject_newer_features_in_steps(steps: list[Any], version: int, schema: JsonObject, prefix: str, path: str | None) -> None:
+    """The version gate, for one list of steps and the lists nested inside it.
+
+    The walk descends into a block step's own subset, so a `version: 3` plan
+    cannot smuggle a version 4 action past the gate by putting it inside a
+    `repeat`, which would be exactly the plan that runs here and is refused on
+    an older install for no stated reason. Reached only after schema validation,
+    so every step is a mapping and every action is one the schema knows."""
+    for index, step in enumerate(steps):
         definition = schema["$defs"][ACTION_SCHEMAS[step["action"]]]
         introduced = definition.get(PLAN_FEATURE_VERSION_KEY)
         if isinstance(introduced, int) and version < introduced:
-            raise_outdated_plan_version(path, f"steps[{index}].action", step["action"], version, introduced)
+            raise_outdated_plan_version(path, f"{prefix}[{index}].action", step["action"], version, introduced)
         for key in step:
             property_schema = resolve_schema_node(definition.get("properties", {}).get(key), schema)
             introduced = property_schema.get(PLAN_FEATURE_VERSION_KEY)
             if isinstance(introduced, int) and version < introduced:
-                raise_outdated_plan_version(path, f"steps[{index}].{key}", key, version, introduced)
+                raise_outdated_plan_version(path, f"{prefix}[{index}].{key}", key, version, introduced)
+        nested = step.get("steps")
+        if step["action"] == REPEAT_ACTION and isinstance(nested, list):
+            reject_newer_features_in_steps(nested, version, schema, f"{prefix}[{index}].steps", path)
 
 
 def raise_outdated_plan_version(path: str | None, field_name: str, value: str, version: int, introduced: int) -> None:
@@ -547,18 +646,31 @@ def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> Non
             "Bundled test reactor configuration schema is invalid.",
             {"schema": TEST_CONFIG_SCHEMA_RESOURCE, "schema_error": str(error)},
         ) from error
-    root_schema = deepcopy(schema)
-    root_schema["properties"]["steps"]["items"] = {}
-    errors = sorted(Draft202012Validator(root_schema).iter_errors(raw), key=lambda item: list(item.absolute_path))
+    # One blanking, everywhere a step list appears. Both the plan's own `steps:`
+    # and a block step's nested one are `#/$defs/steps`, so emptying that
+    # definition's `items` leaves every list validated for its shape and length
+    # while each step is held to its own action's entry below, which is what
+    # turns an opaque `oneOf` failure into a field path naming the step.
+    blanked = {**schema, "$defs": {**schema["$defs"], "steps": {**schema["$defs"]["steps"], "items": {}}}}
+    errors = sorted(Draft202012Validator(blanked).iter_errors(raw), key=lambda item: list(item.absolute_path))
     if errors:
         raise_test_config_validation_error(errors[0], path)
 
-    for index, step in enumerate(raw["steps"]):
+    validate_test_steps_schema(raw["steps"], blanked, path, ["steps"])
+
+
+def validate_test_steps_schema(steps: list[Any], schema: JsonObject, path: str | None, prefix: list[str]) -> None:
+    """Hold one list of steps to the schema, and descend into the nested lists.
+
+    `prefix` is the field path of the list, so a step inside a block step is
+    named where it actually is (`steps[2].steps[1].action`) rather than at the
+    top level, where a reader would count down the file and find another step."""
+    for index, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ConfigError(
                 "test_config_invalid",
                 "Test reactor step must be a mapping.",
-                {"path": path, "field": f"steps[{index}]", "value": step},
+                {"path": path, "field": format_test_config_field([*prefix, str(index)]), "value": step},
             )
         action = step.get("action")
         if action not in ACTION_SCHEMAS:
@@ -567,7 +679,7 @@ def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> Non
                 "Test reactor action has an unsupported value.",
                 {
                     "path": path,
-                    "field": f"steps[{index}].action",
+                    "field": format_test_config_field([*prefix, str(index), "action"]),
                     "value": action,
                     "allowed_values": list(ACTION_SCHEMAS),
                 },
@@ -575,7 +687,10 @@ def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> Non
         step_schema = {**schema["$defs"][ACTION_SCHEMAS[action]], "$defs": schema["$defs"]}
         step_errors = sorted(Draft202012Validator(step_schema).iter_errors(step), key=lambda item: list(item.absolute_path))
         if step_errors:
-            raise_test_config_validation_error(step_errors[0], path, ["steps", str(index)])
+            raise_test_config_validation_error(step_errors[0], path, [*prefix, str(index)])
+        nested = step.get("steps")
+        if action == REPEAT_ACTION and isinstance(nested, list):
+            validate_test_steps_schema(nested, schema, path, [*prefix, str(index), "steps"])
 
 
 def raise_test_config_validation_error(error: Any, path: str | None, prefix: list[str] | None = None) -> None:
@@ -783,10 +898,15 @@ class StepDevice:
         cls.step_action_specs = collect_step_actions(cls)
         cls.step_actions = {name: spec.schema for name, spec in cls.step_action_specs.items()}
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, *, stop_requested: Callable[[], bool] = never_stopped):
         self.id = config_id
         self.device = device
         self.service = service
+        # Whether this run has been asked to stop. A narrow hook rather than a
+        # reference to the reactor: the only thing a device does with the answer
+        # is cut a wait short, and a device that could see the run could see
+        # everything the reactor knows.
+        self.stop_requested = stop_requested
         self.cleanup_interrupts: list[BaseException] = []
         # True once this device has actually run an action that drives it. A
         # device object is built on first use, and `delay` routes to one without
@@ -836,26 +956,26 @@ class StepDevice:
         return None if name is None or name not in cls.config_entries(config) else cls.build_device(config, name)
 
     @classmethod
-    def name_refusal(cls, reactor: TestReactor, index: int, step: TestStep) -> JsonObject | None:
+    def name_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
         entries = cls.config_entries(reactor.config)
         name = cls.step_config_id(reactor.config, step)
         if name is None:
-            return cls.unnamed_refusal(reactor, index, step)
+            return cls.unnamed_refusal(reactor, location, step)
         if name not in entries:
-            return preflight_error(index, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(entries)})
+            return preflight_error(location, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(entries)})
         return None
 
     @classmethod
-    def unnamed_refusal(cls, reactor: TestReactor, index: int, step: TestStep) -> JsonObject | None:
+    def unnamed_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
         """A step that named no entry. Only a debugger may leave its route field
         out, and only while the project configures exactly one probe; the schema
         requires every other kind's."""
-        return preflight_error(index, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(cls.config_entries(reactor.config))})
+        return preflight_error(location, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(cls.config_entries(reactor.config))})
 
     # --- plan time -------------------------------------------------------
 
     @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+    def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
         """Refuse this step against the config and what the plan has already done,
         or None. Runs for every step before the first one executes."""
         return None
@@ -951,10 +1071,23 @@ class StepDevice:
         to be told: a plan waiting on a board is waiting on that board whatever
         kind of thing it is. It is still a step — it routes to a named device and
         it appears in the run's result — because a wait that left no trace would
-        be a gap in the record of what a test did."""
+        be a gap in the record of what a test did.
+
+        The wait is sliced, and the slices are counted against one deadline
+        rather than added up, so an uninterrupted wait takes exactly as long as
+        the plan asked. What the slicing buys is the only other thing that can
+        happen during it: a stop request, which ends the wait early and says so
+        rather than being answered ten minutes later."""
         duration_ms = int(step.arguments["duration_ms"])
-        time.sleep(duration_ms / 1000.0)
-        return {
+        started = time.monotonic()
+        deadline = started + duration_ms / 1000.0
+        while not self.stop_requested():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, DELAY_STOP_POLL_MS / 1000.0))
+        waited_ms = int(round((time.monotonic() - started) * 1000))
+        result: JsonObject = {
             "ok": True,
             "tool": "test_reactor",
             "summary": "Test plan waited.",
@@ -962,6 +1095,15 @@ class StepDevice:
             "action": "delay",
             "duration_ms": duration_ms,
         }
+        if waited_ms < duration_ms:
+            # A wait cut short is not a failed step, and reporting it as one
+            # would turn an orderly stop into an incident. It is a wait that did
+            # not finish, which the record has to say so nobody reads the plan's
+            # own number as what the board was given.
+            result["stop_requested"] = True
+            result["waited_ms"] = waited_ms
+            result["summary"] = "Test plan waited until a stop was requested."
+        return result
 
     def cleanup(self) -> list[JsonObject]:
         """Close what this device is still holding for this plan."""
@@ -1013,40 +1155,47 @@ class SessionDevice(StepDevice):
     def action_in_role(cls, role: str) -> str:
         return next((name for name, spec in cls.step_action_specs.items() if spec.role == role), "")
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
-        super().__init__(config_id, device, service)
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
         # True while this plan holds the session it opened.
         self._owns_session = False
 
     @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+    def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
         name = str(cls.step_config_id(reactor.config, step))
-        refusal = cls.permission_refusal(reactor, index, step, cls.config_entries(reactor.config)[name])
+        refusal = cls.permission_refusal(reactor, location, step, cls.config_entries(reactor.config)[name])
         if refusal is not None:
             return refusal
         key = (cls.kind, name)
         if step.action == cls.open_action:
             if key in state.open_sessions:
-                return preflight_error(index, step, "action", f"{cls.session_noun} session is already open in this test plan.")
+                return preflight_error(location, step, "action", f"{cls.session_noun} session is already open in this test plan.")
             state.open_sessions.add(key)
             return None
         if key not in state.open_sessions:
             closing = step.action == cls.close_action
-            return preflight_error(index, step, "action", f"{cls.session_noun} session must be opened before {'it can be closed' if closing else 'this action'}.")
+            return preflight_error(location, step, "action", f"{cls.session_noun} session must be opened before {'it can be closed' if closing else 'this action'}.")
         if step.action == cls.close_action:
             state.open_sessions.discard(key)
         return None
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
         """Refuse a step this entry's own permissions do not allow."""
         return None
 
     def open_session(self, step: TestStep) -> JsonObject:
         """Open, and take ownership of what this plan opened. The body of every
-        kind's `role="open"` action."""
+        kind's `role="open"` action.
+
+        Ownership is taken once and kept, rather than re-decided on each open. An
+        open inside a `repeat` block runs once per iteration, and every open
+        after the first answers `already_active` because the first one is still
+        in force, so re-deciding would hand ownership back on the second
+        iteration and leave cleanup with nothing to close, which is a session
+        left open by the run that opened it."""
         result = self.call_tool(step)
-        self._owns_session = result.get("ok") is True and not result.get("already_active", False)
+        self._owns_session = self._owns_session or (result.get("ok") is True and not result.get("already_active", False))
         return result
 
     def close_session(self, step: TestStep) -> JsonObject:
@@ -1140,26 +1289,26 @@ class UartRunner(SessionDevice):
     # --- plan time -------------------------------------------------------
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
         # The open is asked about reading, and that covers every action that only
         # listens: each of them requires a session this plan opened, so a port
         # the config will not let a plan read is refused before any of them.
         # Writing is its own grant and its own refusal, named where it applies.
         if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
-            return preflight_error(index, step, "action", "Reading this COM port is disabled by the authoritative config.")
+            return preflight_error(location, step, "action", "Reading this COM port is disabled by the authoritative config.")
         if step.action == "uart_write" and not entry.permissions.allow_write:
-            return preflight_error(index, step, "action", "Writing to this COM port is disabled by the authoritative config.", {"permission": "allow_write"})
+            return preflight_error(location, step, "action", "Writing to this COM port is disabled by the authoritative config.", {"permission": "allow_write"})
         return None
 
     @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
-        refusal = cls._pattern_refusal(index, step)
+    def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
+        refusal = cls._pattern_refusal(location, step)
         if refusal is not None:
             return refusal
-        return super().preflight(reactor, index, step, state)
+        return super().preflight(reactor, location, step, state)
 
     @classmethod
-    def _pattern_refusal(cls, index: int, step: TestStep) -> JsonObject | None:
+    def _pattern_refusal(cls, location: StepLocation, step: TestStep) -> JsonObject | None:
         """Refuse a regular expression this plan cannot mean, before the run.
 
         The comparator's half of this is device-neutral and lives in
@@ -1167,9 +1316,9 @@ class UartRunner(SessionDevice):
         spelling, whose `pattern:` is a bare key on the step and never carries a
         range."""
         if step.action == "uart_expect":
-            return pattern_refusal(index, step, "pattern", step.arguments.get("pattern"), "Test step's uart_expect pattern is not a valid Python regular expression.", needs_capture=False)
+            return pattern_refusal(location, step, "pattern", step.arguments.get("pattern"), "Test step's uart_expect pattern is not a valid Python regular expression.", needs_capture=False)
         if step.action == "uart_read":
-            return comparator_pattern_refusal(index, step)
+            return comparator_pattern_refusal(location, step)
         return None
 
     # --- reading the line ------------------------------------------------
@@ -1451,9 +1600,9 @@ class CanRunner(SessionDevice):
         return [("can_read", arguments)]
 
     @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+    def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
         if step.action == "can_read":
-            refusal = comparator_pattern_refusal(index, step)
+            refusal = comparator_pattern_refusal(location, step)
             if refusal is not None:
                 return refusal
             if step.arguments.get("comparator") and step.arguments.get("wait_timeout_s") is not None:
@@ -1464,29 +1613,29 @@ class CanRunner(SessionDevice):
                 # and ignoring the other is how a plan comes to say a number
                 # nothing reads.
                 return preflight_error(
-                    index,
+                    location,
                     step,
                     "wait_timeout_s",
                     "A `can_read` with a `comparator:` waits out its own `timeout_s`, reading again until the claim is met, so `wait_timeout_s` — how long one read waits — has nothing left to mean. Name one of the two.",
                     {"error_type": "invalid_argument"},
                 )
-        return super().preflight(reactor, index, step, state)
+        return super().preflight(reactor, location, step, state)
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, index: int, step: TestStep, entry: Any) -> JsonObject | None:
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
         readable = reactor.config.can_read_allowed(entry)
         if step.action == cls.open_action:
             if not readable and not entry.permissions.allow_write:
-                return preflight_error(index, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.")
+                return preflight_error(location, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.")
             if step.arguments.get("clear_rx_queue", True) and not readable:
-                return preflight_error(index, step, "clear_rx_queue", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", {"permission": "allow_read"})
+                return preflight_error(location, step, "clear_rx_queue", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", {"permission": "allow_read"})
             return None
         if step.action == "can_read" and not readable:
-            return preflight_error(index, step, "action", "Reading this CAN bus is disabled by the authoritative config.", {"permission": "allow_read"})
+            return preflight_error(location, step, "action", "Reading this CAN bus is disabled by the authoritative config.", {"permission": "allow_read"})
         if step.action != "can_send":
             return None
         if not entry.permissions.allow_write:
-            return preflight_error(index, step, "action", "Writing to this CAN bus is disabled by the authoritative config.", {"permission": "allow_write"})
+            return preflight_error(location, step, "action", "Writing to this CAN bus is disabled by the authoritative config.", {"permission": "allow_write"})
         if entry.listen_only:
             # `listen_only: true` is not an obstacle standing in the way of the
             # send: it is the claim that observing this bus sends nothing, which
@@ -1506,7 +1655,7 @@ class CanRunner(SessionDevice):
             # the tool answers about the bench, where the mode is the fact that
             # cannot be granted away.
             return preflight_error(
-                index,
+                location,
                 step,
                 "action",
                 "This CAN bus is configured `listen_only: true` — the claim that observing it sends nothing — so a plan cannot also send on it. Send on a second `can_buses` entry configured `listen_only: false`, drop the send step, or set `listen_only: false` on this entry if the bus may be transmitted on.",
@@ -1592,8 +1741,8 @@ class DebuggerRunner(StepDevice):
     # answer to "which device kind runs this action".
     debug_session_actions: ClassVar[frozenset[str]] = frozenset({"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"})
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
-        super().__init__(config_id, device, service)
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
         self._owns_debug_session = False
 
     @property
@@ -1659,23 +1808,23 @@ class DebuggerRunner(StepDevice):
         return step_debugger_id(config, step)
 
     @classmethod
-    def unnamed_refusal(cls, reactor: TestReactor, index: int, step: TestStep) -> JsonObject | None:
+    def unnamed_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
         """Resolve which probe a debugger step runs on, or refuse the plan.
 
         A plan that omits the name while several probes are configured is not
         defaulted to one: picking a board for the author is how the wrong board
         gets flashed."""
         if not reactor.config.debuggers:
-            return preflight_error(index, step, "debugger", "The authoritative config declares no debuggers, so this step cannot run.")
-        return preflight_error(index, step, "debugger", "Name the debugger this step runs on; the authoritative config declares several.", {"configured_debuggers": sorted(reactor.config.debuggers)})
+            return preflight_error(location, step, "debugger", "The authoritative config declares no debuggers, so this step cannot run.")
+        return preflight_error(location, step, "debugger", "Name the debugger this step runs on; the authoritative config declares several.", {"configured_debuggers": sorted(reactor.config.debuggers)})
 
     @classmethod
-    def name_refusal(cls, reactor: TestReactor, index: int, step: TestStep) -> JsonObject | None:
-        refusal = super().name_refusal(reactor, index, step)
+    def name_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
+        refusal = super().name_refusal(reactor, location, step)
         if refusal is not None:
             return refusal
         if cls.step_config_id(reactor.config, step) != reactor.config.debugger_id and reactor._service_factory is None:
-            return preflight_error(index, step, "debugger", "Running a step on another debugger needs a service factory to build that probe's service; the reactor would otherwise execute it on the bound probe.", {"bound_debugger": reactor.config.debugger_id})
+            return preflight_error(location, step, "debugger", "Running a step on another debugger needs a service factory to build that probe's service; the reactor would otherwise execute it on the bound probe.", {"bound_debugger": reactor.config.debugger_id})
         return None
 
     @classmethod
@@ -1700,7 +1849,7 @@ class DebuggerRunner(StepDevice):
         return calls
 
     @classmethod
-    def preflight(cls, reactor: TestReactor, index: int, step: TestStep, state: PlanState) -> JsonObject | None:
+    def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
         config = reactor.config
         debugger_id = str(cls.step_config_id(config, step))
         debugger = config.debuggers[debugger_id]
@@ -1708,16 +1857,16 @@ class DebuggerRunner(StepDevice):
 
         if step.action == "flash":
             if state.debug_session is not None:
-                return preflight_error(index, step, "action", "Firmware cannot be flashed while a debug session is active.", {"debug_session_debugger": state.debug_session})
+                return preflight_error(location, step, "action", "Firmware cannot be flashed while a debug session is active.", {"debug_session_debugger": state.debug_session})
             if not permissions.allow_flash:
-                return preflight_error(index, step, "action", "Flashing is disabled for this debugger by the authoritative config.")
+                return preflight_error(location, step, "action", "Flashing is disabled for this debugger by the authoritative config.")
             if step.arguments.get("reset_after_flash", False) and not permissions.allow_reset:
-                return preflight_error(index, step, "reset_after_flash", "Post-flash reset is disabled for this debugger by the authoritative config.")
+                return preflight_error(location, step, "reset_after_flash", "Post-flash reset is disabled for this debugger by the authoritative config.")
             if permissions.allow_raw_debugger_commands:
-                return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
+                return preflight_error(location, step, "action", "Flashing is disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
             if permissions.allow_mass_erase:
-                return preflight_error(index, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
-            return cls._artifact_refusal(reactor, index, step, require_elf=False)
+                return preflight_error(location, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
+            return cls._artifact_refusal(reactor, location, step, require_elf=False)
 
         if step.action == "reset":
             # The two answers flash already gives, for the same reasons.
@@ -1729,14 +1878,14 @@ class DebuggerRunner(StepDevice):
             # `init` off OpenOCD — is refused by that backend with its own
             # `not_supported`, and that refusal is the honest answer.
             if state.debug_session is not None:
-                return preflight_error(index, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
+                return preflight_error(location, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
             if not permissions.allow_reset:
-                return preflight_error(index, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
+                return preflight_error(location, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
             return None
 
         if step.action in cls.debug_session_actions and debugger.type != "openocd":
             return preflight_error(
-                index,
+                location,
                 step,
                 "action",
                 "Typed debug actions currently require a debugger of type 'openocd'.",
@@ -1744,49 +1893,49 @@ class DebuggerRunner(StepDevice):
             )
         if step.action == "debug_start":
             if state.debug_session is not None:
-                return preflight_error(index, step, "action", "A debug session is already active in this test plan.", {"debug_session_debugger": state.debug_session})
+                return preflight_error(location, step, "action", "A debug session is already active in this test plan.", {"debug_session_debugger": state.debug_session})
             mode = str(step.arguments.get("mode", "attach"))
             # Preflight is the only diagnosis the operator gets: it runs
             # before any tool call, so the backend's per-flag messages are
             # never reached. Name the flag that actually fired rather than
             # pointing at a permission the config plainly shows as false.
             if not config.probe_allowed(debugger):
-                return preflight_error(index, step, "action", "Debug sessions require allow_probe on this debugger.", {"permission": "allow_probe"})
+                return preflight_error(location, step, "action", "Debug sessions require allow_probe on this debugger.", {"permission": "allow_probe"})
             if permissions.allow_raw_debugger_commands:
-                return preflight_error(index, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
+                return preflight_error(location, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
             if mode != "attach" and not permissions.allow_reset:
-                return preflight_error(index, step, "mode", f"Debug mode '{mode}' requires allow_reset on this debugger.", {"permission": "allow_reset"})
+                return preflight_error(location, step, "mode", f"Debug mode '{mode}' requires allow_reset on this debugger.", {"permission": "allow_reset"})
             if mode == "load" and not permissions.allow_flash:
-                return preflight_error(index, step, "mode", "Debug load mode requires allow_flash on this debugger.", {"permission": "allow_flash"})
+                return preflight_error(location, step, "mode", "Debug load mode requires allow_flash on this debugger.", {"permission": "allow_flash"})
             if mode == "load" and permissions.allow_mass_erase:
-                return preflight_error(index, step, "mode", "Debug load mode is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
-            artifact_error = cls._artifact_refusal(reactor, index, step, require_elf=True)
+                return preflight_error(location, step, "mode", "Debug load mode is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
+            artifact_error = cls._artifact_refusal(reactor, location, step, require_elf=True)
             if artifact_error is not None:
                 return artifact_error
             state.debug_session = debugger_id
             return None
         if step.action == "debug_stop":
             if state.debug_session is None:
-                return preflight_error(index, step, "action", "A debug session must be started before it can be stopped.")
+                return preflight_error(location, step, "action", "A debug session must be started before it can be stopped.")
             if state.debug_session != debugger_id:
-                return preflight_error(index, step, "debugger", "A debug session may only be stopped on the debugger that started it.", {"debug_session_debugger": state.debug_session})
+                return preflight_error(location, step, "debugger", "A debug session may only be stopped on the debugger that started it.", {"debug_session_debugger": state.debug_session})
             state.debug_session = None
             return None
         if state.debug_session is None:
-            return preflight_error(index, step, "action", "A debug session must be started before this action.")
+            return preflight_error(location, step, "action", "A debug session must be started before this action.")
         if state.debug_session != debugger_id:
-            return preflight_error(index, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": state.debug_session})
+            return preflight_error(location, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": state.debug_session})
         symbol = breakpoint_symbol(step.arguments.get("location")) if step.action == "run_until_breakpoint" else step.arguments.get("symbol")
         if symbol is None and not config.debug.allow_all_symbols:
-            return preflight_error(index, step, "location", "File/line breakpoints require debug.allow_all_symbols.")
+            return preflight_error(location, step, "location", "File/line breakpoints require debug.allow_all_symbols.")
         if symbol is not None and not symbol_allowed(config, str(symbol)):
             field_name = "location" if step.action == "run_until_breakpoint" else "symbol"
-            return preflight_error(index, step, field_name, "Symbol is not allowed by the authoritative debug config.", {"symbol": symbol})
+            return preflight_error(location, step, field_name, "Symbol is not allowed by the authoritative debug config.", {"symbol": symbol})
         if step.action == "dump_memory" and hasattr(reactor.service, "artifacts"):
             output = reactor.service.artifacts.validate_output_path(str(step.arguments["output_path"]), "debug_dump_symbol_ihex")
             if output.get("ok") is not True:
                 return preflight_error(
-                    index,
+                    location,
                     step,
                     "output_path",
                     str(output.get("summary", "Memory dump output path is invalid.")),
@@ -1795,21 +1944,21 @@ class DebuggerRunner(StepDevice):
         return None
 
     @classmethod
-    def _artifact_refusal(cls, reactor: TestReactor, index: int, step: TestStep, require_elf: bool) -> JsonObject | None:
+    def _artifact_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, require_elf: bool) -> JsonObject | None:
         if not hasattr(reactor.service, "artifacts"):
             return None
         image_path = str(step.arguments["image_path"])
         validation = reactor.service.artifacts.validate_local_path(image_path)
         if validation.get("ok") is not True:
             return preflight_error(
-                index,
+                location,
                 step,
                 "image_path",
                 str(validation.get("summary", "Firmware artifact is invalid.")),
                 {"validation": validation},
             )
         if require_elf and Path(image_path).suffix.lower() != ".elf":
-            return preflight_error(index, step, "image_path", "Debug sessions require an ELF artifact with debug symbols.")
+            return preflight_error(location, step, "image_path", "Debug sessions require an ELF artifact with debug symbols.")
         return None
 
     def cleanup(self) -> list[JsonObject]:
@@ -1870,7 +2019,14 @@ class DebuggerRunner(StepDevice):
 # mapping all follow from what each class says about itself, so none of them can
 # disagree with the class that actually serves the action.
 STEP_DEVICE_CLASSES: tuple[type[StepDevice], ...] = (DebuggerRunner, UartRunner, CanRunner)
-ACTION_SCHEMAS = {action: schema for device_class in STEP_DEVICE_CLASSES for action, schema in device_class.step_actions.items()}
+# The actions the reactor runs itself, as action name -> schema `$defs` entry.
+# Same projection every device kind contributes, so the plan format's action
+# vocabulary stays one table however a given action happens to be served.
+REACTOR_ACTION_SCHEMAS: dict[str, str] = {REPEAT_ACTION: "repeat"}
+ACTION_SCHEMAS = {
+    **{action: schema for device_class in STEP_DEVICE_CLASSES for action, schema in device_class.step_actions.items()},
+    **REACTOR_ACTION_SCHEMAS,
+}
 # `device` is format v3's universal routing key and is read for every kind; the
 # rest are the v2 spellings, which stay valid as aliases.
 ROUTE_FIELDS: tuple[str, ...] = ("device", *dict.fromkeys(device_class.route_field for device_class in STEP_DEVICE_CLASSES))
@@ -1878,13 +2034,44 @@ ROUTE_FIELDS: tuple[str, ...] = ("device", *dict.fromkeys(device_class.route_fie
 # base and therefore inherited by all of them — so this maps to every claimant
 # and the name the step gave settles which one runs it.
 STEP_DEVICE_CLASSES_BY_ACTION: dict[str, tuple[type[StepDevice], ...]] = {
-    action: tuple(device_class for device_class in STEP_DEVICE_CLASSES if action in device_class.step_actions) for action in ACTION_SCHEMAS
+    action: tuple(device_class for device_class in STEP_DEVICE_CLASSES if action in device_class.step_actions)
+    for action in ACTION_SCHEMAS
+    if action not in REACTOR_ACTION_SCHEMAS
 }
 
 
 def step_device_classes(action: str) -> tuple[type[StepDevice], ...]:
     """Every device kind that serves an action; empty for one no kind claims."""
     return STEP_DEVICE_CLASSES_BY_ACTION.get(action, ())
+
+
+def step_results(records: Sequence[JsonObject]) -> list[JsonObject]:
+    """Every result a run's step records hold, an iteration's included.
+
+    A block step's record carries its iterations rather than one result of its
+    own doing, so a walk that read only the top level would lose every audit
+    failure and every target failure a loop's steps reported, which are exactly
+    the things the run-level status is propagated from."""
+    collected: list[JsonObject] = []
+    for record in records:
+        result = record.get("result")
+        if isinstance(result, dict):
+            collected.append(result)
+        for iteration in record.get("iterations") or ():
+            collected.extend(step_results(iteration.get("steps") or ()))
+    return collected
+
+
+def flatten_steps(steps: Sequence[TestStep]) -> Iterator[TestStep]:
+    """Every step a plan contains, a block step's own subset included.
+
+    Depth-first and in written order, so a caller asking what a plan touches
+    gets the same answer whether the plan nests or not. The block step itself is
+    yielded too: it is a step of the plan, and leaving it out would make a
+    walker that counts steps disagree with the report that records them."""
+    for step in steps:
+        yield step
+        yield from flatten_steps(step.steps)
 
 
 def step_device_class(config: AgenticHILConfig, step: TestStep) -> type[StepDevice] | None:
@@ -1909,10 +2096,28 @@ def step_device_class(config: AgenticHILConfig, step: TestStep) -> type[StepDevi
 class TestReactor:
     __test__ = False
 
-    def __init__(self, config: AgenticHILConfig, service: AgenticHILToolService, service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None):
+    def __init__(
+        self,
+        config: AgenticHILConfig,
+        service: AgenticHILToolService,
+        service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None,
+        *,
+        stop_requested: Callable[[], bool] = never_stopped,
+        on_progress: Callable[[JsonObject], None] | None = None,
+    ):
         self.config = config
         self.service = service
         self._service_factory = service_factory
+        # Asked between every step and inside every wait. A run nobody can
+        # address answers no forever, which is what a reactor built before
+        # stopping existed did.
+        self.stop_requested = stop_requested
+        self._on_progress = on_progress
+        # Where the run is, as the thing watching it needs to read it: the
+        # top-level step, and, inside a block, which iteration and which step of
+        # its subset. Rebuilt at the top level rather than added to, so a block's
+        # iteration cannot outlive the block.
+        self._progress: JsonObject = {}
         # Services built for a probe other than the base service's bound one are
         # owned here and closed by close(); the base service is the caller's.
         self._owned_services: list[AgenticHILToolService] = []
@@ -1928,7 +2133,12 @@ class TestReactor:
         existing = self.devices.get(key)
         if existing is not None:
             return existing
-        built = device_class(config_id, device_class.build_device(self.config, config_id), device_class.service_for(self, config_id))
+        built = device_class(
+            config_id,
+            device_class.build_device(self.config, config_id),
+            device_class.service_for(self, config_id),
+            stop_requested=self.stop_requested,
+        )
         self.devices[key] = built
         return built
 
@@ -1989,6 +2199,150 @@ class TestReactor:
             return {"tool": "test_reactor", **error.result}
         return device.execute(step)
 
+    def execute_steps(self, steps: Sequence[TestStep], records: list[JsonObject], *, top_level: bool = False) -> StepOutcome | None:
+        """Run one list of steps in order, recording each, and stop at the first
+        failure or at the first stop request.
+
+        Returns why the list did not run to its end, positioned in *this* list,
+        or None when every step passed. The position is what the caller needs
+        and nothing more: the top-level call reads it as `failed_step` or as
+        where a stop landed, and a block step reads it as which step of its
+        subset it was.
+
+        The stop is asked before a step rather than after, so a run that has
+        been asked to end does not start work it will not be judged on. It is
+        not asked after the last step, because a list that ran to its end is not
+        a list that was stopped."""
+        for index, step in enumerate(steps, start=1):
+            if self.stop_requested():
+                return StepOutcome(index - 1, None)
+            self._advance(index, step, top_level=top_level)
+            record: JsonObject = {"index": index, "route": step.route, "action": step.action}
+            records.append(record)
+            if step.action == REPEAT_ACTION:
+                inner = self.execute_repeat(step, record)
+                if inner is not None:
+                    return StepOutcome(index, inner.failure)
+                continue
+            failure = self.execute_recorded_step(step, record)
+            if failure is not None:
+                return StepOutcome(index, failure)
+            if record["result"].get("stop_requested") is True:
+                # The step ended early because a stop was asked for. Read off
+                # the step's own result rather than by asking again, so this is
+                # true of the plan's last step too: a wait cut short is a run
+                # that was stopped, and asking only before a step would have
+                # called it a completed plan because there was no next step to
+                # ask before.
+                return StepOutcome(index, None)
+        return None
+
+    def _advance(self, index: int, step: TestStep, *, top_level: bool) -> None:
+        """Say which step is about to run, for whoever is watching this run."""
+        if top_level:
+            self._progress = {"step": index, "action": step.action, "route": step.route}
+        else:
+            self._progress = {**self._progress, "nested_step": index, "nested_action": step.action, "nested_route": step.route}
+        if self._on_progress is not None:
+            self._on_progress(dict(self._progress))
+
+    def execute_recorded_step(self, step: TestStep, record: JsonObject) -> JsonObject | None:
+        """One ordinary step, executed onto its own record. The failing result,
+        or None."""
+        try:
+            result: JsonObject = self.execute_step(step)
+        except Exception as error:
+            result = exception_result("test_reactor", "step_exception", "Test reactor step raised an exception.", error)
+        record["result"] = result
+        return result if result_failed(result) else None
+
+    def execute_repeat(self, step: TestStep, record: JsonObject) -> StepOutcome | None:
+        """Run a block step's subset until one of its bounds is reached.
+
+        Implemented here rather than as a device action, because there is no
+        device: what repeats is a piece of the sequence, which is the reactor's
+        own subject. Nothing is opened, closed or reset between iterations, so a
+        session the plan holds is still held on the next one and end-of-run
+        cleanup closes exactly what it would have closed without the loop.
+
+        Both bounds are asked at the bottom of the loop and nowhere else, which
+        is what "between iterations" means structurally rather than by promise:
+        a cycle is never cut in half, and a block always runs at least one whole
+        iteration however small its `duration_s` is. `count` is asked first, so
+        a loop whose count is exhausted says so even when the same iteration
+        reached the time bound too; otherwise the first bound reached ends the
+        loop, and reaching either is the green exit.
+
+        A failed nested step ends the run exactly as a failed top-level step
+        does: the failure is handed back up, the loop stops where it is, and the
+        record says which iteration and which step of the subset it stopped at
+        so the failure can be found without replaying the plan. A stop request
+        travels the same way and is answered in the same places, which are the
+        block's own step boundaries: a block is not a step that has to finish,
+        it is a list of steps that do, so a stop ends it at the boundary it
+        reached and the record says which iteration and which step that was."""
+        count = None if step.arguments.get("count") is None else int(step.arguments["count"])
+        duration_s = None if step.arguments.get("duration_s") is None else float(step.arguments["duration_s"])
+        bounds: JsonObject = {key: value for key, value in (("count", count), ("duration_s", duration_s)) if value is not None}
+        iterations: list[JsonObject] = []
+        record["iterations"] = iterations
+        started = time.monotonic()
+        completed = 0
+        while True:
+            self._progress = {**self._progress, "iteration": completed + 1}
+            nested: list[JsonObject] = []
+            iterations.append({"iteration": completed + 1, "steps": nested})
+            aborted = self.execute_steps(step.steps, nested)
+            completed += 1
+            if aborted is not None and aborted.stopped:
+                record["result"] = {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "action": REPEAT_ACTION,
+                    "error_type": RUN_STOPPED_ERROR,
+                    "summary": f"A stop was requested on iteration {completed} of this repeat block.",
+                    **bounds,
+                    "iterations_run": completed,
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                    "exit_reason": "stopped",
+                    "stopped_after_nested_step": aborted.index,
+                }
+                return aborted
+            if aborted is not None:
+                failed_index, failure = aborted.index, aborted.failure
+                record["result"] = {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "action": REPEAT_ACTION,
+                    "error_type": result_error_type(failure or {}),
+                    "summary": f"A step failed on iteration {completed} of this repeat block, so the run stopped there.",
+                    **bounds,
+                    "iterations_run": completed,
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                    "exit_reason": "step_failed",
+                    "failed_iteration": completed,
+                    "failed_nested_step": failed_index,
+                    "failed_nested_action": step.steps[failed_index - 1].action,
+                }
+                return aborted
+            if count is not None and completed >= count:
+                exit_reason = "count"
+                break
+            if duration_s is not None and time.monotonic() - started >= duration_s:
+                exit_reason = "duration_s"
+                break
+        record["result"] = {
+            "ok": True,
+            "tool": "test_reactor",
+            "action": REPEAT_ACTION,
+            "summary": f"Repeat block ran {completed} iteration(s) and ended on its {exit_reason} bound.",
+            **bounds,
+            "iterations_run": completed,
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "exit_reason": exit_reason,
+        }
+        return None
+
     def cleanup_devices(self) -> list[StepDevice]:
         """Every device this run touched, in the order their sessions close.
 
@@ -2025,23 +2379,10 @@ class TestReactor:
             return result
 
         completed: list[JsonObject] = []
-        failed_step: int | None = None
+        aborted: StepOutcome | None = None
         primary_error: BaseException | None = None
         try:
-            for index, step in enumerate(test_config.steps, start=1):
-                try:
-                    result: JsonObject = self.execute_step(step)
-                except Exception as error:
-                    result = exception_result(
-                        "test_reactor",
-                        "step_exception",
-                        "Test reactor step raised an exception.",
-                        error,
-                    )
-                completed.append({"index": index, "route": step.route, "action": step.action, "result": result})
-                if result_failed(result):
-                    failed_step = index
-                    break
+            aborted = self.execute_steps(test_config.steps, completed, top_level=True)
         except BaseException as error:
             primary_error = error
         finally:
@@ -2060,7 +2401,9 @@ class TestReactor:
 
         cleanup_errors = [item for item in cleanup if result_failed(item["result"])]
         cleanup_ok = not cleanup_errors
-        ok = failed_step is None and cleanup_ok
+        failure = None if aborted is None else aborted.failure
+        stopped = aborted is not None and aborted.stopped
+        ok = failure is None and cleanup_ok and not stopped
         result: JsonObject = {
             "ok": ok,
             "tool": "test_reactor",
@@ -2072,15 +2415,32 @@ class TestReactor:
             "cleanup_errors": cleanup_errors,
             "summary": "Test reactor sequence completed." if ok else "Test reactor sequence failed.",
         }
-        propagate_result_status(result, [step["result"] for step in completed] + [item["result"] for item in cleanup])
-        if failed_step is not None:
-            result["failed_step"] = failed_step
-            step_error_type = result_error_type(completed[-1]["result"])
+        propagate_result_status(result, [*step_results(completed), *(item["result"] for item in cleanup)])
+        if failure is not None:
+            result["failed_step"] = aborted.index if aborted is not None else None
+            # The failing step's own result, which inside a block step is the
+            # nested step that failed rather than the block: `failed_step` says
+            # which top-level step the run stopped at and `step_error_type` says
+            # what went wrong there, and a loop's own summary would answer
+            # neither question.
+            step_error_type = result_error_type(failure)
             result["step_error_type"] = step_error_type
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
+        elif stopped:
+            # A stopped run is not a passed run and it is not a failed one
+            # either, so it says which of the two it is by name. The steps that
+            # did run keep their records: the caller decides what a partial run
+            # is worth, and it can only decide that from what actually ran.
+            result["stopped"] = True
+            result["stopped_after_step"] = aborted.index if aborted is not None else 0
+            result["error_type"] = "cleanup_failed" if not cleanup_ok else RUN_STOPPED_ERROR
+            result["summary"] = (
+                f"Test reactor sequence was stopped on request after step {result['stopped_after_step']}; "
+                "the devices it opened were closed and this report was written."
+            )
         elif not cleanup_ok:
             result["error_type"] = "cleanup_failed"
-        if not ok:
+        if failure is not None or not cleanup_ok:
             # A run that failed aborts, and the abort calls the recovery action.
             # After the devices are closed and after this result exists, so the
             # evidence is written before anything drives the board again, and
@@ -2088,6 +2448,12 @@ class TestReactor:
             # Reached for a failed cleanup as well as for a failed step —
             # cleanup is where the unconfirmed-effect incidents come from, and
             # those are precisely the ones that used to sit until a person came.
+            #
+            # A clean stop is deliberately not here, and that is the whole
+            # difference between asking a run to end and killing it. Its devices
+            # were closed and confirmed by the same cleanup as a passing run's,
+            # so there is nothing unconfirmed to recover, and driving the board
+            # again to establish a state nothing disturbed would be the incident.
             result["recovery"] = self._recover_after_failed_run()
         return result
 
@@ -2152,49 +2518,70 @@ class TestReactor:
         serves its action, which answers for its own config entry, its own
         permissions and its own session. Nothing here is built — see PlanState."""
         state = PlanState()
-        for index, step in enumerate(test_config.steps, start=1):
-            named = step.route_keys
-            if len(named) > 1:
-                # `device:` and its v2 alias mean the same entry, so a step
-                # carrying both is a plan that has not decided. Refused rather
-                # than resolved by precedence: a step that names one board under
-                # one key and another under the other must be corrected, not run.
-                return preflight_error(index, step, named[1], "A test step names the device it drives once.", {"route_keys": named})
-            candidates = step_device_classes(step.action)
-            if not candidates:
-                # Unreachable through load_test_config, whose schema pass refuses
-                # an unknown action first; reachable by a caller that built a
-                # TestConfig itself, and silence would be a step nobody checked.
-                return preflight_error(index, step, "action", "No configured device kind serves this test reactor action.", {"allowed_values": sorted(ACTION_SCHEMAS)})
-            device_class = step_device_class(self.config, step)
-            if device_class is None:
-                return preflight_error(
-                    index,
-                    step,
-                    ROUTE_FIELDS[0],
-                    "Every device kind serves this action, so the step's `device:` must name exactly one configured entry — this one names none, or names an entry in more than one section.",
-                    {claimant.configured_field: sorted(claimant.config_entries(self.config)) for claimant in candidates},
-                )
-            name_error = device_class.name_refusal(self, index, step)
-            if name_error is not None:
-                return name_error
-            contract_error = self._preflight_tool_contract(index, step, device_class)
-            if contract_error is not None:
-                return contract_error
-            if not device_class.step_action_specs[step.action].touches_device:
-                # An action that drives nothing has no session to be in, no
-                # permission to hold and nothing to leave behind, so the kind's
-                # own refusals are about a step this one is not.
-                continue
-            refusal = device_class.preflight(self, index, step, state)
+        return self._preflight_steps(test_config.steps, StepLocation.top, state)
+
+    def _preflight_steps(self, steps: Sequence[TestStep], locate: Callable[[int], StepLocation], state: PlanState) -> JsonObject | None:
+        for index, step in enumerate(steps, start=1):
+            refusal = self._preflight_step(locate(index), step, state)
             if refusal is not None:
                 return refusal
         return None
 
+    def _preflight_step(self, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
+        if step.action == REPEAT_ACTION:
+            return self._preflight_repeat(location, step, state)
+        named = step.route_keys
+        if len(named) > 1:
+            # `device:` and its v2 alias mean the same entry, so a step
+            # carrying both is a plan that has not decided. Refused rather
+            # than resolved by precedence: a step that names one board under
+            # one key and another under the other must be corrected, not run.
+            return preflight_error(location, step, named[1], "A test step names the device it drives once.", {"route_keys": named})
+        candidates = step_device_classes(step.action)
+        if not candidates:
+            # Unreachable through load_test_config, whose schema pass refuses
+            # an unknown action first; reachable by a caller that built a
+            # TestConfig itself, and silence would be a step nobody checked.
+            return preflight_error(location, step, "action", "No configured device kind serves this test reactor action.", {"allowed_values": sorted(ACTION_SCHEMAS)})
+        device_class = step_device_class(self.config, step)
+        if device_class is None:
+            return preflight_error(
+                location,
+                step,
+                ROUTE_FIELDS[0],
+                "Every device kind serves this action, so the step's `device:` must name exactly one configured entry — this one names none, or names an entry in more than one section.",
+                {claimant.configured_field: sorted(claimant.config_entries(self.config)) for claimant in candidates},
+            )
+        name_error = device_class.name_refusal(self, location, step)
+        if name_error is not None:
+            return name_error
+        contract_error = self._preflight_tool_contract(location, step, device_class)
+        if contract_error is not None:
+            return contract_error
+        if not device_class.step_action_specs[step.action].touches_device:
+            # An action that drives nothing has no session to be in, no
+            # permission to hold and nothing to leave behind, so the kind's
+            # own refusals are about a step this one is not.
+            return None
+        return device_class.preflight(self, location, step, state)
+
+    def _preflight_repeat(self, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
+        """Refuse a block step, or the subset it repeats.
+
+        The block itself names no device and drives nothing, so what is left to
+        answer for is its subset, which is walked exactly once against the same
+        `PlanState` the rest of the plan uses. Once, not once per iteration: a
+        plan is a document, and asking the same question `count` times would give
+        the same answer `count` times while making a refusal's step path depend
+        on a number nothing has run yet."""
+        if not step.steps:
+            return preflight_error(location, step, "steps", "A repeat step repeats at least one step.")
+        return self._preflight_steps(step.steps, location.nested, state)
+
     def step_debugger_id(self, step: TestStep) -> str | None:
         return step_debugger_id(self.config, step)
 
-    def _preflight_tool_contract(self, index: int, step: TestStep, device_class: type[StepDevice]) -> JsonObject | None:
+    def _preflight_tool_contract(self, location: StepLocation, step: TestStep, device_class: type[StepDevice]) -> JsonObject | None:
         # Validate each step's plan-supplied tool arguments against the exact MCP
         # contract validators, so a step the reactor schema accepted but the tool
         # contract rejects (e.g. a traversal path) fails before any backend call
@@ -2203,7 +2590,7 @@ class TestReactor:
         for tool, arguments in device_class.tool_calls(self.config, step):
             error = validate_tool_arguments(tool, arguments)
             if error is not None:
-                return preflight_error(index, step, error.get("field", "arguments"), f"Step arguments are rejected by the {tool} contract: {error.get('summary', 'invalid argument')}", {"tool": tool, "validation": error})
+                return preflight_error(location, step, error.get("field", "arguments"), f"Step arguments are rejected by the {tool} contract: {error.get('summary', 'invalid argument')}", {"tool": tool, "validation": error})
         return None
 
 
@@ -2233,9 +2620,14 @@ def plan_devices(config: AgenticHILConfig, test_config: TestConfig) -> DeviceSet
 
     Each step's own device class says which unit it drives (`identify`), so a
     device kind cannot be served by the reactor and left out of what the run
-    locks: a plan that can drive a bus declares that bus."""
+    locks: a plan that can drive a bus declares that bus.
+
+    The walk descends into a block step's own subset, because a device a plan
+    touches only inside a `repeat` is a device that plan touches. A block step
+    itself resolves to no kind and so contributes nothing, which is exactly what
+    it is: a statement about the sequence, not about the bench."""
     devices: list[Device] = []
-    for step in test_config.steps:
+    for step in flatten_steps(test_config.steps):
         device_class = step_device_class(config, step)
         # Named, not bound: a device's lock identity comes from its own config
         # entry, so which probe this config happens to be bound to cannot change
@@ -2273,10 +2665,10 @@ def symbol_allowed(config: AgenticHILConfig, symbol: str) -> bool:
     return config.debug.allow_all_symbols or symbol in config.debug.allowed_symbols
 
 
-def preflight_error(index: int, step: TestStep, field: str, summary: str, details: JsonObject | None = None) -> JsonObject:
+def preflight_error(location: StepLocation, step: TestStep, field: str, summary: str, details: JsonObject | None = None) -> JsonObject:
     return {
-        "step": index,
-        "field": f"steps[{index - 1}].{field}",
+        "step": location.step,
+        "field": f"{location.path}.{field}",
         "route": step.route,
         "action": step.action,
         "summary": summary,

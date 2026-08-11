@@ -7,12 +7,16 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions — a serial line's on `uart_read`, a bus's on `can_read` — `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional." },
+    "version": { "enum": [2, 3, 4], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions — a serial line's on `uart_read`, a bus's on `can_read` — `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time." },
     "name": { "type": "string", "minLength": 1 },
+    "steps": { "$ref": "#/$defs/steps" }
+  },
+  "$defs": {
     "steps": {
       "type": "array",
       "minItems": 1,
       "maxItems": 128,
+      "description": "A sequence of steps, executed in order and stopped at the first one that fails. The nested sequence of a `repeat` block is the same shape as the plan's own, which is what makes a block step nestable.",
       "items": {
         "oneOf": [
           { "$ref": "#/$defs/flash" },
@@ -30,12 +34,11 @@
           { "$ref": "#/$defs/runUntilBreakpoint" },
           { "$ref": "#/$defs/dumpMemory" },
           { "$ref": "#/$defs/debugStop" },
-          { "$ref": "#/$defs/delay" }
+          { "$ref": "#/$defs/delay" },
+          { "$ref": "#/$defs/repeat" }
         ]
       }
-    }
-  },
-  "$defs": {
+    },
     "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 3, "description": "Name of the configured entry this step drives — a `debuggers`, `com_ports` or `can_buses` entry. The one routing key of format version 3: the configuration knows which section a name belongs to, so the step does not have to spell it. The version 2 keys below stay valid as readable aliases; a step writes one or the other, never both." },
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
@@ -361,6 +364,20 @@
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "delay" },
         "duration_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "description": "How long to wait, in milliseconds. Capped at ten minutes: a plan that must wait longer than that is waiting for something it should be reading instead, and an unbounded wait is how a bench ends up held by a run nobody is watching." }
+      }
+    },
+    "repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "steps"],
+      "x-since-version": 4,
+      "description": "Run a nested subset of steps again and again, by count or by wall time. A reactor-level block step: it routes to no device, so it names none, and the reactor runs it rather than any device kind. The nested `steps:` list is the subset that repeats and has the same shape as the plan's own, so a `repeat` may contain a `repeat`. Devices stay open across iterations, a failed nested step aborts the whole run exactly as a failed top-level step does, and the run's result carries the records of every iteration beside the reason the loop ended.",
+      "anyOf": [{ "required": ["count"] }, { "required": ["duration_s"] }],
+      "properties": {
+        "action": { "const": "repeat" },
+        "count": { "type": "integer", "minimum": 1, "description": "How many times the nested subset runs. Reaching this count is a green exit. At least one of `count` and `duration_s` is required, because a plan may not loop unbounded; with both, the first bound reached ends the loop." },
+        "duration_s": { "type": "number", "exclusiveMinimum": 0, "description": "How long the loop keeps starting new iterations, in seconds. Checked between iterations only, so a cycle is never cut in half and the loop always runs at least once; the elapsed time is therefore a floor rather than a deadline. Reaching it is a green exit. At least one of `count` and `duration_s` is required; with both, the first bound reached ends the loop." },
+        "steps": { "$ref": "#/$defs/steps" }
       }
     }
   }

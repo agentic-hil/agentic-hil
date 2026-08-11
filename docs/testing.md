@@ -18,6 +18,23 @@ Feedback steps say what they are claiming, not merely that they read something. 
 
 Close steps are optional: end-of-run cleanup closes every session the run opened, so a plan that never closes is complete. Write an explicit close where the plan means to close, reconfigure and reopen a line or a bus mid-run.
 
+A plan states a cycle once and says how often it runs it. `repeat` is a block step the reactor serves itself: it routes to no device, the steps nested under its own `steps:` are the subset that repeats, and it is bounded by `count:` (iterations), by `duration_s:` (wall time), or by both, where the first bound reached ends the loop. At least one bound is required, so a plan cannot loop unbounded. Both bounds are asked between iterations and nowhere else, so a cycle is never cut in half and a block always runs at least one whole iteration however small its `duration_s` is; reaching a bound is the green exit. The nested list has the same shape as the plan's own, so a `repeat` may contain a `repeat`.
+
+Nothing is opened, closed or reset between iterations: a port opened before the loop is still open inside it, a port opened inside the loop is opened once and closed by end-of-run cleanup like any other, and the loop adds no cleanup of its own. There is no retry and no until: a nested step that fails ends the run exactly as a failed top-level step does, with the same cleanup, the same report and the same recovery action after it. The report says where it stopped: `failed_step` is the top-level number of the block, `step_error_type` is the inner step's own error, and the block's record carries the step records of every iteration beside `exit_reason`, `iterations_run`, `elapsed_s`, and, on a failure, `failed_iteration` and `failed_nested_step`. Validation, the version gate, preflight and the run's lock declaration all descend into the nested steps, so a nested step is refused at the path that names its nesting (`steps[2].steps[1].timeout_s`) and a device a plan touches only inside a loop is a device the run locks.
+
+```yaml
+version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - action: repeat
+    count: 1000
+    steps:
+      - {device: dut_can, action: can_send, frame_id: "0x100", data_hex: "01"}
+      - {device: dut, action: delay, duration_ms: 500}
+      - {device: dut_uart, action: uart_read, comparator: {equals: "cycle done"}, timeout_s: 2}
+  - {device: dut, action: reset}
+```
+
 Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. `uart_write` on a port whose entry does not grant `permissions.allow_write` is refused by name in the same pass, as is a `range:` whose pattern captures nothing to put in it. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple. It validates everything, then executes, then always cleans up:
@@ -44,7 +61,7 @@ steps:
 
 `dut_can` above is the `listen_only: true` bus from the [configuration example](configuration.md#what-it-declares), so the plan only reads it. A `can_send` step belongs on a bus whose entry sets `listen_only: false` and grants `allow_write`. The plan closes neither the port nor the bus, because it does not have to. Cleanup does.
 
-A plan already written against `version: 2` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 2` plan reaching for a version 3 action or key is refused by name rather than working on one install and failing on an older one for no stated reason.
+A plan already written against `version: 2` or `version: 3` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 3` plan reaching for the version 4 block step is refused by name rather than working on one install and failing on an older one for no stated reason.
 
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
@@ -53,6 +70,24 @@ agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 ```
 
 See [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml) for the expanded form.
+
+### Detached runs, status and a cooperative stop
+
+A time-bounded endurance plan runs for hours, and a caller that has to sit in front of it for that long is a caller that cannot do anything else. `--detach` runs the plan in its own process and returns at once with a run handle and the path the report will be written to:
+
+```text
+agentic-hil test-reactor --detach
+agentic-hil test-reactor-status --run run-3f9c2a1b4e6d8071
+agentic-hil test-reactor-stop   --run run-3f9c2a1b4e6d8071
+```
+
+The start command answers as soon as the run holds the devices it declared, so a handle it printed is a handle with the bench. The plan is loaded before the worker is started, so a plan that does not load is refused immediately rather than behind a second command. The synchronous invocation is the default and does exactly what it always did; it is registered under a handle too, so a plan running in one terminal can be stopped from another.
+
+`test-reactor-status` answers for one handle: running, with the step and, inside a `repeat`, the iteration it is on; finished or stopped, with the report path and the verdict; or worker gone. Without `--run` it lists the runs the bench still has records of. Whether the process behind a handle is still there is asked of the operating system rather than of a process id: a run holds a lock for as long as it runs, so a lock that can be taken is a run whose process has ended, however it ended.
+
+`test-reactor-stop` is cooperative and nothing else. It writes a request; the run reads it between its steps and inside a `delay`, which waits in slices for exactly this reason and still waits its full duration when nobody asks it to stop. The run then finishes the step it is in, closes its devices in the usual cleanup order and writes its report. A stopped run is not a passed run: `ok: false` with `error_type: run_stopped`, the step it stopped after, and the records of everything that did run, so the caller decides what a partial run is worth. It is not a failed run either: its devices were closed and confirmed by the same cleanup a passing run uses, so there is no incident and no recovery action.
+
+Killing the worker instead is the case this exists to replace. A process that dies without releasing anything is the dead-owner case the bench already handles: the status command names it (`worker_gone`) rather than guessing what the run had reached, a stop is refused because there is nobody left to honour it, and `agentic-hil lease-status` is what reads and heals the bench. Locks are machine-wide and unchanged by any of this: a detached run holds what it declared, and every other caller is refused with the owner named.
 
 ## pytest Plugin
 

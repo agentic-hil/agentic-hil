@@ -14,7 +14,7 @@
 # There are no close steps: end-of-run cleanup closes every session this run
 # opened. Write an explicit close only where the plan means to close,
 # reconfigure and reopen a line or a bus mid-run.
-version: 3
+version: 4
 name: capture-state
 steps:
   - device: dut
@@ -81,3 +81,24 @@ steps:
 
   - device: dut
     action: debug_stop
+
+  # A cycle stated once, run many times. `repeat` names no device: it is the
+  # reactor's own step, and the steps nested under it are what repeats. Bound it
+  # by `count:`, by `duration_s:`, or by both, where the first bound reached
+  # ends the loop; at least one is required, because a plan may not loop
+  # unbounded. Both are asked between iterations, so a cycle is never cut in
+  # half. Nothing is opened or closed between iterations: the line opened above
+  # is still open here, and a `repeat` may contain a `repeat`.
+  - action: repeat
+    count: 10
+    duration_s: 300
+    steps:
+      - device: dut_uart
+        action: uart_write
+        text: "cycle\n"
+
+      - device: dut_uart
+        action: uart_read
+        comparator:
+          equals: "cycle done"
+        timeout_s: 5

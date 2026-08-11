@@ -1056,9 +1056,28 @@ def test_cli_reports_reactor_construction_failure_and_closes_service(monkeypatch
     # If building the per-device services fails inside TestReactor.__init__, the
     # CLI must still write a structured report, close the base service, and only
     # then re-raise the constructor error.
+    # Asked of `run_registered_test_reactor` rather than of `run_test_reactor`:
+    # a run handle is real coordination state and this test's config double is
+    # one field wide on purpose. What is pinned is unchanged, and it is still
+    # the whole of what the entry point does with a plan once a handle exists.
     from types import SimpleNamespace
 
-    from agentic_hil.cli import run_test_reactor
+    from agentic_hil.cli import run_registered_test_reactor
+
+    class FakeRegistration:
+        """A run handle that records nothing. What a registration does has its
+        own tests; here it only has to be there."""
+
+        handle = "run-00000000000000ff"
+
+        def running(self) -> None:
+            return None
+
+        def progress(self, progress: dict) -> None:
+            return None
+
+        def stop_requested(self) -> bool:
+            return False
 
     class FakeService:
         def __init__(self, config, frontend: str) -> None:
@@ -1079,24 +1098,22 @@ def test_cli_reports_reactor_construction_failure_and_closes_service(monkeypatch
 
     written: list[dict] = []
 
-    def fake_reactor(config, service, service_factory=None):
+    def fake_reactor(config, service, service_factory=None, **kwargs):
         raise RuntimeError("device service failed to build")
 
-    monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda workspace: SimpleNamespace(work_dir="."))
-    monkeypatch.setattr(
-        "agentic_hil.cli.load_test_config", lambda path, work_dir: SimpleNamespace(name="plan", path="plan.yaml", steps=[])
-    )
     monkeypatch.setattr("agentic_hil.cli.AgenticHILToolService", lambda config, frontend: make_service(config, frontend=frontend))
     monkeypatch.setattr("agentic_hil.cli.TestReactor", fake_reactor)
     monkeypatch.setattr("agentic_hil.cli.write_report", lambda config, result: written.append(result) or result)
 
+    plan = SimpleNamespace(name="plan", path="plan.yaml", steps=[])
     with pytest.raises(RuntimeError, match="device service failed to build"):
-        run_test_reactor("plan.yaml")
+        run_registered_test_reactor(SimpleNamespace(work_dir="."), plan, wait_s=0.0, registration=FakeRegistration())
 
     assert len(services) == 1
     assert services[0].closed is True
     assert written and written[0]["error_type"] == "reactor_exception"
     assert written[0]["ok"] is False
+    assert written[0]["run"] == "run-00000000000000ff"
 
 
 def test_reactor_close_releases_services_built_before_a_factory_failure(tmp_path: Path) -> None:
@@ -1477,6 +1494,7 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
 
     from agentic_hil.test_reactor import (
         ACTION_SCHEMAS,
+        REACTOR_ACTION_SCHEMAS,
         ROUTE_FIELDS,
         STEP_ACTION_DECLARATIONS,
         STEP_DEVICE_CLASSES,
@@ -1502,13 +1520,24 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
             if spec.tool is not None:
                 assert spec.tool in device_class.device_class.tools, f"{spec.tool} is not a tool {device_class.device_class.__name__} owns"
 
-    assert set(claimed) == set(ACTION_SCHEMAS)
+    # Every action, less the ones the reactor serves itself. `repeat` routes to
+    # no device and drives no hardware, so no kind can declare it and the old
+    # equality would now demand a device class for a step about the sequence.
+    # The two halves are still required to cover the whole vocabulary and to
+    # stay disjoint, which is the property the equality was really pinning.
+    assert set(claimed) == set(ACTION_SCHEMAS) - set(REACTOR_ACTION_SCHEMAS)
+    assert not set(claimed) & set(REACTOR_ACTION_SCHEMAS)
     assert {"can_open", "can_close", "can_send", "can_read"} <= set(claimed)
     assert {"uart_write", "uart_read", "delay"} <= set(claimed)
-    # Every step shape the schema offers is served, and every action a kind
-    # serves has a shape. A `$def` nobody dispatches is a step a plan can be
-    # written against and no device will run.
-    offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["properties"]["steps"]["items"]["oneOf"]}
+    for action, schema_name in REACTOR_ACTION_SCHEMAS.items():
+        # A reactor action answers for itself exactly as a declared one does: a
+        # shape in the bundled schema, and no device kind claiming it.
+        assert schema_name in schema["$defs"], f"{action} names a schema $def that does not exist"
+        assert step_device_classes(action) == ()
+    # Every step shape the schema offers is served, and every action has a
+    # shape. A `$def` nobody dispatches is a step a plan can be written against
+    # and nothing will run.
+    offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["$defs"]["steps"]["items"]["oneOf"]}
     assert offered == set(ACTION_SCHEMAS.values())
 
 
@@ -3067,3 +3096,453 @@ def test_every_plan_this_repository_ships_loads(tmp_path: Path) -> None:
     assert [step.action for step in demo.steps] == ["flash", "uart_open", "reset", "uart_read"]
     assert [step.device for step in demo.steps] == ["dut", "dut_uart", "dut", "dut_uart"]
     assert demo.steps[3].arguments["comparator"] == {"equals": "Hello World"}
+
+
+# --- the repeat block step, plan format version 4 --------------------------
+
+
+def repeat_plan(tmp_path: Path, block: str, *, version: int = 4) -> Path:
+    """A plan whose only step is the block `block`."""
+    return write_test_config(tmp_path, f"version: {version}\nsteps:\n{block}")
+
+
+class SessionTrackingService(RecordingService):
+    """A service that remembers which serial sessions are open, the way the real
+    tool does: a second `com_session_start` on a live session answers
+    `already_active`, which is exactly what a plan opening a port inside a loop
+    meets on every iteration after the first."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_ports: set[str] = set()
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        port = str((arguments or {}).get("port_id"))
+        if name == "com_session_start":
+            already_active = port in self.open_ports
+            self.open_ports.add(port)
+            return {**result, "already_active": already_active}
+        if name == "com_session_stop":
+            self.open_ports.discard(port)
+        return result
+
+
+class ResetFailsOnAttempt(RecordingService):
+    """A probe whose Nth reset comes back unconfirmed. Everything else answers
+    exactly as `RecordingService` does, so what a test using this observes is
+    one failure at a place it chose."""
+
+    def __init__(self, attempt: int) -> None:
+        super().__init__()
+        self.attempt = attempt
+        self.resets = 0
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "reset_target":
+            self.resets += 1
+            if self.resets == self.attempt:
+                return {"ok": False, "tool": name, "error_type": "reset_unconfirmed", "summary": "The probe did not confirm the reset."}
+        return result
+
+
+def test_a_repeat_step_without_a_bound_is_refused(tmp_path: Path) -> None:
+    # A plan may not loop unbounded, and the schema is where that is settled, so
+    # nothing downstream has to decide what to do with a loop that never ends.
+    path = repeat_plan(tmp_path, "  - {action: repeat, steps: [{device: dut, action: reset}]}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["field"] == "steps[0]"
+    assert refused.value.details["validator"] == "anyOf"
+
+
+def test_a_repeat_count_below_one_is_refused(tmp_path: Path) -> None:
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 0, steps: [{device: dut, action: reset}]}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].count"
+    assert refused.value.details["value"] == 0
+
+
+def test_a_repeat_duration_of_zero_is_refused(tmp_path: Path) -> None:
+    # Zero is not "do not wait" here either: a loop bounded by no time at all
+    # has no reading a plan could have meant.
+    path = repeat_plan(tmp_path, "  - {action: repeat, duration_s: 0, steps: [{device: dut, action: reset}]}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].duration_s"
+    assert refused.value.details["value"] == 0
+
+
+def test_a_repeat_step_may_not_name_a_device(tmp_path: Path) -> None:
+    # The block is a statement about the sequence, not about the bench. Routing
+    # it somewhere would make the reactor look like it drives a device it never
+    # touches, and would put a board in the run's lock declaration for a step
+    # that does nothing to it.
+    path = repeat_plan(tmp_path, "  - {device: dut, action: repeat, count: 2, steps: [{device: dut, action: reset}]}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].device"
+
+
+def test_a_step_nested_in_a_repeat_is_refused_at_the_path_that_names_its_nesting(tmp_path: Path) -> None:
+    # A reader counts down the file to find the step a refusal names. Reporting
+    # a nested step at the top level would send them to a different step.
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut, action: reset}
+  - action: repeat
+    count: 2
+    steps:
+      - {device: dut, action: reset}
+      - {device: dut, action: delay, duration_ms: 0}
+""",
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[2].steps[1].duration_ms"
+
+
+def test_a_version_3_plan_cannot_reach_for_the_repeat_step(tmp_path: Path) -> None:
+    # The version a plan declares is what tells another install whether it can
+    # run it, so a v3 plan using the v4 block step is refused by name here
+    # rather than failing on an older install for no stated reason.
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 2, steps: [{device: dut, action: reset}]}\n", version=3)
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].action"
+    assert refused.value.details["value"] == "repeat"
+    assert refused.value.details["plan_version"] == 3
+    assert refused.value.details["requires_plan_version"] == 4
+    assert "version: 4" in refused.value.details["migration"]
+
+
+def test_the_version_gate_descends_into_a_repeat_blocks_own_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No shipped action is newer than `repeat` itself, so the marker is moved
+    # onto one for the length of this test. What is under test is the walk: a
+    # step nested inside a block is held to the plan's version exactly as a
+    # top-level step is, or a block would be the way around the gate.
+    from agentic_hil import test_reactor
+
+    schema = json.loads(json.dumps(test_reactor.test_config_schema()))
+    schema["$defs"]["reset"]["x-since-version"] = 5
+    schema["properties"]["version"]["enum"] = [2, 3, 4, 5]
+    monkeypatch.setattr(test_reactor, "test_config_schema", lambda: schema)
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 2, steps: [{device: dut, action: reset}]}\n")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[0].steps[0].action"
+    assert refused.value.details["requires_plan_version"] == 5
+
+
+def test_a_repeat_inside_a_repeat_loads_as_a_nested_block(tmp_path: Path) -> None:
+    # The nested list is the same shape as the plan's own, which is the whole of
+    # why a block nests. Loading it as steps rather than as raw mappings is what
+    # lets preflight, the lock declaration and the executor see it.
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - action: repeat
+    count: 2
+    steps:
+      - {device: dut, action: reset}
+      - action: repeat
+        duration_s: 1.5
+        steps:
+          - {device: dut, action: delay, duration_ms: 1}
+""",
+    )
+
+    loaded = load_test_config(str(path), str(tmp_path))
+
+    outer = loaded.steps[0]
+    assert outer.action == "repeat"
+    assert outer.route == "-"
+    assert outer.arguments == {"count": 2}
+    assert [step.action for step in outer.steps] == ["reset", "repeat"]
+    inner = outer.steps[1]
+    assert inner.arguments == {"duration_s": 1.5}
+    assert [step.action for step in inner.steps] == ["delay"]
+
+
+def test_a_repeat_count_runs_exactly_that_many_iterations(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 4, steps: [{device: dut, action: reset}]}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert sum(1 for name, _ in service.calls if name == "reset_target") == 4
+    block = result["steps"][0]
+    assert block["action"] == "repeat"
+    assert block["route"] == "-"
+    assert [iteration["iteration"] for iteration in block["iterations"]] == [1, 2, 3, 4]
+    assert block["result"]["exit_reason"] == "count"
+    assert block["result"]["iterations_run"] == 4
+
+
+def test_a_repeat_bounded_only_by_duration_still_runs_one_whole_iteration(tmp_path: Path) -> None:
+    # The bound is asked between iterations, so a cycle is never cut in half,
+    # and a duration already spent when the block is reached does not turn the
+    # block into a step that runs nothing.
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    duration_s: 0.001\n    steps:\n      - {device: dut, action: delay, duration_ms: 50}\n      - {device: dut, action: reset}\n",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    block = result["steps"][0]
+    assert block["result"]["iterations_run"] == 1
+    assert block["result"]["exit_reason"] == "duration_s"
+    assert [step["action"] for step in block["iterations"][0]["steps"]] == ["delay", "reset"]
+
+
+def test_a_repeat_bounded_by_duration_exits_green_between_iterations(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    duration_s: 0.25\n    steps:\n      - {device: dut, action: delay, duration_ms: 50}\n      - {device: dut, action: reset}\n",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    block = result["steps"][0]
+    assert block["result"]["exit_reason"] == "duration_s"
+    assert block["result"]["iterations_run"] >= 2
+    assert block["result"]["elapsed_s"] >= 0.25
+    # Every iteration that started also finished: the loop ends between cycles,
+    # never inside one.
+    assert all([step["action"] for step in iteration["steps"]] == ["delay", "reset"] for iteration in block["iterations"])
+    assert sum(1 for name, _ in service.calls if name == "reset_target") == block["result"]["iterations_run"]
+
+
+def test_a_repeat_with_both_bounds_ends_on_the_count_when_the_count_is_reached_first(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 3, duration_s: 3600, steps: [{device: dut, action: reset}]}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][0]["result"]["exit_reason"] == "count"
+    assert result["steps"][0]["result"]["iterations_run"] == 3
+    assert sum(1 for name, _ in service.calls if name == "reset_target") == 3
+
+
+def test_a_repeat_with_both_bounds_ends_on_the_duration_when_the_duration_is_reached_first(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    count: 10000\n    duration_s: 0.001\n    steps:\n      - {device: dut, action: delay, duration_ms: 50}\n",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][0]["result"]["exit_reason"] == "duration_s"
+    assert result["steps"][0]["result"]["iterations_run"] == 1
+
+
+def test_a_failing_step_inside_a_repeat_aborts_the_run_naming_the_iteration(tmp_path: Path) -> None:
+    # A failure inside a loop is a failed run like any other: it stops there,
+    # cleanup closes what the plan opened, recovery runs after the result
+    # exists, and the record says which iteration and which step of the subset
+    # it stopped at so the failure can be found without replaying the plan.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - action: repeat
+    count: 5
+    steps:
+      - {device: dut, action: delay, duration_ms: 1}
+      - {device: dut, action: reset}
+""",
+    )
+    service = ResetFailsOnAttempt(3)
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    # The top-level step the run stopped at is the block, and what went wrong
+    # there is the inner step's own error.
+    assert result["failed_step"] == 2
+    assert result["step_error_type"] == "reset_unconfirmed"
+    assert result["error_type"] == "reset_unconfirmed"
+    block = result["steps"][1]
+    assert block["result"]["ok"] is False
+    assert block["result"]["error_type"] == "reset_unconfirmed"
+    assert block["result"]["exit_reason"] == "step_failed"
+    assert block["result"]["failed_iteration"] == 3
+    assert block["result"]["failed_nested_step"] == 2
+    assert block["result"]["failed_nested_action"] == "reset"
+    assert block["result"]["iterations_run"] == 3
+    assert len(block["iterations"]) == 3
+    assert block["iterations"][2]["steps"][1]["result"]["error_type"] == "reset_unconfirmed"
+    # The loop stopped where it failed rather than running its remaining count.
+    assert service.resets == 3
+    assert [item["action"] for item in result["cleanup"]] == ["uart_close"]
+    assert service.recovery_calls == [["dut"]]
+
+
+def test_a_repeat_step_propagates_a_nested_audit_failure_to_the_run(tmp_path: Path) -> None:
+    # A run's status is propagated from the results its steps produced, and a
+    # block step's results are its iterations'. A walk that stopped at the top
+    # level would lose every audit failure a loop's steps reported, which is the
+    # one class of failure a green `ok` must never sit beside.
+    config = load_config(str(write_config(tmp_path)))
+    path = repeat_plan(tmp_path, "  - {action: repeat, count: 2, steps: [{device: dut, action: reset}]}\n")
+    service = RecordingService(audit_failure_call="reset_target")
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["audit_ok"] is False
+    assert result["audit_error"] == {"error_type": "audit_failed"}
+    assert result["retry_safe"] is False
+    assert result["steps"][0]["result"]["iterations_run"] == 1
+
+
+def test_a_port_opened_before_a_repeat_stays_open_across_its_iterations(tmp_path: Path) -> None:
+    # The loop opens nothing, closes nothing and resets nothing between
+    # iterations: a session the plan holds is still held on the next one.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - action: repeat
+    count: 3
+    steps:
+      - {device: dut_uart, action: uart_read, comparator: {equals: "cycle done"}, timeout_s: 1}
+""",
+    )
+    service = RecordingService(uart_reads=[b"cycle done\r\n", b"cycle done\r\n", b"cycle done\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert sum(1 for name, _ in service.calls if name == "com_session_start") == 1
+    assert sum(1 for name, _ in service.calls if name == "com_read") == 3
+    assert [item["action"] for item in result["cleanup"]] == ["uart_close"]
+
+
+def test_a_port_opened_inside_a_repeat_is_still_closed_by_cleanup(tmp_path: Path) -> None:
+    # Every open after the first answers `already_active`, because the first one
+    # is still in force. A run that re-decided ownership on each open would hand
+    # it back on the second iteration and leave the line open behind it.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    count: 2\n    steps:\n      - {device: dut_uart, action: uart_open}\n      - {device: dut, action: reset}\n",
+    )
+    service = SessionTrackingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert sum(1 for name, _ in service.calls if name == "com_session_start") == 2
+    assert [item["action"] for item in result["cleanup"]] == ["uart_close"]
+    assert sum(1 for name, _ in service.calls if name == "com_session_stop") == 1
+    assert service.open_ports == set()
+
+
+def test_a_repeat_inside_a_repeat_runs_the_inner_block_every_outer_iteration(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path)))
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - action: repeat
+    count: 2
+    steps:
+      - action: repeat
+        count: 3
+        steps:
+          - {device: dut, action: reset}
+""",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert sum(1 for name, _ in service.calls if name == "reset_target") == 6
+    outer = result["steps"][0]
+    assert outer["result"]["iterations_run"] == 2
+    inner_records = [iteration["steps"][0] for iteration in outer["iterations"]]
+    assert [record["action"] for record in inner_records] == ["repeat", "repeat"]
+    assert [record["result"]["iterations_run"] for record in inner_records] == [3, 3]
+    assert all(len(record["iterations"]) == 3 for record in inner_records)
+
+
+def test_a_run_locks_a_device_a_plan_only_touches_inside_a_repeat(tmp_path: Path) -> None:
+    # What the run locks is read off the plan, so a device named only inside a
+    # block must be in it: a board reached by a step nobody counted is a board
+    # another run can take while this one is using it.
+    from agentic_hil.test_reactor import declared_devices
+
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    count: 2\n    steps:\n      - {device: dut_uart, action: uart_open}\n",
+    )
+
+    devices = declared_devices(config, load_test_config(str(path), str(tmp_path)))
+
+    assert sum(1 for item in devices if item.startswith("com:")) == 1
+
+
+def test_a_repeat_whose_nested_step_names_no_configured_device_is_refused_before_the_run(tmp_path: Path) -> None:
+    # Preflight descends into the block, so a plan that could only fail on its
+    # first iteration fails before anything is opened at all.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = repeat_plan(
+        tmp_path,
+        "  - action: repeat\n    count: 2\n    steps:\n      - {device: dut_uart, action: uart_open}\n      - {device: not_configured, action: uart_read, timeout_s: 1}\n",
+    )
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["steps"] == []
+    # The name is refused under the key the kind that would have served the
+    # step routes by, and the path says which step inside the block it was.
+    assert result["validation_error"]["field"] == "steps[0].steps[1].port_id"
+    # The top-level step a refusal reports is still the block, which is what
+    # `failed_step` has always meant.
+    assert result["validation_error"]["step"] == 1
+    assert result["failed_step"] == 1
+    assert service.calls == []
