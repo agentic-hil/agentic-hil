@@ -199,6 +199,17 @@ wanted in `declared_devices`. And `cleanup`, `cleanup_ok` and `cleanup_errors`
 record the sessions the runner closed on the way out, debug sessions before
 serial lines and CAN buses.
 
+**A run that was asked to end says so.** Every run carries the handle it ran
+under (`run`), and a run that was stopped reports `ok: false` with
+`error_type: run_stopped`, `stopped: true` and `stopped_after_step`, keeping the
+records of every step that did run. A stop is deliberately neither of the other
+two verdicts: it is not a pass, because the plan did not finish, and it is not a
+failure, because the devices were closed and confirmed by the same cleanup a
+passing run uses, so a stopped run carries no `recovery` block and leaves no
+incident. What a partial run is worth is the caller's decision, and the record
+of what ran is what it decides from. See [running hardware
+tests](testing.md#detached-runs-status-and-a-cooperative-stop) for the commands.
+
 ## How a plan travels
 
 The plan is a repository file; the configuration is a machine file. Moving a

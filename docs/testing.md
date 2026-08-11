@@ -71,6 +71,24 @@ agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 
 See [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml) for the expanded form.
 
+### Detached runs, status and a cooperative stop
+
+A time-bounded endurance plan runs for hours, and a caller that has to sit in front of it for that long is a caller that cannot do anything else. `--detach` runs the plan in its own process and returns at once with a run handle and the path the report will be written to:
+
+```text
+agentic-hil test-reactor --detach
+agentic-hil test-reactor-status --run run-3f9c2a1b4e6d8071
+agentic-hil test-reactor-stop   --run run-3f9c2a1b4e6d8071
+```
+
+The start command answers as soon as the run holds the devices it declared, so a handle it printed is a handle with the bench. The plan is loaded before the worker is started, so a plan that does not load is refused immediately rather than behind a second command. The synchronous invocation is the default and does exactly what it always did; it is registered under a handle too, so a plan running in one terminal can be stopped from another.
+
+`test-reactor-status` answers for one handle: running, with the step and, inside a `repeat`, the iteration it is on; finished or stopped, with the report path and the verdict; or worker gone. Without `--run` it lists the runs the bench still has records of. Whether the process behind a handle is still there is asked of the operating system rather than of a process id: a run holds a lock for as long as it runs, so a lock that can be taken is a run whose process has ended, however it ended.
+
+`test-reactor-stop` is cooperative and nothing else. It writes a request; the run reads it between its steps and inside a `delay`, which waits in slices for exactly this reason and still waits its full duration when nobody asks it to stop. The run then finishes the step it is in, closes its devices in the usual cleanup order and writes its report. A stopped run is not a passed run: `ok: false` with `error_type: run_stopped`, the step it stopped after, and the records of everything that did run, so the caller decides what a partial run is worth. It is not a failed run either: its devices were closed and confirmed by the same cleanup a passing run uses, so there is no incident and no recovery action.
+
+Killing the worker instead is the case this exists to replace. A process that dies without releasing anything is the dead-owner case the bench already handles: the status command names it (`worker_gone`) rather than guessing what the run had reached, a stop is refused because there is nobody left to honour it, and `agentic-hil lease-status` is what reads and heals the bench. Locks are machine-wide and unchanged by any of this: a detached run holds what it declared, and every other caller is refused with the owner named.
+
 ## pytest Plugin
 
 Installing `agentic_hil` registers the `agentic_hil` pytest plugin, so CI regression suites can drive the same permission-gated tools without an MCP client.
