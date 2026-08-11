@@ -465,7 +465,7 @@ def host_environment(config: Path | None = None, *, config_home: Path | None = N
 
 
 # A server that answers the two things the wrong-workspace probe asks, with the
-# one behaviour under test switched by MODE. `release` is what 0.12.0 does:
+# one behaviour under test switched by MODE. `release` is what this release does:
 # refuse a configuration bound elsewhere, and serve a workspace it has no
 # configuration for with every hardware tool refusing.
 FAKE_SERVER = """
