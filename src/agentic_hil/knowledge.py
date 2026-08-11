@@ -131,6 +131,18 @@ LISTEN_ONLY_MODE_ERROR = "can_listen_only_mode"
 # failure whose outcome is not merely unproven: the bind had nothing to bind to,
 # so no controller was addressed and the bench is untouched.
 CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
+# The vendor library a configured CAN adapter is driven through is not installed
+# on this host. The same class of claim as the two above and the strongest of
+# them: python-can raises before a driver object exists, so there was nothing for
+# contact to happen through. A host-setup refusal, not a quarantine.
+CAN_ADAPTER_LIBRARY_MISSING_ERROR = "can_adapter_library_missing"
+# A PCAN channel the driver does not have. Provable innocence for the same reason
+# a missing SocketCAN netdev is: `PCANBasic.Initialize` answered that the handle
+# is invalid, so no channel was opened, nothing was put on any bus, and no
+# controller ACKed. Deliberately distinct from the four `SetValue` failures that
+# run *after* a successful `Initialize`, which leave a channel that is on the bus
+# and keep the quarantine they earn.
+CAN_CHANNEL_NOT_AVAILABLE_ERROR = "can_channel_not_available"
 # A serial device another program is already holding. Its own error_type for the
 # same reason as the one above: the open was refused by the operating system
 # before this session had a handle, so the port kept whatever the other holder is
@@ -1095,6 +1107,61 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
             "Do not point the entry at whichever `canN` happens to be up. That is the wrong-bus mistake the channel "
             "name exists to prevent; confirm which interface belongs to this bench first.",
+        ),
+    ),
+    CAN_ADAPTER_LIBRARY_MISSING_ERROR: ErrorRemedy(
+        meaning=(
+            "The vendor library this CAN adapter is driven through is not installed on this host, so python-can "
+            "refused before a driver object existed. Nothing was opened, no frame was sent, no bus state was read, "
+            "and no controller ACKed anything: there was nothing for contact to happen through. This is a refusal "
+            "about the host's software, in the same class as a missing toolchain, and the bench stays in service. "
+            "For a `peak` bus the missing piece is the PCAN-Basic API, which is a separate vendor download from "
+            "python-can and is not installed with `agentic-hil[can]`."
+        ),
+        remediation=(
+            "Read `adapter` and `backend_error` on the result: they name which library was looked for and what the "
+            "library layer said about it.",
+            "For a `peak` bus, install the PCAN-Basic API from PEAK-System: the Windows device-driver setup ships "
+            "`PCANBasic.dll`, Linux uses the `libpcanbasic` package, macOS the MacCAN `PCBUSB` library. Install it "
+            "yourself as a deliberate host setup step; Agentic HIL names the dependency and never fetches it.",
+            "For any other adapter, install the optional dependency that backend needs and confirm python-can can "
+            "import it: `python -c \"import can; can.Bus(interface=...)\"` reports the same class of failure.",
+            "`can_buses_list` reports every configured bus and its adapter, so which entry needs which library is "
+            "readable before a session is started.",
+            "Retry the session afterwards. The bench was never blocked: `retry_safe` is true and no incident was "
+            "opened.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. There is nothing to recover: no lease was "
+            "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
+            "Do not switch the entry to another adapter to get past it. The adapter names the hardware that is "
+            "attached, and a bus opened through the wrong backend is the wrong-bus mistake in a new spelling.",
+        ),
+    ),
+    CAN_CHANNEL_NOT_AVAILABLE_ERROR: ErrorRemedy(
+        meaning=(
+            "The PCAN channel named by `can_buses.<name>.channel` is not a channel this driver has. "
+            "`PCANBasic.Initialize` answered that the handle is invalid, so no channel was opened, nothing was put "
+            "on the bus, and no controller ACKed: a channel the driver does not enumerate is the same provable "
+            "innocence as a library that is not installed. The usual cause is that the dongle is unplugged, or that "
+            "it re-enumerated onto a different `PCAN_USBBUSn` number than the configuration names."
+        ),
+        remediation=(
+            "Read `channel` on the result: that is the channel name that was looked for. `available_channels`, when "
+            "present, is what the driver actually enumerates right now.",
+            "Check the adapter is attached and its driver is loaded. On Windows the PEAK tray tool lists attached "
+            "channels; everywhere, `python -c \"import can; print(can.detect_available_configs([\'pcan\']))\"` asks "
+            "python-can the same question this refusal asked.",
+            "If the adapter is attached under a different number, put that number in the configuration: "
+            "`project_config_set` writes it into `can_buses.<name>.channel`.",
+            "Retry the session afterwards. The bench was never blocked: `retry_safe` is true and no incident was "
+            "opened.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. Nothing was quarantined and nothing on the bench "
+            "moved; the channel was never opened.",
+            "Do not point the entry at whichever channel happens to be attached. That is the wrong-bus mistake the "
+            "channel name exists to prevent; confirm which adapter belongs to this bench first.",
         ),
     ),
     LISTEN_ONLY_UNSUPPORTED_ERROR: ErrorRemedy(
