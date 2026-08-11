@@ -4093,6 +4093,20 @@ def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pyte
     assert spawned[0].poll() is not None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows console inheritance decision")
+def test_a_detached_child_keeps_a_hidden_console_for_its_own_children() -> None:
+    # DETACHED_PROCESS would give the child no console at all, and Windows then
+    # allocates every console-subsystem grandchild a fresh visible window: a
+    # detached test run popped one console per spawned backend over the
+    # operator's desktop. A hidden console is inherited silently instead.
+    from agentic_hil.process import _detached_process_kwargs
+
+    flags = _detached_process_kwargs()["creationflags"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not flags & subprocess.DETACHED_PROCESS
+
+
 SPAWNER_SOURCE = """
 import subprocess, sys
 from agentic_hil.process import {function}

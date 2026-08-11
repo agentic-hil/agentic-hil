@@ -145,9 +145,16 @@ def _process_group_kwargs() -> dict[str, object]:
 
 
 def _detached_process_kwargs() -> dict[str, object]:
-    """Creation flags for a child that outlives its spawner: own group, no console, not suspended."""
+    """Creation flags for a child that outlives its spawner: own group, hidden console, not suspended.
+
+    ``CREATE_NO_WINDOW`` rather than ``DETACHED_PROCESS``, and the difference is
+    the grandchildren: a detached child has no console at all, so Windows
+    allocates every console-subsystem child it spawns a fresh visible window,
+    which turned a detached test run into a stream of consoles popping over the
+    operator's desktop. A hidden console is inherited by those children instead,
+    and nothing appears."""
     if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
     return {"start_new_session": True}
 
 
