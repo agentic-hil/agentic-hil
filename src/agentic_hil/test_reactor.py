@@ -128,6 +128,26 @@ CAN_COMPARATOR_IDLE_POLL_S = 0.05
 # instead, and an unbounded wait in a plan is how a bench ends up held by a run
 # nobody is watching.
 DELAY_MAX_MS = 600_000
+# The longest a `delay` sleeps in one piece. A stop is answered between steps,
+# and a step that waits ten minutes would make "between steps" mean ten minutes;
+# slicing the wait is what makes the wait itself somewhere a stop can be
+# answered. The total is unchanged, because the slices are counted against the
+# step's own deadline rather than added up.
+DELAY_STOP_POLL_MS = 250
+# What a run that was asked to end reports as. Its own name, because a stop is
+# neither a pass nor a failure of the firmware: borrowing an existing error type
+# would send a reader looking for a board that misbehaved, and reporting success
+# would let a partial run be read as a complete one.
+RUN_STOPPED_ERROR = "run_stopped"
+
+
+def never_stopped() -> bool:
+    """The stop question, for a run nobody has addressed.
+
+    The default everywhere, so a reactor built without a run to stop behaves
+    exactly as one built before stopping existed: the question is asked between
+    every step, and it always answers no."""
+    return False
 
 
 def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
@@ -385,6 +405,30 @@ class TestStep:
     def route_keys(self) -> list[str]:
         """Every routing key this step actually set."""
         return [field_name for field_name in ROUTE_FIELDS if getattr(self, field_name) is not None]
+
+
+@dataclass(frozen=True)
+class StepOutcome:
+    """Why a list of steps did not run to its end.
+
+    Two reasons and no third: a step failed, or the run was asked to stop. Both
+    end the list where they are and travel the same way out of however many
+    blocks contain it, which is why they are one type: everything between here
+    and the run's own result treats them identically, and only the verdict at
+    the end tells them apart."""
+
+    # Where in *this* list it happened. For a failure, the step that failed; for
+    # a stop, the last step that ran, which is 0 when the stop came before the
+    # first one and the step itself when that step is what the stop cut short.
+    index: int
+    # The failing step's own result, or None for a stop. Nothing failed when a
+    # run is stopped, and inventing a failure to carry would be the whole of
+    # what makes a stop read as an incident.
+    failure: JsonObject | None
+
+    @property
+    def stopped(self) -> bool:
+        return self.failure is None
 
 
 @dataclass(frozen=True)
@@ -854,10 +898,15 @@ class StepDevice:
         cls.step_action_specs = collect_step_actions(cls)
         cls.step_actions = {name: spec.schema for name, spec in cls.step_action_specs.items()}
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, *, stop_requested: Callable[[], bool] = never_stopped):
         self.id = config_id
         self.device = device
         self.service = service
+        # Whether this run has been asked to stop. A narrow hook rather than a
+        # reference to the reactor: the only thing a device does with the answer
+        # is cut a wait short, and a device that could see the run could see
+        # everything the reactor knows.
+        self.stop_requested = stop_requested
         self.cleanup_interrupts: list[BaseException] = []
         # True once this device has actually run an action that drives it. A
         # device object is built on first use, and `delay` routes to one without
@@ -1022,10 +1071,23 @@ class StepDevice:
         to be told: a plan waiting on a board is waiting on that board whatever
         kind of thing it is. It is still a step — it routes to a named device and
         it appears in the run's result — because a wait that left no trace would
-        be a gap in the record of what a test did."""
+        be a gap in the record of what a test did.
+
+        The wait is sliced, and the slices are counted against one deadline
+        rather than added up, so an uninterrupted wait takes exactly as long as
+        the plan asked. What the slicing buys is the only other thing that can
+        happen during it: a stop request, which ends the wait early and says so
+        rather than being answered ten minutes later."""
         duration_ms = int(step.arguments["duration_ms"])
-        time.sleep(duration_ms / 1000.0)
-        return {
+        started = time.monotonic()
+        deadline = started + duration_ms / 1000.0
+        while not self.stop_requested():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, DELAY_STOP_POLL_MS / 1000.0))
+        waited_ms = int(round((time.monotonic() - started) * 1000))
+        result: JsonObject = {
             "ok": True,
             "tool": "test_reactor",
             "summary": "Test plan waited.",
@@ -1033,6 +1095,15 @@ class StepDevice:
             "action": "delay",
             "duration_ms": duration_ms,
         }
+        if waited_ms < duration_ms:
+            # A wait cut short is not a failed step, and reporting it as one
+            # would turn an orderly stop into an incident. It is a wait that did
+            # not finish, which the record has to say so nobody reads the plan's
+            # own number as what the board was given.
+            result["stop_requested"] = True
+            result["waited_ms"] = waited_ms
+            result["summary"] = "Test plan waited until a stop was requested."
+        return result
 
     def cleanup(self) -> list[JsonObject]:
         """Close what this device is still holding for this plan."""
@@ -1084,8 +1155,8 @@ class SessionDevice(StepDevice):
     def action_in_role(cls, role: str) -> str:
         return next((name for name, spec in cls.step_action_specs.items() if spec.role == role), "")
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
-        super().__init__(config_id, device, service)
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
         # True while this plan holds the session it opened.
         self._owns_session = False
 
@@ -1670,8 +1741,8 @@ class DebuggerRunner(StepDevice):
     # answer to "which device kind runs this action".
     debug_session_actions: ClassVar[frozenset[str]] = frozenset({"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"})
 
-    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService):
-        super().__init__(config_id, device, service)
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
         self._owns_debug_session = False
 
     @property
@@ -2025,10 +2096,28 @@ def step_device_class(config: AgenticHILConfig, step: TestStep) -> type[StepDevi
 class TestReactor:
     __test__ = False
 
-    def __init__(self, config: AgenticHILConfig, service: AgenticHILToolService, service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None):
+    def __init__(
+        self,
+        config: AgenticHILConfig,
+        service: AgenticHILToolService,
+        service_factory: Callable[[AgenticHILConfig], AgenticHILToolService] | None = None,
+        *,
+        stop_requested: Callable[[], bool] = never_stopped,
+        on_progress: Callable[[JsonObject], None] | None = None,
+    ):
         self.config = config
         self.service = service
         self._service_factory = service_factory
+        # Asked between every step and inside every wait. A run nobody can
+        # address answers no forever, which is what a reactor built before
+        # stopping existed did.
+        self.stop_requested = stop_requested
+        self._on_progress = on_progress
+        # Where the run is, as the thing watching it needs to read it: the
+        # top-level step, and, inside a block, which iteration and which step of
+        # its subset. Rebuilt at the top level rather than added to, so a block's
+        # iteration cannot outlive the block.
+        self._progress: JsonObject = {}
         # Services built for a probe other than the base service's bound one are
         # owned here and closed by close(); the base service is the caller's.
         self._owned_services: list[AgenticHILToolService] = []
@@ -2044,7 +2133,12 @@ class TestReactor:
         existing = self.devices.get(key)
         if existing is not None:
             return existing
-        built = device_class(config_id, device_class.build_device(self.config, config_id), device_class.service_for(self, config_id))
+        built = device_class(
+            config_id,
+            device_class.build_device(self.config, config_id),
+            device_class.service_for(self, config_id),
+            stop_requested=self.stop_requested,
+        )
         self.devices[key] = built
         return built
 
@@ -2105,21 +2199,52 @@ class TestReactor:
             return {"tool": "test_reactor", **error.result}
         return device.execute(step)
 
-    def execute_steps(self, steps: Sequence[TestStep], records: list[JsonObject]) -> tuple[int, JsonObject] | None:
+    def execute_steps(self, steps: Sequence[TestStep], records: list[JsonObject], *, top_level: bool = False) -> StepOutcome | None:
         """Run one list of steps in order, recording each, and stop at the first
-        failure.
+        failure or at the first stop request.
 
-        Returns the failing step's position in *this* list together with its own
-        result, or None when every step passed. The position is what the caller
-        needs and nothing more: the top-level call reads it as `failed_step`,
-        and a block step reads it as which step of its subset failed."""
+        Returns why the list did not run to its end, positioned in *this* list,
+        or None when every step passed. The position is what the caller needs
+        and nothing more: the top-level call reads it as `failed_step` or as
+        where a stop landed, and a block step reads it as which step of its
+        subset it was.
+
+        The stop is asked before a step rather than after, so a run that has
+        been asked to end does not start work it will not be judged on. It is
+        not asked after the last step, because a list that ran to its end is not
+        a list that was stopped."""
         for index, step in enumerate(steps, start=1):
+            if self.stop_requested():
+                return StepOutcome(index - 1, None)
+            self._advance(index, step, top_level=top_level)
             record: JsonObject = {"index": index, "route": step.route, "action": step.action}
             records.append(record)
-            failure = self.execute_repeat(step, record) if step.action == REPEAT_ACTION else self.execute_recorded_step(step, record)
+            if step.action == REPEAT_ACTION:
+                inner = self.execute_repeat(step, record)
+                if inner is not None:
+                    return StepOutcome(index, inner.failure)
+                continue
+            failure = self.execute_recorded_step(step, record)
             if failure is not None:
-                return index, failure
+                return StepOutcome(index, failure)
+            if record["result"].get("stop_requested") is True:
+                # The step ended early because a stop was asked for. Read off
+                # the step's own result rather than by asking again, so this is
+                # true of the plan's last step too: a wait cut short is a run
+                # that was stopped, and asking only before a step would have
+                # called it a completed plan because there was no next step to
+                # ask before.
+                return StepOutcome(index, None)
         return None
+
+    def _advance(self, index: int, step: TestStep, *, top_level: bool) -> None:
+        """Say which step is about to run, for whoever is watching this run."""
+        if top_level:
+            self._progress = {"step": index, "action": step.action, "route": step.route}
+        else:
+            self._progress = {**self._progress, "nested_step": index, "nested_action": step.action, "nested_route": step.route}
+        if self._on_progress is not None:
+            self._on_progress(dict(self._progress))
 
     def execute_recorded_step(self, step: TestStep, record: JsonObject) -> JsonObject | None:
         """One ordinary step, executed onto its own record. The failing result,
@@ -2131,7 +2256,7 @@ class TestReactor:
         record["result"] = result
         return result if result_failed(result) else None
 
-    def execute_repeat(self, step: TestStep, record: JsonObject) -> JsonObject | None:
+    def execute_repeat(self, step: TestStep, record: JsonObject) -> StepOutcome | None:
         """Run a block step's subset until one of its bounds is reached.
 
         Implemented here rather than as a device action, because there is no
@@ -2151,7 +2276,11 @@ class TestReactor:
         A failed nested step ends the run exactly as a failed top-level step
         does: the failure is handed back up, the loop stops where it is, and the
         record says which iteration and which step of the subset it stopped at
-        so the failure can be found without replaying the plan."""
+        so the failure can be found without replaying the plan. A stop request
+        travels the same way and is answered in the same places, which are the
+        block's own step boundaries: a block is not a step that has to finish,
+        it is a list of steps that do, so a stop ends it at the boundary it
+        reached and the record says which iteration and which step that was."""
         count = None if step.arguments.get("count") is None else int(step.arguments["count"])
         duration_s = None if step.arguments.get("duration_s") is None else float(step.arguments["duration_s"])
         bounds: JsonObject = {key: value for key, value in (("count", count), ("duration_s", duration_s)) if value is not None}
@@ -2160,17 +2289,32 @@ class TestReactor:
         started = time.monotonic()
         completed = 0
         while True:
+            self._progress = {**self._progress, "iteration": completed + 1}
             nested: list[JsonObject] = []
             iterations.append({"iteration": completed + 1, "steps": nested})
             aborted = self.execute_steps(step.steps, nested)
             completed += 1
-            if aborted is not None:
-                failed_index, failure = aborted
+            if aborted is not None and aborted.stopped:
                 record["result"] = {
                     "ok": False,
                     "tool": "test_reactor",
                     "action": REPEAT_ACTION,
-                    "error_type": result_error_type(failure),
+                    "error_type": RUN_STOPPED_ERROR,
+                    "summary": f"A stop was requested on iteration {completed} of this repeat block.",
+                    **bounds,
+                    "iterations_run": completed,
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                    "exit_reason": "stopped",
+                    "stopped_after_nested_step": aborted.index,
+                }
+                return aborted
+            if aborted is not None:
+                failed_index, failure = aborted.index, aborted.failure
+                record["result"] = {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "action": REPEAT_ACTION,
+                    "error_type": result_error_type(failure or {}),
                     "summary": f"A step failed on iteration {completed} of this repeat block, so the run stopped there.",
                     **bounds,
                     "iterations_run": completed,
@@ -2180,7 +2324,7 @@ class TestReactor:
                     "failed_nested_step": failed_index,
                     "failed_nested_action": step.steps[failed_index - 1].action,
                 }
-                return failure
+                return aborted
             if count is not None and completed >= count:
                 exit_reason = "count"
                 break
@@ -2235,13 +2379,10 @@ class TestReactor:
             return result
 
         completed: list[JsonObject] = []
-        failed_step: int | None = None
-        failure: JsonObject | None = None
+        aborted: StepOutcome | None = None
         primary_error: BaseException | None = None
         try:
-            aborted = self.execute_steps(test_config.steps, completed)
-            if aborted is not None:
-                failed_step, failure = aborted
+            aborted = self.execute_steps(test_config.steps, completed, top_level=True)
         except BaseException as error:
             primary_error = error
         finally:
@@ -2260,7 +2401,9 @@ class TestReactor:
 
         cleanup_errors = [item for item in cleanup if result_failed(item["result"])]
         cleanup_ok = not cleanup_errors
-        ok = failed_step is None and cleanup_ok
+        failure = None if aborted is None else aborted.failure
+        stopped = aborted is not None and aborted.stopped
+        ok = failure is None and cleanup_ok and not stopped
         result: JsonObject = {
             "ok": ok,
             "tool": "test_reactor",
@@ -2274,7 +2417,7 @@ class TestReactor:
         }
         propagate_result_status(result, [*step_results(completed), *(item["result"] for item in cleanup)])
         if failure is not None:
-            result["failed_step"] = failed_step
+            result["failed_step"] = aborted.index if aborted is not None else None
             # The failing step's own result, which inside a block step is the
             # nested step that failed rather than the block: `failed_step` says
             # which top-level step the run stopped at and `step_error_type` says
@@ -2283,9 +2426,21 @@ class TestReactor:
             step_error_type = result_error_type(failure)
             result["step_error_type"] = step_error_type
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
+        elif stopped:
+            # A stopped run is not a passed run and it is not a failed one
+            # either, so it says which of the two it is by name. The steps that
+            # did run keep their records: the caller decides what a partial run
+            # is worth, and it can only decide that from what actually ran.
+            result["stopped"] = True
+            result["stopped_after_step"] = aborted.index if aborted is not None else 0
+            result["error_type"] = "cleanup_failed" if not cleanup_ok else RUN_STOPPED_ERROR
+            result["summary"] = (
+                f"Test reactor sequence was stopped on request after step {result['stopped_after_step']}; "
+                "the devices it opened were closed and this report was written."
+            )
         elif not cleanup_ok:
             result["error_type"] = "cleanup_failed"
-        if not ok:
+        if failure is not None or not cleanup_ok:
             # A run that failed aborts, and the abort calls the recovery action.
             # After the devices are closed and after this result exists, so the
             # evidence is written before anything drives the board again, and
@@ -2293,6 +2448,12 @@ class TestReactor:
             # Reached for a failed cleanup as well as for a failed step —
             # cleanup is where the unconfirmed-effect incidents come from, and
             # those are precisely the ones that used to sit until a person came.
+            #
+            # A clean stop is deliberately not here, and that is the whole
+            # difference between asking a run to end and killing it. Its devices
+            # were closed and confirmed by the same cleanup as a passing run's,
+            # so there is nothing unconfirmed to recover, and driving the board
+            # again to establish a state nothing disturbed would be the incident.
             result["recovery"] = self._recover_after_failed_run()
         return result
 
