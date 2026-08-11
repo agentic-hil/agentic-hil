@@ -521,3 +521,55 @@ def test_a_synchronous_run_registers_a_handle_it_can_be_stopped_by(tmp_path: Pat
     assert status["run_ok"] is True
     assert status["error_type"] is None
     assert status["report_path"] == ".agentic-hil/reports/last-report.json"
+
+
+def test_a_record_read_that_meets_the_writers_replace_waits_it_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The writer retries while a reader holds the record open; this is the
+    # reader's half of the same contention. A status poll landing in the instant
+    # of the writer's os.replace gets a sharing violation, and that is a moment,
+    # not a state: the poll must answer the state, not report it unreadable.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    record = json.dumps({"version": runlifecycle.RUN_RECORD_VERSION, "state": "running"})
+    answers = iter([PermissionError("held by os.replace"), OSError("held by os.replace"), record])
+
+    def contended_read(path):
+        answer = next(answers)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(runlifecycle, "safe_read_text", contended_read)
+    monkeypatch.setattr(runlifecycle, "_RECORD_READ_RETRY_DELAY_S", 0.0)
+
+    value = runlifecycle.read_run_record(config, "run-0123456789abcdef")
+
+    assert value == {"version": runlifecycle.RUN_RECORD_VERSION, "state": "running"}
+
+
+def test_a_record_read_that_never_gets_an_answer_is_bounded_and_honest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The retry is patience, not denial: a record that stays unreadable is still
+    # unreadable, after a bounded number of looks, and the answer still names
+    # the backend error.
+    import agentic_hil.runlifecycle as runlifecycle
+    from agentic_hil.config import ConfigError
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    asked = []
+
+    def refused_read(path):
+        asked.append(path)
+        raise PermissionError("held forever")
+
+    monkeypatch.setattr(runlifecycle, "safe_read_text", refused_read)
+    monkeypatch.setattr(runlifecycle, "_RECORD_READ_RETRY_DELAY_S", 0.0)
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.read_run_record(config, "run-0123456789abcdef")
+
+    assert caught.value.error_type == "run_state_invalid"
+    assert "held forever" in str(caught.value.details.get("backend_error"))
+    assert len(asked) == runlifecycle._RECORD_READ_ATTEMPTS

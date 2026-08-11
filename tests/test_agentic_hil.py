@@ -878,6 +878,26 @@ def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert (Path.home() / ".claude.json").read_bytes() == registration_before
 
 
+def test_the_user_half_hands_back_the_project_line_that_carries_the_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This is where a split first run hands back to the operator.
+
+    A bare `agentic-hil init` finishes the project and writes no rule, so the
+    line this half offers has to name the agent it just installed.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude")
+
+    assert result["ok"] is True, result
+    assert "agentic-hil init --agent claude-code" in result["next_step"]
+
+
 def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -898,6 +918,278 @@ def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
     assert second["steps"]["config"]["skipped"] is True
     assert second["steps"]["agent_write_restriction"]["added"] == []
     assert config_path.read_bytes() == before
+
+
+def _claude_deny_rules(home: Path) -> list[str]:
+    """The deny list the host would evaluate, `[]` where there is no file yet.
+
+    `_deny_rules` reads a settings file a test wrote itself. These tests start
+    before anything has written one, so a missing file is an answer here rather
+    than an error.
+    """
+    settings = home / ".claude" / "settings.json"
+    if not settings.is_file():
+        return []
+    document = json.loads(settings.read_text(encoding="utf-8"))
+    return document.get("permissions", {}).get("deny", [])
+
+
+def _protected_trees(config_path: Path) -> list[Path]:
+    return [config_path.parent, Path(load_config(str(config_path)).state_root)]
+
+
+def _expected_deny_rules(config_path: Path) -> list[str]:
+    return [f"Edit(/{_posix_filesystem_path(tree)}/**)" for tree in _protected_trees(config_path)]
+
+
+def test_init_with_an_agent_hardens_a_config_an_earlier_plain_init_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completion path for a split first run.
+
+    Where the host blocks the agent's own `setup`, what is left is a plain
+    `init` by the agent and an operator-run `agent-install`, and from then on
+    the config exists. Naming the agent afterwards has to add that agent's
+    refusal of its own write tools without touching the config, or the hardening
+    has no route left on this bench, nor on any bench whose config predates the
+    rules.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+    assert _claude_deny_rules(home) == []
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    # The config is not this run's to write, before or after.
+    assert config_path.read_bytes() == before
+    assert result["steps"]["config"]["ok"] is True
+    assert result["steps"]["config"]["existing"] is True
+    assert result["steps"]["config"]["skipped"] is True
+    assert result["steps"]["doctor"]["ok"] is True
+    restriction = result["steps"]["agent_write_restriction"]
+    assert restriction["ok"] is True
+    assert restriction["added"] == _expected_deny_rules(config_path)
+    assert _claude_deny_rules(home) == _expected_deny_rules(config_path)
+
+
+def test_a_second_init_with_an_agent_on_an_existing_config_changes_no_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    assert init_project(agent="claude-code")["ok"] is True
+    config_path = initialized_config_path(workspace)
+    config_before = config_path.read_bytes()
+    settings_before = (home / ".claude" / "settings.json").read_bytes()
+
+    again = init_project(agent="claude-code")
+
+    assert again["ok"] is True, again
+    restriction = again["steps"]["agent_write_restriction"]
+    assert (restriction["added"], restriction["removed"]) == ([], [])
+    assert config_path.read_bytes() == config_before
+    assert (home / ".claude" / "settings.json").read_bytes() == settings_before
+
+
+def test_init_with_an_agent_on_an_existing_config_takes_back_the_inert_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bench whose config predates the rules is the second case #201 names.
+
+    Its settings carry the forms releases up to 0.7.0 wrote for these same two
+    trees: a `Write(...)` no host consults and an `Edit(...)` anchored under
+    `~/.claude` instead of at the filesystem root. The repair route has to drop
+    them and write the form the host evaluates, with the config still untouched.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    config_directory, state_root = _protected_trees(config_path)
+    superseded = _superseded_claude_rules(config_path, state_root)
+    _claude_settings(home, ["Bash(curl *)", *superseded])
+    before = config_path.read_bytes()
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert config_path.read_bytes() == before
+    restriction = result["steps"]["agent_write_restriction"]
+    assert sorted(restriction["removed"]) == sorted(superseded)
+    assert restriction["added"] == _expected_deny_rules(config_path)
+    assert _claude_deny_rules(home) == ["Bash(curl *)", *_expected_deny_rules(config_path)]
+    assert config_directory.is_dir()
+
+
+def test_init_with_an_agent_writes_the_rule_for_a_state_root_the_operator_moved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rules follow the config, and the config is still not rewritten.
+
+    Moving `state_root` is an operator's edit to their own file. The next
+    `init --agent` reads it back and denies the tree the config names now.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project(agent="claude-code")["ok"] is True
+    config_path = initialized_config_path(workspace)
+    first_state_root = Path(load_config(str(config_path)).state_root)
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["state_root"] = str(tmp_path / "moved-state")
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    before = config_path.read_bytes()
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert config_path.read_bytes() == before
+    moved = f"Edit(/{_posix_filesystem_path(tmp_path / 'moved-state')}/**)"
+    assert result["steps"]["agent_write_restriction"]["added"] == [moved]
+    assert moved in _claude_deny_rules(home)
+    # The rule for the tree it left is not identifiable as ours by its text
+    # alone, so it is not this command's to delete. See
+    # `_stale_claude_code_deny_rules`.
+    assert f"Edit(/{_posix_filesystem_path(first_state_root)}/**)" in _claude_deny_rules(home)
+
+
+def test_init_without_an_agent_on_an_existing_config_writes_no_rule_and_names_the_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an agent there is no permission half to complete.
+
+    The config is kept either way, so what is left to report is that nothing was
+    written and which command does write the rules.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    result = init_project()
+
+    assert result["ok"] is True, result
+    assert result["agent"] is None
+    assert config_path.read_bytes() == before
+    assert result["steps"]["config"]["existing"] is True
+    restriction = result["steps"]["agent_write_restriction"]
+    assert restriction["skipped"] is True
+    assert "--agent" in restriction["summary"]
+    assert "agentic-hil init --agent" in restriction["summary"]
+    assert _claude_deny_rules(home) == []
+
+
+def test_setup_completes_the_permission_half_on_a_config_it_did_not_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's `setup` after a split first run is a complete path too.
+
+    Its project half is `init`, so an existing config leaves it the same work,
+    and the whole command has to report `ok` rather than a refusal for a file it
+    was never going to replace.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scopes"]["project"]["ok"] is True
+    assert result["steps"]["config"]["existing"] is True
+    assert config_path.read_bytes() == before
+    assert result["steps"]["agent_write_restriction"]["added"] == _expected_deny_rules(config_path)
+    assert _claude_deny_rules(home) == _expected_deny_rules(config_path)
+
+
+def test_init_with_codex_on_an_existing_config_reports_the_agents_own_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    result = init_project(agent="codex")
+
+    assert result["ok"] is True, result
+    assert config_path.read_bytes() == before
+    assert result["steps"]["config"]["existing"] is True
+    assert result["steps"]["agent_write_restriction"]["mode"] == "sandboxed-by-the-agent"
+
+
+def test_init_with_opencode_on_an_existing_config_keeps_saying_it_writes_no_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+
+    result = init_project(agent="opencode")
+
+    assert result["ok"] is True, result
+    assert config_path.read_bytes() == before
+    assert result["steps"]["config"]["existing"] is True
+    restriction = result["steps"]["agent_write_restriction"]
+    assert restriction["mode"] == "operator-managed"
+    assert (restriction["added"], restriction["removed"]) == ([], [])
+    assert "writes no write restriction for opencode" in restriction["summary"]
+    assert not (home / ".config" / "opencode" / "opencode.json").exists()
+
+
+def test_a_failed_permission_half_on_an_existing_config_leaves_that_config_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rollback set is the permission file and nothing else.
+
+    The config was not written by this run, so a refusal in the half that
+    follows can neither restore nor remove it, and the refusal the operator has
+    to act on is reported unchanged.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project()["ok"] is True
+    config_path = initialized_config_path(workspace)
+    before = config_path.read_bytes()
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(b"not json at all\n")
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["steps"]["config"]["existing"] is True
+    assert result["steps"]["agent_write_restriction"]["error_type"] == "agent_permissions_unreadable"
+    assert result["rollback"]["ok"] is True
+    assert config_path.read_bytes() == before
+    assert settings.read_bytes() == b"not json at all\n"
 
 
 def test_agent_install_completes_where_the_config_location_is_refused(
@@ -3799,6 +4091,20 @@ def test_windows_missing_job_handle_terminates_suspended_child(monkeypatch: pyte
 
     assert len(spawned) == 1
     assert spawned[0].poll() is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows console inheritance decision")
+def test_a_detached_child_keeps_a_hidden_console_for_its_own_children() -> None:
+    # DETACHED_PROCESS would give the child no console at all, and Windows then
+    # allocates every console-subsystem grandchild a fresh visible window: a
+    # detached test run popped one console per spawned backend over the
+    # operator's desktop. A hidden console is inherited silently instead.
+    from agentic_hil.process import _detached_process_kwargs
+
+    flags = _detached_process_kwargs()["creationflags"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not flags & subprocess.DETACHED_PROCESS
 
 
 SPAWNER_SOURCE = """

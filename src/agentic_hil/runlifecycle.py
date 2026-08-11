@@ -83,6 +83,12 @@ RUN_RECORDS_KEPT = 100
 # is running, and the start command would then time out on a run that was fine.
 RECORD_WRITE_ATTEMPTS = 10
 RECORD_WRITE_BACKOFF_S = 0.02
+# The reader's half of the same contention: a read that lands in the instant
+# the writer's os.replace swaps the record answers a sharing violation on
+# Windows. That is a moment, not a state, so the read waits it out a few times
+# before it calls the state unreadable.
+_RECORD_READ_ATTEMPTS = 6
+_RECORD_READ_RETRY_DELAY_S = 0.05
 # How long after a worker process exits the start command waits for its record
 # before calling it a failure. Not zero, because the process it spawned is not
 # always the process that runs the plan: an interpreter that re-executes itself
@@ -135,13 +141,26 @@ def stop_path(config: AgenticHILConfig, handle: str) -> Path:
 
 
 def read_run_record(config: AgenticHILConfig, handle: str) -> JsonObject | None:
-    """One run's record, or None when this bench has never heard of it."""
-    try:
-        text = safe_read_text(record_path(config, handle))
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError, ConfigError) as error:
-        raise ConfigError("run_state_invalid", "Test run state could not be read.", {"run": handle, "backend_error": str(error)}) from error
+    """One run's record, or None when this bench has never heard of it.
+
+    A read can meet the writer's own ``os.replace``: on Windows that answers a
+    sharing violation, which is a moment rather than a state, so the read
+    retries briefly (the writer holds the same patience for a reader) before it
+    calls the state unreadable. A complete read that fails validation stays
+    terminal on the first answer: the replace is atomic, so a parsed file is a
+    whole file."""
+    for attempt in range(_RECORD_READ_ATTEMPTS):
+        try:
+            text = safe_read_text(record_path(config, handle))
+            break
+        except FileNotFoundError:
+            return None
+        except ConfigError as error:
+            raise ConfigError("run_state_invalid", "Test run state could not be read.", {"run": handle, "backend_error": str(error)}) from error
+        except (OSError, UnicodeDecodeError) as error:
+            if attempt == _RECORD_READ_ATTEMPTS - 1:
+                raise ConfigError("run_state_invalid", "Test run state could not be read.", {"run": handle, "backend_error": str(error)}) from error
+            time.sleep(_RECORD_READ_RETRY_DELAY_S)
     try:
         value = json.loads(text)
     except ValueError as error:
