@@ -31,7 +31,13 @@ Agent prose and exit status never determine PASS alone. The verifier checks:
 - exact version, console entry point, and PEP 610 origin/commit metadata;
 - static safety of the persistent user-local launcher;
 - `setup --help`, `doctor`, and MCP probes through a root-owned Python runtime
-  using a verifier-staged copy of the digest-matched package;
+  using a verifier-staged copy of the digest-matched package. The probes that
+  load a configuration load a copy of the agent's own with `state_root` moved
+  onto the container's tmpfs, because the runtime opens that directory for
+  writing while it loads and this container mounts the home read-only. The copy
+  is staged where discovery looks, so the probes still find it by starting in
+  the workspace, and what the real `state_root` is stays checked against the
+  real file;
 - unchanged, secret-free local source snapshot;
 - no source checkout, `.mcp.json`, or authoritative config in firmware project;
 - no observed use of guarded PATH commands such as `sudo` or
@@ -44,7 +50,10 @@ Agent prose and exit status never determine PASS alone. The verifier checks:
 - preserved unrelated operator configuration;
 - user-level MCP registration using exact trusted launcher;
 - MCP `initialize` and the target revision's exact `tools/list` contract;
-- fail-closed startup from another workspace.
+- a configuration named from another workspace refused before the server serves
+  anything, and a server started where no configuration binds refusing a
+  hardware tool for the directory it was started in rather than reaching the
+  bench this configuration describes.
 
 The container runs as a non-root user with a read-only root filesystem, all
 capabilities dropped, `no-new-privileges`, process/memory/CPU limits, no Docker
