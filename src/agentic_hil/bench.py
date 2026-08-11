@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -536,6 +537,14 @@ def validated_wait(wait_s: object) -> float:
     if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)):
         raise ConfigError("invalid_argument", "A device wait must be a number of seconds.", {"field": "wait_s", "value": wait_s})
     value = float(wait_s)
+    # NaN slips past both range checks below — every comparison against it is
+    # false — so a NaN wait would become a NaN deadline that `time.monotonic() >=
+    # deadline` never reaches, and the holder of a device would be polled forever.
+    # Infinity is caught by the upper bound already, but reject every non-finite
+    # value here so the one validator is the single gate: a wait must be a real,
+    # bounded number of seconds or it is refused before it can strand a worker.
+    if not math.isfinite(value):
+        raise ConfigError("invalid_argument", "A device wait must be a finite number of seconds.", {"field": "wait_s", "value": wait_s})
     if value < 0:
         raise ConfigError("invalid_argument", "A device wait must not be negative.", {"field": "wait_s", "value": wait_s})
     if value > MAX_WAIT_S:

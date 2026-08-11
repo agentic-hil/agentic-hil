@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 from types import TracebackType
 
-from agentic_hil.bench import _LifetimeLock, utc_now_iso
+from agentic_hil.bench import MAX_WAIT_S, _LifetimeLock, utc_now_iso, validated_wait
 from agentic_hil.config import (
     ConfigError,
     atomic_write_text,
@@ -407,17 +407,56 @@ class RunRegistration:
         return True
 
 
+def worker_publish_window_s(wait_s: float) -> float:
+    """How long the start command waits for a detached worker to publish.
+
+    The worker stays in ``starting`` not only while it comes up but for as long
+    as it is allowed to wait for a device another run holds: ``begin_run(wait_s=
+    ...)`` sits inside that window. A deadline that counted only the startup
+    would call a worker still legitimately waiting ``run_worker_unresponsive``
+    and walk away from a live process that then acquires the devices and runs the
+    whole plan behind a caller told the start had failed. So the base startup
+    window is extended by the same bounded wait the worker was handed, clamped to
+    the bench's own maximum; a nonsensical value falls back to the base window
+    rather than raising, since the worker refuses it the same way and publishes a
+    terminal record at once."""
+    device_wait = float(wait_s) if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool) else 0.0
+    return WORKER_PUBLISH_TIMEOUT_S + max(0.0, min(device_wait, MAX_WAIT_S))
+
+
 def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_s: float) -> JsonObject:
     """Start a run in its own process and answer as soon as it has published.
 
     The wait is for the worker to say what it is doing, not for it to finish:
     it publishes as soon as it holds its devices, or as soon as it knows it
     cannot have them. A handle printed before that would be a handle that might
-    name nothing, and the caller's next move is to ask about it."""
+    name nothing, and the caller's next move is to ask about it.
+
+    Two things the answer is careful about. The window it waits in accounts for
+    the device wait the worker was handed, so a legitimate wait for a held bench
+    is not mistaken for a stuck worker. And a worker that reached a terminal
+    state before it could be caught at ``running`` — a refusal published at once,
+    or a plan short enough to finish inside the window — is reported with its own
+    verdict, not as a successful launch: launch success is reserved for a running
+    worker and for an already-finished run only when it passed.
+
+    The wait is validated here, before a worker is spawned. The worker refuses a
+    bad wait too — it runs the same validator when it acquires its devices — but
+    a non-finite wait handed to a detached process would strand it: a NaN deadline
+    is one ``time.monotonic()`` never reaches, so a worker holding for a device
+    polls forever, past the window this command waits in, and the caller is told
+    the start failed while a live process keeps waiting. Refusing the value up
+    front keeps an invalid wait out of a process nobody is watching, and the one
+    validated finite value is what both the worker and the publication window are
+    built from."""
+    try:
+        wait_s = validated_wait(wait_s)
+    except ConfigError as error:
+        return {"ok": False, "tool": "test_reactor_start", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
     handle = new_run_handle()
     report = display_path(config, last_report_path(config))
     worker = spawn_run_worker(config, handle, test_config_path, wait_s=wait_s)
-    deadline = time.monotonic() + WORKER_PUBLISH_TIMEOUT_S
+    deadline = time.monotonic() + worker_publish_window_s(wait_s)
     exited_at: float | None = None
     while True:
         record = None
@@ -442,22 +481,31 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
                 "side_effect_committed": False,
             }
         if time.monotonic() >= deadline:
+            # The worker outlasted even the wait it was granted, so it is stuck
+            # rather than patiently holding for a device. It is not abandoned: a
+            # stop is planted under its handle first, so if it does come alive
+            # and reach the board it ends at the first step boundary instead of
+            # running the whole plan behind a caller told the start had failed.
+            _plant_stop_after_unresponsive(config, handle)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
                 "error_type": "run_worker_unresponsive",
-                "summary": "The detached run's worker process did not say what it was doing within the startup window.",
+                "summary": "The detached run's worker process did not say what it was doing within the startup window; a cooperative stop was left under its handle in case it is still alive.",
                 "run": handle,
                 "worker_output": worker_output(config, handle),
                 "retry_safe": False,
                 "side_effect_committed": False,
             }
         time.sleep(WORKER_PUBLISH_POLL_S)
+    state = str(record.get("state"))
+    if state in TERMINAL_RUN_STATES:
+        return _detached_terminal_result(handle, record, report)
     return {
         "ok": True,
         "tool": "test_reactor_start",
         "run": handle,
-        "state": str(record.get("state")),
+        "state": state,
         "detached": True,
         "name": record.get("name"),
         "test_config_path": record.get("test_config_path"),
@@ -468,6 +516,60 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             f"and `agentic-hil test-reactor-stop --run {handle}` to end it early."
         ),
     }
+
+
+def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> JsonObject:
+    """The start command's answer for a run that already ended.
+
+    The worker published a terminal record before it could be caught at
+    ``running``, so there is nothing to launch — there is a verdict, and the
+    caller gets it. ``ok`` is the run's own ``run_ok`` so a refused start (a held
+    bench answers ``device_busy`` at once) exits non-zero, and the failure's
+    ``error_type`` and failed-step fields travel with it instead of being dropped
+    behind a handle to a run that is already over."""
+    run_ok = record.get("run_ok") is True
+    stopped = str(record.get("state")) == RUN_STOPPED
+    verdict = "passed" if run_ok else f"did not pass ({record.get('error_type') or 'unknown'})"
+    ended = "was stopped on request" if stopped else "ended"
+    result: JsonObject = {
+        "ok": run_ok,
+        "tool": "test_reactor_start",
+        "run": handle,
+        "state": str(record.get("state")),
+        "detached": True,
+        "run_ok": run_ok,
+        "name": record.get("name"),
+        "test_config_path": record.get("test_config_path"),
+        "report_path": record.get("report_path", report),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "summary": (
+            f"The detached run under handle {handle} {ended} before the start command returned and {verdict}; "
+            f"its report is at {record.get('report_path', report)}."
+        ),
+    }
+    if not run_ok:
+        result["error_type"] = record.get("error_type") or "unknown"
+        for field in ("failed_step", "stopped_after_step"):
+            if record.get(field) is not None:
+                result[field] = record.get(field)
+    return result
+
+
+def _plant_stop_after_unresponsive(config: AgenticHILConfig, handle: str) -> None:
+    """Best-effort cooperative stop for a worker that never published in time.
+
+    Written directly rather than through ``request_run_stop`` so it lands even
+    when no record has appeared yet, and guarded so a state directory that cannot
+    be written does not turn a timeout into a raise. The run reads this between
+    its steps and inside a wait, so a worker that later comes alive ends early."""
+    try:
+        atomic_write_text(
+            stop_path(config, handle),
+            json.dumps({"run": handle, "requested_at": utc_now_iso(), "requested_by_pid": os.getpid()}, indent=2) + "\n",
+        )
+    except (ConfigError, OSError, ValueError):
+        return
 
 
 def spawn_run_worker(config: AgenticHILConfig, handle: str, test_config_path: str, *, wait_s: float) -> subprocess.Popen:
