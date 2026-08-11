@@ -24,15 +24,25 @@ from conftest import write_config
 
 from agentic_hil.config import load_config
 from agentic_hil.coordination import (
+    ATTESTATION_RECOVERY_ACTION,
     LEASE_RELEASE_RETRY_REASON,
+    RECOVERY_ACTION_VIA,
+    RECOVERY_ACTOR_SERVER,
     HardwareCoordinator,
 )
+from agentic_hil.report import CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY, write_report
 from agentic_hil.test_reactor import TestReactor
 from agentic_hil.tools import AgenticHILToolService
 
 # Machine-wide device locks contend across sibling clones, so this name is this
 # module's alone.
 RESOURCE = "physical:run-abort-recovery-probe"
+# The resource the dead owner below held. Its own name so an inherited incident
+# can never be confused with one this module's live owner raised.
+DEAD_OWNER_RESOURCE = "physical:run-abort-recovery-dead-owner-uart"
+# What `status()` and `acquire()` write over a project record left `active` by a
+# process that is gone and cannot be proved innocent.
+DEAD_OWNER_REASON = "owner_process_exited_without_release"
 # An incident a reset settles: the session start never confirmed, so the target
 # may be running and only driving it into a defined state answers that.
 RESET_REASON = "debug_session_start_unconfirmed"
@@ -85,11 +95,9 @@ def quarantine(service: AgenticHILToolService, reason: str, *, audit_broken: boo
     """The incident a failed run leaves behind, raised on this service's own
     coordinator.
 
-    A live owner's own incident, deliberately, and not one adopted from a dead
-    process: recovery is what a run does to the mess it just made, and an
-    incident inherited from a process that is gone leaves state this one cannot
-    speak for — `retryable_incident` refuses those on purpose and that refusal is
-    not what these tests are about."""
+    A live owner's own incident, and the inherited kind is set up by
+    `leave_contacted_dead_owner` below: the two shapes reach `retryable_incident`
+    through different halves of it, so the tests that care keep them apart."""
     lease = service.coordinator.acquire(RESOURCE)
     service.coordinator.quarantine_lease(lease, reason, audit_broken=audit_broken)
     incident = service.coordinator.quarantine_id
@@ -97,11 +105,66 @@ def quarantine(service: AgenticHILToolService, reason: str, *, audit_broken: boo
     return incident
 
 
+def leave_contacted_dead_owner(workspace: Path, *, audit_ok: bool = True, **config_kwargs):
+    """A project record from a process that died with a session it had opened.
+
+    The endurance bench's shape, built the way the coordinator builds it so a
+    change to what an active project record contains breaks these tests instead
+    of quietly making them describe a record nobody writes. The last report
+    carries a contact marker, which is what stops `status()` releasing the dead
+    owner as provably innocent: the port was driven, so the incident is real and
+    a recovery action is what answers it.
+    """
+    config = config_for(workspace, **config_kwargs)
+    setup = HardwareCoordinator(config, "dead-owner-setup")
+    lease = {
+        "lease_id": "dead-owner-lease",
+        "resources": [DEAD_OWNER_RESOURCE],
+        "lease_state": "active",
+        "safe_state_confirmed": False,
+        "processes_reaped": False,
+        "audit_ok": audit_ok,
+        "cleanup_required": False,
+        "quarantined": False,
+        "cleanup_reasons": [],
+        "quarantine_id": None,
+    }
+    record = setup._base_record("active", [DEAD_OWNER_RESOURCE])
+    record["leases"] = [lease]
+    write_report(
+        config,
+        {
+            "ok": False,
+            "tool": "com_session_start",
+            "error_type": "com_reader_start_failed",
+            "summary": "COM port reader could not be started; the port was closed.",
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": True,
+            "audit_ok": True,
+            "lease_id": "dead-owner-lease",
+            "resources": [DEAD_OWNER_RESOURCE],
+            "lease_state": "active",
+            CONTACT_MARKER_KEY: "2026-08-07T09:00:00Z",
+            CONTACT_MARKER_SOURCE_KEY: "serial_open",
+        },
+    )
+    marker = setup._base_record("active", [DEAD_OWNER_RESOURCE])
+    marker["lease_id"] = "dead-owner-lease"
+    setup._write_record(DEAD_OWNER_RESOURCE, marker)
+    setup._write_record(setup.project_key, record)
+    return config
+
+
 def ledger(config) -> list[dict]:
     path = Path(HardwareCoordinator(config, "ledger-reader").root) / "recovery.jsonl"
     if not path.is_file():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def recovery_action_lines(config) -> list[dict]:
+    return [line for line in ledger(config) if line.get("via") == RECOVERY_ACTION_VIA]
 
 
 def failing_flash_plan(tmp_path: Path):
@@ -568,3 +631,220 @@ def test_a_no_contact_incident_still_clears_without_driving_the_board(tmp_path: 
         assert "reset_target:halt" not in backend.calls
     finally:
         service.close()
+
+
+# ---------------------------------------------------------------------------
+# C. The incident this owner inherited, which is the one the bench reported.
+
+
+def test_the_dead_owner_incident_the_run_inherited_is_settled_by_the_recovery_action(tmp_path: Path) -> None:
+    """The bench case, and the narrowing it exposed.
+
+    On the state before this change the recovery ran, confirmed a reset into
+    halt, and then reported `incident_resolved: false` with "it needs the
+    operator's route", because the incident had no lease of this owner behind it
+    and `retryable_incident` refused that shape outright. What the dead owner
+    left unconfirmed is exactly what the reset erased, so the same evidence
+    settles it whichever process opened the session that failed.
+    """
+    config = leave_contacted_dead_owner(tmp_path)
+    backend = FakeBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+        incident = service.coordinator.quarantine_id
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["safe_state_predicate"] == "reset_halt"
+        assert recovery["incident_resolved"] is True, recovery
+        assert recovery["incident_open"] is False
+        assert recovery["resolved_reason"] == DEAD_OWNER_REASON
+        assert recovery["resolved_quarantine_id"] == incident
+        assert "incident_summary" not in recovery
+        # The claim is about the board, so it is read off the board's own log.
+        assert "reset_target:halt" in backend.calls
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+    lines = recovery_action_lines(config)
+    assert len(lines) == 1, ledger(config)
+    assert lines[0]["actor"] == RECOVERY_ACTOR_SERVER
+    assert lines[0]["attestation"] == ATTESTATION_RECOVERY_ACTION
+    assert lines[0]["reason"] == DEAD_OWNER_REASON
+    assert lines[0]["resources"] == [DEAD_OWNER_RESOURCE]
+
+
+def test_the_inherited_incident_leaves_no_marker_behind_and_the_next_run_starts(tmp_path: Path) -> None:
+    """The whole point, end to end: an endurance run dies on step one against a
+    bench a dead process left quarantined, the abort recovers it, and the next
+    run declares its devices and starts. No operator, no command line, no state
+    files deleted, and the resource marker the dead owner left is gone, so a
+    fresh process cannot adopt the same incident all over again."""
+    config = leave_contacted_dead_owner(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend(flash_ok=False))
+    try:
+        result = TestReactor(config, service).run(failing_flash_plan(tmp_path))
+
+        # The run still failed. Recovering the bench does not un-fail a test.
+        assert result["ok"] is False, result
+        assert service.coordinator.status()["blocked"] is False
+
+        started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
+        assert started["ok"] is True, started
+        assert service.call("bench_run_stop")["ok"] is True
+    finally:
+        service.close()
+
+    observer = HardwareCoordinator(config, "fresh-process")
+    status = observer.status()
+    assert status["blocked"] is False, status
+    assert status["cleanup_reasons"] == []
+    assert observer._read_record(DEAD_OWNER_RESOURCE)["state"] == "released"
+    assert len(recovery_action_lines(config)) == 1, ledger(config)
+
+
+def test_a_failed_recovery_leaves_the_inherited_incident_for_the_next_call(tmp_path: Path) -> None:
+    """Failing closed, then converging. A board with no power refuses the reset,
+    the incident stays exactly as it was and the recovery-class call that runs
+    against it is refused too, the escalation as it has always been. Once the
+    board answers, the next confirmed reset settles it with one ledger line, and
+    nobody was asked for anything."""
+    config = leave_contacted_dead_owner(tmp_path)
+    backend = FakeBackend(reset_ok=False)
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        incident = service.coordinator.status()["quarantine_id"]
+
+        failed = service.recover_after_failed_run(["dut"])
+        assert failed["outcome"] == "failed", failed
+        assert failed["failed_action"] == "reset_halt"
+        assert service.coordinator.status()["blocked"] is True
+        assert service.coordinator.quarantine_id == incident
+        assert recovery_action_lines(config) == []
+
+        # The board is still dark: the remedy call escalates rather than
+        # pretending, exactly as it does today.
+        dark = service.call("reset_target", {"mode": "halt"})
+        assert dark["ok"] is False, dark
+        assert dark["error_type"] == "resource_quarantined"
+        assert service.coordinator.status()["blocked"] is True
+
+        # Somebody plugs the board back in.
+        backend.reset_ok = True
+        recovered = service.call("reset_target", {"mode": "halt"})
+
+        assert recovered["ok"] is True, recovered
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+    lines = recovery_action_lines(config)
+    assert len(lines) == 1, ledger(config)
+    assert lines[0]["reason"] == DEAD_OWNER_REASON
+    assert lines[0]["actor"] == RECOVERY_ACTOR_SERVER
+    assert lines[0]["attestation"] == ATTESTATION_RECOVERY_ACTION
+
+
+def test_a_readonly_bench_never_settles_the_inherited_incident_by_reading(tmp_path: Path) -> None:
+    """The predicate still decides. A dead owner's session may have left the
+    target running, and a probe that answers says the probe answers, so a bench
+    whose policy forbids driving the target keeps this incident for the operator,
+    and the board is not reset behind that policy's back."""
+    config = leave_contacted_dead_owner(tmp_path, auto_recover="readonly")
+    backend = FakeBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["safe_state_predicate"] == "readonly_probe"
+        assert recovery["incident_resolved"] is False, recovery
+        assert recovery["incident_open"] is True
+        assert service.coordinator.status()["blocked"] is True
+        assert "reset_target:halt" not in backend.calls
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []
+
+
+@pytest.mark.parametrize("reason", ["machine_recovery_audit_broken", "debug_coordination_report_audit_broken"])
+def test_no_automatic_route_settles_an_audit_broken_incident(tmp_path: Path, reason: str) -> None:
+    """The one family every automatic route keeps refusing, pinned across all
+    three of them. The reason names a ledger that could not be written, and
+    driving the target writes no ledger, so the widened rule must not reach it:
+    not through the run teardown, not through the gate's own attempt, and not
+    through a recovery-class call that came back confirmed."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        incident = quarantine(service, reason, audit_broken=True)
+
+        teardown = service.recover_after_failed_run(["dut"])
+        assert teardown["outcome"] == "recovered", teardown
+        assert teardown["incident_resolved"] is False, teardown
+        assert teardown["incident_open"] is True
+
+        assert service._attempt_machine_recovery() is None
+        assert reason not in service.coordinator.recoverable_reasons()
+
+        settled = service._settle_after_recovery_class_call(
+            "reset_target", True, {"ok": True, "tool": "reset_target", "mode": "halt"}
+        )
+        assert "incident_resolved" not in settled, settled
+
+        assert service.coordinator.status()["blocked"] is True
+        assert service.coordinator.quarantine_id == incident
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []
+
+
+def test_an_inherited_incident_with_a_broken_audit_stays_with_the_operator(tmp_path: Path) -> None:
+    """The same exclusion on the inherited half. The record is the only evidence
+    a lease-less incident has, and a lease entry in it that says its audit is
+    broken is the record saying it cannot be the evidence for anything."""
+    config = leave_contacted_dead_owner(tmp_path, audit_ok=False)
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["incident_resolved"] is False, recovery
+        assert recovery["incident_open"] is True
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []
+
+
+def test_an_inherited_incident_recorded_under_another_configuration_is_refused(tmp_path: Path) -> None:
+    """The third of the three questions `recover` asks, asked here too: a record
+    stamped with configuration bytes this server did not load describes a bench
+    under a policy nobody here can speak for, so no recovery action clears it and
+    the `config_changed` route stays the operator's."""
+    config = leave_contacted_dead_owner(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        service.coordinator.status()
+        record = service.coordinator._read_record(service.coordinator.project_key)
+        service.coordinator._write_record(service.coordinator.project_key, {**record, "config_sha256": "0" * 64})
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["incident_resolved"] is False, recovery
+        assert recovery["incident_open"] is True
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []

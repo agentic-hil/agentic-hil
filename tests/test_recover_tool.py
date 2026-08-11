@@ -273,8 +273,10 @@ def test_the_clearable_set_is_the_no_contact_class_and_nothing_else(tmp_path: Pa
     coordinator = HardwareCoordinator(config, "class-boundary")
 
     assert coordinator.agent_recoverable_reasons() == {"released_dead_owner_no_contact", LEASE_RELEASE_RETRY_REASON}
-    # Strictly inside what the machine may settle, never beyond it.
-    assert coordinator.agent_recoverable_reasons() - coordinator.recoverable_reasons() == {"released_dead_owner_no_contact"}
+    # Strictly inside what the machine may settle, never beyond it. Asked by
+    # membership: what the machine may settle is defined by an exclusion and
+    # enumerates nothing, so a set difference would answer about the wrong thing.
+    assert all(reason in coordinator.recoverable_reasons() for reason in coordinator.agent_recoverable_reasons())
 
 
 # ---------------------------------------------------------------------------

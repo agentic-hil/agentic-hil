@@ -111,11 +111,14 @@ own route and it stays open. The boundary has not moved (a claim about a
 physical board still comes from a person); what moved is that you may carry
 their sentence instead of sending them hunting for a shell.
 
-Call it before you retry a hardware call rather than after: taking a lease over
-a dead owner's record adds `owner_process_exited_without_release` to the
-incident. If `permissions.allow_recover` is false, this bench has decided its
-incidents are the operator's, and the answer is the `operator_command` and
-nothing else.
+An incident inherited from a process that died holding the bench
+(`owner_process_exited_without_release`) is not yours to hand to a person
+either, on a bench whose `recovery.auto_recover` is `reset_halt`: the next
+`probe_target`, `reset_target` or `flash_firmware` drives the target into a
+defined state, reads it back, and clears the incident on that evidence, because
+what the dead owner left unconfirmed is exactly what the reset erased. If
+`permissions.allow_recover` is false, this bench has decided its incidents are
+the operator's, and the answer is the `operator_command` and nothing else.
 
 `com_port_identity_mismatch` is a refusal about *which board*, not about
 permissions. A serial device name (`/dev/ttyACM0`, `COM7`) is an enumeration

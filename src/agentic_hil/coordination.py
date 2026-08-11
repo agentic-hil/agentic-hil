@@ -74,17 +74,11 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
         LEASE_RELEASE_RETRY_REASON,
     }
 )
-# Reasons a verified reset-into-halt settles but a read-only re-read cannot: the
-# target may be running after an unconfirmed flash, reset, or session start, and
-# only driving it into a defined state answers that. Reaching for this set is a
-# physical act, so it is gated on the bench's recovery.auto_recover policy.
-RESET_RECOVERABLE_CLEANUP_REASONS = RETRYABLE_CLEANUP_REASONS | frozenset(
-    {
-        "debug_session_start_unconfirmed",
-        "debugger_result_unconfirmed",
-        DEBUGGER_READONLY_TARGET_STATE_REASON,
-    }
-)
+# What a verified reset-into-halt settles beyond the set above is not an
+# enumeration and deliberately stopped being one: see `RECOVERY_ACTION_REASONS`,
+# which every caller that has driven the target into a defined state reaches for.
+# Reaching for it is a physical act, so it is gated on the bench's
+# recovery.auto_recover policy and on the probe's allow_reset grant.
 # What `status` names when it gives a dead owner's devices back instead of
 # quarantining them. A release reason, not a quarantine reason:
 # it appears in a status result and in the recovery ledger, and by construction
@@ -127,14 +121,26 @@ class _PerformedRecoveryReasons(frozenset):  # type: ignore[type-arg]
     not be written, and no amount of driving the target writes it. They keep
     needing the operator's route.
 
-    ``retryable_incident`` refuses a lease whose ``audit_ok`` is false before
-    this is ever consulted, so the name test here is the second of two locks on
-    the same door, not the only one."""
+    ``retryable_incident`` refuses a broken audit before this is ever consulted:
+    a lease whose ``audit_ok`` is false, or a record carrying a lease entry that
+    says so. The name test here is the second of two locks on the same door, not
+    the only one.
+
+    Membership is the whole interface. The elements are empty on purpose, so
+    every set operation other than ``in`` reports nothing rather than reporting a
+    wrong enumeration; callers ask this whether one reason is settled, never
+    which reasons exist. Truth is overridden with them: a caller testing
+    ``if allowed`` is asking whether this bench may settle anything at all, and
+    the honest answer for a set that admits every non-``audit_broken`` reason is
+    yes, however few elements it happens to hold."""
 
     __slots__ = ()
 
     def __contains__(self, item: object) -> bool:
         return isinstance(item, str) and "audit_broken" not in item
+
+    def __bool__(self) -> bool:
+        return True
 
 
 RECOVERY_ACTION_REASONS: frozenset[str] = _PerformedRecoveryReasons()
@@ -779,6 +785,16 @@ class HardwareCoordinator:
     def recoverable_reasons(self) -> frozenset[str]:
         """The reasons this bench's policy and grants actually let the owner clear.
 
+        The policy picks the predicate, and the predicate decides the set. A
+        read-only probe re-read attests that the probe answers and a target is
+        detected, and nothing beyond that, so it settles only what a re-read
+        settles. A verified reset into halt drives the target into a defined
+        state first and reads it back, and a state this host established and
+        confirmed is a known state whatever the reason it was held for was
+        called, so under ``reset_halt`` the permitted set is the one defined by
+        what it excludes, and the exclusion is the ``audit_broken`` families,
+        which name a ledger no reset writes.
+
         ``reset_halt`` degrades to the read-only set without ``allow_reset``: the
         config may permit the stronger predicate while the bound probe does not
         authorize the reset it needs."""
@@ -787,7 +803,7 @@ class HardwareCoordinator:
             return frozenset()
         debugger = self.config.debugger
         if policy == "reset_halt" and (debugger is None or debugger.permissions.allow_reset):
-            return RESET_RECOVERABLE_CLEANUP_REASONS
+            return RECOVERY_ACTION_REASONS
         return RETRYABLE_CLEANUP_REASONS
 
     def agent_recoverable_reasons(self) -> frozenset[str]:
@@ -811,27 +827,81 @@ class HardwareCoordinator:
     def retryable_incident(self, allowed: frozenset[str] | None = None) -> str | None:
         """The single reason this owner's whole incident consists of, if recoverable.
 
-        Machine recovery may only address an incident this live owner raised and
-        still holds. An incident adopted from a dead owner, a broken audit, a mix
-        of reasons, or a still-active sibling lease all leave state that no check
-        this process can run will settle, so each of those keeps needing the
-        operator regardless of how wide ``allowed`` is."""
+        Two shapes answer here, and what separates them is whether a lease of
+        this owner raised the incident or this owner inherited one. A live
+        owner's own incident is read off its quarantined leases. An incident with
+        no lease behind it, adopted from a process that died holding this project
+        so the lease objects went with it, is read off the durable record
+        instead, because that record is all that is left of it.
+
+        Refusing the second shape outright is the narrowing this undoes. The
+        argument had been that an inherited incident leaves state no check this
+        process can run will settle, which is true of a re-read and false of a
+        reset: a target this host drove into halt and read back is in the state
+        this host attested, whatever the previous owner failed to confirm. What
+        stays refused is what no predicate answers: a mix of reasons, an incident
+        naming no reason at all, a broken audit, a record written under a
+        different configuration, or a sibling lease still active."""
         with self._guard:
-            if self._state != "open" or not self.blocked or self.project_lock is None:
+            if self._state != "open" or not self.blocked:
                 return None
-            quarantined = [lease for lease in self.leases.values() if lease.state == "cleanup_required"]
-            if not quarantined or any(lease.state == "active" for lease in self.leases.values()):
+            if any(lease.state == "active" for lease in self.leases.values()):
                 return None
-            if any(not lease.audit_ok for lease in quarantined):
-                return None
-            held = {resource for lease in quarantined for resource in lease.resources}
-            if not self.incident_resources <= held:
-                return None
-            reasons = {reason for lease in quarantined for reason in lease.cleanup_reasons()}
-            if len(reasons) != 1:
+            reasons = self._incident_reasons()
+            if reasons is None or len(reasons) != 1:
                 return None
             reason = reasons.pop()
             return reason if reason in (RETRYABLE_CLEANUP_REASONS if allowed is None else allowed) else None
+
+    def _incident_reasons(self) -> set[str] | None:
+        """Every reason this owner's whole incident is held for, or None to refuse.
+
+        ``None`` is "nothing here may be settled without an operator", never "no
+        reasons": an empty set travels on to the caller and is refused one line
+        later for naming nothing, which is the one thing an automatic clearance
+        must not read as harmless."""
+        quarantined = [lease for lease in self.leases.values() if lease.state == "cleanup_required"]
+        if not quarantined:
+            # A lease that exists and is neither active nor quarantined is a
+            # transition in flight, and only a bench with no lease at all can
+            # have its incident read off the record.
+            return self._adopted_incident_reasons() if not self.leases else None
+        if self.project_lock is None or any(not lease.audit_ok for lease in quarantined):
+            return None
+        held = {resource for lease in quarantined for resource in lease.resources}
+        if not self.incident_resources <= held:
+            return None
+        return {reason for lease in quarantined for reason in lease.cleanup_reasons()}
+
+    def _adopted_incident_reasons(self) -> set[str] | None:
+        """What the durable record says a lease-less incident is held for.
+
+        The record has to answer for this exact incident before it counts: the
+        quarantine id this owner adopted, this project, and the same
+        configuration bytes the incident was recorded under. Those are the three
+        questions ``recover`` asks before it moves a marker, asked here so a
+        recovery action can never clear an incident ``recover`` would refuse. A
+        lease entry with a broken audit refuses too, which is the second of the
+        two locks the ``audit_broken`` exclusion leans on."""
+        if not isinstance(self.quarantine_id, str) or not self.quarantine_id:
+            return None
+        try:
+            record = self._read_record(self.project_key)
+        except CoordinationError:
+            # An unreadable record answers nothing, which is not the same as
+            # answering "settled".
+            return None
+        if not isinstance(record, dict) or record.get("state") not in {"cleanup_required", "quarantined", "recovery_pending"}:
+            return None
+        if record.get("quarantine_id") != self.quarantine_id or not self._record_matches_config(record):
+            return None
+        leases = record.get("leases")
+        if any(isinstance(item, dict) and item.get("audit_ok") is False for item in (leases if isinstance(leases, list) else [])):
+            return None
+        recorded = {item for item in record.get("resources", []) if isinstance(item, str)}
+        if not recorded or not self.incident_resources <= recorded:
+            return None
+        return set(_record_cleanup_reasons(record))
 
     def resolve_retryable_incident(
         self,
@@ -858,12 +928,45 @@ class HardwareCoordinator:
             permitted = RETRYABLE_CLEANUP_REASONS if allowed is None else allowed
             if reason not in permitted or self.retryable_incident(permitted) != reason:
                 return False
+            if not self.leases:
+                return self._resolve_adopted_incident(reason, via=via, attestation=attestation)
             if not self._append_recovery_resolution(reason, via=via, attestation=attestation):
                 return False
             for lease in [item for item in self.leases.values() if item.state == "cleanup_required"]:
                 if not self.resolve_retryable_cleanup(lease, reason, allowed=permitted):
                     return False
             return not self.blocked
+
+    def _resolve_adopted_incident(self, reason: str, *, via: str, attestation: str) -> bool:
+        """Clear an incident with no lease of this owner behind it.
+
+        There is nothing in memory to move: the leases that raised it belonged to
+        a process that is gone, and what remains of the incident is the project
+        marker and the resource markers beside it. Rewriting those is exactly the
+        transition ``recover`` performs, so this performs no other one: the same
+        marker-consistency checks, the same evidence-first ordering, the same
+        ledger. Only the line's actor, route and attestation say that a recovery
+        action established the safe state where an operator's signature would
+        otherwise stand."""
+        quarantine_id = self.quarantine_id
+        if not isinstance(quarantine_id, str) or not quarantine_id or self.leases:
+            return False
+        if self.project_lock is not None:
+            # Held with no lease open, which ``recover`` reads as a live owner
+            # still on the bench. It is this owner, clearing its own incident, so
+            # the lock goes back and the one implementation of the transition
+            # takes it for the length of the rewrite.
+            self.project_lock.release()
+            self.project_lock = None
+        cleared = self.recover(
+            safe_state_confirmed=True,
+            quarantine_id=quarantine_id,
+            actor=RECOVERY_ACTOR_SERVER,
+            via=via,
+            attestation=attestation,
+            reason=reason,
+        )
+        return cleared.get("ok") is True
 
     def _append_recovery_resolution(self, reason: str, *, via: str, attestation: str) -> bool:
         """Record an incident clearing that no operator signed, or refuse it.
@@ -1241,6 +1344,7 @@ class HardwareCoordinator:
         via: str = "cli:recover",
         attestation: str = ATTESTATION_OPERATOR,
         operator_statement: str | None = None,
+        reason: str | None = None,
     ) -> JsonObject:
         """Clear a quarantine and give its resources back.
 
@@ -1259,6 +1363,13 @@ class HardwareCoordinator:
         because a line reading ``"operator_statement": null`` invites being read
         as an operator who said nothing, and what actually happened is that
         nobody was quoted at all.
+
+        ``reason`` names the single cleanup reason the incident consisted of, for
+        the caller that knows it: a recovery action clearing an incident no lease
+        of this owner is left holding. It makes the line the one
+        ``_append_recovery_resolution`` writes for the lease-backed half of the
+        same rule, so an audit reads one shape for one kind of event whichever
+        half of the bench state the incident happened to live in.
         """
         if not safe_state_confirmed:
             return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state."}
@@ -1322,6 +1433,7 @@ class HardwareCoordinator:
                         return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine resource markers changed; recovery remains blocked.", "resource": resource}
                 audit_event = {
                     "event": "recovery",
+                    **({"recovery": "incident_resolved", "reason": reason} if reason else {}),
                     "actor": actor,
                     "via": via,
                     "attestation": attestation,
@@ -1371,11 +1483,14 @@ class HardwareCoordinator:
                     "actor": actor,
                     "attestation": attestation,
                     **({"operator_statement": operator_statement} if operator_statement else {}),
+                    **({"resolved_reason": reason} if reason else {}),
                     "summary": (
                         "Quarantined hardware resources were released after operator-confirmed recovery."
                         if attestation == ATTESTATION_OPERATOR
                         else "Quarantined hardware resources were released on the operator's statement, recorded verbatim in the recovery ledger."
                         if attestation == ATTESTATION_OPERATOR_VIA_AGENT
+                        else "Quarantined hardware resources were released after a recovery action drove the target into a state it then read back."
+                        if attestation == ATTESTATION_RECOVERY_ACTION
                         else "Quarantined hardware resources were released: every reason it was held for names a call that never reached the hardware."
                     ),
                 }
