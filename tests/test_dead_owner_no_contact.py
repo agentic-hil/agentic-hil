@@ -405,11 +405,12 @@ def test_the_no_contact_class_is_agent_clearable_and_the_physical_one_is_not(tmp
 
     assert DEAD_OWNER_NO_CONTACT_REASON in allowed
     assert allowed == NO_CONTACT_RECOVERABLE_REASONS
-    # Narrower than what machine recovery may settle, because that path performs
-    # a predicate against the board and an agent's bookkeeping call performs
-    # none. The only member outside it is the release reason above, which names
-    # a bench nothing reached.
-    assert allowed - coordinator.recoverable_reasons() == {DEAD_OWNER_NO_CONTACT_REASON}
+    # Inside what machine recovery may settle, never beyond it: that path runs a
+    # predicate against the board and an agent's bookkeeping call runs none, so
+    # the bookkeeping class has to be a subset of the predicate's. Asked by
+    # membership, because the predicate's set answers `in` and enumerates
+    # nothing.
+    assert all(reason in coordinator.recoverable_reasons() for reason in allowed)
     # The reason the bench case produced, and the one that still needs a person.
     assert "owner_process_exited_without_release" not in allowed
     assert "safe_state_unconfirmed" not in allowed

@@ -849,16 +849,35 @@ def peak_config(tmp_path: Path):
     return config_for(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "peak"\n    channel: "can0"\n')
 
 
+class LoadablePcanBasic:
+    """A PCAN-Basic API that is installed, for the one test that needs one.
+
+    The scenario below is only reachable on a host that has the driver: the four
+    `SetValue` calls run after `PCANBasic.Initialize` has succeeded, and nothing
+    reaches `Initialize` where the API will not load. So the host has to be
+    stated rather than inherited from whichever machine runs the suite, or this
+    passes on a bench with a PEAK driver and fails in the Linux container.
+    """
+
+    def GetErrorText(self, error, language):  # noqa: N802 - the vendor API's spelling
+        return (1, b"")
+
+
 def test_a_peak_initialization_error_cannot_prove_it_never_joined_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`CanInitializationError` is a class, not a phase.
 
-    python-can's PCAN backend raises `PcanCanInitializationError` — a subclass —
+    python-can's PCAN backend raises `PcanCanInitializationError`, a subclass,
     from four `SetValue` calls that run *after* `PCANBasic.Initialize` has
     already succeeded, and every one of them raises before `BusABC.__init__`, so
     no bus object comes back here to shut down. An initialized PCAN channel is on
     the bus: it ACKs, and at a wrong bitrate it emits error frames. SocketCAN can
-    make the claim because its controller is brought up out of band; PCAN cannot,
-    so this path keeps the lease contained."""
+    make the claim because its controller is brought up out of band; PCAN cannot
+    from the class alone, so this path keeps the lease contained.
+
+    The two PCAN failures that *can* prove it are answered by the driver rather
+    than by the exception, and neither is this one: the API loads here, and it
+    does not call the handle invalid. `tests/test_can_backend_missing.py` holds
+    that half."""
     config = peak_config(tmp_path)
     service = AgenticHILToolService(config)
     fake_can = SimpleNamespace(
@@ -866,6 +885,7 @@ def test_a_peak_initialization_error_cannot_prove_it_never_joined_the_bus(tmp_pa
         CanInitializationError=FakeCanInitializationError,
     )
     monkeypatch.setitem(sys.modules, "can", fake_can)
+    monkeypatch.setitem(sys.modules, "can.interfaces.pcan.basic", SimpleNamespace(PCANBasic=LoadablePcanBasic, PCAN_ERROR_OK=0, PCAN_ERROR_ILLHANDLE=0x1C00))
     try:
         result = service.call("can_session_start", {"bus_id": "bench"})
 

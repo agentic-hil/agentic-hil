@@ -449,7 +449,7 @@ class AgenticHILToolService:
             # that exists to answer a blocked bench, so the gate above — which
             # refuses every hardware tool while an incident is open — must not
             # stand in front of it.
-            "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement")),
+            "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement"), args.get("accept_config_change") is True),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it. It also reads a
@@ -708,7 +708,7 @@ class AgenticHILToolService:
     def hardware_lease_status(self) -> JsonObject:
         return self.coordinator.status()
 
-    def hardware_recover(self, operator_statement: str | None = None) -> JsonObject:
+    def hardware_recover(self, operator_statement: str | None = None, accept_config_change: bool = False) -> JsonObject:
         """Clear this bench's quarantine, on its own or on a relayed statement.
 
         Before this tool a quarantine could be seen and explained over MCP and
@@ -747,6 +747,18 @@ class AgenticHILToolService:
         the CLI performs — one implementation, one set of marker-consistency
         checks, one ledger — with the actor and the attestation saying which of
         the two ways in was taken.
+
+        `accept_config_change` is the second half of that sameness, and it is a
+        boolean for the reason the paragraph above says `confirm_safe_state`
+        cannot be one: it attests nothing about a board. It states that the
+        difference between two configuration digests, both of which the refusal
+        printed, has been looked at. The refusal named this override from the
+        day it existed and the schema then refused the argument it named, so the
+        one way forward the tool handed an agent dead-ended on the tool itself,
+        for every incident older than a configuration edit, including the edit
+        that granted `allow_recover` in the first place. It travels into the same
+        ledger field the CLI writes, `config_change_accepted`, beside both
+        digests.
 
         Idempotent, and honestly so: a bench with no open incident answers `ok`
         with `was_quarantined: false` rather than failing, the way `bench_run_stop`
@@ -803,6 +815,7 @@ class AgenticHILToolService:
             cleared = self.coordinator.recover(
                 safe_state_confirmed=True,
                 quarantine_id=quarantine_id if isinstance(quarantine_id, str) else None,
+                accept_config_change=accept_config_change,
                 actor=RECOVERY_ACTOR_AGENT,
                 via="mcp:hardware_recover",
                 attestation=ATTESTATION_OPERATOR_VIA_AGENT,
@@ -855,6 +868,7 @@ class AgenticHILToolService:
         recovered = self.coordinator.recover(
             safe_state_confirmed=True,
             quarantine_id=quarantine_id if isinstance(quarantine_id, str) else None,
+            accept_config_change=accept_config_change,
             actor=RECOVERY_ACTOR_AGENT,
             via="mcp:hardware_recover",
             attestation=ATTESTATION_NO_CONTACT_CLASS,
@@ -1039,7 +1053,18 @@ class AgenticHILToolService:
         if report.get("audit_ok") is False:
             self._poison_quietly("machine_recovery_audit_broken", audit_broken=True)
             return None
-        if not self.coordinator.resolve_retryable_incident(reason, allowed=allowed):
+        # The same line the run teardown and a recovery-class call write, because
+        # this is the same event: a recovery action ran, its predicate confirmed,
+        # and the incident ended on that evidence. Which of the three asked for
+        # it is not what an audit of a quarantine that ended without a person
+        # needs to distinguish, and spelling this one differently said the safe
+        # state came from a reason class when a reset had established it.
+        if not self.coordinator.resolve_retryable_incident(
+            reason,
+            allowed=allowed,
+            via=RECOVERY_ACTION_VIA,
+            attestation=ATTESTATION_RECOVERY_ACTION,
+        ):
             return None
         self._release_recovered_leases()
         return report
@@ -1150,12 +1175,18 @@ class AgenticHILToolService:
         return {**result, "outcome": "recovered", **self._settle_incident_after_recovery(reset_halt)}
 
     def _settle_incident_after_recovery(self, reset_halt: bool) -> JsonObject:
-        """Clear the incident the failed run raised, if the actions answered it.
+        """Clear the incident the run was standing under, if the actions answered it.
 
         A read-only re-read only settles what a re-read can settle; a verified
         reset into halt settles everything but the `audit_broken` families. The
         distinction is the same one the acquire path draws, and it is the whole
-        reason the wide set is not simply handed to every caller."""
+        reason the wide set is not simply handed to every caller.
+
+        "The incident the run raised" and "the incident the run inherited" are
+        the same thing here, deliberately. A dead owner's unconfirmed cleanup is
+        exactly what the reset just erased, so an incident this owner adopted
+        ends on the same evidence as one its own lease raised; what the previous
+        process failed to confirm is not a fact about the board any more."""
         allowed = RECOVERY_ACTION_REASONS if reset_halt else RETRYABLE_CLEANUP_REASONS
         reason = self.coordinator.retryable_incident(allowed)
         if reason is None:

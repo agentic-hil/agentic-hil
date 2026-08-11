@@ -130,7 +130,7 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
-    # One optional argument, and its type is the contract. There is no
+    # Two optional arguments, and their types are the contract. There is no
     # `confirm_safe_state` boolean here and there will not be: that flag attests
     # that a physical board is still and holds the expected firmware, and a flag
     # the caller sets for itself is not a confirmation of anything. A schema test
@@ -140,6 +140,13 @@ MCP_TOOLS: list[JsonObject] = [
     # because what it has to contain is what a person said. A boolean can be
     # guessed into existence; a sentence about the state of a bench has to come
     # from somebody. The tool refuses an empty one for the same reason.
+    #
+    # `accept_config_change` is a boolean and belongs here all the same, because
+    # it attests nothing about a board. It says the difference between two
+    # configuration digests, both printed in the refusal that asks for it, has
+    # been looked at. The refusal named this override from the day it existed
+    # while the schema refused the argument it named, so the one way forward the
+    # tool handed an agent dead-ended on the tool itself.
     {
         "name": "hardware_recover",
         "description": (
@@ -150,11 +157,29 @@ MCP_TOOLS: list[JsonObject] = [
             "to the recovery ledger as their statement, relayed by you. Never write one you were not given — a "
             "ledger line that reflects no actual operator utterance is a false record with you recorded as the "
             "actor; when you have nobody to ask, relay the `agentic-hil recover --confirm-safe-state "
-            "--quarantine-id <id>` line the refusal hands you and let them run it themselves. Needs "
-            "permissions.allow_recover. Safe to call when nothing is quarantined; it answers was_quarantined: false. "
-            "Use this instead of deleting the server's state files, which is never the fix."
+            "--quarantine-id <id>` line the refusal hands you and let them run it themselves. A refusal with "
+            "error_type config_changed means the authoritative configuration was edited after the incident was "
+            "recorded: show the operator the two digests on the result, and once they confirm the delta is "
+            "understood, call again with accept_config_change: true (the operator's own line takes "
+            "--accept-config-change instead). Needs permissions.allow_recover. Safe to call when nothing is "
+            "quarantined; it answers was_quarantined: false. Use this instead of deleting the server's state "
+            "files, which is never the fix."
         ),
-        "inputSchema": object_schema({"operator_statement": NONEMPTY_STRING}),
+        "inputSchema": object_schema(
+            {
+                "operator_statement": NONEMPTY_STRING,
+                "accept_config_change": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Accept that the authoritative configuration changed after the incident was recorded. Only "
+                        "after the operator has reviewed the delta between the two digests the config_changed "
+                        "refusal reports; it is written to the recovery ledger as config_change_accepted beside "
+                        "both of them."
+                    ),
+                },
+            }
+        ),
     },
     # No parameters, and that is the contract. The configuration is generated for
     # the workspace this server is bound to, out of what is attached to this

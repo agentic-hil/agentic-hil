@@ -28,6 +28,7 @@ from agentic_hil.coordination import (
     ATTESTATION_NO_CONTACT_CLASS,
     LEASE_RELEASE_RETRY_REASON,
     HardwareCoordinator,
+    lease_config_sha256,
 )
 from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry, recovery_operator_command
 from agentic_hil.tools import AgenticHILToolService
@@ -273,8 +274,10 @@ def test_the_clearable_set_is_the_no_contact_class_and_nothing_else(tmp_path: Pa
     coordinator = HardwareCoordinator(config, "class-boundary")
 
     assert coordinator.agent_recoverable_reasons() == {"released_dead_owner_no_contact", LEASE_RELEASE_RETRY_REASON}
-    # Strictly inside what the machine may settle, never beyond it.
-    assert coordinator.agent_recoverable_reasons() - coordinator.recoverable_reasons() == {"released_dead_owner_no_contact"}
+    # Strictly inside what the machine may settle, never beyond it. Asked by
+    # membership: what the machine may settle is defined by an exclusion and
+    # enumerates nothing, so a set difference would answer about the wrong thing.
+    assert all(reason in coordinator.recoverable_reasons() for reason in coordinator.agent_recoverable_reasons())
 
 
 # ---------------------------------------------------------------------------
@@ -342,29 +345,38 @@ def test_the_schema_offers_no_way_to_confirm_a_safe_state() -> None:
     A `confirm_safe_state` argument would be a flag the caller sets for itself,
     and a confirmation one gives oneself is not a confirmation.
 
-    Narrowed from "no properties at all" when `operator_statement` arrived. The
-    original pin used emptiness as a cheap way to close every spelling of a
-    self-signed confirmation at once, and that shortcut stopped being available
-    once the tool grew an argument — but the thing it was protecting is intact
-    and is what this now states directly: the only property is a string, and no
-    boolean of any name exists to be set. That distinction is the whole design.
-    A boolean can be invented by a caller with nothing to go on; a sentence about
-    the state of a bench has to have been given to it by somebody.
+    Narrowed twice, and the thing being protected has not moved. The original pin
+    was "no properties at all"; then `operator_statement` arrived, which cannot
+    be satisfied by a value the caller invents because what it has to contain is
+    what a person said. Now `accept_config_change` is here and it is a boolean,
+    so the rule has to be stated by what the boolean is about rather than by its
+    type: no argument of any spelling may assert something about a physical
+    board. That one says two configuration digests, both of them printed in the
+    refusal that asks for it, have been looked at, which is a claim about two
+    strings this process wrote.
     """
     schema = schema_for(TOOL)
 
-    assert set(schema.get("properties", {})) == {"operator_statement"}
+    assert set(schema.get("properties", {})) == {"operator_statement", "accept_config_change"}
     assert schema["properties"]["operator_statement"]["type"] == "string"
     # Empty is not a statement: a caller with nothing to relay must be refused
     # rather than allowed to satisfy the argument with "".
     assert schema["properties"]["operator_statement"]["minLength"] == 1
+    assert schema["properties"]["accept_config_change"] == {
+        "type": "boolean",
+        "default": False,
+        "description": schema["properties"]["accept_config_change"]["description"],
+    }
+    assert schema["properties"]["accept_config_change"]["default"] is False
     assert schema.get("additionalProperties") is False
-    # Still nothing the tool demands — the no-contact reasons clear with no
+    # Still nothing the tool demands: the no-contact reasons clear with no
     # arguments, exactly as before.
     assert not schema.get("required")
-    assert not [key for key, value in schema.get("properties", {}).items() if value.get("type") == "boolean"]
+    assert [key for key, value in schema.get("properties", {}).items() if value.get("type") == "boolean"] == [
+        "accept_config_change"
+    ]
     serialized = json.dumps(schema)
-    for spelling in ("confirm", "safe_state", "force", "override", "quarantine_id"):
+    for spelling in ("confirm", "safe_state", "force", "quarantine_id", "board", "powered"):
         assert spelling not in serialized, spelling
 
 
@@ -616,3 +628,144 @@ def test_a_statement_does_not_reach_the_audit_broken_family(tmp_path: Path) -> N
         assert service.coordinator.status()["blocked"] is True
     finally:
         service.close()
+
+
+# ---------------------------------------------------------------------------
+# The override the refusal has always named.
+
+
+def edit_config(workspace: Path):
+    """Change the authoritative configuration's bytes without changing its meaning.
+
+    A comment line is enough: `recover` compares the digest of what was parsed,
+    so any edit at all makes the incident older than the configuration in force,
+    which is the situation `config_changed` exists to report.
+    """
+    path = workspace / ".agentic-hil" / "config.yaml"
+    path.write_text(path.read_text(encoding="utf-8") + "\n# operator edited this after the incident\n", encoding="utf-8")
+    return load_config(str(path))
+
+
+def config_changed_incident(tmp_path: Path):
+    """An incident recorded under one configuration, met by a server holding another."""
+    config = config_for(tmp_path)
+    incident = quarantine(config, LEASE_RELEASE_RETRY_REASON)
+    recorded = lease_config_sha256(config)
+    edited = edit_config(tmp_path)
+    assert lease_config_sha256(edited) != recorded
+    return edited, incident, recorded
+
+
+def test_a_config_edit_after_the_incident_refuses_and_names_both_spellings(tmp_path: Path) -> None:
+    """The refusal is the only thing that tells an agent what to do next, so it
+    has to name the argument this tool takes as well as the operator's flag. It
+    named only its own spelling of it for one release and the schema refused
+    that spelling, which is how the one way forward became a dead end."""
+    config, incident, recorded = config_changed_incident(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "config_changed"
+        assert result["override"] == "accept_config_change (CLI: --accept-config-change)"
+        assert result["recorded_config_sha256"] == recorded
+        assert result["current_config_sha256"] == lease_config_sha256(config)
+        assert result["quarantine_id"] == incident
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert ledger(config) == []
+
+
+def test_the_override_clears_it_and_the_ledger_carries_both_digests(tmp_path: Path) -> None:
+    """The issue, end to end: the same call again with the argument the refusal
+    named, and the incident is gone. The ledger records that the override was
+    used and both digests, exactly as the operator's own command line does, so a
+    reader can tell afterwards which configuration was assessed and which was in
+    force."""
+    config, incident, recorded = config_changed_incident(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {"accept_config_change": True})
+
+        assert result["ok"] is True, result
+        assert result["was_quarantined"] is True
+        assert result["config_change_accepted"] is True
+        assert result["recovered_quarantine_id"] == incident
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+    lines = ledger(config)
+    assert len(lines) == 1, lines
+    assert lines[0]["config_change_accepted"] is True
+    assert lines[0]["recorded_config_sha256"] == recorded
+    assert lines[0]["current_config_sha256"] == lease_config_sha256(config)
+    assert lines[0]["actor"] == ACTOR_AGENT
+    assert lines[0]["via"] == "mcp:hardware_recover"
+
+
+def test_the_override_false_is_the_same_as_not_passing_it(tmp_path: Path) -> None:
+    """A caller that spells the default out loud gets the default, not a silent
+    acceptance: the override exists only when somebody set it."""
+    config, _, _ = config_changed_incident(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {"accept_config_change": False})
+
+        assert result["error_type"] == "config_changed", result
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert ledger(config) == []
+
+
+def test_the_override_is_no_way_past_the_physical_check(tmp_path: Path) -> None:
+    """The class boundary does not move. `accept_config_change` says two digests
+    were compared; it says nothing about a board, so an incident that needs
+    somebody to look at one is refused with it exactly as without it."""
+    config = config_for(tmp_path)
+    quarantine(config, "safe_state_unconfirmed")
+    edited = edit_config(tmp_path)
+    service = AgenticHILToolService(edited)
+    try:
+        result = service.call(TOOL, {"accept_config_change": True})
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == RECOVERY_PHYSICAL_CHECK_ERROR
+        assert result["missing_argument"] == "operator_statement"
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert ledger(edited) == []
+
+
+def test_a_relayed_statement_carries_the_override_too(tmp_path: Path) -> None:
+    """Both ways in take it, because both run the same transition: an operator
+    who has looked at the board has usually looked at the configuration delta in
+    the same breath, and sending them to a shell for the second half would be the
+    dead end this removes."""
+    config = config_for(tmp_path)
+    quarantine(config, "safe_state_unconfirmed")
+    edited = edit_config(tmp_path)
+    service = AgenticHILToolService(edited)
+    try:
+        refused = service.call(TOOL, {"operator_statement": "Board is powered down on my desk.", "accept_config_change": False})
+        assert refused["error_type"] == "config_changed", refused
+
+        result = service.call(TOOL, {"operator_statement": "Board is powered down on my desk.", "accept_config_change": True})
+
+        assert result["ok"] is True, result
+        assert result["config_change_accepted"] is True
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+    lines = ledger(edited)
+    assert len(lines) == 1, lines
+    assert lines[0]["operator_statement"] == "Board is powered down on my desk."
+    assert lines[0]["config_change_accepted"] is True

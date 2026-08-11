@@ -24,6 +24,8 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.devices import can_device
 from agentic_hil.knowledge import (
+    CAN_ADAPTER_LIBRARY_MISSING_ERROR,
+    CAN_CHANNEL_NOT_AVAILABLE_ERROR,
     CAN_INTERFACE_NOT_FOUND_ERROR,
     LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
@@ -730,6 +732,186 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     }
 
 
+
+def pcan_basic_library_error() -> str | None:
+    """What the installed PCAN-Basic API says when it will not load, or ``None``.
+
+    Asked by constructing the same ``PCANBasic`` object ``PcanBus.__init__``
+    constructs as its very first statement, so the answer comes from the library
+    rather than from a sentence written here. It raises ``OSError`` when
+    ``find_library`` finds nothing and when the file it found will not load, and
+    those are the two ways a host can have python-can and not have the driver.
+
+    Reading it costs a ``LoadLibrary`` and touches no channel: the object is a
+    handle onto the API, and every call that reaches a CAN controller is a method
+    on it that this never makes.
+    """
+    try:
+        from can.interfaces.pcan.basic import PCANBasic
+    except Exception:
+        # An import failure here is the interface module being unavailable, which
+        # `CanInterfaceNotImplementedError` already answers for on the way in.
+        return None
+    try:
+        PCANBasic()
+    except OSError as error:
+        return str(error)
+    except Exception:
+        # Anything else is not the library being absent, and a non-answer must
+        # never be read as one.
+        return None
+    return None
+
+
+def pcan_illegal_handle_text() -> str | None:
+    """What the installed driver calls ``PCAN_ERROR_ILLHANDLE``, or ``None``.
+
+    ``PcanBus`` builds its initialization exception out of
+    ``PCANBasic.GetErrorText(status, 0x9)`` and carries the text and nothing
+    else — the status code is not copied onto the exception, so the text is the
+    only thing a classifier has to work with. Rather than hard-coding the
+    sentence the bench happened to see, this asks the same function, in the same
+    language, for the same code, and the comparison is against the library.
+    """
+    try:
+        from can.interfaces.pcan.basic import PCAN_ERROR_ILLHANDLE, PCAN_ERROR_OK, PCANBasic
+    except Exception:
+        return None
+    try:
+        status, text = PCANBasic().GetErrorText(PCAN_ERROR_ILLHANDLE, 0x9)
+    except Exception:
+        return None
+    if status != PCAN_ERROR_OK or not isinstance(text, bytes):
+        return None
+    return text.decode("utf-8", errors="replace")
+
+
+def pcan_available_channels() -> list[str]:
+    """The PCAN channel names the driver enumerates right now.
+
+    python-can's own detection, so a channel this reports is a channel
+    ``can.Bus(interface="pcan")`` could be pointed at. Empty is deliberately not
+    read as "nothing is attached": the same list comes back empty when the
+    library is absent and when the attached-channel query itself fails, and a
+    non-answer must not become evidence.
+    """
+    try:
+        from can.interfaces.pcan.pcan import PcanBus
+
+        configs = PcanBus._detect_available_configs()
+    except Exception:
+        return []
+    return [str(entry["channel"]) for entry in configs if isinstance(entry, dict) and entry.get("channel")]
+
+
+def can_adapter_library_missing(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
+    """The refusal for an adapter whose backend library is not installed, or ``None``.
+
+    The strongest no-contact claim on this path, and the one the bench met
+    twice: python-can raises before a driver object exists, so there is no frame,
+    no ACK and no bus state that could have been touched, because there was
+    nothing to touch them through. The contact-marker rule has always covered
+    this shape; the peak open path classified it into the unproven bucket
+    instead and every attempt cost an operator a `recover`.
+
+    Two ways in, and both are answered by the installed library rather than by a
+    string. ``CanInterfaceNotImplementedError`` is what ``can.Bus`` raises when
+    the interface module will not import at all. And for a `peak` bus,
+    ``PcanBus.__init__`` constructs ``PCANBasic()`` as its first statement, so a
+    host where that construction fails is a host where nothing after it ran,
+    whatever the exception that came back said.
+    """
+    library: str | None = None
+    detail: str | None = None
+    with suppress(Exception):
+        import can
+
+        not_implemented = getattr(can, "CanInterfaceNotImplementedError", None)
+        if isinstance(not_implemented, type) and isinstance(error, not_implemented):
+            library, detail = f"python-can interface for {bus_config.adapter}", str(error)
+    if library is None and bus_config.adapter == "peak":
+        absent = pcan_basic_library_error()
+        if absent is not None:
+            library, detail = "PCAN-Basic API", absent
+    if library is None:
+        return None
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "error_type": CAN_ADAPTER_LIBRARY_MISSING_ERROR,
+        "channel": bus_config.channel,
+        "missing_library": library,
+        "summary": (
+            f"The {library} this bus is driven through is not installed on this host, so the session was refused "
+            "before any driver object existed: nothing was opened and no controller was addressed."
+        ),
+        "backend_error": detail or str(error),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+        **remediation_fields(CAN_ADAPTER_LIBRARY_MISSING_ERROR),
+    }
+
+
+def peak_channel_not_available(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
+    """The refusal for a PCAN channel the driver does not have, or ``None``.
+
+    ``Initialize`` only, and that is the contract. ``PcanBus.__init__`` calls
+    ``PCANBasic.Initialize`` and raises on anything but ``PCAN_ERROR_OK`` before
+    it makes the four ``SetValue`` calls below it, and only those four run on a
+    channel that is already on the bus. ``PCAN_ERROR_ILLHANDLE`` from the first
+    of those two places says the handle names no channel: nothing was opened,
+    nothing ACKed, and the bench is exactly as the last call that did reach it
+    left it.
+
+    The exception carries the driver's error text and not its status code, so the
+    text is compared against what the same ``GetErrorText`` call answers for that
+    code. A driver that words it differently is caught by the second question:
+    a channel absent from a non-empty enumeration is a channel that is not there.
+    An empty enumeration answers nothing and is not used, because it is also what
+    a driver that will not enumerate returns.
+    """
+    if bus_config.adapter != "peak":
+        return None
+    initialization = None
+    with suppress(Exception):
+        from can.interfaces.pcan.pcan import PcanCanInitializationError
+
+        initialization = PcanCanInitializationError
+    if not isinstance(initialization, type) or not isinstance(error, initialization):
+        return None
+    channels = pcan_available_channels()
+    illegal_handle = pcan_illegal_handle_text()
+    absent = bool(channels) and bus_config.channel not in channels
+    if not absent and not (illegal_handle is not None and str(error).strip() == illegal_handle.strip()):
+        return None
+    result = {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "error_type": CAN_CHANNEL_NOT_AVAILABLE_ERROR,
+        "field": f"can_buses.{bus_id}.channel",
+        "channel": bus_config.channel,
+        "summary": (
+            f"PCAN channel {bus_config.channel} is not a channel this driver has, so the session was refused where "
+            "the channel would have been initialized: no channel was opened and nothing was put on any bus."
+        ),
+        "backend_error": str(error),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+        **remediation_fields(CAN_CHANNEL_NOT_AVAILABLE_ERROR),
+    }
+    if channels:
+        result["available_channels"] = sorted(channels)
+    return result
+
+
 def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
     """Open a python-can bus, recording contact where it becomes provable.
 
@@ -779,8 +961,8 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     #
     # PCAN deliberately cannot, and is deliberately absent. python-can 4.6.1
     # raises `PcanCanInitializationError` from four `SetValue` calls that run
-    # *after* `PCANBasic.Initialize` has already succeeded — error frames, echo
-    # frames, auto-reset, the receive event — and every one of them raises
+    # *after* `PCANBasic.Initialize` has already succeeded (error frames, echo
+    # frames, auto-reset, the receive event), and every one of them raises
     # before `BusABC.__init__`, so no bus object exists to shut down, the
     # best-effort destructor has no `_is_shutdown` state to consult, and nothing
     # is returned here that could be closed. The class carries no phase marker
@@ -788,6 +970,13 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     # initialized PCAN channel is on the bus: it ACKs, and at a wrong bitrate it
     # emits error frames. That is the unknown quarantine exists for, so this
     # path keeps the markerless result and the lease stays contained.
+    #
+    # What does prove it on this backend is not the class but two answers from
+    # the installed library, and `can_adapter_library_missing` and
+    # `peak_channel_not_available` below ask for them: an API that will not load
+    # at all, and an `Initialize` refusal over a handle the driver itself calls
+    # invalid. Neither is a phase marker on the exception, which is why they are
+    # asked separately and after this check rather than folded into it.
     #
     # Read defensively off the module because tests (and old python-can) may not
     # provide the class.
@@ -804,6 +993,15 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
             missing = socketcan_interface_missing(error, bus_id, bus_config)
             if missing is not None:
                 return missing
+        # Asked for every backend, and in this order. A library that is not
+        # installed leaves nothing for a driver call to have happened through, so
+        # it answers before any question about a channel; a channel the driver
+        # does not have was never initialized. Both are the same claim the
+        # SocketCAN check above makes, on the two places a PCAN bus can be
+        # provably innocent, and neither reaches the marker below.
+        absent = can_adapter_library_missing(error, bus_id, bus_config) or peak_channel_not_available(error, bus_id, bus_config)
+        if absent is not None:
+            return absent
         failure = open_failure(error)
         if initialization_errors and isinstance(error, initialization_errors):
             # Provably never on the bus: refuse, do not quarantine. Every other
