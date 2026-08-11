@@ -46,6 +46,17 @@ DEAD_OWNER_REASON = "owner_process_exited_without_release"
 # An incident a reset settles: the session start never confirmed, so the target
 # may be running and only driving it into a defined state answers that.
 RESET_REASON = "debug_session_start_unconfirmed"
+# Incidents a reset does *not* settle: a serial handle that may still be open and
+# its reader thread, a CAN adapter that may still be initialised on the bus. A
+# reset driven into the target and a probe re-read speak for neither, so a
+# performed recovery action must leave these for the route that verifies the
+# peripheral itself.
+PERIPHERAL_CLEANUP_REASONS = (
+    "com_open_cleanup_unconfirmed",
+    "com_cleanup_unconfirmed",
+    "can_open_cleanup_unconfirmed",
+    "can_adapter_cleanup_unconfirmed",
+)
 
 
 class FakeBackend:
@@ -344,6 +355,44 @@ def test_a_recovery_that_fails_leaves_the_incident_standing(tmp_path: Path) -> N
     finally:
         service.close()
 
+    assert [line for line in ledger(config) if line.get("via") == "recovery_action"] == []
+
+
+@pytest.mark.parametrize("reason", PERIPHERAL_CLEANUP_REASONS)
+def test_a_peripheral_cleanup_incident_is_not_settled_by_a_target_reset(tmp_path: Path, reason: str) -> None:
+    """The narrowing the reason set exists to make.
+
+    A reset driven into halt and a probe re-read speak for the target and nothing
+    else: a serial handle that may still be open holding modem lines, the reader
+    thread behind it, a CAN adapter that may still be on the bus, are not theirs
+    to attest. So the recovery action still runs — the next run wants a defined
+    board — but the incident keeps the operator's route rather than being cleared
+    without the evidence its name asks for. Admitting it by a negative name test
+    is exactly what handed a still-busy peripheral back to service.
+    """
+    config = config_for(tmp_path)
+    backend = FakeBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        incident = quarantine(service, reason)
+        assert service.coordinator.status()["blocked"] is True
+        assert reason not in service.coordinator.recoverable_reasons()
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        # The board was still driven into a defined state for the next run...
+        assert recovery["outcome"] == "recovered", recovery
+        assert "reset_target:halt" in backend.calls
+        # ...but the target reset does not speak for the peripheral, so the
+        # incident stays for the route that can verify it.
+        assert recovery["incident_resolved"] is False, recovery
+        assert recovery["incident_open"] is True, recovery
+        assert recovery["quarantine_id"] == incident
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    # Nothing recorded a clearance that never happened.
     assert [line for line in ledger(config) if line.get("via") == "recovery_action"] == []
 
 

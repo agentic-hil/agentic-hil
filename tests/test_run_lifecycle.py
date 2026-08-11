@@ -312,9 +312,11 @@ def test_a_detached_start_on_a_held_bench_answers_with_the_run_that_was_refused(
     # The start command waits for the worker to say what it is doing, not for it
     # to finish, and "what it is doing" includes having been refused the bench.
     # Answering with a handle to go and ask about would put a refusal the caller
-    # could have had at once behind a second command.
+    # could have had at once behind a second command. And because the run it
+    # names already failed, the start's own verdict is that failure: `ok` false,
+    # the refusal's `error_type`, and a CLI exit status that is not zero.
     from agentic_hil.bench import BenchMutex
-    from agentic_hil.cli import start_detached_test_reactor
+    from agentic_hil.cli import result_succeeded, start_detached_test_reactor
     from agentic_hil.test_reactor import declared_devices, load_test_config
 
     workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
@@ -328,11 +330,70 @@ def test_a_detached_start_on_a_held_bench_answers_with_the_run_that_was_refused(
 
     detached_runs.append((config, result["run"]))
     assert result["state"] == "finished", result
+    # The start does not dress a refused run up as a successful launch.
+    assert result["ok"] is False, result
+    assert result["run_ok"] is False, result
+    assert result["error_type"] == "device_busy", result
+    assert result_succeeded(result) is False, result
     report = json.loads((workspace / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
     assert report["error_type"] == "device_busy"
     assert report["holder"]["label"] == "other-bench-session"
     assert report["steps"] == []
     assert report["run"] == result["run"]
+
+
+def test_the_publish_window_grows_with_the_bounded_device_wait() -> None:
+    """The startup deadline accounts for the wait the worker was handed.
+
+    A worker told to wait for a held device stays in `starting` for the whole of
+    that wait, so a deadline that counted only the fixed startup window would
+    call it unresponsive while it does exactly what it was asked to — and then
+    walk away from a live process that later acquires the devices and runs the
+    plan. The wait is added on, bounded by the bench's own maximum, never
+    unbounded, and a value the worker would refuse falls back to the base window
+    rather than raising."""
+    from agentic_hil.runlifecycle import MAX_WAIT_S, WORKER_PUBLISH_TIMEOUT_S, worker_publish_window_s
+
+    assert worker_publish_window_s(0) == WORKER_PUBLISH_TIMEOUT_S
+    assert worker_publish_window_s(120) == WORKER_PUBLISH_TIMEOUT_S + 120
+    assert worker_publish_window_s(10_000) == WORKER_PUBLISH_TIMEOUT_S + MAX_WAIT_S
+    assert worker_publish_window_s(-5) == WORKER_PUBLISH_TIMEOUT_S
+    assert worker_publish_window_s(True) == WORKER_PUBLISH_TIMEOUT_S
+
+
+def test_a_terminal_detached_record_is_answered_with_its_own_verdict() -> None:
+    """A run that ended before the start caught it at `running` gets its verdict.
+
+    Launch success is reserved for a running worker and for an already-finished
+    run only when it passed. A finished-and-failed record — the held bench's
+    `device_busy` is the case — is answered `ok: false` with the run's own
+    `error_type` and failed-step fields, so the CLI exits non-zero rather than
+    printing a handle to a run that is already over."""
+    from agentic_hil.cli import result_succeeded
+    from agentic_hil.runlifecycle import _detached_terminal_result
+
+    handle = "run-" + "0" * 16
+    passed = {"state": "finished", "run_ok": True, "name": "demo", "report_path": "r.json", "started_at": "t0", "finished_at": "t1"}
+    ok = _detached_terminal_result(handle, passed, "fallback.json")
+    assert ok["ok"] is True
+    assert ok["run_ok"] is True
+    assert "error_type" not in ok
+    assert result_succeeded(ok) is True
+
+    failed = {"state": "finished", "run_ok": False, "error_type": "device_busy", "failed_step": 0, "report_path": "r.json", "started_at": "t0", "finished_at": "t1"}
+    bad = _detached_terminal_result(handle, failed, "fallback.json")
+    assert bad["ok"] is False
+    assert bad["run_ok"] is False
+    assert bad["error_type"] == "device_busy"
+    assert bad["failed_step"] == 0
+    assert result_succeeded(bad) is False
+
+    stopped = {"state": "stopped", "run_ok": False, "error_type": "run_stopped", "stopped_after_step": 2, "report_path": "r.json"}
+    halted = _detached_terminal_result(handle, stopped, "fallback.json")
+    assert halted["ok"] is False
+    assert halted["state"] == "stopped"
+    assert halted["stopped_after_step"] == 2
+    assert "was stopped on request" in halted["summary"]
 
 
 def test_a_detached_run_holds_its_devices_and_refuses_another_caller_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:

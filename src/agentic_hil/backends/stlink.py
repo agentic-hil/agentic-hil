@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from agentic_hil.artifacts import looks_like_intel_hex
+from agentic_hil.artifacts import looks_like_intel_hex, sha256_file
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
@@ -515,10 +515,24 @@ class STLinkBackend:
                 "likely_causes": ["no flash_firmware call has succeeded in this session", "the firmware that was flashed was a .hex or .bin, which carries no symbols", "the firmware on the target was flashed outside Agentic HIL"],
                 **NOT_CONTACTED,
             }
+        # The remembered path is the caller's own workspace file, which a
+        # rebuild is free to overwrite between the flash and this read. GDB would
+        # answer from whatever bytes are there now while the result still carried
+        # the flashed image's digest, so an address that is right about the new
+        # build and wrong about the board would travel out wearing the old
+        # image's provenance. Refuse instead unless the file is byte-for-byte the
+        # one that was flashed.
+        elf_path = str(symbol_elf["resolved_path"])
+        recorded_digest = symbol_elf.get("integrity_sha256") or symbol_elf.get("sha256")
+        try:
+            current_digest = sha256_file(Path(elf_path))
+        except OSError as error:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF flashed through this service can no longer be read, so no symbol table is proven to describe what is on the target. Flash it again with flash_firmware.", "symbol": symbol, "backend_error": str(error), **NOT_CONTACTED}
+        if not isinstance(recorded_digest, str) or current_digest != recorded_digest:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF on disk no longer matches the image flashed through this service, so its symbol table is not proven to describe what is on the target. Flash the current build with flash_firmware first.", "symbol": symbol, "likely_causes": ["the ELF was rebuilt or replaced after it was flashed", "a different file now occupies the flashed artifact's path"], **NOT_CONTACTED}
         gdb = resolve_gdb_executable(self.config, self.backend_name)
         if not gdb["ok"]:
             return {**gdb, "tool": tool, "symbol": symbol}
-        elf_path = str(symbol_elf["resolved_path"])
         args = gdb_symbol_query_args(str(gdb["executable"]), elf_path, symbol)
         completed = spawn_command(args, str(Path(elf_path).parent), min(self.config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
         if completed.not_found:

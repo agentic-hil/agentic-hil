@@ -74,11 +74,14 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
         LEASE_RELEASE_RETRY_REASON,
     }
 )
-# What a verified reset-into-halt settles beyond the set above is not an
-# enumeration and deliberately stopped being one: see `RECOVERY_ACTION_REASONS`,
-# which every caller that has driven the target into a defined state reaches for.
-# Reaching for it is a physical act, so it is gated on the bench's
-# recovery.auto_recover policy and on the probe's allow_reset grant.
+# What a verified reset-into-halt settles beyond the set above is enumerated in
+# `RECOVERY_ACTION_REASONS`, which every caller that has driven the target into a
+# defined state reaches for. Reaching for it is a physical act, so it is gated on
+# the bench's recovery.auto_recover policy and on the probe's allow_reset grant.
+# The enumeration is deliberate: a reset and a target probe speak only for the
+# target, so the UART and CAN cleanup reasons — a handle that may still be open,
+# an adapter that may still be on the bus — are not among its members and keep
+# needing their own teardown or the operator's route.
 # What `status` names when it gives a dead owner's devices back instead of
 # quarantining them. A release reason, not a quarantine reason:
 # it appears in a status result and in the recovery ledger, and by construction
@@ -107,43 +110,47 @@ DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
 NO_CONTACT_RECOVERABLE_REASONS = frozenset({DEAD_OWNER_NO_CONTACT_REASON, LEASE_RELEASE_RETRY_REASON})
 
 
-class _PerformedRecoveryReasons(frozenset):  # type: ignore[type-arg]
-    """Every reason a recovery action that actually ran may settle.
-
-    An incident is not a padlock: a run that failed has already delivered its
-    verdict, and what follows is an attempt to put the board back into a state
-    the next run can start from. When that attempt performs the thing the reason
-    names as unconfirmed — a reset driven into halt, a probe that answers, a
-    flash that completed and reset — the reason is answered, whatever it was
-    called. So this set is defined by what it excludes rather than by an
-    enumeration that would silently fail to cover a reason added later, and the
-    exclusion is the ``audit_broken`` families: those name a ledger that could
-    not be written, and no amount of driving the target writes it. They keep
-    needing the operator's route.
-
-    ``retryable_incident`` refuses a broken audit before this is ever consulted:
-    a lease whose ``audit_ok`` is false, or a record carrying a lease entry that
-    says so. The name test here is the second of two locks on the same door, not
-    the only one.
-
-    Membership is the whole interface. The elements are empty on purpose, so
-    every set operation other than ``in`` reports nothing rather than reporting a
-    wrong enumeration; callers ask this whether one reason is settled, never
-    which reasons exist. Truth is overridden with them: a caller testing
-    ``if allowed`` is asking whether this bench may settle anything at all, and
-    the honest answer for a set that admits every non-``audit_broken`` reason is
-    yes, however few elements it happens to hold."""
-
-    __slots__ = ()
-
-    def __contains__(self, item: object) -> bool:
-        return isinstance(item, str) and "audit_broken" not in item
-
-    def __bool__(self) -> bool:
-        return True
-
-
-RECOVERY_ACTION_REASONS: frozenset[str] = _PerformedRecoveryReasons()
+# The target-state reasons a reset driven into halt, then a probe re-read,
+# settles on top of the retryable and no-contact sets. Each names an unconfirmed
+# *target* state — a flash or reset whose landing is unknown, a session start
+# that may have halted or partially loaded the core, a debugger call that raised
+# before it could reap its child, a shutdown that could not report its own end —
+# and driving the MCU into a defined halted state and reading it back is exactly
+# the evidence they lack. A dead owner's adopted incident settles the same way
+# when what it left unconfirmed is what the reset erased.
+#
+# Positive and explicit on purpose. The set this replaced admitted every reason
+# whose name merely lacked ``audit_broken``, which quietly swept in the UART and
+# CAN cleanup reasons — a serial handle that may still be open holding modem
+# lines, a CAN adapter that may still be initialised on the bus — that no reset
+# or target probe can speak for. Those resources verify their own handle, reader
+# thread and adapter teardown, or stay on the operator's route; a reason a
+# performed recovery cannot actually settle is not admitted here by default, it
+# is added deliberately or it keeps needing a person. A newly named reason left
+# out therefore fails closed — one more operator recovery — rather than being
+# auto-cleared without the evidence its name asks for.
+RECOVERY_ACTION_TARGET_REASONS: frozenset[str] = frozenset(
+    {
+        "owner_process_exited_without_release",
+        "debugger_result_unconfirmed",
+        "debugger_call_exception",
+        "debug_session_start_unconfirmed",
+        "debug_shutdown_reporting_failed",
+        DEBUGGER_READONLY_TARGET_STATE_REASON,
+    }
+)
+# Every reason a recovery action that actually ran may settle: the retryable
+# cleanup reasons a read-only re-read already answers, the no-contact classes
+# that need no predicate at all, and the target-state reasons above that only a
+# reset into halt establishes. Kept a superset of ``RETRYABLE_CLEANUP_REASONS``
+# so ``_attempt_machine_recovery`` can still read ``reason not in`` it to decide
+# whether a reset is even needed. The ``audit_broken`` families are excluded by
+# construction — none is a member — and ``retryable_incident`` refuses a broken
+# audit before this is ever consulted, so that exclusion is the second of two
+# locks on the same door.
+RECOVERY_ACTION_REASONS: frozenset[str] = (
+    RETRYABLE_CLEANUP_REASONS | NO_CONTACT_RECOVERABLE_REASONS | RECOVERY_ACTION_TARGET_REASONS
+)
 # What a performed recovery action records as its route in the ledger, beside
 # the operator's `cli:recover` and the agent's `mcp:hardware_recover`.
 RECOVERY_ACTION_VIA = "recovery_action"

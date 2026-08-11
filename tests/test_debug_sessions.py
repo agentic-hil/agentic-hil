@@ -1329,6 +1329,68 @@ def test_stlink_dump_refuses_before_a_symbol_table_describes_the_target(tmp_path
     assert not (tmp_path / "build" / "memory.hex").exists()
 
 
+def test_remember_symbol_elf_keeps_only_the_source_still_proven_on_the_target(tmp_path: Path) -> None:
+    """The decision table a flash leaves behind for the offline symbol source.
+
+    A confirmed ELF flash is the only thing that makes a symbol table describe
+    the board, so it is the only thing that becomes the source. A confirmed
+    `.hex`/`.bin` puts an image with no symbols on the board and drops it; an
+    unconfirmed flash that may have written part of a new image drops it too. The
+    one failure that keeps the previous ELF is a flash that provably never
+    reached the target, because then the board still runs what it ran before.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        elf = service.artifacts.validate_local_path("build/app.elf")["artifact"]
+        binary = {"resolved_path": str(tmp_path / "build" / "app.bin"), "path": "build/app.bin"}
+
+        service._remember_symbol_elf(elf, {"ok": True})
+        assert service._symbol_elf is elf
+
+        # A confirmed non-ELF flash replaces the image with one carrying no symbols.
+        service._remember_symbol_elf(binary, {"ok": True})
+        assert service._symbol_elf is None
+
+        # An unconfirmed flash may have landed part of a new image: drop it.
+        service._remember_symbol_elf(elf, {"ok": True})
+        service._remember_symbol_elf(elf, {"ok": False, "side_effect_status": "unknown"})
+        assert service._symbol_elf is None
+
+        # A flash that provably never reached the target leaves the board — and
+        # so the remembered ELF — as it was.
+        service._remember_symbol_elf(elf, {"ok": True})
+        service._remember_symbol_elf(binary, {"ok": False, "side_effect_status": "not_started"})
+        assert service._symbol_elf is elf
+    finally:
+        service.close()
+
+
+def test_stlink_dump_refuses_a_source_that_no_longer_matches_the_flashed_image(tmp_path: Path) -> None:
+    """A rebuild that overwrites the flashed ELF must not be read as the target.
+
+    The remembered path is the caller's own workspace file, and a build system
+    is free to replace it between the flash and this read. Resolving against the
+    new bytes while reporting the flashed image's provenance would answer with an
+    address that is right about the new build and wrong about the board, so the
+    dump refuses until the current build is flashed.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        # The ELF is rebuilt after it was flashed: same path, different bytes.
+        (tmp_path / "build" / "app.elf").write_bytes(b"\x7fELF" + b"\x01" * 64)
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_source_changed"
+    assert "flash_firmware" in refused["summary"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
 def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path) -> None:
     """One tool crossed over; the rest of the family still refuses and says why."""
     service = stlink_dump_service(tmp_path)

@@ -233,19 +233,30 @@ class AgenticHILToolService:
         return result
 
     def _remember_symbol_elf(self, artifact: JsonObject, result: JsonObject) -> None:
-        """Record the flashed ELF as this bench's symbol source, or leave it be.
+        """Record the flashed ELF as this bench's symbol source, or drop it.
 
-        `ok is True` is the whole condition, and it is the strict one: a flash
-        that could not confirm itself leaves the previous answer in place rather
-        than replacing it with an image that may never have landed. The
-        pre-staging artifact is kept, not the staged copy — staging is released
-        as soon as the backend returns, while this path stays readable for as
-        long as the file does."""
-        if result.get("ok") is not True:
+        A confirmed flash decides what the target runs, so it decides the symbol
+        source outright: an ELF becomes it, and a `.hex`/`.bin` carries no
+        symbols, so whatever ELF this bench remembered no longer describes the
+        image on the board and is dropped rather than left to answer for a build
+        that is no longer there.
+
+        An unconfirmed flash may have written part of a new image. Only a flash
+        that provably never reached the target (`side_effect_status` still
+        `not_started`) leaves the remembered ELF proven; anything else — an
+        unknown or partial hardware effect — drops it rather than resolve a
+        symbol against an image the board may no longer be running.
+
+        The pre-staging artifact is kept, not the staged copy — staging is
+        released as soon as the backend returns, while this path stays readable
+        for as long as the file does. Its digest is kept with it and revalidated
+        at dump time, so a rebuild that replaces the file cannot be read while
+        the result still claims the flashed image's bytes."""
+        if result.get("ok") is True:
+            self._symbol_elf = artifact if Path(str(artifact["resolved_path"])).suffix.lower() == ".elf" else None
             return
-        if Path(str(artifact["resolved_path"])).suffix.lower() != ".elf":
-            return
-        self._symbol_elf = artifact
+        if result.get("side_effect_status") != "not_started":
+            self._symbol_elf = None
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
