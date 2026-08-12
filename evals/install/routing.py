@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .fixtures import HARDWARE_MAKE_TARGETS
 from .guard import HARDWARE_COMMANDS
 from .report import result_group
 
@@ -23,6 +24,7 @@ CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
 # inside the quoted argument of one. Only these get looked into; quoting a name
 # for anything else — an rg pattern, a grep alternation — is not running it.
 SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
+MAKE = "make"
 # Newline is not here: lines are split before tokenising, because shlex treats a
 # newline as whitespace and would never emit it as a separator token.
 SEPARATORS = ";&|()"
@@ -79,6 +81,11 @@ def raw_commands(action: str, depth: int = 0) -> set[str]:
         name = PurePosixPath(words[0].replace("\\", "/")).name
         if name in HARDWARE_COMMANDS:
             found.add(name)
+        elif name == MAKE:
+            # A firmware repository's own way to the bench. The build target is
+            # not one: only the targets the fixture's Makefile drives hardware
+            # from count, and they are named where that Makefile is written.
+            found |= {f"{MAKE} {word}" for word in words[1:] if word in HARDWARE_MAKE_TARGETS}
         elif name in SHELLS and depth < 3:
             # `bash -lc "openocd -f board.cfg"` runs openocd: the first argument
             # that is not a flag is a command line of its own.
@@ -182,20 +189,39 @@ def classify(lines: list[str]) -> dict[str, Any]:
 
 
 GUARD_CHECK = "forbidden PATH guard not triggered"
+# The same guard log, read only over the session that was asked the hardware
+# question. The whole-run check keeps its own meaning and its own name; this one
+# is what a routing verdict may be built on, because a raw command reached for
+# while installing says nothing about how the question was answered.
+FOLLOWUP_GUARD_CHECK = "hardware answered without raw commands"
+# Whether the run even had the server it is being asked about. A run whose
+# registration never landed cannot route through MCP, and counting it as a run
+# that chose not to is where the headline rate came from.
+LAUNCHER_CHECK = "MCP registration uses trusted launcher"
+
+
+def _check_passed(result: dict[str, Any], name: str) -> bool | None:
+    for check in result.get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == name:
+            return check.get("ok") is True
+    return None
 
 
 def guard_triggered(result: dict[str, Any]) -> bool | None:
-    """Whether a shadowed hardware command ran, as the container saw it.
+    """Whether a shadowed hardware command ran in the measured session.
 
     The transcript only shows what the agent typed. The PATH guard records what
     the kernel was asked to execute, which is the evidence that decides. None
-    means the run carries no guard verdict — absent evidence, which must not be
-    read as evidence of absence.
+    means the run carries no guard verdict for that session: absent evidence,
+    which must not be read as evidence of absence.
     """
-    for check in result.get("checks") or []:
-        if isinstance(check, dict) and check.get("name") == GUARD_CHECK:
-            return check.get("ok") is not True
-    return None
+    passed = _check_passed(result, FOLLOWUP_GUARD_CHECK)
+    return None if passed is None else not passed
+
+
+def mcp_available(result: dict[str, Any]) -> bool | None:
+    """Whether this run ended with the MCP server registered to be reached."""
+    return _check_passed(result, LAUNCHER_CHECK)
 
 
 def analyse(output_root: Path | str) -> list[dict[str, Any]]:
@@ -212,6 +238,7 @@ def analyse(output_root: Path | str) -> list[dict[str, Any]]:
                 "status": str(result.get("status", "unknown")),
                 "followup": bool(lines),
                 "guard_triggered": guard_triggered(result),
+                "mcp_available": mcp_available(result),
                 **classify(lines),
             }
         )
@@ -260,15 +287,26 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
         lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {label} — {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]
-    gated = [entry for entry in measured if not is_control(entry)]
-    control = [entry for entry in measured if is_control(entry)]
+    # A run whose MCP registration never landed had no server to route through,
+    # so counting it as a run that chose another way measures the install, not
+    # the routing. Reported on its own line rather than dropped: how often the
+    # install left no server is a result too.
+    comparable = [entry for entry in measured if entry.get("mcp_available") is True]
+    unregistered = [entry for entry in measured if entry.get("mcp_available") is not True]
+    gated = [entry for entry in comparable if not is_control(entry)]
+    control = [entry for entry in comparable if is_control(entry)]
     lines.extend(["", f"Answered through the MCP server: {_rate(gated)} with the skill installed"])
     if control:
         lines.append(f"{' ' * 33}{_rate(control)} with the skill uninstalled")
         lines.append(
-            f"Distinct Agentic HIL tools per run: {_mean_tools(gated)} with, {_mean_tools(control)} without"
+            f"Distinct Agentic HIL tools per MCP-routed run: {_mean_tools(gated)} with, {_mean_tools(control)} without"
         )
         lines.append("The difference is what the skill adds over the tool descriptions alone.")
+    if unregistered:
+        lines.append(
+            f"Left out of that comparison, no MCP registration to route through: {len(unregistered)} of "
+            f"{len(measured)} measured runs; they answered {_rate(unregistered)} through MCP anyway"
+        )
     if not measured:
         lines.append("No run asked a follow-up question; the routing case was not part of this matrix.")
     return "\n".join(lines)
@@ -279,9 +317,17 @@ def is_control(entry: dict[str, Any]) -> bool:
 
 
 def _mean_tools(entries: list[dict[str, Any]]) -> str:
-    if not entries:
-        return "n/a"
-    return f"{sum(len(entry.get('mcp_tools', [])) for entry in entries) / len(entries):.1f}"
+    """How many distinct tools an MCP-routed answer took, and over how many runs.
+
+    Averaged over every measured run instead, this mixes "how many tools does an
+    answer need" with "how many answers used none at all", and reads as the first
+    while measuring the second. The 2.7-against-3.5 claim was that mixture.
+    """
+    routed = [entry for entry in entries if route_of(entry) == "mcp"]
+    if not routed:
+        return "n/a (n=0)"
+    mean = sum(len(entry.get("mcp_tools", [])) for entry in routed) / len(routed)
+    return f"{mean:.1f} (n={len(routed)})"
 
 
 def _rate(entries: list[dict[str, Any]]) -> str:
@@ -294,7 +340,13 @@ def routing_results(args: argparse.Namespace, analysed: list[dict[str, Any]] | N
     print(format_routing_report(analysed, args.output))
     # Only the arm that has the skill is a gate. The control arm is the thing
     # being measured; a run of it that skips MCP is a result, not a regression.
-    gated = [entry for entry in analysed if entry["followup"] and not is_control(entry)]
+    # A run with no MCP registration is not gated either: it had no server to
+    # route through, which its own failed install check already reports.
+    gated = [
+        entry
+        for entry in analysed
+        if entry["followup"] and not is_control(entry) and entry.get("mcp_available") is True
+    ]
     if not gated:
         return 0
     return 0 if all(route_of(entry) == "mcp" for entry in gated) else 1

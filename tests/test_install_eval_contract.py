@@ -18,7 +18,8 @@ from agentic_hil.types import (
     ProjectPermissions,
 )
 from evals.install import verifier
-from evals.install.config import load_matrix
+from evals.install.config import load_case, load_matrix
+from evals.install.fixtures import HARDWARE_MAKE_TARGETS, MAKE_FLASH_FILES
 from evals.install.runner import expected_mcp_tools, job_payload
 from evals.install.verifier import target_mcp_tools
 
@@ -151,6 +152,68 @@ def test_eval_image_does_not_embed_current_checkout_tool_contract() -> None:
     )
 
     assert "COPY evals/install/tools.list.expected" not in dockerfile
+
+
+def test_every_case_prompt_names_where_the_package_comes_from() -> None:
+    """A prompt handing only the guide sent every obedient agent to the index.
+
+    The guide's own sentence is "A link to this guide is not that case; it means
+    the current release", so in local mode an agent following it installs the
+    released package instead of the tree under test. That was 117 of the 147
+    failures in the 0.12.0 matrix.
+    """
+    cases = sorted((REPOSITORY_ROOT / "evals" / "install" / "cases").glob("*.json"))
+
+    assert cases
+    for path in cases:
+        case = load_case(path)
+        assert "{install_spec}" in case.prompt_template, path.name
+        assert "{guide}" in case.prompt_template, path.name
+
+
+def test_the_guard_survives_a_login_shell() -> None:
+    """`bash -lc` was blind to it: /etc/profile rewrites PATH from scratch.
+
+    codex wraps its commands that way, and all 57 codex runs of the 0.12.0
+    matrix could have reached the bench without the guard recording anything.
+    Two answers, because either alone can be undone by the next thing that sets
+    PATH.
+    """
+    dockerfile = (REPOSITORY_ROOT / "evals" / "install" / "container" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/usr/local/bin/$(basename \"$shim\")" in dockerfile
+    assert "/etc/profile.d/00-eval-guard.sh" in dockerfile
+    assert 'PATH="/opt/eval-guard/bin:$PATH"' in dockerfile
+
+
+def test_the_image_carries_the_openocd_scripts_a_generated_config_names() -> None:
+    """Both containers come from this image, so a script tree here resolves in both.
+
+    Without one, a configuration naming an OpenOCD script is refused as
+    config_invalid by a verifier whose filesystem never had the file, about a
+    bench that may have been sound where it was written.
+    """
+    dockerfile = (REPOSITORY_ROOT / "evals" / "install" / "container" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    for script in ("interface/stlink.cfg", "target/stm32f4x.cfg"):
+        assert f"/usr/share/openocd/scripts/{script}" in dockerfile
+    # The same paths the workspace fixture's own openocd.cfg resolves through.
+    assert "source [find interface/stlink.cfg]" in MAKE_FLASH_FILES["openocd.cfg"]
+    assert "source [find target/stm32f4x.cfg]" in MAKE_FLASH_FILES["openocd.cfg"]
+
+
+def test_the_make_targets_routing_reads_are_the_ones_the_fixture_offers() -> None:
+    """A target named here that the Makefile does not drive hardware from is noise."""
+    makefile = MAKE_FLASH_FILES["Makefile"]
+
+    for target in HARDWARE_MAKE_TARGETS:
+        assert f"\n{target}:" in makefile or f"\n{target}: " in makefile, target
+    # `all` builds; it reaches no bench and must not be read as reaching one.
+    assert "all" not in HARDWARE_MAKE_TARGETS
 
 
 def test_eval_image_allocates_an_unused_non_root_uid() -> None:
