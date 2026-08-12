@@ -905,18 +905,20 @@ def test_a_read_that_raises_quarantines_the_probe_and_shuts_the_path(tmp_path: P
     try:
         failed = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
         assert failed["ok"] is False
-        assert failed["quarantined"] is True
         assert failed["cleanup_required"] is True
-        # And the bench stays shut until an operator resolves it: a retry is not
-        # allowed to walk straight back onto the board.
+        # Contained while the call ran and named on the way out. The bench is
+        # not shut afterwards, because a probe read that raised leaves a target
+        # the next reset and probe speak for, and the retry below is that next
+        # contact rather than a walk back onto a board nobody vouched for.
+        assert failed["quarantined"] is False
+        assert failed["incident_stood_down"]["reasons"] == ["adopt_discovery_exception", "unknown_hardware_exception"]
         attached(monkeypatch)
         retried = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
     finally:
         tools.close()
 
-    assert retried["ok"] is False
-    assert retried["error_type"] == "resource_quarantined"
-    assert path.read_text(encoding="utf-8") == before
+    assert retried["ok"] is True, retried
+    assert path.read_text(encoding="utf-8") != before
 
 
 def _probe_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1516,7 +1518,15 @@ def test_a_lease_that_will_not_release_is_not_reported_as_a_clean_read(tmp_path:
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "resource_quarantined"
     assert refused["cleanup_required"] is True
-    assert refused["quarantined"] is True
+    # The refusal is this call's own verdict about a lease it could not give
+    # back, not a gate on the next one: the reason names no hardware contact,
+    # and nothing stands on it afterwards.
+    assert refused["quarantined"] is False
+    assert refused["cleanup_reasons"] == ["lease_release_retry"]
+    # The refusal is this call's own verdict about a lease it could not give
+    # back, not a gate on the next one: the reason names no hardware contact and
+    # nothing stands on it afterwards.
+    assert tools.coordinator.incident_stands is False
     assert refused["retry_safe"] is False
     # The read did happen and its result is still handed over; what did not
     # happen is the write.

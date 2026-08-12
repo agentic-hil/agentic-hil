@@ -63,9 +63,35 @@ def config_for(workspace: Path, *, allow_recover: bool = True, **write_config_kw
 
 
 def quarantine(config, reason: str) -> str:
-    """An incident on disk, raised the way a live owner raises one and then left
-    behind by an owner that is gone."""
+    """A *standing* incident on disk, raised the way a live owner raises one and
+    then left behind by an owner that is gone.
+
+    `audit_broken=True` beside the reason, and that is the whole of what #216
+    changed here. Since the quarantine narrowed, an incident stands only while
+    the evidence chain for this bench is damaged: everything else ends with the
+    call that raised it, so a bench built without this flag has nothing for
+    `hardware_recover` to be asked about and answers `nothing_to_recover`. Every
+    test below is about what the tool does with an incident that *is* standing,
+    so the setup builds one; the reason keeps naming the physical state that
+    decides which route out applies, because the two facts are independent and
+    a real bench that loses its ledger mid-call carries both.
+
+    What the narrowed tool does with a bench that is not standing has its own
+    tests at the end of this file."""
     owner = HardwareCoordinator(config, "quarantine-setup")
+    lease = owner.acquire(RESOURCE)
+    lease.quarantine(reason, audit_broken=True)
+    incident = owner.quarantine_id
+    owner.close()
+    assert isinstance(incident, str)
+    return incident
+
+
+def open_incident(config, reason: str) -> str:
+    """An incident on disk that does not stand: the ordinary aftermath of a
+    failed call, left behind by an owner that never came back through the seam
+    that ends one."""
+    owner = HardwareCoordinator(config, "open-incident-setup")
     lease = owner.acquire(RESOURCE)
     lease.quarantine(reason)
     incident = owner.quarantine_id
@@ -233,7 +259,7 @@ def test_a_mixed_incident_refuses_on_the_reason_that_needs_a_person(tmp_path: Pa
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "quarantine-setup")
     lease = owner.acquire(RESOURCE)
-    lease.quarantine(LEASE_RELEASE_RETRY_REASON)
+    lease.quarantine(LEASE_RELEASE_RETRY_REASON, audit_broken=True)
     lease.quarantine("safe_state_unconfirmed")
     owner.close()
     service = AgenticHILToolService(config)
@@ -769,3 +795,114 @@ def test_a_relayed_statement_carries_the_override_too(tmp_path: Path) -> None:
     assert len(lines) == 1, lines
     assert lines[0]["operator_statement"] == "Board is powered down on my desk."
     assert lines[0]["config_change_accepted"] is True
+
+
+# ---------------------------------------------------------------------------
+# The bench with nothing standing.
+#
+# Since #216 this is the ordinary state after a failed call: the incident ended
+# when the call did, and the tool that exists to clear one has nothing to do.
+# It says so instead of failing, because nothing went wrong.
+
+
+def test_an_incident_that_does_not_stand_answers_nothing_to_recover(tmp_path: Path) -> None:
+    """The reason names a target, and a target is what the next reset and probe
+    speak for. There is no signature owed for it, so the tool does not ask for
+    one and does not invent an error over a bench that is fine."""
+    config = config_for(tmp_path)
+    open_incident(config, "debugger_result_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+
+        assert result["ok"] is True, result
+        assert result["nothing_to_recover"] is True
+        assert result["was_quarantined"] is False
+        assert "error_type" not in result
+        assert service.coordinator.status()["blocked"] is False
+    finally:
+        service.close()
+
+
+def test_the_bench_that_answered_nothing_to_recover_is_actually_free(tmp_path: Path) -> None:
+    """Not a softer refusal: the markers are released and the ledger says how."""
+    config = config_for(tmp_path)
+    open_incident(config, "safe_state_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        assert service.call(TOOL, {})["nothing_to_recover"] is True
+        assert service.call("probe_target", {}).get("error_type") != "resource_quarantined"
+    finally:
+        service.close()
+
+    lines = ledger(config)
+    assert [line["recovery"] for line in lines] == ["incident_stood_down"]
+    assert lines[0]["attestation"] == "no_standing_state"
+    assert lines[0]["reasons"] == ["safe_state_unconfirmed"]
+
+
+def test_a_bench_with_no_incident_at_all_answers_the_same_way(tmp_path: Path) -> None:
+    """One answer for the three ways of having nothing to clear: never had an
+    incident, had one a recovery action settled, had one that stood down."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+
+        assert result["ok"] is True
+        assert result["nothing_to_recover"] is True
+        assert result["was_quarantined"] is False
+    finally:
+        service.close()
+
+    assert ledger(config) == []
+
+
+def test_the_permission_gates_the_route_that_clears_something(tmp_path: Path) -> None:
+    """`allow_recover` decides whether an agent may clear a quarantine. A bench
+    with nothing standing has none to clear, so being told so needs no grant:
+    refusing the answer would send an agent hunting for a shell to run a command
+    that would do nothing."""
+    config = config_for(tmp_path, allow_recover=False)
+    open_incident(config, "debugger_result_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(TOOL, {})
+
+        assert result["ok"] is True, result
+        assert result["nothing_to_recover"] is True
+        assert "error_type" not in result
+    finally:
+        service.close()
+
+
+def test_the_operator_command_line_answers_the_same_way(tmp_path: Path) -> None:
+    """The CLI narrows with the tool, or an operator following a stale runbook
+    would be told a bench that is fine cannot be recovered."""
+    from agentic_hil.coordination import nothing_standing_result
+
+    config = config_for(tmp_path)
+    open_incident(config, "debugger_result_unconfirmed")
+    coordinator = HardwareCoordinator(config, "operator-cli")
+    status = coordinator.status()
+
+    assert status["incident_stands"] is False
+    answer = nothing_standing_result(status)
+    assert answer["ok"] is True
+    assert answer["nothing_to_recover"] is True
+    coordinator.close()
+
+
+def test_the_operator_command_line_still_clears_a_standing_quarantine(tmp_path: Path) -> None:
+    """And the one route that still has work to do is untouched."""
+    config = config_for(tmp_path)
+    incident = quarantine(config, "audit_broken")
+    coordinator = HardwareCoordinator(config, "operator-cli")
+    status = coordinator.status()
+
+    assert status["incident_stands"] is True
+    recovered = coordinator.recover(safe_state_confirmed=True, quarantine_id=incident)
+
+    assert recovered["ok"] is True
+    assert recovered["recovered_quarantine_id"] == incident
+    assert coordinator.status()["blocked"] is False

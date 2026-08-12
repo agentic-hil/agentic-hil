@@ -273,6 +273,14 @@ class HardwareLease:
         self.processes_reaped = False
         self.audit_ok = True
         self.errors: list[JsonObject] = []
+        # Cleanup reasons recorded without an incident behind them, kept apart
+        # from `errors` on purpose: `errors` is what an incident consists of and
+        # what the recovery machinery reads, and mixing a recorded event into it
+        # would turn a bench with one unconfirmed handle into an incident naming
+        # two reasons, which nothing may settle automatically. These survive the
+        # release that clears `errors`, because what a call could not confirm is
+        # still what its result has to say.
+        self.cleanup_events: list[JsonObject] = []
         self.quarantine_id: str | None = None
         self.valid = True
 
@@ -303,10 +311,23 @@ class HardwareLease:
         return self.coordinator.resolve_retryable_cleanup(self, reason)
 
     def cleanup_reasons(self) -> list[str]:
-        """Distinct reasons this lease is holding cleanup state, in the order they occurred."""
+        """Distinct reasons this lease is holding cleanup state, in the order they occurred.
+
+        The incident and nothing else. `reported_cleanup_reasons` is what a
+        result and a record carry, and the difference is a recorded event that
+        opened no incident."""
         reasons: list[str] = []
         for error in self.errors:
             reason = error.get("reason")
+            if isinstance(reason, str) and reason and reason not in reasons:
+                reasons.append(reason)
+        return reasons
+
+    def reported_cleanup_reasons(self) -> list[str]:
+        """Every reason this lease has to name, incident or recorded event."""
+        reasons = self.cleanup_reasons()
+        for event in self.cleanup_events:
+            reason = event.get("reason")
             if isinstance(reason, str) and reason and reason not in reasons:
                 reasons.append(reason)
         return reasons
@@ -324,7 +345,10 @@ class HardwareLease:
             # The reason decides whether a caller may retry or an operator has to
             # inspect the bench, so it travels with the lease into the project
             # record and every tool result instead of only into the marker file.
-            "cleanup_reasons": self.cleanup_reasons(),
+            # Recorded events travel with it too: an open whose teardown could
+            # not be confirmed holds nothing, and is still exactly what the next
+            # caller needs to read.
+            "cleanup_reasons": self.reported_cleanup_reasons(),
             "quarantine_id": self.quarantine_id,
         }
 
@@ -388,6 +412,13 @@ class HardwareCoordinator:
         # evidence chain owes one. A reset can put a target back and an open can
         # prove a handle, but nothing writes a report that was never written.
         self.audit_incident = False
+        # What an inherited incident is held for, kept in memory because the
+        # record it came from is about to be rewritten by the lease that took the
+        # devices. It travels back into every cleanup-state record this owner
+        # writes, so the reason an adopted incident names survives a lease being
+        # taken and given back, which is exactly the window a run's teardown
+        # reads it in.
+        self.adopted_reason: str | None = None
         self.quarantine_id: str | None = None
         self.incident_resources: set[str] = set()
         self._state = "open"
@@ -677,7 +708,7 @@ class HardwareCoordinator:
                     raise
                 if stale is not None and stale.get("state") not in {None, "released"}:
                     stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or normalized
-                    self._adopt_incident(stale, stale_resources)
+                    self._adopt_incident(stale, stale_resources, "owner_process_exited_without_release")
                     if self.incident_stands:
                         stale = {**stale, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
                         self._write_record(self.project_key, stale)
@@ -702,7 +733,7 @@ class HardwareCoordinator:
                         if not self._record_matches_project(stale):
                             raise CoordinationError({"ok": False, "error_type": "resource_quarantined", "summary": "Physical resource belongs to another unresolved project incident.", "resource": resource, "cleanup_required": True, "quarantined": True, "retry_safe": False, "quarantine_id": stale.get("quarantine_id")})
                         stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or [resource]
-                        self._adopt_incident(stale, stale_resources)
+                        self._adopt_incident(stale, stale_resources, "owner_process_exited_without_release")
                         if self.incident_stands:
                             self._persist_project("cleanup_required", stale_resources)
                             for held in reversed(locks):
@@ -819,6 +850,7 @@ class HardwareCoordinator:
             self.blocked = any(item.state in {"cleanup_required", "quarantined"} for item in self.leases.values()) or bool(self.incident_resources)
             if not self.blocked:
                 self.audit_incident = False
+                self.adopted_reason = None
                 self.quarantine_id = None
                 self.incident_resources.clear()
             return True
@@ -862,9 +894,9 @@ class HardwareCoordinator:
             details: JsonObject = {"reason": reason, "time": utc_now_iso()}
             if error is not None:
                 details.update({"error_type": type(error).__name__, "summary": str(error)})
-            if any(item.get("reason") == reason and item.get("summary") == details.get("summary") for item in lease.errors):
+            if any(item.get("reason") == reason and item.get("summary") == details.get("summary") for item in lease.cleanup_events):
                 return
-            lease.errors.append(details)
+            lease.cleanup_events.append(details)
             self._persist_lease(lease)
 
     def stand_down(self) -> JsonObject | None:
@@ -945,6 +977,7 @@ class HardwareCoordinator:
                 for lock in reversed(locks):
                     lock.release()
             self.blocked = False
+            self.adopted_reason = None
             self.quarantine_id = None
             self.incident_resources.clear()
             if not self.leases and self.project_lock is not None:
@@ -995,6 +1028,7 @@ class HardwareCoordinator:
             self.blocked = any(item.state in {"cleanup_required", "quarantined"} for item in self.leases.values())
             if not self.blocked:
                 self.audit_incident = False
+                self.adopted_reason = None
                 self.quarantine_id = None
                 self.incident_resources.clear()
             self._persist_lease(lease)
@@ -1239,7 +1273,6 @@ class HardwareCoordinator:
             owner_active = self.project_lock is not None
             snapshot_atomic = True
             released_dead_owner: JsonObject | None = None
-            stood_down_incident: JsonObject | None = None
             if owner_active:
                 record = self._read_record(self.project_key)
             else:
@@ -1265,32 +1298,20 @@ class HardwareCoordinator:
                                 record = released
                                 released_dead_owner = finding
                             else:
-                                self._adopt_incident(record, stale_resources)
+                                self._adopt_incident(record, stale_resources, "owner_process_exited_without_release")
                                 record = {**record, "version": LEASE_VERSION, "state": "quarantined", "quarantined_at": utc_now_iso(), "reason": "owner_process_exited_without_release", "quarantine_id": self.quarantine_id}
                                 self._write_record(self.project_key, record)
                                 self._mark_incident_resources(stale_resources, "owner_process_exited_without_release", expected_project=self.project_key)
-                                # Written first and stood down second, in that
-                                # order on purpose: an interrupt between the two
-                                # leaves the incident recorded rather than a
-                                # dead owner's devices silently free, and the
-                                # stand-down reads its reason off the record it
-                                # just wrote. What a status read cannot do is run
-                                # a recovery action, so an incident that does not
-                                # stand ends here and the next call meets the
-                                # bench with no hold on it.
-                                stood_down_incident = self.stand_down()
-                                if stood_down_incident is not None:
-                                    record = self._read_record(self.project_key)
-                        elif record is not None and record.get("state") in {"cleanup_required", "quarantined"} and not record_audit_broken(record):
-                            # An owner that raised an incident and then died
-                            # before it could stand down. Nobody is going to come
-                            # back for it, and the reason it names is not one a
-                            # person has to answer for, so it ends here rather
-                            # than waiting for a hardware call to adopt it.
-                            self._adopt_incident(record, [item for item in record.get("resources", []) if isinstance(item, str)])
-                            stood_down_incident = self.stand_down()
-                            if stood_down_incident is not None:
-                                record = self._read_record(self.project_key)
+                                # Adopted and recorded, and deliberately not
+                                # ended here. This is a read, and the incident it
+                                # inherits names a target a recovery action can
+                                # still answer for: reap, reset into halt, read
+                                # it back. A status call runs none of those, so
+                                # ending the incident here would throw away the
+                                # one thing that could have settled it. The next
+                                # hardware call is where it goes, either because
+                                # the recovery action settled it or because the
+                                # seam at the end of that call stood it down.
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
@@ -1340,12 +1361,6 @@ class HardwareCoordinator:
                 # what evidence, or the difference is invisible to the operator
                 # who would otherwise have signed for it.
                 result["released_dead_owner"] = released_dead_owner
-            if stood_down_incident is not None:
-                # Named for the same reason: an incident was found and is gone,
-                # and an operator reading this has to be able to see that it
-                # happened and on what basis, which is the ledger line this
-                # block points at.
-                result["stood_down_incident"] = stood_down_incident
             if blocked:
                 # The signature `recover --confirm-safe-state` asks for is only
                 # as good as what the signer was told: name what was attempted,
@@ -1722,6 +1737,7 @@ class HardwareCoordinator:
                     return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_persist_failed", "summary": "Recovery could not persist all released markers; rerun recovery with the same quarantine_id to resume it.", "backend_error": str(error), "retry_safe": True, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id}
                 self.blocked = False
                 self.audit_incident = False
+                self.adopted_reason = None
                 self.quarantine_id = None
                 self.incident_resources.clear()
                 return {
@@ -1836,6 +1852,7 @@ class HardwareCoordinator:
                 "processes_reaped": lease.processes_reaped,
                 "audit_ok": lease.audit_ok,
                 "errors": list(lease.errors),
+                "cleanup_events": list(lease.cleanup_events),
                 "quarantine_id": lease.quarantine_id,
             }
         )
@@ -1850,6 +1867,13 @@ class HardwareCoordinator:
         record["leases"] = [lease.status() for lease in population.values()]
         if state in {"cleanup_required", "quarantined"}:
             record["quarantine_id"] = self.quarantine_id
+            if self.adopted_reason and not any(lease.status().get("cleanup_reasons") for lease in population.values()):
+                # An incident with no lease left to name it. Without this the
+                # record went out saying a bench was held and refusing to say
+                # what for, which every automatic route reads as "unnamed" and
+                # therefore refuses: the operator became the only way out of an
+                # incident a reset settles.
+                record["reason"] = self.adopted_reason
         self._write_record(self.project_key, record)
 
     def _base_record(self, state: str, resources: list[str]) -> JsonObject:
@@ -1940,11 +1964,13 @@ class HardwareCoordinator:
             and all(lock.locked for lock in lease.locks)
         )
 
-    def _adopt_incident(self, record: JsonObject, resources: list[str]) -> None:
+    def _adopt_incident(self, record: JsonObject, resources: list[str], reason: str | None = None) -> None:
         incident = record.get("quarantine_id")
         self.quarantine_id = incident if isinstance(incident, str) and incident else secrets.token_hex(16)
         self.incident_resources.update(resources)
         self.blocked = True
+        recorded = record.get("reason")
+        self.adopted_reason = reason or (recorded if isinstance(recorded, str) and recorded else None) or self.adopted_reason
         # Whether the inherited incident stands is the record's answer, not this
         # process's: the flag that raised it died with the owner, and the record
         # is what is left of the claim.

@@ -36,7 +36,7 @@ from conftest import (
 )
 
 from agentic_hil.config import load_config
-from agentic_hil.coordination import HardwareCoordinator
+from agentic_hil.coordination import HardwareCoordinator, debugger_effect_resources
 from agentic_hil.knowledge import (
     QUARANTINE_REASON_GUIDES,
     attach_quarantine_guidance,
@@ -141,7 +141,7 @@ def test_an_stlink_probe_that_enumerates_nothing_never_touched_the_bench(tmp_pat
         service.close()
 
 
-def test_a_readonly_result_claiming_an_unknown_effect_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_readonly_result_claiming_an_unknown_effect_names_the_retryable_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The self-resolving middle class stays, and it is the one the backend's own
     claim defines: the target was never contacted, so its run state is not in
     question, but the read still reports an effect nobody can account for. Only
@@ -156,9 +156,14 @@ def test_a_readonly_result_claiming_an_unknown_effect_still_quarantines(tmp_path
     try:
         result = service.call("probe_target")
 
-        assert result["quarantined"] is True
+        # The reason is what the call could not confirm and it is still here;
+        # `quarantined` is what somebody would have to clear, and since the
+        # target's state is what the next reset and probe say it is, nobody has
+        # to. The ledger keeps the incident and its ending both.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_readonly_result_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_readonly_result_unconfirmed"]
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -176,9 +181,14 @@ def test_a_readonly_result_that_names_no_abort_point_needs_the_stronger_predicat
     try:
         result = service.call("probe_target")
 
-        assert result["quarantined"] is True
+        # The reason is what the call could not confirm and it is still here;
+        # `quarantined` is what somebody would have to clear, and since the
+        # target's state is what the next reset and probe say it is, nobody has
+        # to. The ledger keeps the incident and its ending both.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -285,7 +295,7 @@ def test_openocd_flash_now_carries_the_init_stage_marker(tmp_path: Path) -> None
     assert logged.index("AGENTIC_HIL_STAGE:init:ok") < logged.index("program")
 
 
-def test_a_reset_the_openocd_fake_aborts_after_init_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_reset_the_openocd_fake_aborts_after_init_is_still_an_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other direction: once the init marker printed, the adapter was open,
     and no error classification may talk the quarantine away."""
     service = AgenticHILToolService(config_for(tmp_path))
@@ -303,9 +313,14 @@ def test_a_reset_the_openocd_fake_aborts_after_init_still_quarantines(tmp_path: 
     try:
         result = service.call("reset_target", {"mode": "halt"})
 
-        assert result["quarantined"] is True
+        # The reason is what the call could not confirm and it is still here;
+        # `quarantined` is what somebody would have to clear, and since the
+        # target's state is what the next reset and probe say it is, nobody has
+        # to. The ledger keeps the incident and its ending both.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -387,7 +402,7 @@ def test_an_unopenable_com_port_refuses_and_frees_the_lease(tmp_path: Path, monk
     assert_no_quarantine_record(config)
 
 
-def test_a_com_open_whose_rollback_fails_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_com_open_whose_rollback_fails_records_the_reason_and_holds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = com_config(tmp_path)
     service = AgenticHILToolService(config)
     handle = SimpleNamespace(is_open=True)
@@ -398,10 +413,15 @@ def test_a_com_open_whose_rollback_fails_still_quarantines(tmp_path: Path, monke
         result = service.call("com_session_start", {"port_id": "dut"})
 
         assert result["error_type"] == "com_port_open_failed"
-        assert result["quarantined"] is True
+        # No incident at all now, and that is the narrowing rather than an
+        # oversight: a serial handle proves itself at its own next open, which
+        # the operating system refuses by itself if the handle is really stuck.
+        # The event is recorded under the same reason and the refusal still
+        # tells the reader what to verify.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["com_open_cleanup_unconfirmed"]
-        assert service.coordinator.blocked is True
-        # The justified quarantine tells the signer what to verify.
+        assert "incident_stood_down" not in result
+        assert service.coordinator.blocked is False
         assert result["quarantine_guidance"][0]["reason"] == "com_open_cleanup_unconfirmed"
     finally:
         service.close()
@@ -455,7 +475,7 @@ def test_a_can_adapter_that_never_initialized_refuses_and_frees_the_lease(tmp_pa
     assert_no_quarantine_record(config)
 
 
-def test_a_can_open_failure_python_can_cannot_classify_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_can_open_failure_python_can_cannot_classify_records_the_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A partially initialized channel participates on the bus, and a generic
     exception cannot disprove one was left behind."""
     config = can_config(tmp_path)
@@ -468,9 +488,12 @@ def test_a_can_open_failure_python_can_cannot_classify_still_quarantines(tmp_pat
     try:
         result = service.call("can_session_start", {"bus_id": "bench"})
 
-        assert result["quarantined"] is True
+        # Recorded, not held: an adapter proves itself at its own next open.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["can_open_cleanup_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert "incident_stood_down" not in result
+        assert result["quarantine_guidance"][0]["reason"] == "can_open_cleanup_unconfirmed"
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -526,6 +549,11 @@ def test_a_justified_quarantine_names_what_the_signer_must_check(tmp_path: Path,
     )
     try:
         result = service.call("reset_target", {"mode": "run"})
+        # Read while the incident still stood, because `hardware_lease_status`
+        # after the stand-down describes a bench with nothing on it. The result
+        # of the failing call is the carrier that survives either way.
+        held = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        held.quarantine("debugger_result_unconfirmed")
         status = service.hardware_lease_status()
 
         for carrier in (result, status):
@@ -551,6 +579,8 @@ def test_lease_status_of_a_second_process_carries_the_same_guidance(tmp_path: Pa
     )
     try:
         service.call("reset_target", {"mode": "run"})
+        held = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        held.quarantine("debugger_result_unconfirmed")
         observer = HardwareCoordinator(config, "observer")
         status = observer.status()
 
@@ -583,11 +613,17 @@ def test_an_unknown_reason_gets_the_explicit_fallback_guidance() -> None:
     assert "catalogue" in details[0]["attempted"]
 
 
-def test_guidance_attaches_only_to_quarantined_results() -> None:
-    clean = attach_quarantine_guidance({"ok": True, "cleanup_reasons": ["audit_broken"]})
+def test_guidance_follows_the_reason_and_not_the_gate() -> None:
+    """It used to attach only where something was being held. Since #216 most
+    reasons name something a call could not confirm without the bench being held
+    for it, and what to check is exactly as useful then, so the reason is what
+    keys it. A result with no reason still gets none."""
+    reasonless = attach_quarantine_guidance({"ok": True})
+    unheld = attach_quarantine_guidance({"ok": False, "cleanup_reasons": ["com_cleanup_unconfirmed"]})
     quarantined = attach_quarantine_guidance({"ok": False, "quarantined": True, "cleanup_reasons": ["audit_broken"]})
 
-    assert "quarantine_guidance" not in clean
+    assert "quarantine_guidance" not in reasonless
+    assert unheld["quarantine_guidance"][0]["reason"] == "com_cleanup_unconfirmed"
     assert quarantined["quarantine_guidance"][0]["reason"] == "audit_broken"
 
 
@@ -634,7 +670,7 @@ def test_every_quarantine_trigger_in_the_source_has_signer_guidance() -> None:
 # The abort point has to be the backend's claim, not this layer's inference.
 
 
-def test_a_probe_read_killed_at_the_deadline_still_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_probe_read_killed_at_the_deadline_names_the_target_state_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A timeout names no abort point at all.
 
     OpenOCD's and ST-Link's timeout branches report `timeout` and nothing about
@@ -655,9 +691,14 @@ def test_a_probe_read_killed_at_the_deadline_still_quarantines(tmp_path: Path, m
     try:
         result = service.call("probe_target")
 
-        assert result["quarantined"] is True
+        # The reason is what the call could not confirm and it is still here;
+        # `quarantined` is what somebody would have to clear, and since the
+        # target's state is what the next reset and probe say it is, nobody has
+        # to. The ledger keeps the incident and its ending both.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -679,6 +720,12 @@ def test_a_timed_out_probe_is_not_cleared_by_a_successful_re_read(tmp_path: Path
     try:
         first = service.call("probe_target")
         assert first["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        # Rebuilt by hand, because the failing call above no longer leaves it
+        # standing. What this test is about is the second half: a re-read that
+        # succeeds must not settle a run state it says nothing about.
+        held = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        held.quarantine("debugger_readonly_target_state_unconfirmed")
+        service._quarantined_lease = held
         assert service.coordinator.status()["auto_recoverable"] is False
 
         # The re-read succeeds, and that is exactly what must not be enough.
@@ -692,8 +739,12 @@ def test_a_timed_out_probe_is_not_cleared_by_a_successful_re_read(tmp_path: Path
         # the incident is exactly where it was.
         assert second.get("error_type") != "resource_quarantined"
         assert "incident_resolved" not in second
-        assert service.coordinator.status()["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
+        # Not settled by the re-read, and it did not have to be settled to end:
+        # the ledger line says nothing attested anything, which is precisely the
+        # claim a successful re-read is not entitled to make about a run state.
+        assert second["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.status()["cleanup_reasons"] == []
+        assert service.coordinator.blocked is False
         assert service._attempt_machine_recovery() is None
     finally:
         service.close()
@@ -712,6 +763,9 @@ def test_a_timed_out_probe_is_cleared_only_by_a_verified_reset_into_halt(tmp_pat
     )
     try:
         assert service.call("probe_target")["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        held = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        held.quarantine("debugger_readonly_target_state_unconfirmed")
+        service._quarantined_lease = held
 
         resets: list[str] = []
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
@@ -731,7 +785,7 @@ def test_a_timed_out_probe_is_cleared_only_by_a_verified_reset_into_halt(tmp_pat
         service.close()
 
 
-def test_an_stlink_probe_that_confirms_nothing_quarantines(tmp_path: Path) -> None:
+def test_an_stlink_probe_that_confirms_nothing_names_the_target_state_reason(tmp_path: Path) -> None:
     """The post-`init` case that the timeout rule alone did not cover.
 
     STM32CubeProgrammer exits 0 with output that confirms no connection: the run
@@ -746,14 +800,17 @@ def test_an_stlink_probe_that_confirms_nothing_quarantines(tmp_path: Path) -> No
 
         assert result["backend_error_type"] == "probe_unconfirmed"
         assert result["error_type"] == "target_state_unconfirmed"
-        assert result["quarantined"] is True
+        # The containment is the reason, which is still the one a re-read may
+        # not settle. What is no longer held is the bench.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
 
-def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_openocd_probe_that_confirms_nothing_names_the_target_state_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The same case on the default backend, which is where it was missed.
 
     OpenOCD exits 0 with neither its init-stage marker nor the tool's success
@@ -779,9 +836,10 @@ def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monk
         assert result["error_type"] == "target_state_unconfirmed"
         assert result.get("target_contacted") is not False
         assert result.get("hardware_state") != "unchanged"
-        assert result["quarantined"] is True
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert result["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert service.coordinator.blocked is False
         assert service.coordinator.status()["auto_recoverable"] is False
 
         # And a read-only re-probe that succeeds does not clear it: it attests
@@ -790,16 +848,16 @@ def test_an_openocd_probe_that_confirms_nothing_quarantines(tmp_path: Path, monk
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
         second = service.call("probe_target")
 
-        # Was: the re-read is refused with `resource_quarantined`. A probe is
-        # the recovery class now and runs during an incident — but running is
-        # not settling, and this test's tooth is the second half. The read-only
-        # re-read still cannot answer a reason about the core's run state, so
-        # the incident is exactly where it was.
+        # Was: the re-read is refused with `resource_quarantined`, and before
+        # that the incident stayed standing after it. A probe is the recovery
+        # class and runs during an incident, running is not settling, and the
+        # tooth is what the re-read is never allowed to claim: it succeeded and
+        # no `incident_resolved` says it settled a run state it cannot see.
         assert second.get("error_type") != "resource_quarantined"
         assert "incident_resolved" not in second
-        assert service.coordinator.status()["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
-        assert service.coordinator.blocked is True
-        assert service._attempt_machine_recovery() is None
+        assert second["ok"] is True
+        assert service.coordinator.status()["cleanup_reasons"] == []
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 
@@ -891,8 +949,11 @@ def test_a_peak_initialization_error_cannot_prove_it_never_joined_the_bus(tmp_pa
 
         assert result["error_type"] == "can_adapter_open_failed"
         assert result.get("side_effect_status") != "not_started"
-        assert result["quarantined"] is True
+        # Still not read as innocent: the reason is recorded and the refusal
+        # carries it. The bus is not held for it, because the next open is what
+        # settles an adapter that may or may not still be on the bus.
+        assert result["quarantined"] is False
         assert result["cleanup_reasons"] == ["can_open_cleanup_unconfirmed"]
-        assert service.coordinator.blocked is True
+        assert service.coordinator.blocked is False
     finally:
         service.close()

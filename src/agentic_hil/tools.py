@@ -432,31 +432,72 @@ class AgenticHILToolService:
 
         The last thing a call does, and deliberately the last: the run teardown
         and the recovery-class settlement have both already run by the time this
-        is asked, so what reaches here is an incident the recovery action did not
-        settle — because the policy withheld it, because a predicate did not
-        confirm, or because there was no action to take. Under the narrowed
-        quarantine that is not a hold: the target's state is what the next reset
-        and probe say it is, and a peripheral's is what the next open says.
+        is asked. What has not, for a call outside a run, is the automatic
+        recovery the acquire path used to run on the *next* call, and that is why
+        it is attempted here first. The gate it used to sit behind is gone, so
+        this is where it belongs: the report exists, the call is finished, and
+        the reset-into-halt this bench's policy allows is exactly what settles an
+        unconfirmed target. Nothing about the action changed, only when it is
+        asked for.
 
-        The envelope is corrected to match, because the call's own body stamped
-        it while the incident still stood. The reasons stay, and so does the
-        guidance keyed off them: what the call could not confirm is exactly what
-        the caller needs to read, and it is the same text the quarantine carried.
-        What goes is the claim that somebody has to clear something."""
-        if not isinstance(result, dict):
+        What it does not settle stands down, and that is the narrowing: an
+        incident the policy withheld, or whose predicate did not confirm, is not
+        a hold. The target's state is what the next reset and probe say it is,
+        and a peripheral's is what the next open says.
+
+        The envelope keeps its reasons and its guidance: what the call could not
+        confirm is exactly what the caller needs to read, and it is the same text
+        the quarantine carried. What goes is the claim that the bench is held."""
+        if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
+            # A declared run is the agent's own hold, and its teardown is where
+            # the recovery belongs: resetting the board at the end of step one
+            # because step one failed would drive the target out from under step
+            # two, and the verdict is the run's. `bench_run_stop` brings the same
+            # incident back here with the run closed.
+            #
+            # A registered debug session is the agent's own hold on this bench,
+            # and it is what makes both halves of this seam wrong here. The
+            # recovery action reaps this owner's debugger processes, so running
+            # it would take the live session with it; and ending the incident
+            # without it would leave a partially written image with nothing
+            # having driven the target into a defined state. The same reasoning
+            # keeps session-scoped calls out of `implicit_run_tools`. So the
+            # incident waits for the session: `debug_stop_session` and the
+            # recovery-class calls stay reachable through it, and whichever of
+            # them ends the session brings the next call here with the hold gone.
             return result
+        if self.coordinator.blocked:
+            try:
+                self._attempt_machine_recovery()
+            except Exception as error:
+                # Same rule as everywhere else recovery runs: a fault inside it
+                # never fails open, and never replaces the call's own answer.
+                self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
         stood_down = self.coordinator.stand_down()
         if stood_down is None:
             return result
-        self._release_recovered_leases()
+        # Whatever the ended incident left registered goes back, because the call
+        # that took it is over and the bench is not held for it any more. A
+        # lease a live COM or CAN session owns is the exception and the only one:
+        # the session is still there, still usable, and still the thing that
+        # gives its device back. Without this the leases an incident used to keep
+        # would sit registered for the rest of the process, and every later call
+        # that asks whether this server holds anything would be told yes.
+        session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
+        for lease in list(self.coordinator.leases.values()):
+            if lease.state == "active" and id(lease) not in session_leases:
+                lease.release()
+        if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
+            self._quarantined_lease = None
         # Attached while the flags still say quarantined, so the reasons keep the
         # remediation text they had; `call` re-attaching it is a no-op.
         result = attach_quarantine_guidance(result)
-        corrected = {**result, "incident_stood_down": stood_down}
-        for field in ("cleanup_required", "quarantined"):
-            if corrected.get(field) is True:
-                corrected[field] = False
-        return corrected
+        # `quarantined` and nothing else. It is the one field that says the bench
+        # is being held, and it is the one that stopped being true. Its neighbour
+        # `cleanup_required` says something the stand-down did not change: this
+        # call left work behind, a debug session to stop, a state nobody
+        # confirmed, and a caller reading a failed result still has to know it.
+        return {**result, "incident_stood_down": stood_down, **({"quarantined": False} if result.get("quarantined") is True else {})}
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
