@@ -21,7 +21,10 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # The Windows legs of the grown suite take about fourteen minutes of
+    # pytest alone; fifteen ended runs seconds after a green summary and
+    # reported the cancellation as a failure.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
