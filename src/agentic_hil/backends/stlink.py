@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Literal
 
-from agentic_hil.artifacts import looks_like_intel_hex
+from agentic_hil.artifacts import looks_like_intel_hex, sha256_file
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
@@ -515,32 +517,59 @@ class STLinkBackend:
                 "likely_causes": ["no flash_firmware call has succeeded in this session", "the firmware that was flashed was a .hex or .bin, which carries no symbols", "the firmware on the target was flashed outside Agentic HIL"],
                 **NOT_CONTACTED,
             }
-        gdb = resolve_gdb_executable(self.config, self.backend_name)
-        if not gdb["ok"]:
-            return {**gdb, "tool": tool, "symbol": symbol}
+        # The remembered path is the caller's own workspace file, which a
+        # rebuild is free to overwrite at any moment — including in the window
+        # between hashing it and handing the same path to a separately spawned
+        # GDB. A replacement landing there makes GDB answer from bytes the digest
+        # never covered while the result still carries the flashed image's digest,
+        # so an address that is right about the new build and wrong about the
+        # board would travel out wearing the old image's provenance. So the bytes
+        # are copied into a private file first; the digest that gates the query
+        # and the bytes GDB reads are then the same immutable file, and a later
+        # replacement of the caller's path cannot reach it. A copy whose digest no
+        # longer matches the flashed image is refused, exactly as a changed source
+        # on the original path was.
         elf_path = str(symbol_elf["resolved_path"])
-        args = gdb_symbol_query_args(str(gdb["executable"]), elf_path, symbol)
-        completed = spawn_command(args, str(Path(elf_path).parent), min(self.config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
-        if completed.not_found:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "symbol": symbol, **NOT_CONTACTED}
-        if completed.timed_out:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
-        output = f"{completed.stdout}{completed.stderr}"
-        address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
-        size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
-        if address_value is None or size_value is None:
-            lower = output.lower()
-            error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
-            summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, **NOT_CONTACTED}
-        return {
-            "ok": True,
-            "symbol": symbol,
-            "address": hex(address_value),
-            "address_value": address_value,
-            "size_bytes": size_value,
-            "symbol_source": {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")},
-        }
+        recorded_digest = symbol_elf.get("integrity_sha256") or symbol_elf.get("sha256")
+        staging_dir: Path | None = None
+        try:
+            try:
+                staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-symbols-"))
+                staged_elf = staging_dir / Path(elf_path).name
+                shutil.copyfile(elf_path, staged_elf)
+                staged_digest = sha256_file(staged_elf)
+            except OSError as error:
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF flashed through this service can no longer be read, so no symbol table is proven to describe what is on the target. Flash it again with flash_firmware.", "symbol": symbol, "backend_error": str(error), **NOT_CONTACTED}
+            if not isinstance(recorded_digest, str) or staged_digest != recorded_digest:
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF on disk no longer matches the image flashed through this service, so its symbol table is not proven to describe what is on the target. Flash the current build with flash_firmware first.", "symbol": symbol, "likely_causes": ["the ELF was rebuilt or replaced after it was flashed", "a different file now occupies the flashed artifact's path"], **NOT_CONTACTED}
+            gdb = resolve_gdb_executable(self.config, self.backend_name)
+            if not gdb["ok"]:
+                return {**gdb, "tool": tool, "symbol": symbol}
+            args = gdb_symbol_query_args(str(gdb["executable"]), str(staged_elf), symbol)
+            completed = spawn_command(args, str(staging_dir), min(self.config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
+            if completed.not_found:
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "symbol": symbol, **NOT_CONTACTED}
+            if completed.timed_out:
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
+            output = f"{completed.stdout}{completed.stderr}"
+            address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
+            size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
+            if address_value is None or size_value is None:
+                lower = output.lower()
+                error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
+                summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, **NOT_CONTACTED}
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "address": hex(address_value),
+                "address_value": address_value,
+                "size_bytes": size_value,
+                "symbol_source": {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")},
+            }
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()

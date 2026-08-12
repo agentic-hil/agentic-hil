@@ -8,7 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
+from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template
+from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, grant_every_permission
 from evals.install import verifier
 from evals.install.fixtures import agent_config_path, fixture_content
 from evals.install.source import create_source_snapshot, source_digest
@@ -432,7 +435,7 @@ def test_mcp_probe_reports_why_the_server_refused_to_start(
         "trusted_command",
         lambda arguments: [sys.executable, "-c", refusal],
     )
-    monkeypatch.setattr(verifier, "trusted_environment", lambda: dict(os.environ))
+    monkeypatch.setattr(verifier, "trusted_environment", host_environment)
 
     with pytest.raises(RuntimeError) as excinfo:
         verifier.mcp_probe(["mcp-stdio"], tmp_path)
@@ -440,3 +443,286 @@ def test_mcp_probe_reports_why_the_server_refused_to_start(
     message = str(excinfo.value)
     assert "state_root refused" in message, message
     assert "exit=3" in message, message
+
+
+def host_environment(config: Path | None = None, *, config_home: Path | None = None) -> dict[str, str]:
+    """`trusted_environment` without the container's fixed PATH and HOME.
+
+    The probes are started with an environment built from scratch, which is
+    right in the container and unusable on a developer's host: no SYSTEMROOT on
+    Windows, no interpreter on either. What the tests are about is which
+    configuration the probe hands the server, so that part is kept exactly and
+    the rest comes from the host.
+    """
+    environment = dict(os.environ)
+    environment.pop("AGENTIC_HIL_CONFIG", None)
+    if config is not None:
+        environment["AGENTIC_HIL_CONFIG"] = str(config)
+    if config_home is not None:
+        environment["XDG_CONFIG_HOME"] = str(config_home)
+        environment["APPDATA"] = str(config_home)
+    return environment
+
+
+# A server that answers the two things the wrong-workspace probe asks, with the
+# one behaviour under test switched by MODE. `release` is what this release does:
+# refuse a configuration bound elsewhere, and serve a workspace it has no
+# configuration for with every hardware tool refusing.
+FAKE_SERVER = """
+import json
+import os
+import sys
+from pathlib import Path
+
+MODE = {mode!r}
+here = str(Path.cwd().resolve())
+
+if os.environ.get("AGENTIC_HIL_CONFIG") and MODE != "serves-a-config-bound-elsewhere":
+    print(json.dumps({{"ok": False, "error_type": "config_invalid", "summary": "bound to a different workspace"}}))
+    raise SystemExit(1)
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        result = {{"serverInfo": {{"name": "agentic-hil", "version": "0.0.0"}}}}
+    elif method == "tools/call":
+        if MODE == "answers-hardware-unconfigured":
+            document = {{"ok": True, "tool": message["params"]["name"]}}
+        elif MODE == "binds-the-workspace-it-was-not-started-in":
+            document = {{"ok": False, "error_type": "config_file_not_found", "workspace_root": "/workspace/project"}}
+        else:
+            document = {{"ok": False, "error_type": "config_file_not_found", "workspace_root": here}}
+        result = {{"content": [{{"type": "text", "text": json.dumps(document)}}]}}
+    else:
+        continue
+    print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": result}}), flush=True)
+"""
+
+
+def wrong_workspace_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+) -> tuple[bool, str]:
+    other = (tmp_path / "other-project").resolve()
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "trusted_environment", host_environment)
+    monkeypatch.setattr(
+        verifier,
+        "trusted_command",
+        lambda arguments: [sys.executable, "-c", FAKE_SERVER.format(mode=mode)],
+    )
+    return verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "probe" / "config.yaml")
+
+
+def test_a_workspace_the_config_does_not_bind_is_served_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The release's answer, which is two answers.
+
+    Named from the wrong directory the configuration is refused outright;
+    discovered from a directory that has none, the server starts bound to *that*
+    directory and refuses every hardware tool. The check used to read the second
+    half as a failure because before 0.7.0 there was no such server to start,
+    and a whole matrix failed on it once the release grew one.
+    """
+    ok, detail = wrong_workspace_verdict(monkeypatch, tmp_path, "release")
+
+    assert ok, detail
+    assert "config_invalid" in detail
+    assert "config_file_not_found" in detail
+
+
+def test_a_config_bound_elsewhere_that_is_served_anyway_fails_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The teeth: `workspace_root` binding one project root and no other."""
+    ok, detail = wrong_workspace_verdict(monkeypatch, tmp_path, "serves-a-config-bound-elsewhere")
+
+    assert not ok
+    assert "initialized anyway" in detail, detail
+
+
+def test_an_unconfigured_server_that_answers_hardware_fails_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other teeth: no configuration means no bench, not a bench found elsewhere."""
+    ok, detail = wrong_workspace_verdict(monkeypatch, tmp_path, "answers-hardware-unconfigured")
+
+    assert not ok
+    assert verifier.UNPROVISIONED_PROBE_TOOL in detail
+    assert "not refused as unconfigured" in detail, detail
+
+
+def test_a_server_that_bound_another_workspace_fails_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Refusing is not enough: it has to refuse for the directory it was started in.
+
+    A server that answered `config_file_not_found` while naming the project it
+    was never started in would have found that project's configuration, which is
+    the leak this whole check is about.
+    """
+    ok, detail = wrong_workspace_verdict(monkeypatch, tmp_path, "binds-the-workspace-it-was-not-started-in")
+
+    assert not ok
+    assert "bound '/workspace/project'" in detail, detail
+
+
+def test_the_probe_configuration_moves_the_state_root_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """What the read-only home costs, and what it must not cost.
+
+    The runtime opens `state_root` for writing while it loads, and the verifier
+    mounts the home read-only so the evidence under it cannot be rewritten by
+    what is being verified. So the probes load a copy with that one field moved
+    onto the tmpfs, and everything the install decided has to survive the copy,
+    or the probes stop proving anything about the install. It is staged where
+    discovery looks, under the same project directory, so the probes still find
+    it by starting in the workspace.
+    """
+    authoritative = tmp_path / "projects" / "project-abc123" / "config.yaml"
+    authoritative.parent.mkdir(parents=True)
+    original = {
+        "version": 3,
+        "workspace_root": "/workspace/project",
+        "state_root": "/home/eval/.local/state/agentic-hil",
+        "permissions": {"allow_config_write": True, "allow_recover": True},
+        "debuggers": {"dut": {"type": "openocd", "permissions": {"allow_flash": True}}},
+    }
+    authoritative.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    monkeypatch.setattr(verifier, "PROBE_STATE_ROOT", tmp_path / "probe-state")
+
+    staged = verifier.probe_config(authoritative)
+    document = yaml.safe_load(staged.read_text(encoding="utf-8"))
+
+    assert staged == tmp_path / "probe-config" / "agentic-hil" / "projects" / "project-abc123" / "config.yaml"
+    assert document["state_root"] == str(tmp_path / "probe-state")
+    assert (tmp_path / "probe-state").is_dir()
+    assert {key: value for key, value in document.items() if key != "state_root"} == {
+        key: value for key, value in original.items() if key != "state_root"
+    }
+    # The file the agent wrote is evidence and stays untouched.
+    assert yaml.safe_load(authoritative.read_text(encoding="utf-8")) == original
+
+
+# Enough of a discovery result for the generation paths that fill the skeleton
+# in from attached hardware. It decides no permission and no version: what is
+# under test is whether the verifier still recognises what a generation writes.
+DISCOVERY = {
+    "ok": True,
+    "executable": str(Path(__file__).resolve()),
+    "probe_id": "STLINK123",
+    "target": {"probe_id": "STLINK123", "controller": "STM32F446RE"},
+    "com_port": {"device": "/dev/ttyACM0", "serial_number": "STLINK123"},
+}
+
+
+def generated_configuration(path: str) -> dict:
+    """What each generation path writes, read as YAML rather than as a string."""
+    skeleton = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    assert isinstance(skeleton, dict)
+    if path == "shipped template":
+        return skeleton
+    filled = apply_discovery_to_template(skeleton, DEFAULT_PROJECT_PROFILE, DISCOVERY)
+    return filled if path == "hardware discovery" else grant_every_permission(filled)
+
+
+@pytest.fixture
+def container_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """The three roots the config check reads, moved onto this host.
+
+    `safe_owned_path` walks with `os.geteuid` and `dir_fd`, so it cannot run on
+    Windows and is replaced here; what is under test is the document, and the
+    ownership walk has its own tests. `TEMPORARY_ROOT` moves aside because on
+    Linux pytest's own `tmp_path` lives under `/tmp`, which the real check
+    refuses a state root inside, for a reason that has nothing to do with this.
+    """
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace" / "project"
+    state_root = home / ".local" / "state" / "agentic-hil"
+    for directory in (home, workspace, state_root):
+        directory.mkdir(parents=True)
+    monkeypatch.setattr(verifier, "HOME", home)
+    monkeypatch.setattr(verifier, "WORKSPACE", workspace)
+    monkeypatch.setattr(verifier, "SOURCE", tmp_path / "workspace" / "source")
+    monkeypatch.setattr(verifier, "TEMPORARY_ROOT", tmp_path / "nothing-is-here")
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, root, **_: (True, str(path)))
+    return workspace, state_root
+
+
+def write_authoritative(home_root: Path, document: dict) -> Path:
+    path = home_root / ".config" / "agentic-hil" / "projects" / "project-abc123" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("path", ["shipped template", "hardware discovery", "project_config_create"])
+def test_the_config_check_accepts_what_this_release_generates(
+    container_layout: tuple[Path, Path],
+    tmp_path: Path,
+    path: str,
+) -> None:
+    """The check that stranded a whole matrix, stated as a crossing.
+
+    Both halves of that failure were the same mistake: a copy of the release's
+    own answer, kept by hand, going stale. `allow_recover` shipped and every job
+    failed on a permission the install was right to write; behind it, unread
+    because the first refusal returned, sat schema version 3. So the fixture is
+    the generation itself rather than a config written out here, and a release
+    that generates something this check does not recognise fails in its own pull
+    request.
+    """
+    workspace, state_root = container_layout
+    document = generated_configuration(path)
+    document["workspace_root"] = str(workspace)
+    document["state_root"] = str(state_root)
+
+    ok, detail = verifier.valid_authoritative_config(write_authoritative(tmp_path / "home", document))
+
+    assert ok, detail
+
+
+def test_the_config_check_still_refuses_a_permission_this_release_never_defined(
+    container_layout: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """The teeth on the whitelist: it is a whitelist, not a formality."""
+    workspace, state_root = container_layout
+    document = generated_configuration("shipped template")
+    document["workspace_root"] = str(workspace)
+    document["state_root"] = str(state_root)
+    document["permissions"]["allow_anything_at_all"] = True
+
+    ok, detail = verifier.valid_authoritative_config(write_authoritative(tmp_path / "home", document))
+
+    assert not ok
+    assert "allow_anything_at_all" in detail
+
+
+def test_the_config_check_still_refuses_a_schema_version_this_release_cannot_read(
+    container_layout: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """The teeth on the version family: accepting 3 is not accepting anything."""
+    workspace, state_root = container_layout
+    document = generated_configuration("shipped template")
+    document["workspace_root"] = str(workspace)
+    document["state_root"] = str(state_root)
+    document["version"] = max(verifier.SUPPORTED_CONFIG_VERSIONS) + 1
+
+    ok, detail = verifier.valid_authoritative_config(write_authoritative(tmp_path / "home", document))
+
+    assert not ok
+    assert "unsupported config version" in detail
