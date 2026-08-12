@@ -398,6 +398,7 @@ class AgenticHILToolService:
                 result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
             else:
                 result = self._call_unlocked(name, arguments)
+                result = self._stand_down_after_call(result)
             # A configuration that has moved since startup belongs in every
             # answer, not only in the two that name it outright: a caller reading
             # a flash result has the same reason to know that the policy it was
@@ -424,6 +425,37 @@ class AgenticHILToolService:
             if "config_status" in result:
                 return result
             return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
+
+    def _stand_down_after_call(self, result: JsonObject) -> JsonObject:
+        """End an incident this call left open that owes nobody a gate.
+
+        The last thing a call does, and deliberately the last: the run teardown
+        and the recovery-class settlement have both already run by the time this
+        is asked, so what reaches here is an incident the recovery action did not
+        settle — because the policy withheld it, because a predicate did not
+        confirm, or because there was no action to take. Under the narrowed
+        quarantine that is not a hold: the target's state is what the next reset
+        and probe say it is, and a peripheral's is what the next open says.
+
+        The envelope is corrected to match, because the call's own body stamped
+        it while the incident still stood. The reasons stay, and so does the
+        guidance keyed off them: what the call could not confirm is exactly what
+        the caller needs to read, and it is the same text the quarantine carried.
+        What goes is the claim that somebody has to clear something."""
+        if not isinstance(result, dict):
+            return result
+        stood_down = self.coordinator.stand_down()
+        if stood_down is None:
+            return result
+        self._release_recovered_leases()
+        # Attached while the flags still say quarantined, so the reasons keep the
+        # remediation text they had; `call` re-attaching it is a no-op.
+        result = attach_quarantine_guidance(result)
+        corrected = {**result, "incident_stood_down": stood_down}
+        for field in ("cleanup_required", "quarantined"):
+            if corrected.get(field) is True:
+                corrected[field] = False
+        return corrected
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -523,7 +555,13 @@ class AgenticHILToolService:
                 # attempt did not settle the incident: those calls are the
                 # remedy, and refusing them was what left an incident with no
                 # way out but a person at a shell.
-                if recovered is None and name not in recovery_class_tools():
+                #
+                # `incident_stands` rather than `blocked_before`, and that is the
+                # whole of the narrowing on this path: the attempt is unchanged,
+                # and only a broken evidence chain still refuses when it did not
+                # settle. Anything else stands down at the end of this call and
+                # the next one meets the bench with nothing on it.
+                if recovered is None and self.coordinator.incident_stands and name not in recovery_class_tools():
                     return {
                         "ok": False,
                         "tool": name,
@@ -547,7 +585,7 @@ class AgenticHILToolService:
             # A bare effect call therefore declares its own single-action run
             # here, at the one place every tool passes through, so the wrap is
             # never a thing each tool has to remember to do.
-            if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.blocked:
+            if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.incident_stands:
                 return self._in_implicit_run(name, args, lambda: self._dispatch_tool(name, args, blocked_before, action))
             return self._dispatch_tool(name, args, blocked_before, action)
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
@@ -572,8 +610,11 @@ class AgenticHILToolService:
         Never entered while a run is open (the declared run already holds
         everything, and a second declaration would be refused), and never while
         an incident stands: a new run is the stimulus class and waits for the
-        incident, while the recovery class must reach the board *through* it,
-        and wrapping either in a run it cannot open would break both.
+        one incident that still gates, while the recovery class must reach the
+        board *through* it, and wrapping either in a run it cannot open would
+        break both. An incident that is open and does not stand is not one of
+        those cases — `begin_run` lets it through, and the teardown below is
+        where its recovery action runs.
         """
         try:
             resources = implicit_run_resources(self.config, name, args)
@@ -636,7 +677,10 @@ class AgenticHILToolService:
                 poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
                 # Report the quarantine state that actually holds instead of a
                 # hardcoded claim: a poison failure must not fake protection.
-                quarantined_now = self.coordinator.blocked or any(item.state in {"cleanup_required", "quarantined"} for item in self.coordinator.leases.values())
+                # An open incident that owes no gate is not that state, so it is
+                # not reported as one; the stand-down at the end of the call is
+                # what makes the two agree.
+                quarantined_now = self.coordinator.incident_stands
                 if not isinstance(error, Exception):
                     if poison_error is not None:
                         error.args = (*error.args, f"Quarantine error: {poison_error}")
@@ -660,7 +704,7 @@ class AgenticHILToolService:
                 written = write_report(self.config, result)
                 if written.get("audit_ok") is False:
                     self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
-                    quarantined_now = self.coordinator.blocked or quarantined_now
+                    quarantined_now = self.coordinator.incident_stands or quarantined_now
                 return {**written, "cleanup_required": True, "quarantined": quarantined_now, "quarantine_id": self.coordinator.quarantine_id}
             if isinstance(error, ConfigError):
                 return {"tool": name, **error.to_dict()}
@@ -697,12 +741,16 @@ class AgenticHILToolService:
         """This bench's open incident, or None when there is none.
 
         Separate from `open_hardware_holds` because it is a different fact: a
-        quarantine can outlive every lease that produced it, and `blocked` is
-        then true with nothing held. A description reload is refused on it all
+        quarantine can outlive every lease that produced it, and it is then
+        standing with nothing held. A description reload is refused on it all
         the same — the operator is about to be asked to physically check the
         devices the incident names, and a name that meant another board by the
-        time they read it is the one thing that check cannot survive."""
-        if not self.coordinator.blocked:
+        time they read it is the one thing that check cannot survive.
+
+        Only the standing kind refuses. An incident nobody has to check is one
+        nobody is about to read a device name off, so there is nothing for a
+        rename to invalidate."""
+        if not self.coordinator.incident_stands:
             return None
         return {
             "quarantined": True,
