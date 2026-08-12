@@ -742,7 +742,7 @@ def render_list(root: Path) -> str:
     # Distinct paths, not entries: a file may hold several claims — TROUBLESHOOTING.md
     # carries requirement pins and a git-tag pin as two entries.
     files = len({location.path for location in carried})
-    built = f", built as {distribution}" if distribution != release else ""
+    built = f" (built as {distribution})" if distribution != release else ""
     lines = [f"Release version {release}{built} is carried in {files} files, {occurrences} occurrences:", ""]
     for location in carried:
         count = len(location.versions)

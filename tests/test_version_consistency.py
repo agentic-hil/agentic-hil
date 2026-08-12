@@ -470,10 +470,12 @@ def test_a_third_party_action_pin_is_not_this_projects_version(tree: Path) -> No
 
 
 def test_a_version_inside_a_longer_number_is_not_a_mention(tree: Path) -> None:
-    version = package_version(tree)
-    major, minor, patch = version.split(".")
+    """Both versions the sweep looks for, and a digit on either side of each."""
+    swept = {release_version(tree), package_version(tree)}
     (tree / "docs").mkdir(parents=True, exist_ok=True)
-    (tree / "docs" / "numbers.md").write_text(f"1{version} and {major}.{minor}.{patch}9\n", encoding="utf-8")
+    (tree / "docs" / "numbers.md").write_text(
+        "\n".join(f"1{version} and {version}9" for version in sorted(swept)) + "\n", encoding="utf-8"
+    )
 
     assert uncovered_files(tree) == []
 
@@ -579,11 +581,12 @@ def test_no_tag_is_not_a_failure(tree: Path, tag: str | None) -> None:
     assert version_problems(tree, release_tag=tag) == []
 
 
-def test_the_release_tag_is_accepted_with_and_without_its_v(tree: Path) -> None:
-    version = package_version(tree)
+def test_the_release_tag_is_accepted_with_and_without_its_v(released_tree: Path) -> None:
+    """A release commit, because that is the only tree a tag is ever cut from."""
+    version = package_version(released_tree)
 
-    assert version_problems(tree, release_tag=f"v{version}") == []
-    assert version_problems(tree, release_tag=version) == []
+    assert version_problems(released_tree, release_tag=f"v{version}") == []
+    assert version_problems(released_tree, release_tag=version) == []
 
 
 @pytest.mark.parametrize(
