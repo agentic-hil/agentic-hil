@@ -19,12 +19,15 @@ from agentic_hil.can import CanBusService, normalize_received_frames, payload_fr
 from agentic_hil.cli import debugger_probes, entrypoint
 from agentic_hil.config import ConfigError, config_digest, config_schema, debugger_config, load_config
 from agentic_hil.coordination import (
+    ATTESTATION_NO_STANDING_STATE,
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
     RETRYABLE_CLEANUP_REASONS,
     CoordinationError,
     HardwareCoordinator,
     _LifetimeLock,
+    debugger_effect_resources,
+    nothing_standing_result,
     resource_digest,
 )
 from agentic_hil.devices import config_devices
@@ -151,22 +154,26 @@ def test_lifetime_lock_rejects_final_component_symlink(tmp_path: Path) -> None:
     assert lock.descriptor == -1
 
 
-def test_stale_resource_keeps_project_cleanup_required(tmp_path: Path) -> None:
+def test_a_stale_resource_marker_is_adopted_without_holding_the_device(tmp_path: Path) -> None:
+    """The marker a dead owner left names an unconfirmed target, and a target is
+    exactly what the next reset and probe speak for. So the acquire goes through
+    and the incident is adopted rather than refused: adopted, because the owner
+    that takes the device is the one whose teardown runs the recovery action;
+    not refused, because holding the bench for it would ask a person to confirm
+    what this owner's own next call establishes."""
     config = config_for(tmp_path)
     coordinator = HardwareCoordinator(config, "stale-resource")
     resource = "physical:stale"
     coordinator._write_record(resource, coordinator._base_record("active", [resource]))
     coordinator._write_record(coordinator.project_key, coordinator._base_record("released", []))
 
-    with pytest.raises(CoordinationError) as excinfo:
-        coordinator.acquire(resource)
+    lease = coordinator.acquire(resource)
 
-    assert excinfo.value.result["error_type"] == "resource_quarantined"
-    status = coordinator.status()
-    assert status["blocked"] is True
-    assert status["record"]["state"] == "cleanup_required"
-    assert status["record"]["resources"] == [resource]
-    assert coordinator.recover(safe_state_confirmed=True, quarantine_id=status["quarantine_id"])["ok"] is True
+    assert lease.state == "active"
+    assert coordinator.blocked is True
+    assert coordinator.incident_stands is False
+    assert coordinator.incident_resources == {resource}
+    assert lease.release() is True
 
 
 def test_process_cleanup_is_scoped_to_service_owner() -> None:
@@ -215,7 +222,7 @@ def test_direct_process_service_reaps_owned_orphans_before_close(
     assert service.coordinator._state == "closed"
 
 
-def test_killed_owner_requires_explicit_recovery(tmp_path: Path) -> None:
+def test_a_killed_owner_hands_its_devices_back_without_a_ritual(tmp_path: Path) -> None:
     config_path = write_config(tmp_path)
     marker = tmp_path / "owner-ready"
     script = """
@@ -245,17 +252,18 @@ time.sleep(60)
 
     config = load_config(str(config_path))
     coordinator = HardwareCoordinator(config, "recovery")
-    with pytest.raises(CoordinationError) as excinfo:
-        coordinator.acquire("physical:crash-test")
-    assert excinfo.value.result["error_type"] == "resource_quarantined"
-
-    denied = coordinator.recover(safe_state_confirmed=False)
-    assert denied["error_type"] == "operator_confirmation_required"
-    quarantine_id = coordinator.status()["quarantine_id"]
-    recovered = coordinator.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)
-    assert recovered["ok"] is True
+    # The killed owner left an unconfirmed target, which is what the next reset
+    # and probe answer for. So the device comes back to the next owner with the
+    # incident adopted and no ritual in front of it, and `recover` says exactly
+    # that rather than inventing an error over a bench that is fine.
     lease = coordinator.acquire("physical:crash-test")
+    assert lease.state == "active"
+    assert coordinator.blocked is True
+    assert coordinator.incident_stands is False
     assert lease.release() is True
+    status = coordinator.status()
+    assert status["incident_stands"] is False
+    assert nothing_standing_result(status)["nothing_to_recover"] is True
     coordinator.close()
 
 
@@ -659,7 +667,7 @@ def test_close_retries_lock_release_failure(tmp_path: Path, monkeypatch: pytest.
     assert coordinator._state == "closed"
 
 
-def test_stale_multi_resource_incident_marks_every_resource_for_recovery(tmp_path: Path) -> None:
+def test_a_stale_multi_resource_incident_is_adopted_whole_without_marking_a_device(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     setup = HardwareCoordinator(config, "setup")
     resources = ["physical:first", "physical:second"]
@@ -668,16 +676,16 @@ def test_stale_multi_resource_incident_marks_every_resource_for_recovery(tmp_pat
         setup._write_record(resource, active)
     setup._write_record(setup.project_key, setup._base_record("released", []))
 
-    with pytest.raises(CoordinationError):
-        setup.acquire(resources[0])
+    lease = setup.acquire(resources[0])
 
-    status = setup.status()
-    for resource in resources:
-        marker = setup._read_record(resource)
-        assert marker["state"] == "quarantined"
-        assert marker["resources"] == resources
-        assert marker["quarantine_id"] == status["quarantine_id"]
-    assert setup.recover(safe_state_confirmed=True, quarantine_id=status["quarantine_id"])["ok"] is True
+    # Every resource the dead owner held is still what the adopted incident
+    # names, so the recovery action at this owner's teardown answers for all of
+    # them. What no longer happens is the quarantine marker beside each one: the
+    # device that was taken carries this owner's own active record instead.
+    assert setup.incident_resources == set(resources)
+    assert setup.incident_stands is False
+    assert setup._read_record(resources[0])["state"] == "active"
+    assert lease.release() is True
 
 
 def test_foreign_project_incident_is_not_rewritten(tmp_path: Path) -> None:
@@ -762,11 +770,20 @@ def test_recovery_requires_current_quarantine_id(tmp_path: Path) -> None:
 
 
 def quarantined_coordinator(tmp_path: Path) -> tuple[HardwareCoordinator, str, str]:
+    """A bench left standing, which since #216 means one whose audit broke.
+
+    The reason moved and nothing else did. Every test below is about
+    `recover`'s transition: marker consistency, the evidence-first ledger
+    write, two recoveries racing. That transition is the one an operator
+    still performs, on the one family a later contact cannot re-establish. A
+    reason outside it no longer produces a standing incident to recover, so
+    building these on one would have been testing the mechanics through a state
+    the product no longer has."""
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "owner")
     resource = "physical:incident"
     lease = owner.acquire(resource)
-    lease.quarantine("test_incident")
+    lease.quarantine("test_audit_broken", audit_broken=True)
     quarantine_id = str(owner.status()["quarantine_id"])
     owner.close()
     return HardwareCoordinator(config, "recovery"), resource, quarantine_id
@@ -917,7 +934,7 @@ def test_discovery_stops_when_audit_is_unavailable(tmp_path: Path, monkeypatch: 
         ("can_buses", "send", "can_send", {"bus_id": "bench", "frame_id": "0x123", "data_hex": "01"}),
     ],
 )
-def test_unknown_hardware_exception_poisons_active_lease(
+def test_unknown_hardware_exception_contains_the_lease_then_stands_it_down(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error: BaseException,
@@ -927,10 +944,11 @@ def test_unknown_hardware_exception_poisons_active_lease(
     arguments: dict,
 ) -> None:
     # `auto_recover: off` on purpose. What this test is about is containment: an
-    # exception nobody classified poisons the lease that was open and blocks the
-    # bench. A bare effect call now declares an implicit single-action run, and
-    # that run's teardown would recover the incident this test needs standing —
-    # correct behaviour, and a different question, tested where it belongs in
+    # exception nobody classified poisons the lease that was open, and it stays
+    # poisoned for the length of the call. A bare effect call declares an
+    # implicit single-action run, and that run's teardown would recover the
+    # incident rather than merely stand it down, which is correct behaviour and
+    # a different question, tested where it belongs in
     # tests/test_implicit_single_action_run.py. The policy that governs it is a
     # supported setting, so turning it off here separates the two rather than
     # working around one of them.
@@ -947,21 +965,33 @@ def test_unknown_hardware_exception_poisons_active_lease(
         if isinstance(error, Exception):
             result = service.call(tool, arguments)
             assert result["error_type"] == "hardware_action_exception"
-            assert result["quarantined"] is True
+            # Contained while the call ran, and named on the way out: the reason
+            # is in the ledger and the answer says the incident ended. What is
+            # gone is the hold, because an exception nobody classified says the
+            # target's state is unknown, and unknown is what the next reset and
+            # probe are for.
+            assert result["quarantined"] is False
+            assert result["incident_stood_down"]["reasons"] == ["unknown_hardware_exception"]
+            # And the device goes back with it. The call that took the lease is
+            # over, no session owns it, and a lease the incident used to keep
+            # would otherwise sit registered for the rest of the process.
+            assert lease.state == "released"
+            assert service.coordinator.blocked is False
         else:
             with pytest.raises(type(error)):
                 service.call(tool, arguments)
-        assert lease.state == "cleanup_required"
-        assert service.coordinator.blocked is True
-        assert service.call(tool, arguments)["error_type"] == "resource_quarantined"
+            # An interrupt never returns through the seam that stands an
+            # incident down, so the containment is exactly what it was.
+            assert lease.state == "cleanup_required"
+            assert service.coordinator.blocked is True
+        assert service.coordinator.incident_stands is False
     finally:
         service.close()
     next_owner = HardwareCoordinator(config, "next-owner")
-    with pytest.raises(CoordinationError) as excinfo:
-        next_owner.acquire("physical:exception")
-    assert excinfo.value.result["error_type"] == "resource_quarantined"
-    quarantine_id = next_owner.status()["quarantine_id"]
-    assert next_owner.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)["ok"] is True
+    reclaimed = next_owner.acquire("physical:exception")
+    assert reclaimed.state == "active"
+    assert next_owner.incident_stands is False
+    assert reclaimed.release() is True
 
 
 def test_foreign_project_marker_is_not_adopted_by_new_owner(tmp_path: Path) -> None:
@@ -1001,10 +1031,13 @@ def test_hardware_exception_with_busy_project_lock_stays_fail_closed(tmp_path: P
         result = service.call("com_write", {"port_id": "dut", "text": "x"})
 
         assert result["error_type"] == "hardware_action_exception"
-        assert result["quarantined"] is True
+        # The poison could not even be persisted, because another owner holds
+        # the project lock. That failure is still named, and the answer still
+        # refuses; what it no longer does is claim a quarantine, because the
+        # reason is one the next contact settles and the seam ended it.
+        assert result["quarantined"] is False
         assert "quarantine_error" in result
-        assert service.coordinator.blocked is True
-        assert service.call("com_write", {"port_id": "dut", "text": "x"})["error_type"] == "resource_quarantined"
+        assert service.coordinator.incident_stands is False
     finally:
         service.close()
         other.close()
@@ -1037,9 +1070,10 @@ def test_release_resource_write_fault_blocks_and_stays_retryable(tmp_path: Path,
     assert coordinator.blocked is True
     assert all(lock.locked for lock in lease.locks)
 
-    with pytest.raises(CoordinationError) as own_acquire:
-        coordinator.acquire("physical:second-resource")
-    assert own_acquire.value.result["error_type"] == "resource_quarantined"
+    # The incident is open and the release is retryable, and neither of those
+    # refuses a second acquire any more: an unconfirmed release names no
+    # hardware at all, so there is nothing for a person to check.
+    assert coordinator.incident_stands is False
 
     second_owner = HardwareCoordinator(coordinator.config, "second")
     with pytest.raises(CoordinationError) as foreign_acquire:
@@ -1065,9 +1099,9 @@ def test_release_fault_with_total_write_failure_still_blocks_in_memory(tmp_path:
     assert lease.state == "cleanup_required"
     assert coordinator.blocked is True
     assert lease.errors and all(error.get("reason") == "lease_release_unconfirmed" for error in lease.errors)
-
-    with pytest.raises(CoordinationError):
-        coordinator.acquire("physical:other")
+    # Blocking in memory is the containment; refusing the next acquire was the
+    # gate, and a gate is owed only where the missing proof cannot come back.
+    assert coordinator.incident_stands is False
 
     restore_write_record(coordinator, monkeypatch)
     assert lease.release() is True
@@ -1155,7 +1189,7 @@ def test_recovery_resumes_idempotently_after_each_partial_persist_fault(tmp_path
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "owner")
     lease = owner.acquire("physical:part-a", "physical:part-b")
-    lease.quarantine("incident")
+    lease.quarantine("incident_audit_broken", audit_broken=True)
     quarantine_id = str(owner.status()["quarantine_id"])
     owner.close()
 
@@ -1223,7 +1257,7 @@ def test_recovery_config_change_requires_explicit_audited_override(tmp_path: Pat
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "owner")
     lease = owner.acquire("physical:config-change")
-    lease.quarantine("incident")
+    lease.quarantine("incident_audit_broken", audit_broken=True)
     quarantine_id = str(owner.status()["quarantine_id"])
     recorded_sha = owner.config_sha256
     owner.close()
@@ -1543,7 +1577,7 @@ def test_adopted_lease_less_incident_survives_unrelated_release(tmp_path: Path) 
     config = config_for(tmp_path)
     owner = HardwareCoordinator(config, "owner")
     lease_b = owner.acquire("physical:healthy-b")
-    owner._write_record("physical:orphan-x", {**owner._base_record("quarantined", ["physical:orphan-x"]), "quarantine_id": "prior-incident", "reason": "prior_dead_owner"})
+    owner._write_record("physical:orphan-x", {**owner._base_record("quarantined", ["physical:orphan-x"]), "quarantine_id": "prior-incident", "reason": "prior_dead_owner_audit_broken"})
 
     with pytest.raises(CoordinationError):
         owner.acquire("physical:orphan-x")
@@ -1640,13 +1674,26 @@ DETECTED_PROBE = {"ok": True, "tool": "probe_target", "target_detected": True, "
 
 
 def quarantined_probe_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgenticHILToolService:
-    """A service whose one-shot probe_target left a retryable incident behind."""
+    """A service holding the retryable incident a one-shot probe_target leaves.
+
+    Raised straight through the coordinator, and the lease parked where the
+    one-shot parks it, rather than by letting a failing `probe_target` call
+    produce it. Since #216 a call that returns does not leave an incident
+    standing behind it, so a tool call cannot set this state up any more: what
+    still reaches the acquire path is an incident that outlived the call that
+    raised it because the call never came back through the seam that ends one,
+    an interrupt or an owner that died holding the bench. That is the state
+    every test below is about, so it is the state built here, and the failing
+    result the reason comes from is pinned in
+    test_quarantine_triggers.py instead."""
     service = AgenticHILToolService(config_for(tmp_path))
     monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
-    first = service.call("probe_target")
-    assert first["quarantined"] is True, first
-    assert first["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON], first
+    lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
+    lease.quarantine(DEBUGGER_READONLY_RESULT_REASON)
+    service._quarantined_lease = lease
     assert service.coordinator.blocked is True
+    assert service.coordinator.incident_stands is False
+    assert lease.cleanup_reasons() == [DEBUGGER_READONLY_RESULT_REASON]
     return service
 
 
@@ -1737,8 +1784,14 @@ def test_machine_recovery_refuses_while_the_probe_stays_unreachable(tmp_path: Pa
         # fails against an unreachable probe, so the thing this test guards is
         # unchanged: nothing clears an incident it could not verify.
         assert "incident_resolved" not in attempted
-        assert service.coordinator.status()["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
-        assert service.coordinator.blocked is True
+        # It also ends, and the difference between the two is the whole tooth:
+        # the ledger line says nothing attested anything, never that a recovery
+        # action verified a target it could not reach.
+        assert attempted["incident_stood_down"]["reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        assert service.coordinator.blocked is False
+        last = json.loads((service.coordinator.root / "recovery.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        assert last["attestation"] == ATTESTATION_NO_STANDING_STATE
+        assert last["recovery"] == "incident_stood_down"
     finally:
         service.close()
 
@@ -1754,11 +1807,19 @@ HALTED_RESET = {"ok": True, "tool": "reset_target", "mode": "halt", "summary": "
 
 
 def quarantined_reset_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config_kwargs) -> AgenticHILToolService:
-    """A service whose unconfirmed reset_target left an effect-class incident behind."""
+    """A service holding the effect-class incident an unconfirmed reset leaves.
+
+    Raised through the coordinator for the reason `quarantined_probe_service`
+    gives: since #216 an incident does not outlive the call that raised it, and
+    the acquire path answers for the one that did because its call never
+    returned. The failing `reset_target` result and its reason are pinned in
+    test_quarantine_triggers.py and test_run_abort_recovery.py."""
     service = AgenticHILToolService(config_for(tmp_path, **config_kwargs))
     monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(UNCONFIRMED_RESET))
-    first = service.call("reset_target", {"mode": "run"})
-    assert first["cleanup_reasons"] == ["debugger_result_unconfirmed"], first
+    lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
+    lease.quarantine("debugger_result_unconfirmed")
+    service._quarantined_lease = lease
+    assert lease.cleanup_reasons() == ["debugger_result_unconfirmed"]
     assert service.coordinator.blocked is True
     return service
 
@@ -1777,8 +1838,13 @@ def test_readonly_policy_leaves_an_unconfirmed_reset_to_the_operator(tmp_path: P
         # attests reachability and nothing about a core that may be running, so
         # the incident stays with the operator exactly as before.
         assert "incident_resolved" not in attempted
-        assert service.coordinator.blocked is True
-        assert service.coordinator.status()["auto_recoverable"] is False
+        # The reason is still outside what this policy may settle, which is what
+        # decides that no attestation is written. The incident ends unattested
+        # instead of waiting for a person, and the ledger keeps the difference.
+        assert attempted["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
+        last = json.loads((service.coordinator.root / "recovery.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        assert last["attestation"] == ATTESTATION_NO_STANDING_STATE
     finally:
         service.close()
 
@@ -1826,7 +1892,16 @@ def test_reset_halt_policy_degrades_without_allow_reset(tmp_path: Path, monkeypa
     service = AgenticHILToolService(config_for(tmp_path, auto_recover="reset_halt", permissions=grants))
     try:
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
-        assert service.call("probe_target")["quarantined"] is True
+        # `off` withholds the recovery action, and with nothing to attest the
+        # incident ends where every unattested one now ends: at the seam, with a
+        # ledger line and no hold. The reason is still on the result.
+        first = service.call("probe_target")
+        assert first["quarantined"] is False
+        assert first["cleanup_reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        assert first["incident_stood_down"]["reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
+        quarantined = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        quarantined.quarantine(DEBUGGER_READONLY_RESULT_REASON)
+        service._quarantined_lease = quarantined
 
         # The read-only class still recovers; the config may name the stronger
         # predicate, but the bound probe does not authorize the reset it needs.
@@ -1843,10 +1918,19 @@ def test_off_policy_recovers_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     service = AgenticHILToolService(config_for(tmp_path, auto_recover="off"))
     try:
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(UNCONFIRMED_PROBE))
-        assert service.call("probe_target")["quarantined"] is True
+        # Nothing recovers under `off`, so the failing call leaves the reason on
+        # its result and no hold behind it.
+        first = service.call("probe_target")
+        assert first["quarantined"] is False
+        assert first["incident_stood_down"]["reasons"] == [DEBUGGER_READONLY_RESULT_REASON]
         assert service.coordinator.recoverable_reasons() == frozenset()
-        assert service.coordinator.status()["auto_recoverable"] is False
 
+        # And with the incident rebuilt by hand, the policy still refuses to
+        # settle it however reachable the probe is.
+        held = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        held.quarantine(DEBUGGER_READONLY_RESULT_REASON)
+        service._quarantined_lease = held
+        assert service.coordinator.status()["auto_recoverable"] is False
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
         assert service._attempt_machine_recovery() is None
         assert service.coordinator.blocked is True
@@ -1908,9 +1992,10 @@ def test_a_defaulted_policy_warns_once_when_it_first_drives_the_target(tmp_path:
         assert "recovery.auto_recover is not named" in first["warnings"][0]
 
         # Second incident, same project state: the operator has been told once.
-        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(UNCONFIRMED_RESET))
-        assert service.call("reset_target", {"mode": "run"})["quarantined"] is True
-        monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(HALTED_RESET))
+        second_lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        second_lease.quarantine("debugger_result_unconfirmed")
+        service._quarantined_lease = second_lease
+        assert service.coordinator.blocked is True
         second = service._attempt_machine_recovery()
         assert second is not None
         assert "warnings" not in second
@@ -1947,7 +2032,7 @@ def test_machine_recovery_refuses_a_broken_audit(tmp_path: Path, monkeypatch: py
         service.close()
 
 
-def test_machine_recovery_refuses_an_incident_adopted_from_a_dead_owner(tmp_path: Path) -> None:
+def test_a_readonly_predicate_still_refuses_an_incident_adopted_from_a_dead_owner(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     resource = "physical:dead-owner"
     dead = HardwareCoordinator(config, "dead")
@@ -1955,12 +2040,16 @@ def test_machine_recovery_refuses_an_incident_adopted_from_a_dead_owner(tmp_path
     dead._write_record(dead.project_key, dead._base_record("released", []))
 
     successor = HardwareCoordinator(config, "successor")
-    with pytest.raises(CoordinationError):
-        successor.acquire(resource)
+    lease = successor.acquire(resource)
 
-    # Nothing this process did produced the incident, so nothing it can read
-    # tells it what the dead owner left behind on the bench.
+    # The device comes back, because a dead owner's unconfirmed target is what
+    # the next reset and probe answer for. What has not changed is the refusal
+    # this test is named for: the default read-only predicate settles nothing
+    # here, so the adopted incident is not one `retryable_incident` reports
+    # under it, and the reset-into-halt route is the only one that can.
+    assert lease.state == "active"
     assert successor.blocked is True
+    assert successor.incident_stands is False
     assert successor.retryable_incident() is None
     assert successor.status()["auto_recoverable"] is False
     successor.close()

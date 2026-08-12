@@ -33,7 +33,7 @@ directly.
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
-| Hardware is quarantined and nothing physical was part of it | `hardware_recover` |
+| The bench is quarantined on a broken audit trail | `hardware_recover` |
 | Update Agentic HIL itself to the newest release | `server_upgrade` |
 
 Declare a multi-step sequence before its first call: `bench_run_start` with
@@ -72,34 +72,44 @@ that would not open, a read whose backend reports that no target answered)
 carries `target_contacted: false`, `retry_safe: true` and no
 `quarantined: true`: the bench stays in service, so report the named cause, fix
 it or ask for it to be fixed, and retry. Being a read is not the proof; the
-backend's claim is. `probe_target` and `debugger_probes_list` quarantine like
-anything else when the backend named no abort point (a call killed at its
+backend's claim is. `probe_target` and `debugger_probes_list` open an incident
+like anything else when the backend named no abort point (a call killed at its
 deadline, an exit without complete confirmation), because an SWD attach halts
-the core and nothing there says whether it got that far. `quarantined: true`
-means the physical state is genuinely unknown. An incident is not a padlock on
-the bench: a failed run aborts with its verdict, the abort drives a recovery
-action, and the calls that *are* the remedy (`probe_target`, `reset_target`,
-`flash_firmware`) keep working while the incident stands. What waits for it is
-the stimulus class: `com_write`, `can_send`, session starts, new runs. So put
-the target back into a known state and carry on. A recovery action that answers
-the reason the incident names clears it, with a ledger line. A refusal carrying
-`auto_recovery_attempted: true` means the automatic attempt already ran and did
-not confirm the safe state, so drive the reset yourself or ask. Relay the
-result's `quarantine_guidance` entries to the operator (per reason: what was
-attempted, what is confirmed, what remains unknown, and the `physical_check` to
-perform on the board), and then clear what is left with `hardware_recover`,
-below, carrying their statement rather than sending them to a shell. Never
-clear the server's own state files yourself.
+the core and nothing there says whether it got that far.
 
-`hardware_recover` is how you clear what is left. With no arguments it clears
-an incident whose every reason names a call that never reached the hardware: a
-release that could not persist its own record, an owner process that died before
-it touched the board. Everything else is refused with
-`recovery_requires_physical_check`, and that refusal tells you what to do:
-**ask the operator, in chat, and pass back what they say** as
-`operator_statement`. Show them the result's `quarantine_guidance` while you
-ask, then call again with their answer in their words. It goes into the recovery
-ledger verbatim, recorded as their statement relayed by you.
+An incident is not a padlock on the bench, and since the quarantine narrowed it
+is not even a state that outlives the call. A failed run aborts with its
+verdict, the abort drives a recovery action (reap, reset into halt where the
+policy and the probe's grants allow it, then a probe re-read), and a recovery
+that answers the reason the incident names clears it with a ledger line. What
+the recovery did not settle stands down when the call ends, with its own ledger
+line: the target's state is what the next reset and probe say it is, a serial
+handle's and a CAN adapter's is what their next open says, and the operating
+system refuses a handle that is really still held without anybody being asked.
+So put the target back into a known state and carry on; the result's
+`cleanup_reasons` and `quarantine_guidance` still tell you what was left
+unconfirmed and what to check, and reading them is the point of them.
+
+`quarantined: true` now means one thing: the evidence chain for this bench
+could not be written or read (`*_audit_broken`). That one holds the bench,
+because no reset writes a report that was never written. The calls that *are*
+the remedy (`probe_target`, `reset_target`, `flash_firmware`) keep working while
+it stands; the stimulus class (`com_write`, `can_send`, session starts, new
+runs) waits for it. Relay the result's `quarantine_guidance` entries to the
+operator (per reason: what was attempted, what is confirmed, what remains
+unknown, and the `physical_check` to perform on the board), then clear it with
+`hardware_recover`, below, carrying their statement rather than sending them to
+a shell. Never clear the server's own state files yourself.
+
+`hardware_recover` is how you clear that one. On a bench with nothing standing
+it answers `ok` with `nothing_to_recover: true` and changes nothing, so it is
+free to call and never the thing to reach for after an ordinary failed run. A
+standing quarantine is refused with `recovery_requires_physical_check`, and that
+refusal tells you what to do: **ask the operator, in chat, and pass back what
+they say** as `operator_statement`. Show them the result's
+`quarantine_guidance` while you ask, then call again with their answer in their
+words. It goes into the recovery ledger verbatim, recorded as their statement
+relayed by you.
 
 Never write an `operator_statement` you were not given, and never strengthen one
 on the way through. The ledger names you as the actor who cleared the bench, so
@@ -113,12 +123,14 @@ their sentence instead of sending them hunting for a shell.
 
 An incident inherited from a process that died holding the bench
 (`owner_process_exited_without_release`) is not yours to hand to a person
-either, on a bench whose `recovery.auto_recover` is `reset_halt`: the next
-`probe_target`, `reset_target` or `flash_firmware` drives the target into a
-defined state, reads it back, and clears the incident on that evidence, because
-what the dead owner left unconfirmed is exactly what the reset erased. If
-`permissions.allow_recover` is false, this bench has decided its incidents are
-the operator's, and the answer is the `operator_command` and nothing else.
+either, and on a bench whose `recovery.auto_recover` is `reset_halt` it is not
+even yours to work around: the next `probe_target`, `reset_target` or
+`flash_firmware` drives the target into a defined state, reads it back, and
+clears the incident on that evidence, because what the dead owner left
+unconfirmed is exactly what the reset erased. Where that cannot run or does not
+confirm, the incident stands down anyway and the next call meets the bench with
+nothing on it, so the next probe refusing is the honest answer about the board
+rather than a leftover hold.
 
 `com_port_identity_mismatch` is a refusal about *which board*, not about
 permissions. A serial device name (`/dev/ttyACM0`, `COM7`) is an enumeration

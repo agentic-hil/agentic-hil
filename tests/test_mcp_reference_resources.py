@@ -383,7 +383,10 @@ def test_a_toolchain_that_confirmed_nothing_publishes_no_abort_point_to_the_refe
     assert result["ok"] is False
     assert result["backend_error_type"] == "probe_unconfirmed"
     assert result["error_type"] == "target_state_unconfirmed"
-    assert result["quarantined"] is True
+    # The reason is unchanged and the bench is not held for it: since #216 an
+    # unconfirmed target is what the next reset and probe speak for.
+    assert result["quarantined"] is False
+    assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
 
     assert result["remediation"] == entry["remediation"]
     assert entry["meaning"] == catalogue_entry(f"target_state_unconfirmed:{backend}")["meaning"]
@@ -427,10 +430,14 @@ def test_a_partial_confirmation_is_not_described_as_an_absent_one(
         tools.close()
 
     # Same branch as the markerless fixtures: still no abort point, still
-    # quarantined. Only the evidence published alongside it differs.
+    # the reason a re-read may not settle. Only the evidence published
+    # alongside it differs.
     assert result["backend_error_type"] == "probe_unconfirmed"
     assert result["error_type"] == "target_state_unconfirmed"
-    assert result["quarantined"] is True
+    # The reason is unchanged and the bench is not held for it: since #216 an
+    # unconfirmed target is what the next reset and probe speak for.
+    assert result["quarantined"] is False
+    assert result["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
 
     assert present in f"{log['stdout']}{log['stderr']}"
     assert result["operation_result"]["confirmed"] is False

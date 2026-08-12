@@ -24,6 +24,7 @@ from conftest import write_config
 
 from agentic_hil.config import load_config
 from agentic_hil.coordination import (
+    ATTESTATION_NO_STANDING_STATE,
     ATTESTATION_RECOVERY_ACTION,
     LEASE_RELEASE_RETRY_REASON,
     RECOVERY_ACTION_VIA,
@@ -176,6 +177,25 @@ def ledger(config) -> list[dict]:
 
 def recovery_action_lines(config) -> list[dict]:
     return [line for line in ledger(config) if line.get("via") == RECOVERY_ACTION_VIA]
+
+
+def adopt_dead_owner(service: AgenticHILToolService) -> str:
+    """Inherit the dead owner's incident the way a run's first lease does.
+
+    `hardware_lease_status` used to be the shortest way to set this up. Since
+    #216 a status read of a bench whose incident does not stand ends it, with a
+    ledger line and no hold, because a status read runs no recovery action and
+    holding a bench for an answer nobody is going to give is the thing the issue
+    removed. So these tests take the incident through `acquire`, which is where
+    a run actually inherits one and which keeps it open precisely so the run's
+    teardown can answer it."""
+    coordinator = service.coordinator
+    status = coordinator.status()
+    reasons = status["cleanup_reasons"]
+    assert reasons == [DEAD_OWNER_REASON], status
+    incident = coordinator.quarantine_id
+    assert isinstance(incident, str)
+    return incident
 
 
 def failing_flash_plan(tmp_path: Path):
@@ -545,15 +565,20 @@ def test_the_recovery_class_runs_during_an_incident(tmp_path: Path, tool: str) -
         ("bench_run_start", {"devices": [{"kind": "debugger"}]}),
     ],
 )
-def test_the_stimulus_class_stays_behind_the_incident(tmp_path: Path, tool: str, arguments: dict) -> None:
+def test_the_stimulus_class_stays_behind_the_standing_incident(tmp_path: Path, tool: str, arguments: dict) -> None:
     """The other half of the boundary, and the reason it is not simply "physical
     calls are refused": a reset drives the target harder than a `com_write`
     does. What separates them is what the call is for. A measurement taken
-    across an unresolved incident is one nobody can stand behind afterwards."""
+    across an unresolved incident is one nobody can stand behind afterwards.
+
+    Since #216 the incident that is unresolved in that sense is the audit halt,
+    where the evidence chain a measurement would be recorded into is what broke.
+    The reason moved and the boundary did not: the recovery class still reaches
+    the board through it, and the stimulus class still waits."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
-        quarantine(service, "safe_state_unconfirmed")
+        quarantine(service, "safe_state_unconfirmed", audit_broken=True)
         result = service.call(tool, arguments)
 
         assert result["ok"] is False, result
@@ -602,8 +627,14 @@ def test_a_read_only_probe_does_not_settle_what_only_a_reset_can(tmp_path: Path)
         result = service.call("probe_target", {})
 
         assert result["ok"] is True, result
+        # Not settled: no `incident_resolved`, and the ledger line the incident
+        # did leave says nothing attested anything. A re-read that had been let
+        # settle this would have written `recovery_action_verified` over a core
+        # it never looked at, which is the thing this test exists to forbid.
         assert "incident_resolved" not in result
-        assert service.coordinator.status()["blocked"] is True
+        assert result["incident_stood_down"]["reasons"] == [RESET_REASON]
+        assert [line["attestation"] for line in ledger(config)] == [ATTESTATION_NO_STANDING_STATE]
+        assert service.coordinator.status()["blocked"] is False
     finally:
         service.close()
 
@@ -616,7 +647,6 @@ def test_a_follow_up_run_starts_without_a_ritual(tmp_path: Path) -> None:
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
         quarantine(service, RESET_REASON)
-        assert service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})["ok"] is False
 
         service.recover_after_failed_run(["dut"])
         started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
@@ -700,7 +730,7 @@ def test_the_dead_owner_incident_the_run_inherited_is_settled_by_the_recovery_ac
     backend = FakeBackend()
     service = AgenticHILToolService(config, backend=backend)
     try:
-        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+        assert adopt_dead_owner(service)
         incident = service.coordinator.quarantine_id
 
         recovery = service.recover_after_failed_run(["dut"])
@@ -755,17 +785,19 @@ def test_the_inherited_incident_leaves_no_marker_behind_and_the_next_run_starts(
     assert len(recovery_action_lines(config)) == 1, ledger(config)
 
 
-def test_a_failed_recovery_leaves_the_inherited_incident_for_the_next_call(tmp_path: Path) -> None:
+def test_a_failed_recovery_leaves_no_hold_and_the_next_call_answers_for_itself(tmp_path: Path) -> None:
     """Failing closed, then converging. A board with no power refuses the reset,
-    the incident stays exactly as it was and the recovery-class call that runs
-    against it is refused too, the escalation as it has always been. Once the
-    board answers, the next confirmed reset settles it with one ledger line, and
-    nobody was asked for anything."""
+    nothing is attested, and the incident ends where every unattested one now
+    ends: at the seam, with a ledger line saying so. The escalation is the
+    board's own, and it is the whole of what #216 relies on here, because the
+    next call meets a bench with no hold and fails on exactly the same evidence
+    for exactly as long as the board stays dark. Once it answers, the call
+    simply succeeds, and nobody was asked for anything."""
     config = leave_contacted_dead_owner(tmp_path)
     backend = FakeBackend(reset_ok=False)
     service = AgenticHILToolService(config, backend=backend)
     try:
-        incident = service.coordinator.status()["quarantine_id"]
+        incident = adopt_dead_owner(service)
 
         failed = service.recover_after_failed_run(["dut"])
         assert failed["outcome"] == "failed", failed
@@ -774,14 +806,17 @@ def test_a_failed_recovery_leaves_the_inherited_incident_for_the_next_call(tmp_p
         assert service.coordinator.quarantine_id == incident
         assert recovery_action_lines(config) == []
 
-        # The board is still dark: the remedy call escalates rather than
-        # pretending, exactly as it does today.
+        # The board is still dark: the remedy call fails on its own evidence
+        # rather than pretending. What it no longer does is answer
+        # `resource_quarantined` on top of that, because the incident it ran
+        # under owes nobody a signature and ended when the call did.
         dark = service.call("reset_target", {"mode": "halt"})
         assert dark["ok"] is False, dark
-        assert dark["error_type"] == "resource_quarantined"
-        assert service.coordinator.status()["blocked"] is True
+        assert dark.get("error_type") != "resource_quarantined"
+        assert dark["incident_stood_down"]["reasons"] == [DEAD_OWNER_REASON]
+        assert service.coordinator.status()["blocked"] is False
 
-        # Somebody plugs the board back in.
+        # Somebody plugs the board back in, and the next call is simply a call.
         backend.reset_ok = True
         recovered = service.call("reset_target", {"mode": "halt"})
 
@@ -790,11 +825,12 @@ def test_a_failed_recovery_leaves_the_inherited_incident_for_the_next_call(tmp_p
     finally:
         service.close()
 
-    lines = recovery_action_lines(config)
-    assert len(lines) == 1, ledger(config)
-    assert lines[0]["reason"] == DEAD_OWNER_REASON
-    assert lines[0]["actor"] == RECOVERY_ACTOR_SERVER
-    assert lines[0]["attestation"] == ATTESTATION_RECOVERY_ACTION
+    # No recovery action ever confirmed anything here, so no line claims one.
+    assert recovery_action_lines(config) == []
+    stood_down = [line for line in ledger(config) if line.get("recovery") == "incident_stood_down"]
+    assert [line["reasons"] for line in stood_down] == [[DEAD_OWNER_REASON]]
+    assert stood_down[0]["actor"] == RECOVERY_ACTOR_SERVER
+    assert stood_down[0]["attestation"] == ATTESTATION_NO_STANDING_STATE
 
 
 def test_a_readonly_bench_never_settles_the_inherited_incident_by_reading(tmp_path: Path) -> None:
@@ -806,7 +842,7 @@ def test_a_readonly_bench_never_settles_the_inherited_incident_by_reading(tmp_pa
     backend = FakeBackend()
     service = AgenticHILToolService(config, backend=backend)
     try:
-        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+        assert adopt_dead_owner(service)
 
         recovery = service.recover_after_failed_run(["dut"])
 
@@ -862,7 +898,7 @@ def test_an_inherited_incident_with_a_broken_audit_stays_with_the_operator(tmp_p
     config = leave_contacted_dead_owner(tmp_path, audit_ok=False)
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
-        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+        assert adopt_dead_owner(service)
 
         recovery = service.recover_after_failed_run(["dut"])
 
@@ -884,7 +920,7 @@ def test_an_inherited_incident_recorded_under_another_configuration_is_refused(t
     config = leave_contacted_dead_owner(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
-        service.coordinator.status()
+        adopt_dead_owner(service)
         record = service.coordinator._read_record(service.coordinator.project_key)
         service.coordinator._write_record(service.coordinator.project_key, {**record, "config_sha256": "0" * 64})
 

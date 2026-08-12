@@ -63,6 +63,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
     debugger_effect_resources,
+    nothing_standing_result,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
@@ -398,6 +399,7 @@ class AgenticHILToolService:
                 result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
             else:
                 result = self._call_unlocked(name, arguments)
+                result = self._stand_down_after_call(result)
             # A configuration that has moved since startup belongs in every
             # answer, not only in the two that name it outright: a caller reading
             # a flash result has the same reason to know that the policy it was
@@ -424,6 +426,78 @@ class AgenticHILToolService:
             if "config_status" in result:
                 return result
             return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
+
+    def _stand_down_after_call(self, result: JsonObject) -> JsonObject:
+        """End an incident this call left open that owes nobody a gate.
+
+        The last thing a call does, and deliberately the last: the run teardown
+        and the recovery-class settlement have both already run by the time this
+        is asked. What has not, for a call outside a run, is the automatic
+        recovery the acquire path used to run on the *next* call, and that is why
+        it is attempted here first. The gate it used to sit behind is gone, so
+        this is where it belongs: the report exists, the call is finished, and
+        the reset-into-halt this bench's policy allows is exactly what settles an
+        unconfirmed target. Nothing about the action changed, only when it is
+        asked for.
+
+        What it does not settle stands down, and that is the narrowing: an
+        incident the policy withheld, or whose predicate did not confirm, is not
+        a hold. The target's state is what the next reset and probe say it is,
+        and a peripheral's is what the next open says.
+
+        The envelope keeps its reasons and its guidance: what the call could not
+        confirm is exactly what the caller needs to read, and it is the same text
+        the quarantine carried. What goes is the claim that the bench is held."""
+        if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
+            # A declared run is the agent's own hold, and its teardown is where
+            # the recovery belongs: resetting the board at the end of step one
+            # because step one failed would drive the target out from under step
+            # two, and the verdict is the run's. `bench_run_stop` brings the same
+            # incident back here with the run closed.
+            #
+            # A registered debug session is the agent's own hold on this bench,
+            # and it is what makes both halves of this seam wrong here. The
+            # recovery action reaps this owner's debugger processes, so running
+            # it would take the live session with it; and ending the incident
+            # without it would leave a partially written image with nothing
+            # having driven the target into a defined state. The same reasoning
+            # keeps session-scoped calls out of `implicit_run_tools`. So the
+            # incident waits for the session: `debug_stop_session` and the
+            # recovery-class calls stay reachable through it, and whichever of
+            # them ends the session brings the next call here with the hold gone.
+            return result
+        if self.coordinator.blocked:
+            try:
+                self._attempt_machine_recovery()
+            except Exception as error:
+                # Same rule as everywhere else recovery runs: a fault inside it
+                # never fails open, and never replaces the call's own answer.
+                self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
+        stood_down = self.coordinator.stand_down()
+        if stood_down is None:
+            return result
+        # Whatever the ended incident left registered goes back, because the call
+        # that took it is over and the bench is not held for it any more. A
+        # lease a live COM or CAN session owns is the exception and the only one:
+        # the session is still there, still usable, and still the thing that
+        # gives its device back. Without this the leases an incident used to keep
+        # would sit registered for the rest of the process, and every later call
+        # that asks whether this server holds anything would be told yes.
+        session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
+        for lease in list(self.coordinator.leases.values()):
+            if lease.state == "active" and id(lease) not in session_leases:
+                lease.release()
+        if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
+            self._quarantined_lease = None
+        # Attached while the flags still say quarantined, so the reasons keep the
+        # remediation text they had; `call` re-attaching it is a no-op.
+        result = attach_quarantine_guidance(result)
+        # `quarantined` and nothing else. It is the one field that says the bench
+        # is being held, and it is the one that stopped being true. Its neighbour
+        # `cleanup_required` says something the stand-down did not change: this
+        # call left work behind, a debug session to stop, a state nobody
+        # confirmed, and a caller reading a failed result still has to know it.
+        return {**result, "incident_stood_down": stood_down, **({"quarantined": False} if result.get("quarantined") is True else {})}
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -523,7 +597,13 @@ class AgenticHILToolService:
                 # attempt did not settle the incident: those calls are the
                 # remedy, and refusing them was what left an incident with no
                 # way out but a person at a shell.
-                if recovered is None and name not in recovery_class_tools():
+                #
+                # `incident_stands` rather than `blocked_before`, and that is the
+                # whole of the narrowing on this path: the attempt is unchanged,
+                # and only a broken evidence chain still refuses when it did not
+                # settle. Anything else stands down at the end of this call and
+                # the next one meets the bench with nothing on it.
+                if recovered is None and self.coordinator.incident_stands and name not in recovery_class_tools():
                     return {
                         "ok": False,
                         "tool": name,
@@ -547,7 +627,7 @@ class AgenticHILToolService:
             # A bare effect call therefore declares its own single-action run
             # here, at the one place every tool passes through, so the wrap is
             # never a thing each tool has to remember to do.
-            if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.blocked:
+            if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.incident_stands:
                 return self._in_implicit_run(name, args, lambda: self._dispatch_tool(name, args, blocked_before, action))
             return self._dispatch_tool(name, args, blocked_before, action)
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
@@ -572,8 +652,11 @@ class AgenticHILToolService:
         Never entered while a run is open (the declared run already holds
         everything, and a second declaration would be refused), and never while
         an incident stands: a new run is the stimulus class and waits for the
-        incident, while the recovery class must reach the board *through* it,
-        and wrapping either in a run it cannot open would break both.
+        one incident that still gates, while the recovery class must reach the
+        board *through* it, and wrapping either in a run it cannot open would
+        break both. An incident that is open and does not stand is not one of
+        those cases: `begin_run` lets it through, and the teardown below is
+        where its recovery action runs.
         """
         try:
             resources = implicit_run_resources(self.config, name, args)
@@ -636,7 +719,10 @@ class AgenticHILToolService:
                 poison_error = self._poison_quietly("unknown_hardware_exception", error, audit_broken=isinstance(error, (ConfigError, OSError)))
                 # Report the quarantine state that actually holds instead of a
                 # hardcoded claim: a poison failure must not fake protection.
-                quarantined_now = self.coordinator.blocked or any(item.state in {"cleanup_required", "quarantined"} for item in self.coordinator.leases.values())
+                # An open incident that owes no gate is not that state, so it is
+                # not reported as one; the stand-down at the end of the call is
+                # what makes the two agree.
+                quarantined_now = self.coordinator.incident_stands
                 if not isinstance(error, Exception):
                     if poison_error is not None:
                         error.args = (*error.args, f"Quarantine error: {poison_error}")
@@ -660,7 +746,7 @@ class AgenticHILToolService:
                 written = write_report(self.config, result)
                 if written.get("audit_ok") is False:
                     self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
-                    quarantined_now = self.coordinator.blocked or quarantined_now
+                    quarantined_now = self.coordinator.incident_stands or quarantined_now
                 return {**written, "cleanup_required": True, "quarantined": quarantined_now, "quarantine_id": self.coordinator.quarantine_id}
             if isinstance(error, ConfigError):
                 return {"tool": name, **error.to_dict()}
@@ -697,12 +783,16 @@ class AgenticHILToolService:
         """This bench's open incident, or None when there is none.
 
         Separate from `open_hardware_holds` because it is a different fact: a
-        quarantine can outlive every lease that produced it, and `blocked` is
-        then true with nothing held. A description reload is refused on it all
+        quarantine can outlive every lease that produced it, and it is then
+        standing with nothing held. A description reload is refused on it all
         the same — the operator is about to be asked to physically check the
         devices the incident names, and a name that meant another board by the
-        time they read it is the one thing that check cannot survive."""
-        if not self.coordinator.blocked:
+        time they read it is the one thing that check cannot survive.
+
+        Only the standing kind refuses. An incident nobody has to check is one
+        nobody is about to read a device name off, so there is nothing for a
+        rename to invalidate."""
+        if not self.coordinator.incident_stands:
             return None
         return {
             "quarantined": True,
@@ -797,6 +887,15 @@ class AgenticHILToolService:
         status = self.coordinator.status()
         quarantine_id = status.get("quarantine_id")
         reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
+        # Asked before the grant, because `allow_recover` gates the operator
+        # route and this is not it: being told there is nothing to clear needs no
+        # permission, and refusing the answer would send an agent hunting for a
+        # shell to run a command that would do nothing. `incident_stands` comes
+        # off the read above, so it is this bench's state and not a guess: an
+        # incident that is open and owes no gate is one the next hardware call
+        # answers for, and no signature moves it.
+        if not status.get("incident_stands"):
+            return nothing_standing_result(status)
         if not self.config.permissions.allow_recover:
             return {
                 "ok": False,
@@ -810,14 +909,6 @@ class AgenticHILToolService:
                 "side_effect_committed": False,
                 "retry_safe": False,
                 **remediation_fields("permission_denied", "allow_recover"),
-            }
-        if not status.get("blocked"):
-            return {
-                "ok": True,
-                "tool": "hardware_recover",
-                "was_quarantined": False,
-                "resources": [],
-                "summary": "This bench has no unresolved incident; nothing needed clearing.",
             }
         allowed = self.coordinator.agent_recoverable_reasons()
         # An incident with no named reason is not a reason class this can judge.

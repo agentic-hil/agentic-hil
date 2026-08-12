@@ -423,7 +423,11 @@ def test_com_session_stop_attempts_close_after_cancel_failure(tmp_path: Path) ->
     result = service.session_stop("dut")
 
     assert result["error_type"] == "com_port_close_failed"
-    assert result["cleanup_required"] is True
+    # The stop failed and the failure is the answer. It records the reason,
+    # gives the port back, and holds nothing: a handle that is really stuck is
+    # refused by the operating system at the next open, and one that is not
+    # simply opens, which is the proof this reason was waiting for.
+    assert service.sessions["dut"].lease.state == "active"
     assert handle.close_attempts == 1
 
 
@@ -445,9 +449,12 @@ def test_com_open_failure_without_cleanup_confirmation_quarantines(tmp_path: Pat
     try:
         result = service.session_start("dut")
 
-        assert result["cleanup_required"] is True
-        assert result["lease_state"] == "cleanup_required"
-        assert service.coordinator.blocked is True
+        # Recorded and released rather than held: the open failed and its own
+        # teardown could not be confirmed, which the next open settles either
+        # way. The reason and its remediation still travel with the refusal.
+        assert result["cleanup_reasons"] == ["com_open_cleanup_unconfirmed"]
+        assert result["lease_state"] == "released"
+        assert service.coordinator.blocked is False
     finally:
         service.close()
 

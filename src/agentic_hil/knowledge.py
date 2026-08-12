@@ -1749,12 +1749,19 @@ def quarantine_reason_details(reasons: list[str]) -> list[JsonObject]:
 
 
 def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
-    """Attach the per-reason signer guidance to a quarantined result.
+    """Attach the per-reason guidance to a result that names a cleanup reason.
 
     Applied at reporting time, never persisted: records and audit reports keep
     only the reason strings, so catalogue text can improve between versions
-    without stale copies surviving in state files."""
-    if result.get("quarantined") is not True and result.get("cleanup_required") is not True:
+    without stale copies surviving in state files.
+
+    Keyed off the reason rather than off the gate. Since the quarantine narrowed
+    to the audit families, most reasons name something a call could not confirm
+    without the bench being held for it, and what was attempted, what still
+    holds, what stays unknown and what to check on the board is exactly as
+    useful then as it was when a person had to sign for it. So a result that
+    carries a cleanup reason carries its guidance, blocked or not."""
+    if result.get("quarantined") is not True and result.get("cleanup_required") is not True and not result.get("cleanup_reasons"):
         return result
     listed = result.get("cleanup_reasons")
     reasons = [reason for reason in listed if isinstance(reason, str) and reason] if isinstance(listed, list) else []
@@ -2712,7 +2719,9 @@ hardware_state     != unknown
 
 ## What quarantines, and what merely refuses
 
-Quarantine answers one question — "is the physical state of the hardware unknown?" — never the weaker "did something go wrong?". A failure that can prove it never reached the hardware refuses with a named error and `retry_safe: true`, leaves no quarantine record, and keeps the bench in service; the board is exactly as the last call that did reach it left it.
+An incident answers one question, "is the physical state of the hardware unknown?", never the weaker "did something go wrong?". A failure that can prove it never reached the hardware refuses with a named error and `retry_safe: true`, leaves no incident record, and keeps the bench in service; the board is exactly as the last call that did reach it left it.
+
+A *standing* quarantine answers a narrower one still: "is the missing proof one that cannot come back on its own?". Only a broken audit trail qualifies, because no reset writes a report that was never written. A target's state comes back with the next reset into halt and an answering probe; a serial handle's and a CAN adapter's with their own next open, which the operating system refuses by itself if the handle is really stuck. So the peripheral cleanup reasons record their event and open no incident at all, and every other incident is open only for the length of the call that raised it: the recovery action runs, and whatever it did not settle stands down at the end of the call with a `no_standing_state` line in the recovery ledger. Nothing is lost from the record; what goes is the hold.
 
 | Failure | Outcome |
 |---|---|
@@ -2720,20 +2729,24 @@ Quarantine answers one question — "is the physical state of the hardware unkno
 | OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
 | pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
 | ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
-| `probe_target` / `debugger_probes_list` failed and the backend named no abort point — a timeout that killed it mid-call (`timeout`), an exit whose output does not carry the confirmation the tool asks for (`target_state_unconfirmed`) | **quarantine** (`debugger_readonly_target_state_unconfirmed`) — being read-only is not being passive: an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
+| `probe_target` / `debugger_probes_list` failed and the backend named no abort point (a timeout that killed it mid-call (`timeout`), an exit whose output does not carry the confirmation the tool asks for (`target_state_unconfirmed`)) | **incident** (`debugger_readonly_target_state_unconfirmed`): being read-only is not being passive, an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
 | COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
 | CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
-| CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **quarantine** — python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same |
+| CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **recorded event** (`can_open_cleanup_unconfirmed`): python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same. The refusal names it and carries its guidance; the bus is not held for it, because the next `can_session_start` is what settles an adapter either way |
 | a direct CAN read failed | refusal — `recv()` transmits nothing |
-| anything whose abort point cannot be proven — an unconfirmed flash or reset, an exception mid-call, an unconfirmed cleanup, an owner that died holding a lease, a broken audit trail | quarantine; that is the feature |
+| a peripheral cleanup that did not confirm (a serial handle or reader that would not close, a CAN adapter that would not shut down) | recorded event with the same reason and the same guidance, and no incident: the next open is the proof, and a handle that is really stuck makes it fail through the operating system |
+| anything else whose abort point cannot be proven (an unconfirmed flash or reset, an exception mid-call, an owner that died holding a lease) | incident for the length of the call: the recovery action runs, and what it does not settle stands down rather than standing |
+| a broken audit trail (`*_audit_broken`) | **standing quarantine**; that is the feature, and it is the only one left. No reset writes a report that was never written |
 
-Between the two sits the self-resolving class: a reason the next hardware call can settle itself under `recovery.auto_recover` (a read-only re-read, or a verified reset-into-halt) is cleared by the machine, without an operator.
+Between the two sits the self-resolving class: a reason the next hardware call can settle itself under `recovery.auto_recover` (a read-only re-read, or a verified reset-into-halt) is cleared by the machine, without an operator, and attested in the ledger as `recovery_action_verified`.
 
 ## What a justified quarantine tells the signer
 
-`recover --confirm-safe-state` is a signature, so every quarantined result and `hardware_lease_status` carry `quarantine_guidance`: one entry per `cleanup_reason` with `attempted` (what was being done when confirmation was lost), `confirmed` (what still holds), `unknown` (the exact gap that makes a machine answer impossible), and `physical_check` (what to verify on the physical board before signing). An incident recorded by another version gets an explicit fallback entry rather than silence.
+`recover --confirm-safe-state` is a signature, so every result naming a `cleanup_reason`, and `hardware_lease_status`, carry `quarantine_guidance`: one entry per reason with `attempted` (what was being done when confirmation was lost), `confirmed` (what still holds), `unknown` (the exact gap that makes a machine answer impossible), and `physical_check` (what to verify on the physical board before signing). An incident recorded by another version gets an explicit fallback entry rather than silence. Guidance follows the reason and not the gate: what a call could not confirm is worth reading whether or not anything is being held for it.
 
 ## When a call is refused with `resource_quarantined`
+
+This is the audit halt, and since it narrowed to that it is the only refusal of its kind: the evidence chain for this bench could not be written or read, and no hardware action rebuilds it.
 
 1. Stop every effect. Do not retry around it, and never delete state under `state_root`.
 2. Read `hardware_lease_status` (CLI: `agentic-hil lease-status`). It reports `cleanup_reasons`, `quarantine_guidance`, `auto_recoverable`, `auto_recover_policy`, and the current `quarantine_id`.
@@ -2784,7 +2797,7 @@ Set in the authoritative configuration; decides how far the owning process may g
 |---|---|
 | `operator_confirmation_required` | `--confirm-safe-state` was not given |
 | `quarantine_id_required` | `--quarantine-id` was not given |
-| `resource_not_quarantined` | nothing to recover |
+| `resource_not_quarantined` | nothing to recover; a bench whose incident does not stand answers `ok: true` with `nothing_to_recover: true` instead, because nothing went wrong |
 | `quarantine_changed` | the incident or a resource marker moved; re-read `lease-status` |
 | `config_changed` | see `--accept-config-change` above; over MCP, `accept_config_change: true` |
 | `resource_busy` | a live owner still holds project resources; stop it first |

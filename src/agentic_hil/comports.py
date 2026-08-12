@@ -738,8 +738,16 @@ class ComPortService:
             opened = no_contact_refusal({**opened, **contact.report_fields()}, contact)
             safe_to_release = opened.get("side_effect_committed") is False or opened.get("cleanup_confirmed") is True
             if not safe_to_release:
-                lease.quarantine("com_open_cleanup_unconfirmed", opened.get("backend_error"))
-            return self._write_unattached_lease_report(opened, lease, release_if_safe=safe_to_release)
+                # The open failed and the teardown of whatever handle it got as
+                # far as could not be confirmed. That is recorded, in the same
+                # detail and under the same reason, and it travels into this
+                # refusal so the caller reads what is unconfirmed and what to
+                # check. What it no longer does is hold the port: a handle that
+                # is really still open makes the next `com_session_start` fail
+                # through the operating system, and one that is not makes it
+                # succeed, which is the proof this reason was waiting for.
+                lease.record_cleanup_event("com_open_cleanup_unconfirmed", opened.get("backend_error"))
+            return self._write_unattached_lease_report(opened, lease, release_if_safe=True)
         session = opened["session"]
         self.sessions[port_id] = session
         audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
@@ -1073,9 +1081,9 @@ class ComPortService:
         if not port["ok"]:
             return port
         session = self.sessions.get(port_id)
-        if session is None or self.coordinator.blocked or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
+        if session is None or self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
             result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
-            if session is not None and (self.coordinator.blocked or session.audit_broken or session.lease.state != "active"):
+            if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
                 result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
             if session is not None and session.reader_error:
                 result["reader_error"] = session.reader_error
@@ -1160,7 +1168,19 @@ class ComPortService:
             session.lease.quarantine("com_audit_broken", audit_error, audit_broken=True)
             errors.append(("audit", audit_error or RuntimeError("COM audit state was already broken.")))
         if errors:
-            session.lease.quarantine("com_cleanup_unconfirmed", errors[0][1], audit_broken=session.audit_broken)
+            if session.audit_broken:
+                # The audit is the one thing no later call re-establishes, so a
+                # cleanup that failed beside a broken ledger keeps the incident
+                # it always had.
+                session.lease.quarantine("com_cleanup_unconfirmed", errors[0][1], audit_broken=True)
+            else:
+                # Recorded and released. The close, the reader join, or both did
+                # not confirm, and the failure below still says so with the same
+                # reason and the same remediation; the port is not held for it,
+                # because the next open is what settles a handle either way.
+                session.lease.record_cleanup_event("com_cleanup_unconfirmed", errors[0][1])
+                if not defer_release:
+                    session.lease.release()
             details = "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
             if interrupt is not None:
                 interrupt.args = (*interrupt.args, f"Cleanup errors: {details}")

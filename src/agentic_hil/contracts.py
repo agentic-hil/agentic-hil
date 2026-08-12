@@ -150,10 +150,13 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "hardware_recover",
         "description": (
-            "Clear this bench's quarantine. Reasons that name a call which never reached the hardware — a lease "
-            "release that could not persist its own record, an owner process that died before its call touched a "
-            "board — clear with no arguments. Every other reason needs operator_statement: ask the operator in chat "
-            "what state the bench is in, then pass back what they answered, in their words. It is written verbatim "
+            "Clear this bench's quarantine. A quarantine is the audit halt: the evidence chain for this bench "
+            "could not be written or read, and no hardware action rebuilds a record that was never written. Every "
+            "other incident settles itself at the next contact and holds nothing, so on a bench with nothing "
+            "standing this answers ok with nothing_to_recover: true and changes nothing. Of what does stand, a "
+            "reason that names no hardware contact still clears with no argument. Anything else needs "
+            "operator_statement: ask the operator in chat what state the bench is in, then pass back what they "
+            "answered, in their words. It is written verbatim "
             "to the recovery ledger as their statement, relayed by you. Never write one you were not given — a "
             "ledger line that reflects no actual operator utterance is a false record with you recorded as the "
             "actor; when you have nobody to ask, relay the `agentic-hil recover --confirm-safe-state "
@@ -161,9 +164,8 @@ MCP_TOOLS: list[JsonObject] = [
             "error_type config_changed means the authoritative configuration was edited after the incident was "
             "recorded: show the operator the two digests on the result, and once they confirm the delta is "
             "understood, call again with accept_config_change: true (the operator's own line takes "
-            "--accept-config-change instead). Needs permissions.allow_recover. Safe to call when nothing is "
-            "quarantined; it answers was_quarantined: false. Use this instead of deleting the server's state "
-            "files, which is never the fix."
+            "--accept-config-change instead). Needs permissions.allow_recover for the one route that clears "
+            "something. Use this instead of deleting the server's state files, which is never the fix."
         ),
         "inputSchema": object_schema(
             {
@@ -519,10 +521,11 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # recovery ledger, and what that changes is which calls the bench will accept
     # next. Not destructive, and that is a claim about what it reaches rather
     # than a comfortable default — it never drives the target, never opens a
-    # port or a bus, and only ever clears reasons that name no hardware contact;
-    # the ones that might have left a board somewhere are exactly the ones it
-    # refuses. Idempotent: a second call finds nothing quarantined and answers
-    # `ok` with `was_quarantined: false`.
+    # port or a bus, and only ever clears an incident whose evidence chain is
+    # what broke; the ones that might have left a board somewhere settle
+    # themselves at the next contact and are not its to clear. Idempotent: a
+    # second call finds nothing standing and answers `ok` with
+    # `nothing_to_recover: true`.
     "hardware_recover": {"title": "Clear a bench quarantine", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # Rewrites the authoritative configuration with no backup on disk, and
     # carries over the permissions of the document *this server loaded at

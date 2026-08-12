@@ -378,8 +378,12 @@ def test_an_open_incident_keeps_the_recovery_class_reaching_the_board(tmp_path: 
         result = service.call("reset_target", {"mode": "halt"})
 
         assert result["ok"] is True, result
-        assert "run" not in result, result
         assert result["incident_resolved"] is True, result
+        # The wrap now happens, and the reason it may is what #216 settled: this
+        # incident owes no gate, so the run it declares for itself opens. What
+        # the wrap must never do is stand between the remedy and the board, and
+        # the line above is the proof it did not.
+        assert result["run"]["implicit"] is True, result
     finally:
         service.close()
 

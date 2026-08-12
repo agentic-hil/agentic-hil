@@ -63,7 +63,7 @@ from agentic_hil.configwrite import (
     permission_surface,
     set_permission,
 )
-from agentic_hil.coordination import CoordinationError, HardwareCoordinator
+from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
 from agentic_hil.devices import config_devices
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
@@ -357,7 +357,18 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
-        return coordinator.status() if args.command == "lease-status" else coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id, accept_config_change=args.accept_config_change)
+        status = coordinator.status()
+        if args.command == "lease-status":
+            return status
+        # The signature is owed for one thing: an evidence chain that cannot be
+        # rebuilt. Everything else ended with the call that raised it, or is an
+        # incident waiting for the next hardware call to answer it, and neither
+        # is a thing an operator can sign for. So somebody who typed this over a
+        # bench with nothing standing is told exactly that, rather than handed an
+        # error about a bench that is fine.
+        if not status.get("incident_stands"):
+            return nothing_standing_result(status)
+        return coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id, accept_config_change=args.accept_config_change)
     if args.command == "schema":
         return schema(args.output, args.force)
     if args.command == "test-schema":

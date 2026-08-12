@@ -216,19 +216,32 @@ class CanBusService:
                 session = CanBusSession(bus_id, bus_config, opened["session"], log_path, lease, contact)
                 session.active = False
                 self.sessions[bus_id] = session
-                lease.quarantine("can_open_cleanup_unconfirmed", opened.get("cleanup_error"))
+                # The bridge child would not be cleaned up. The session stays
+                # registered holding its lease, exactly as a live session does,
+                # and the refusal below carries the reason and its remediation.
+                # No incident: the next `can_session_start` tears this session
+                # down before it opens anything, and whether that succeeds is
+                # the answer this reason was waiting for.
+                lease.record_cleanup_event("can_open_cleanup_unconfirmed", opened.get("cleanup_error"))
             failure = {key: value for key, value in opened.items() if key != "session"}
             # Consulted before the backend's own claim, and only ever widening
             # the refusal: an open that never reached a controller is a refusal
             # whatever ended it, and a `cleanup_required` bridge child keeps its
-            # quarantine because a process that is still running can still act.
+            # registered session because a process that is still running can
+            # still act.
             failure = no_contact_refusal({**failure, **contact.report_fields()}, contact)
             if opened.get("cleanup_required"):
                 return self._write_report(failure)
             safe_to_release = failure.get("side_effect_committed") is False or failure.get("cleanup_confirmed") is True
             if not safe_to_release:
-                lease.quarantine("can_open_cleanup_unconfirmed", opened.get("backend_error"))
-            return self._write_unattached_lease_report(failure, lease, release_if_safe=safe_to_release)
+                # An open whose own teardown is unconfirmed, the PCAN
+                # `SetValue`-after-`Initialize` family included. Recorded under
+                # the same reason, with the same remediation in the refusal, and
+                # the bus is not held for it: an adapter that is really still on
+                # the bus makes the next open fail, and one that is not makes it
+                # succeed.
+                lease.record_cleanup_event("can_open_cleanup_unconfirmed", opened.get("backend_error"))
+            return self._write_unattached_lease_report(failure, lease, release_if_safe=True)
         adapter_session = opened["session"]
         adapter_provisional = register_provisional_handle(self.coordinator.owner_marker, f"can-adapter:{bus_id}", adapter_session.close)
         try:
@@ -415,8 +428,8 @@ class CanBusService:
         if not bus["ok"]:
             return bus
         session = self.sessions.get(bus_id)
-        if session is None or self.coordinator.blocked or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
-            if session is not None and (self.coordinator.blocked or session.audit_broken or session.lease.state != "active"):
+        if session is None or self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
+            if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
                 return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "resource_quarantined", "summary": "CAN bus requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True}
             return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "session_not_active", "summary": "CAN bus session is not active. Start it with can_session_start first."}
         return {"ok": True, "session": session}
@@ -497,7 +510,17 @@ class CanBusService:
         except BaseException as error:
             session.active = False
             details = error.result if isinstance(error, BridgeCleanupError) else error
-            session.lease.quarantine("can_adapter_cleanup_unconfirmed", details)
+            if session.audit_broken:
+                # A cleanup that failed beside a ledger that is already broken
+                # keeps the incident: no later open re-writes a missing record.
+                session.lease.quarantine("can_adapter_cleanup_unconfirmed", details)
+            else:
+                # Recorded and released. The adapter close did not confirm, the
+                # failure below still says so under the same reason, and the bus
+                # is not held for it: the next open is what settles an adapter.
+                session.lease.record_cleanup_event("can_adapter_cleanup_unconfirmed", details)
+                if not defer_release:
+                    session.lease.release()
             raise
         session.active = False
         session.safe_state_confirmed = close_result.get("safe_state_confirmed") is True

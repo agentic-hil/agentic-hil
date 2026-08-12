@@ -1204,8 +1204,10 @@ version: 3
 # `agentic-hil init --force` writes this file again at the defaults below.
 #
 # allow_recover is not about this file. It lets an agent clear a quarantine over
-# MCP. Reasons that name no hardware contact — a dead owner that never reached
-# the board, a host-side persistence fault — clear with no argument. Confirming
+# MCP, and a quarantine is the audit halt: every other incident ends with the
+# call that raised it, so on a bench with nothing standing the tool answers
+# nothing_to_recover and this grant decides nothing. Reasons that name no hardware contact (a dead owner that never reached
+# the board, a host-side persistence fault) clear with no argument. Confirming
 # that a board is still and holds the firmware you expect is a statement about
 # the physical world, and no agent may make it; but it may relay one, so a
 # physical reason clears over MCP only when the agent passes back an

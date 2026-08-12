@@ -434,6 +434,10 @@ def test_refused_while_an_incident_on_this_bench_is_unresolved(tmp_path: Path, m
     tools = service(workspace)
     try:
         tools.coordinator.blocked = True
+        # The reload is refused by the incident that stands, which since #216 is
+        # the audit halt: the operator is about to be asked to physically check
+        # the devices it names, and a rename invalidates that check.
+        tools.coordinator.audit_incident = True
         tools.coordinator.quarantine_id = "deadbeef"
         rewrite(path, add_second_board)
         refused = tools.call(PROJECT_CONFIG_RELOAD)

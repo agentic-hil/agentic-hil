@@ -3404,7 +3404,11 @@ def test_a_reset_that_may_have_reached_the_target_still_quarantines(tmp_path: Pa
     assert result["ok"] is False
     assert result.get("rejected_commands") is None
     assert result["side_effect_status"] == "unknown"
-    assert result["quarantined"] is True
+    # The reason is unchanged and it is what the caller reads. The bench is
+    # not held for it: an unconfirmed target is what the next reset and probe
+    # speak for, so the incident ended when this call did.
+    assert result["quarantined"] is False
+    assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
     assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
 
 
@@ -3593,7 +3597,11 @@ def test_a_halt_that_never_reported_the_core_stays_unconfirmed_however_much_the_
     # Nothing on the host knows whether the core is halted or running, so this
     # is the branch that stops the bench rather than one that refuses.
     assert result["side_effect_status"] == "unknown"
-    assert result["quarantined"] is True
+    # The reason is unchanged and it is what the caller reads. The bench is
+    # not held for it: an unconfirmed target is what the next reset and probe
+    # speak for, so the incident ended when this call did.
+    assert result["quarantined"] is False
+    assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
     # The banner did print, and it confirmed nothing.
     assert "Reset mode  : Software reset" in json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["stdout"]
 

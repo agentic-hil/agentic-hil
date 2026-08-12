@@ -202,10 +202,30 @@ def test_a_second_status_call_finds_nothing_left_to_do(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Everything that still quarantines.
+# Everything that is not released on evidence of no contact.
+#
+# The fallback moved with #216 and the question these cases ask did not. A dead
+# owner nothing can vouch for used to be quarantined; now the incident is
+# adopted, named, and stood down, because `owner_process_exited_without_release`
+# names a target the next reset and probe speak for and a gate is only owed
+# where the missing proof cannot come back. What must never happen is the
+# *other* answer: a release recorded as `dead_owner_no_contact` asserts positive
+# evidence that these reports do not carry, and asserting it would hand a bench
+# back on a claim nobody made. That is what each case below holds.
 
 
-def test_an_owner_that_died_with_a_committed_effect_still_quarantines(tmp_path: Path) -> None:
+def assert_no_contact_release_was_refused(status, config, why: str = "") -> None:
+    assert "released_dead_owner" not in status, why
+    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"], why
+    # Adopted, not released: nothing here vouched for the bench, and no ledger
+    # line claims anything did. A status read runs no recovery action, so the
+    # incident it inherits is left for the call that can, and the seam at the
+    # end of that call is where it ends if the recovery could not settle it.
+    assert status["incident_stands"] is False, why
+    assert recovery_ledger(config) == [], why
+
+
+def test_an_owner_that_died_with_a_committed_effect_is_not_released_as_no_contact(tmp_path: Path) -> None:
     config = leave_dead_owner(tmp_path, report=None)
     setup = HardwareCoordinator(config, "dead-owner-setup")
     write_report(config, no_contact_report(setup, side_effect_committed=True, side_effect_status="committed", ok=True, error_type=None))
@@ -213,14 +233,14 @@ def test_an_owner_that_died_with_a_committed_effect_still_quarantines(tmp_path: 
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
-    assert status["record"]["state"] == "quarantined"
+    assert_no_contact_release_was_refused(status, config)
+    # And the marker says so: quarantined under this incident, never released
+    # with the `released_reason` the evidence-backed path writes.
     assert observer._read_record(RESOURCE)["state"] == "quarantined"
-    assert recovery_ledger(config) == []
+    assert "released_reason" not in observer._read_record(RESOURCE)
 
 
-def test_an_owner_that_left_no_readable_record_at_all_still_quarantines(tmp_path: Path) -> None:
+def test_an_owner_that_left_no_readable_record_at_all_is_not_released_as_no_contact(tmp_path: Path) -> None:
     """The indeterminable case: there is nothing to read, and nothing is not
     evidence of no contact."""
     config = leave_dead_owner(tmp_path, report=None)
@@ -228,9 +248,7 @@ def test_an_owner_that_left_no_readable_record_at_all_still_quarantines(tmp_path
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
-    assert "quarantine_guidance" in status
+    assert_no_contact_release_was_refused(status, config)
 
 
 @pytest.mark.parametrize(
@@ -246,7 +264,7 @@ def test_an_owner_that_left_no_readable_record_at_all_still_quarantines(tmp_path
         ({"tool": "can_send"}, "a write on an open session likewise"),
     ],
 )
-def test_a_report_that_does_not_answer_the_question_still_quarantines(tmp_path: Path, overrides: dict, why: str) -> None:
+def test_a_report_that_does_not_answer_the_question_is_not_released_as_no_contact(tmp_path: Path, overrides: dict, why: str) -> None:
     config = leave_dead_owner(tmp_path, report=None)
     setup = HardwareCoordinator(config, "dead-owner-setup")
     write_report(config, no_contact_report(setup, **overrides))
@@ -254,11 +272,10 @@ def test_a_report_that_does_not_answer_the_question_still_quarantines(tmp_path: 
 
     status = observer.status()
 
-    assert status["blocked"] is True, why
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"], why
+    assert_no_contact_release_was_refused(status, config, why)
 
 
-def test_a_session_that_opened_its_port_still_quarantines(tmp_path: Path) -> None:
+def test_a_session_that_opened_its_port_is_not_released_as_no_contact(tmp_path: Path) -> None:
     """The gap between "this call did nothing" and "this session did nothing".
 
     `side_effect_committed: false` is a truthful claim about the call that wrote
@@ -290,10 +307,7 @@ def test_a_session_that_opened_its_port_still_quarantines(tmp_path: Path) -> Non
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
-    assert "released_dead_owner" not in status
-    assert recovery_ledger(config) == []
+    assert_no_contact_release_was_refused(status, config)
 
 
 def test_the_release_names_the_contact_question_it_asked(tmp_path: Path) -> None:
@@ -322,8 +336,7 @@ def test_a_second_open_lease_is_not_answered_for_by_one_report(tmp_path: Path) -
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
+    assert_no_contact_release_was_refused(status, config)
 
 
 def test_a_report_written_under_another_configuration_is_not_evidence(tmp_path: Path) -> None:
@@ -339,8 +352,7 @@ def test_a_report_written_under_another_configuration_is_not_evidence(tmp_path: 
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
+    assert_no_contact_release_was_refused(status, config)
 
 
 def test_a_record_already_carrying_an_incident_is_left_alone(tmp_path: Path) -> None:
@@ -352,8 +364,7 @@ def test_a_record_already_carrying_an_incident_is_left_alone(tmp_path: Path) -> 
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
+    assert_no_contact_release_was_refused(status, config)
 
 
 def test_a_marker_that_is_not_this_leases_hold_stops_the_release(tmp_path: Path) -> None:
@@ -367,9 +378,7 @@ def test_a_marker_that_is_not_this_leases_hold_stops_the_release(tmp_path: Path)
 
     status = observer.status()
 
-    assert status["blocked"] is True
-    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"]
-    assert recovery_ledger(config) == []
+    assert_no_contact_release_was_refused(status, config)
 
 
 def test_a_live_owner_is_never_decided_about(tmp_path: Path) -> None:

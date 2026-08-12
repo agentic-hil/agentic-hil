@@ -391,7 +391,10 @@ def test_a_failure_after_contact_still_quarantines(tmp_path: Path, monkeypatch: 
         result = service.call("com_write", {"port_id": PORT_ID, "text": "ping\n"})
 
         assert result["error_type"] == "serial_write_failed", result
-        assert result["quarantined"] is True
+        # The reason is what the marker decides and it is unchanged. Since #216
+        # the bench is not held for it either: what an unconfirmed write left on
+        # the line is what the next run's own evidence answers for.
+        assert result["quarantined"] is False
         assert result["side_effect_status"] == "unknown"
         assert result["retry_safe"] is False
         assert "com_write_effect_unconfirmed" in result["cleanup_reasons"], result
@@ -399,7 +402,7 @@ def test_a_failure_after_contact_still_quarantines(tmp_path: Path, monkeypatch: 
         # release of a dead owner's devices can see that this report's
         # `not_started` would have been about a call and not about the session.
         assert result[CONTACT_MARKER_KEY], result
-        assert service.coordinator.blocked is True
+        assert service.coordinator.blocked is False
     finally:
         # A quarantined session stays registered for a cleanup retry, so shutting
         # the service down over it is refused as well. That is the containment

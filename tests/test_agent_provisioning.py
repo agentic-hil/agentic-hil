@@ -1183,6 +1183,10 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
     discovery that raised escaped the service instead of producing the standard
     structured refusal — and nothing shut the bench behind it."""
     workspace, path = _regenerable_bench(tmp_path, monkeypatch)
+    # A regeneration writes the same deterministic document the fixture wrote,
+    # so equal bytes would be a correct outcome and prove nothing about a
+    # rewrite. The marker is what a rewrite cannot preserve.
+    path.write_bytes(path.read_bytes() + b"# an operator's note a regeneration does not carry over\n")
     before = path.read_bytes()
 
     def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: object = None) -> dict:
@@ -1197,17 +1201,21 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
         failed = service.call(PROJECT_CONFIG_CREATE)
         assert failed["ok"] is False
         assert failed["error_type"] == "hardware_action_exception"
-        assert failed["quarantined"] is True
+        # The reason is recorded and the bench is not held for it.
+        assert failed["quarantined"] is False
+        assert failed["incident_stood_down"]["reasons"] == ["config_create_discovery_exception", "unknown_hardware_exception"]
         assert failed["cleanup_required"] is True
-        # And the bench stays shut: a retry does not walk back onto the board.
+        # And the retry is that next contact: a probe read that raised leaves a
+        # target the next reset and probe speak for, so the bench is not shut
+        # behind it and the regeneration that follows either reads the board or
+        # fails on its own evidence.
         attached_hardware(monkeypatch)
         retried = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
 
-    assert retried["ok"] is False
-    assert retried["error_type"] == "resource_quarantined"
-    assert path.read_bytes() == before
+    assert retried["ok"] is True, retried
+    assert path.read_bytes() != before
 
 
 def test_a_regeneration_whose_terminal_record_fails_quarantines_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
