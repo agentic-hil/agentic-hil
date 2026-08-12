@@ -51,6 +51,17 @@ def group_statuses(results: list[dict[str, Any]]) -> dict[tuple[str, str, str, s
     return grouped
 
 
+def group_counts(results: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], int]:
+    """How many repetitions each combination actually ran.
+
+    Escalation runs a disagreeing combination again, up to the ceiling, so the
+    cells of a finished matrix are not all the same size. A table that averages
+    them without that number treats a five-run cell and a two-run cell as one
+    measurement each.
+    """
+    return {group: len(statuses) for group, statuses in group_statuses(results).items()}
+
+
 def unstable_groups(results: list[dict[str, Any]]) -> list[tuple[str, str, str, str]]:
     """Combinations whose repetitions disagreed with each other.
 
@@ -135,6 +146,12 @@ def format_report(results: list[dict[str, Any]], output_root: Path | str) -> str
     lines.extend(_grouped_rates(results, "case", "id"))
     lines.extend(["", "By agent:"])
     lines.extend(_grouped_rates(results, "agent", "cli"))
+
+    counts = group_counts(results)
+    lines.extend(["", "Repetitions per combination:"])
+    for group, count in sorted(counts.items()):
+        case_id, cli, model, effort = group
+        lines.append(f"  {case_id} | {cli} {model} ({effort}): n={count}")
 
     statuses = group_statuses(results)
     unstable = unstable_groups(results)
