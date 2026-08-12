@@ -5,6 +5,6 @@
   "expected_outcome": "success",
   "requires_tool_use": false,
   "remove_skill_before_followup": true,
-  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project.",
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL from {install_spec} and set it up for this project.",
   "followup_prompt": "Answer this question about the project's hardware: is a debug probe reachable for this project, and what does the project's debugger configuration say?"
 }

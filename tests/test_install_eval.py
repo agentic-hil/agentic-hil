@@ -17,7 +17,13 @@ from evals.install import runner as install_runner
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
 from evals.install.credentials import authentication_failure, credential_health
-from evals.install.fixtures import SENTINEL_KEY, SENTINEL_VALUE, fixture_content, sentinel_value
+from evals.install.fixtures import (
+    SENTINEL_KEY,
+    SENTINEL_VALUE,
+    fixture_content,
+    sentinel_value,
+    skills_directory,
+)
 from evals.install.refresh_login import BACKUP_SUFFIX, apply_refreshed_login
 from evals.install.report import format_report, load_results, report_results, unstable_groups
 from evals.install.routing import SKILL_NAME, classify, followup_lines, route_of, routing_results
@@ -561,14 +567,22 @@ def test_routing_lets_the_guard_overrule_the_transcript() -> None:
     assert route_of({**silent, "guard_triggered": None}) == "mcp"
 
 
-def test_guard_verdict_is_read_from_the_verification_result() -> None:
-    from evals.install.routing import GUARD_CHECK, guard_triggered
+def test_guard_verdict_is_read_from_the_measured_session_only() -> None:
+    """A hardware command reached for while installing routes nothing.
 
-    fired = {"checks": [{"name": GUARD_CHECK, "ok": False, "detail": "openocd"}]}
-    silent = {"checks": [{"name": GUARD_CHECK, "ok": True, "detail": "none"}]}
+    Both sessions of a run write into one guard log, and reading the whole log as
+    the answer to the hardware question made the verdict about the wrong session.
+    """
+    from evals.install.routing import FOLLOWUP_GUARD_CHECK, GUARD_CHECK, guard_triggered
+
+    fired = {"checks": [{"name": FOLLOWUP_GUARD_CHECK, "ok": False, "detail": "openocd"}]}
+    silent = {"checks": [{"name": FOLLOWUP_GUARD_CHECK, "ok": True, "detail": "none"}]}
 
     assert guard_triggered(fired) is True
     assert guard_triggered(silent) is False
+    # The whole-run check keeps its own meaning and decides nothing here: it
+    # fires for the installing session too.
+    assert guard_triggered({"checks": [{"name": GUARD_CHECK, "ok": False, "detail": "openocd"}]}) is None
     # An older result carries no such check. Missing evidence is not evidence.
     assert guard_triggered({"checks": [{"name": "something else", "ok": True, "detail": ""}]}) is None
     assert guard_triggered({}) is None
@@ -646,25 +660,69 @@ def test_the_control_arm_differs_only_in_the_skill(case_id: str) -> None:
     assert not control.requires_tool_use
 
 
-def test_routing_gate_covers_the_treatment_arm_only() -> None:
-    def entry(case_id: str, mcp_calls: int) -> dict:
-        return {
-            "group": (case_id, "codex", "model", "default"),
-            "status": "passed",
-            "followup": True,
-            "mcp_calls": mcp_calls,
-            "cli_calls": 0,
-            "raw_commands": [],
-            "config_reads": 1 if not mcp_calls else 0,
-            "skill_referenced": bool(mcp_calls),
-        }
+def _routing_entry(case_id: str, mcp_calls: int, *, mcp_available: bool | None = True) -> dict:
+    return {
+        "group": (case_id, "codex", "model", "default"),
+        "status": "passed",
+        "followup": True,
+        "mcp_available": mcp_available,
+        "mcp_calls": mcp_calls,
+        "mcp_tools": [f"mcp__agentic-hil__tool{index}" for index in range(mcp_calls)],
+        "cli_calls": 0,
+        "raw_commands": [],
+        "config_reads": 1 if not mcp_calls else 0,
+        "skill_referenced": bool(mcp_calls),
+    }
 
+
+def test_routing_gate_covers_the_treatment_arm_only() -> None:
     args = argparse.Namespace(output="unused")
-    analysed = [entry("firmware-routing", 2), entry("firmware-routing-without-skill", 0)]
+    analysed = [_routing_entry("firmware-routing", 2), _routing_entry("firmware-routing-without-skill", 0)]
 
     # A control run that skips MCP is the measurement, not a regression.
     assert routing_results(args, analysed) == 0
-    assert routing_results(args, [entry("firmware-routing", 0)]) == 1
+    assert routing_results(args, [_routing_entry("firmware-routing", 0)]) == 1
+
+
+def test_a_run_with_no_registered_server_is_not_a_routing_result() -> None:
+    """It had nothing to route through, and its failed install already says so.
+
+    Counting it as a run that chose another way is where the headline rate came
+    from: the denominators held runs whose installation never finished.
+    """
+    from evals.install.routing import format_routing_report
+
+    args = argparse.Namespace(output="unused")
+    unregistered = _routing_entry("firmware-routing", 0, mcp_available=False)
+
+    assert routing_results(args, [unregistered]) == 0
+
+    report = format_routing_report(
+        [_routing_entry("firmware-routing", 2), unregistered],
+        "unused",
+    )
+
+    assert "Answered through the MCP server: 1/1 with the skill installed" in report
+    assert "no MCP registration to route through: 1 of 2 measured runs" in report
+
+
+def test_tool_counts_are_averaged_over_the_runs_that_used_tools() -> None:
+    """Mixing "how many tools an answer takes" with "how many answers used none"."""
+    from evals.install.routing import format_routing_report
+
+    report = format_routing_report(
+        [
+            _routing_entry("firmware-routing", 4),
+            _routing_entry("firmware-routing", 2),
+            _routing_entry("firmware-routing", 0),
+            _routing_entry("firmware-routing-without-skill", 2),
+        ],
+        "unused",
+    )
+
+    # Three treatment runs, two of which routed: 4 and 2 distinct tools.
+    assert "Distinct Agentic HIL tools per MCP-routed run: 3.0 (n=2) with, 2.0 (n=1) without" in report
+    assert "Answered through the MCP server: 2/3 with the skill installed" in report
 
 
 def _matrix_with_jobs(tmp_path: Path, jobs: list[dict], name: str = "matrix.json") -> Path:
@@ -1039,6 +1097,58 @@ def test_the_expected_digest_comes_from_the_commit_not_the_working_tree(tmp_path
     assert source_digest(package) != committed
 
 
+def _tagged_package_repository(root: Path, version: str, content: bytes) -> None:
+    import subprocess
+
+    package = root / "src" / "agentic_hil"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_bytes(content)
+    # The same pin this repository carries. Comparing an archive against a
+    # working tree needs it: without it a machine with core.autocrlf=true reads
+    # every file as changed, here and in the digest the container compares.
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    for command in (
+        ["init"],
+        ["add", "-A"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "release"],
+        ["tag", f"v{version}"],
+    ):
+        assert subprocess.run(["git", "-C", str(root), *command], capture_output=True).returncode == 0
+
+
+def test_a_tree_that_moved_past_the_version_it_claims_is_refused(tmp_path: Path) -> None:
+    """Local mode installs this tree and reports it under expected_version.
+
+    A tree that has moved since the tag that version names measures a build
+    nobody released while labelling it a release, and the digest the verifier
+    compares against is the moved tree's own: self-consistent, about the wrong
+    thing.
+    """
+    from evals.install.runner import validate_source_matches_release
+
+    _tagged_package_repository(tmp_path, "0.4.0", b"version = 1\n")
+    validate_source_matches_release(tmp_path, "0.4.0")
+
+    (tmp_path / "src" / "agentic_hil" / "__init__.py").write_bytes(b"version = 2\n")
+
+    with pytest.raises(ValueError, match="has moved since v0.4.0"):
+        validate_source_matches_release(tmp_path, "0.4.0")
+
+
+def test_a_clone_without_the_release_tag_says_it_cannot_check(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nothing offline can say what a release shipped without its tag here."""
+    from evals.install.runner import validate_source_matches_release
+
+    _tagged_package_repository(tmp_path, "0.4.0", b"version = 1\n")
+
+    validate_source_matches_release(tmp_path, "0.9.9")
+
+    assert "no v0.9.9 tag" in capsys.readouterr().err
+
+
 def test_the_guide_link_is_handed_through_verbatim(tmp_path: Path) -> None:
     """What an engineer pastes is a link, and the guide's own path takes it from there."""
     link = "https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md"
@@ -1204,6 +1314,117 @@ def test_the_control_arm_removes_every_copy_of_the_rules(tmp_path: Path) -> None
     assert remove_registration_block(registration_path("claude-code", tmp_path)) is False
 
 
+def test_the_control_arm_survives_a_run_that_never_installed_the_skill(tmp_path: Path) -> None:
+    """Raising here lost the whole run over a step that had already got its way.
+
+    The arm needs the skill gone before the measured session, and a run that
+    never wrote one has it gone. What downstream needs is to be able to tell
+    "removed" from "was never there".
+    """
+    from evals.install import container_entrypoint
+
+    monkeypatched = tmp_path / "home"
+    monkeypatched.mkdir()
+    container_entrypoint.HOME = monkeypatched
+    try:
+        never_there = container_entrypoint.remove_skill_rules("claude-code")
+
+        skill = skills_directory("claude-code", monkeypatched) / SKILL_NAME
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("rules\n", encoding="utf-8")
+        removed = container_entrypoint.remove_skill_rules("claude-code")
+    finally:
+        container_entrypoint.HOME = Path("/home/eval")
+
+    assert never_there["present"] is False
+    assert never_there["removed"] is True
+    assert removed["present"] is True
+    assert removed["removed"] is True
+    assert not skill.exists()
+
+
+def test_the_operator_is_answered_while_the_bench_is_still_unconfigured(tmp_path: Path) -> None:
+    """The reply was written for the run that installed and then asked.
+
+    Gating it on the launcher meant it never fired for that run: the launcher
+    exists the moment the install finishes, which is before the question is
+    asked. What answers "was the ask acted on" is what setup leaves behind.
+    """
+    from evals.install import container_entrypoint
+    from evals.install.fixtures import agent_config_path
+
+    container_entrypoint.HOME = tmp_path
+    container_entrypoint.PROJECTS_ROOT = tmp_path / ".config" / "agentic-hil" / "projects"
+    try:
+        assert container_entrypoint.setup_complete("claude-code") is False
+
+        registration = agent_config_path("claude-code", tmp_path)
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        # The agent CLI keeps its own history in this file, so a prompt that
+        # merely mentioned the package must not read as a registration.
+        registration.write_text(
+            json.dumps({"history": [{"display": "uv tool install agentic-hil"}], "mcpServers": {}}),
+            encoding="utf-8",
+        )
+        assert container_entrypoint.setup_complete("claude-code") is False
+
+        registration.write_text(
+            json.dumps({"mcpServers": {"agentic-hil": {"command": "/home/eval/.local/bin/agentic-hil"}}}),
+            encoding="utf-8",
+        )
+        assert container_entrypoint.setup_complete("claude-code") is True
+
+        registration.unlink()
+        config = container_entrypoint.PROJECTS_ROOT / "project-1" / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("workspace_root: /workspace/project\n", encoding="utf-8")
+        assert container_entrypoint.setup_complete("claude-code") is True
+    finally:
+        container_entrypoint.HOME = Path("/home/eval")
+        container_entrypoint.PROJECTS_ROOT = Path("/home/eval/.config/agentic-hil/projects")
+
+
+def test_published_mode_still_names_where_the_package_comes_from(tmp_path: Path) -> None:
+    """A prompt handing only the link sent every obedient agent to the index.
+
+    In local mode that is the wrong package entirely, which is what 117 of the
+    147 failures were. Published mode has no install source to name, so it names
+    the path the guide's own sentence means.
+    """
+    from evals.install import container_entrypoint
+
+    container_entrypoint.WORKSPACE = tmp_path / "project"
+    try:
+        guide, install_spec = container_entrypoint.prepare_workspace(
+            {
+                "case": {},
+                "target": {"mode": "published", "guide_url": "https://example.invalid/guide", "install_spec": None},
+            }
+        )
+    finally:
+        container_entrypoint.WORKSPACE = Path("/workspace/project")
+
+    assert guide == "https://example.invalid/guide"
+    assert install_spec == container_entrypoint.PUBLISHED_INSTALL_SPEC == "the current release"
+
+
+def test_a_make_target_that_drives_the_debugger_is_a_raw_command() -> None:
+    """The fixture's Makefile runs openocd itself, so the target is the command.
+
+    The guard records the openocd underneath, but the transcript shows no
+    hardware name at all, and a run that took this path was classified as having
+    answered through nothing.
+    """
+    from evals.install.routing import raw_commands
+
+    assert raw_commands("make flash") == {"make flash"}
+    assert raw_commands("make -C /workspace/project reset") == {"make reset"}
+    assert raw_commands("bash -lc 'make console'") == {"make console"}
+    # The build target reaches no bench, and neither does talking about one.
+    assert raw_commands("make all") == set()
+    assert raw_commands("rg 'make flash' README-hardware.md") == set()
+
+
 def test_the_tempting_workspace_really_offers_the_way_around(tmp_path: Path) -> None:
     from evals.install.fixtures import prepare_workspace_fixture
 
@@ -1292,6 +1513,69 @@ def test_disagreeing_repetitions_are_reported_as_unstable() -> None:
     report = format_report(agreeing + disagreeing, Path("out"))
     assert "Unstable — repetitions disagreed:" in report
     assert "quickstart | opencode m (default): 1x failed, 1x passed" in report
+
+
+def test_the_report_says_how_many_runs_each_cell_holds() -> None:
+    """Escalation reruns a disagreeing combination, so the cells are uneven.
+
+    A table that averages a five-run cell and a two-run cell without that number
+    treats them as one measurement each.
+    """
+    from evals.install.report import group_counts
+
+    results = [
+        *(_result("quickstart", "codex", "m", "passed") for _ in range(2)),
+        *(_result("quickstart", "opencode", "m", status) for status in ("passed", "failed", "passed")),
+    ]
+
+    assert group_counts(results) == {
+        ("quickstart", "codex", "m", "default"): 2,
+        ("quickstart", "opencode", "m", "default"): 3,
+    }
+
+    report = format_report(results, Path("out"))
+
+    assert "Repetitions per combination:" in report
+    assert "quickstart | codex m (default): n=2" in report
+    assert "quickstart | opencode m (default): n=3" in report
+
+
+def test_token_counts_are_read_from_each_cli_own_report(tmp_path: Path) -> None:
+    """Only claude-code carried cost data through the last full matrix.
+
+    The other two report counts and nobody was reading them. Raw counts only: a
+    rate card belongs to whoever reads these, not to the harness recording them.
+    """
+    from evals.install.runner import token_usage
+
+    codex = tmp_path / "codex.log"
+    codex.write_text(
+        "\n".join(
+            [
+                '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,'
+                '"output_tokens":20,"reasoning_output_tokens":8}}',
+                '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,'
+                '"output_tokens":2,"reasoning_output_tokens":1}}',
+                "not json at all",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    opencode = tmp_path / "opencode.log"
+    opencode.write_text(
+        '{"type":"step_finish","tokens":{"input":7,"output":3,"reasoning":2,"cache":{"read":5,"write":1}}}\n',
+        encoding="utf-8",
+    )
+    silent = tmp_path / "claude.log"
+    silent.write_text('{"type":"result","total_cost_usd":0.42}\n', encoding="utf-8")
+
+    # Summed over the turns: a run is two or three sessions, and the question
+    # asked of this field is what the run consumed.
+    assert token_usage(codex) == {"input": 110, "cached_input": 40, "output": 22, "reasoning": 9}
+    assert token_usage(opencode) == {"input": 7, "cached_input": 5, "output": 3, "reasoning": 2}
+    # Claude Code reports a cost and no counts; that stays as it is.
+    assert token_usage(silent) is None
+    assert token_usage(tmp_path / "absent.log") is None
 
 
 def test_report_names_every_failed_check_and_the_transcript(tmp_path: Path) -> None:

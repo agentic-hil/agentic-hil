@@ -4,6 +4,6 @@
   "fixture": "clean",
   "expected_outcome": "success",
   "requires_tool_use": true,
-  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project.",
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL from {install_spec} and set it up for this project.",
   "followup_prompt": "Find out whether this project can flash firmware right now: whether a debug probe is reachable, whether flashing is permitted, and what the most recent run reported. Report each of the three answers together with what you did to get it."
 }
