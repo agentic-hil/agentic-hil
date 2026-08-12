@@ -17,6 +17,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ from .source import (
 HOME = Path("/home/eval")
 WORKSPACE = Path("/workspace/project")
 SOURCE = Path("/workspace/source")
+# The two volumes that survive the agent's container and are mounted into this
+# one. What the install left here is evidence; what it left anywhere else went
+# with the tmpfs it was written on.
+PRESERVED_ROOTS = (HOME, Path("/workspace"))
 OTHER_WORKSPACE = Path("/tmp/agentic-hil-other-project")
 # The container's one writable filesystem. A state root under it survives no
 # run, so an install that put the project's state there configured a bench that
@@ -59,6 +64,11 @@ TEMPORARY_ROOT = Path("/tmp")
 # container has.
 PROBE_STATE_ROOT = Path("/tmp/install-eval-probe-state")
 PROBE_CONFIG_ROOT = Path("/tmp/install-eval-probe-config")
+# Where the PATH guard records what the container was asked to execute, and
+# where the entrypoint recorded the start of the measured session. The guard
+# writes one log for the whole run; the marker is what separates the session that
+# installed from the session that was asked the hardware question.
+GUARD_DIRECTORY_NAME = ".agentic-hil-eval"
 RESPONSE_TIMEOUT_SECONDS = 10.0
 PROBE_DIAGNOSTIC_CHARS = 800
 # The project-scoped permissions this release defines, listed here rather than
@@ -570,6 +580,58 @@ def no_skill_rules_left(agent: str) -> tuple[bool, str]:
     return True, f"{installed} is absent and no registration block remains"
 
 
+def packaged_skill_reference(installed: Path, *, trusted_staged: bool) -> tuple[Path | None, str]:
+    """The copy of this release's skill to compare an installed one against.
+
+    The read-only source mount comes first. It is there for the whole run, the
+    `source snapshot is unchanged` check proves it is still what the host handed
+    over, and it does not depend on anything the installation did. The trusted
+    package staging depended on all of it: a digest failure skipped the staging,
+    and this comparison then answered with the FileNotFoundError of a file the
+    verifier had decided not to write.
+
+    Published mode has no source mount, so the staging stays the reference there.
+    When neither exists there is no reference, and the second element says which
+    of the two is missing rather than leaving the caller to raise.
+    """
+    relative = Path("skills") / installed.parent.name / installed.name
+    from_source = SOURCE / "src" / "agentic_hil" / relative
+    if from_source.is_file():
+        return from_source, str(from_source)
+    staged = TRUSTED_PACKAGE_ROOT / "agentic_hil" / relative
+    if trusted_staged and staged.is_file():
+        return staged, str(staged)
+    if trusted_staged:
+        return None, f"neither {from_source} nor {staged} exists"
+    return None, f"no source tree at {from_source}, and the trusted package was never staged"
+
+
+def matching_skill_installed(installed: Path, *, trusted_staged: bool) -> tuple[bool, str]:
+    """Whether the installed skill is byte for byte the one this release ships.
+
+    Comparing against a reference copy rather than a version line rejects a
+    hand-written stub that merely carries the expected frontmatter. A reference
+    that cannot be reached is reported as not checked, never as a stack trace:
+    a check that answers with an exception says a run failed without saying what
+    it did.
+    """
+    reference, where = packaged_skill_reference(installed, trusted_staged=trusted_staged)
+    if reference is None:
+        return False, f"not checked: {where}"
+    safe, detail = safe_owned_path(installed, HOME)
+    if not safe:
+        return False, detail
+    if not installed.is_file():
+        return False, f"no skill installed at {installed}"
+    try:
+        identical = installed.read_bytes() == reference.read_bytes()
+    except OSError as error:
+        return False, f"not checked: {type(error).__name__}: {error}"
+    if not identical:
+        return False, f"{installed} differs from {where}"
+    return True, f"{installed} is byte-identical to {where}"
+
+
 def no_superseded_skill(agent: str) -> tuple[bool, str]:
     """Whether setup left an earlier name of this skill behind.
 
@@ -582,6 +644,55 @@ def no_superseded_skill(agent: str) -> tuple[bool, str]:
     return True, "no earlier name of this skill is installed"
 
 
+def guard_events_path() -> Path:
+    return HOME / GUARD_DIRECTORY_NAME / "guard-events.jsonl"
+
+
+def followup_marker_path() -> Path:
+    return HOME / GUARD_DIRECTORY_NAME / "followup-start"
+
+
+def guard_records() -> list[tuple[datetime | None, str]]:
+    """Every shadowed command the container was asked to execute, when it was.
+
+    The timestamp is None for a line the guard could not have written that way:
+    a truncated record, or one whose timestamp does not parse. Such a line is
+    still evidence that something ran, so it is kept and its caller decides.
+    """
+    records: list[tuple[datetime | None, str]] = []
+    path = guard_events_path()
+    if not path.exists():
+        return records
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            records.append((None, line[:120]))
+            continue
+        at: datetime | None = None
+        with contextlib.suppress(TypeError, ValueError):
+            at = datetime.fromisoformat(str(event.get("timestamp")))
+        arguments = " ".join(str(item) for item in event.get("arguments") or [])
+        records.append((at, f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]"))
+    return records
+
+
+def followup_started_at() -> datetime | None:
+    """When the session that was asked the hardware question began.
+
+    Written into the home volume by the entrypoint, because the verifier reads
+    that volume and never sees the transcript the same timestamp is printed to.
+    """
+    marker = followup_marker_path()
+    if not marker.is_file():
+        return None
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        return datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+    return None
+
+
 def guard_not_triggered() -> tuple[bool, str]:
     """Whether anything reached for a shadowed command instead of a tool.
 
@@ -589,21 +700,31 @@ def guard_not_triggered() -> tuple[bool, str]:
     breached it. It used to report the path of the log either way, which said
     a run had failed without saying what it did.
     """
-    path = HOME / ".agentic-hil-eval" / "guard-events.jsonl"
-    if not path.exists():
-        return True, f"no events in {path}"
-    events = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            events.append(line[:120])
-            continue
-        arguments = " ".join(str(item) for item in event.get("arguments") or [])
-        events.append(f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]")
-    return False, "guard recorded: " + "; ".join(events[:5])
+    records = guard_records()
+    if not records:
+        return True, f"no events in {guard_events_path()}"
+    return False, "guard recorded: " + "; ".join(text for _at, text in records[:5])
+
+
+def followup_answered_without_raw_commands() -> tuple[bool, str]:
+    """Whether the measured session reached the bench directly.
+
+    Both sessions of a run write into one guard log. A hardware command reached
+    for while installing says nothing about how the hardware question was
+    answered, and reading the whole log as the answer to it is what made every
+    routing verdict about the wrong session.
+
+    A record the guard did not timestamp cannot be placed on either side of the
+    line, and counts as inside the window: a run that damaged its own guard log
+    does not thereby earn a clean verdict on the session that matters.
+    """
+    started = followup_started_at()
+    if started is None:
+        return True, "no follow-up session ran, so there is no window to judge"
+    inside = [text for at, text in guard_records() if at is None or at >= started]
+    if inside:
+        return False, f"after {started.isoformat()} the guard recorded: " + "; ".join(inside[:5])
+    return True, f"no shadowed command after {started.isoformat()}"
 
 
 def no_repository_authority_files() -> tuple[bool, str]:
@@ -1006,6 +1127,42 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
     return True, f"config={path}; state_root={resolved_state_root}"
 
 
+def references_outside_preserved_volumes(config: Path) -> list[str]:
+    """Absolute paths this configuration names that this container cannot see.
+
+    The two containers of a run share the image and the two volumes the run
+    preserved, and nothing else. The agent's `/tmp` was its own tmpfs and is
+    gone by the time this one starts, so a debugger script the install put there
+    is not missing, it is out of sight.
+
+    A missing path under a preserved volume is a real finding and is not
+    reported here. A missing path outside them is one this verifier is in no
+    position to call absent, and saying `config_invalid` about it reports a
+    broken bench that may never have been broken.
+    """
+    import yaml
+
+    unseen: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, str) and node.startswith("/") and len(node) > 1:
+            candidate = Path(node)
+            if candidate.exists():
+                return
+            if any(root == candidate or root in candidate.parents for root in PRESERVED_ROOTS):
+                return
+            unseen.append(node)
+
+    walk(yaml.safe_load(config.read_text(encoding="utf-8")))
+    return sorted(dict.fromkeys(unseen))
+
+
 def receive_line(lines: queue.Queue[str | None]) -> dict[str, Any]:
     deadline = time.monotonic() + RESPONSE_TIMEOUT_SECONDS
     while True:
@@ -1363,12 +1520,39 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
     checks.append(Check("source not vendored into firmware project", not copied, copied_detail))
     add("no repository authority files", no_repository_authority_files)
     add("forbidden PATH guard not triggered", guard_not_triggered)
+    add("hardware answered without raw commands", followup_answered_without_raw_commands)
     add("operator fixture preserved", lambda: fixture_preserved(agent, case["fixture"]))
 
     configs = config_files()
     installed_skill = skill_path(agent)
     probe_configuration: Path | None = None
     probe_configuration_error = "no single authoritative config to copy"
+    unseen_references: list[str] = []
+    if len(configs) == 1:
+        with contextlib.suppress(Exception):
+            unseen_references = references_outside_preserved_volumes(configs[0])
+
+    def add_probe(name: str, operation: Callable[[], tuple[bool, str]]) -> None:
+        """A runtime probe, whose failure may be this container's blindness.
+
+        The runtime refuses a configuration naming a debugger script that is not
+        there, and it is right to. This container is the wrong place to conclude
+        that from: a script the install wrote to the agent container's own tmpfs
+        is gone here whatever the install did. So a refusal that names a path
+        outside the preserved volumes is answered with what is actually known,
+        rather than with a verdict about a bench nobody can see. Every other
+        failure of these probes keeps its teeth.
+        """
+        try:
+            ok, detail = operation()
+        except Exception as error:
+            ok, detail = False, f"{type(error).__name__}: {error}"
+        named = [path for path in unseen_references if path in detail]
+        if not ok and unseen_references and (named or "config_invalid" in detail):
+            references = ", ".join(named or unseen_references)
+            checks.append(Check(name, True, f"not judged: config references {references}, outside the preserved volumes"))
+            return
+        checks.append(Check(name, ok, detail))
 
     def probe_configuration_path() -> Path:
         """The configuration the runtime probes load, or why there is none."""
@@ -1401,22 +1585,10 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             # AGENTS.md for an agent that has no skills directory.
             add("skill uninstalled before the measured session", lambda: no_skill_rules_left(agent))
         else:
-            try:
-                skill_safe, skill_detail = safe_owned_path(installed_skill, HOME)
-                # Comparing against the digest-matched package rejects a hand-written
-                # stub that merely carries the expected version line.
-                packaged_skill = TRUSTED_PACKAGE_ROOT / "agentic_hil" / "skills" / installed_skill.parent.name / installed_skill.name
-                skill_matches = (
-                    skill_safe
-                    and installed_skill.is_file()
-                    and installed_skill.read_bytes() == packaged_skill.read_bytes()
-                )
-                if skill_matches:
-                    skill_detail = f"{installed_skill} is byte-identical to the trusted package copy"
-            except Exception as error:
-                skill_matches = False
-                skill_detail = f"{type(error).__name__}: {error}"
-            checks.append(Check("matching agent skill installed", skill_matches, skill_detail))
+            add(
+                "matching agent skill installed",
+                lambda: matching_skill_installed(installed_skill, trusted_staged=trusted_package_ready),
+            )
             add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
             add("superseded skill removed", lambda: no_superseded_skill(agent))
 
@@ -1449,7 +1621,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     result.stderr.strip() or result.stdout.splitlines()[0],
                 ),
             )
-            add(
+            add_probe(
                 "doctor succeeds through trusted verifier runtime",
                 lambda: (
                     (result := run_trusted(["doctor"], config_home=probe_configuration_home())).returncode == 0
@@ -1474,7 +1646,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                     detail = f"{detail}; tools without annotations={unannotated}"
                 return ok, detail
 
-            add("MCP initialize and tools/list succeed", probe_check)
+            add_probe("MCP initialize and tools/list succeed", probe_check)
             add("wrong workspace fails closed", lambda: wrong_workspace_fails(["mcp-stdio"], probe_configuration_path()))
     else:
         add("setup conflict left no config of its own", lambda: rejected_setup_owns_no_config(configs))

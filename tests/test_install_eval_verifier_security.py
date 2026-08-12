@@ -231,6 +231,165 @@ def test_the_guard_check_passes_when_nothing_was_recorded(
     assert "no events" in detail
 
 
+def _guard_log(home: Path, *events: tuple[str, str]) -> None:
+    path = home / ".agentic-hil-eval" / "guard-events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps({"timestamp": at, "command": command, "arguments": [], "reason": "hardware access"}) + "\n"
+            for at, command in events
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_measured_session_is_judged_on_its_own_guard_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Both sessions of a run write into one guard log.
+
+    A hardware command reached for while installing says nothing about how the
+    hardware question was answered, and reading the whole log as the answer to
+    it made every routing verdict about the wrong session.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    marker = tmp_path / ".agentic-hil-eval" / "followup-start"
+    _guard_log(tmp_path, ("2026-08-12T10:00:00+00:00", "openocd"))
+    marker.write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert ok
+    assert "no shadowed command after" in detail
+    # The whole-run check keeps its own meaning: something did breach the gate.
+    assert verifier.guard_not_triggered()[0] is False
+
+    _guard_log(tmp_path, ("2026-08-12T10:00:00+00:00", "openocd"), ("2026-08-12T11:30:00+00:00", "pyocd"))
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert not ok
+    assert "pyocd" in detail
+    assert "openocd" not in detail
+
+
+def test_a_run_without_a_measured_session_has_no_window_to_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _guard_log(tmp_path, ("2026-08-12T10:00:00+00:00", "openocd"))
+
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert ok
+    assert "no follow-up session ran" in detail
+
+
+def test_a_guard_record_without_a_timestamp_counts_against_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A run that damaged its own guard log does not earn a clean verdict."""
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    events = tmp_path / ".agentic-hil-eval" / "guard-events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text('{"command": "openocd", truncated\n', encoding="utf-8")
+    (tmp_path / ".agentic-hil-eval" / "followup-start").write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert not ok
+    assert "openocd" in detail
+
+
+def test_the_installed_skill_is_compared_against_the_read_only_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The source mount is there whatever the installation did.
+
+    Comparing against the trusted package staging tied this check to a staging
+    the verifier skips after a digest failure, and it then answered with the
+    FileNotFoundError of a file it had decided not to write.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path / "home")
+    monkeypatch.setattr(verifier, "SOURCE", tmp_path / "source")
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, _root: (True, str(path)))
+    packaged = tmp_path / "source" / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"---\nname: agentic-hil\n---\n")
+    installed = tmp_path / "home" / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"---\nname: agentic-hil\n---\n")
+
+    ok, detail = verifier.matching_skill_installed(installed, trusted_staged=False)
+
+    assert ok
+    assert str(packaged) in detail
+
+    installed.write_bytes(b"---\nname: agentic-hil\n---\nhand written\n")
+    ok, detail = verifier.matching_skill_installed(installed, trusted_staged=False)
+
+    assert not ok
+    assert "differs from" in detail
+
+
+def test_a_skill_with_no_reference_copy_is_reported_as_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A check that answers with a stack trace says a run failed, not what it did."""
+    monkeypatch.setattr(verifier, "HOME", tmp_path / "home")
+    monkeypatch.setattr(verifier, "SOURCE", tmp_path / "source")
+    installed = tmp_path / "home" / ".claude" / "skills" / "agentic-hil" / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"whatever\n")
+
+    ok, detail = verifier.matching_skill_installed(installed, trusted_staged=False)
+
+    assert not ok
+    assert detail.startswith("not checked: ")
+    assert "trusted package was never staged" in detail
+    assert "Error" not in detail
+
+
+def test_a_config_path_outside_the_preserved_volumes_is_not_this_container_to_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The agent's /tmp went with the container it belonged to.
+
+    A debugger script written there is not missing, it is out of sight, and
+    reporting config_invalid about it reports a bench that may never have been
+    broken. A missing path under a volume the run preserved is still a finding.
+    """
+    monkeypatch.setattr(verifier, "PRESERVED_ROOTS", (Path("/home/eval"), Path("/workspace")))
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "workspace_root": "/workspace/project",
+                "state_root": "/home/eval/.local/state/agentic-hil",
+                "debuggers": {
+                    "probe": {
+                        "interface_cfg": "/gone/with/the/tmpfs/interface/stlink.cfg",
+                        # Missing under a volume the run preserved: a real finding,
+                        # and not this function's to excuse.
+                        "target_cfg": "/home/eval/scripts/stm32f4x.cfg",
+                        "executable": "openocd",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    unseen = verifier.references_outside_preserved_volumes(config)
+
+    assert unseen == ["/gone/with/the/tmpfs/interface/stlink.cfg"]
+
+
 def test_a_repository_authority_file_is_named_when_one_is_found(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
