@@ -179,8 +179,8 @@ ATTESTATION_RECOVERY_ACTION = "recovery_action_verified"
 # between a person at a command line and a person quoted by a program.
 ATTESTATION_OPERATOR_VIA_AGENT = "operator_statement_via_agent"
 # Nothing attested anything, and nothing needed to. The incident named a proof
-# that comes back on its own at the next contact — a target the next reset and
-# probe speak for, a serial handle or a CAN adapter the next open speaks for —
+# that comes back on its own at the next contact: a target the next reset and
+# probe speak for, a serial handle or a CAN adapter the next open speaks for,
 # so it stopped standing when the call that raised it ended. Kept as its own
 # attestation rather than folded into one of the four above precisely because it
 # is not evidence about a bench: it is the record that a gate was not owed, and
@@ -302,8 +302,8 @@ class HardwareLease:
         lands in ``errors``, the same reason travels into ``cleanup_reasons`` and
         from there into every result and record this lease writes, and the
         catalogue keys its remediation off it exactly as before. What does not
-        happen is the incident — no ``cleanup_required`` state, no quarantine id,
-        no gate — because the proof this reason is missing comes back by itself
+        happen is the incident: no ``cleanup_required`` state, no quarantine id and
+        no gate, because the proof this reason is missing comes back by itself
         at the next open."""
         self.coordinator.record_cleanup_event(self, reason, error)
 
@@ -488,9 +488,9 @@ class HardwareCoordinator:
         (``blocked``) so the recovery action still runs and the teardown still
         settles it, but it only *stands* while the evidence chain itself is
         damaged. Everything else names a proof that comes back at the next
-        contact — the target's, at the next reset and probe; a serial handle's or
+        contact: the target's, at the next reset and probe; a serial handle's or
         a CAN adapter's, at the next open, which the operating system refuses by
-        itself if the handle is really stuck — so holding the bench for it would
+        itself if the handle is really stuck, so holding the bench for it would
         be asking a person to confirm what the next call establishes anyway."""
         return self.blocked and self.audit_incident
 
@@ -903,7 +903,7 @@ class HardwareCoordinator:
         """End an incident that owes no gate, and leave the ledger saying so.
 
         ``None`` when there is nothing to do: no incident, or one that stands.
-        Otherwise the incident stops existing — in memory and on disk — and the
+        Otherwise the incident stops existing, in memory and on disk, and the
         recovery ledger carries a line naming every reason it was held for, who
         ended it, and that nothing attested anything, because nothing had to.
 

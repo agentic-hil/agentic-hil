@@ -773,8 +773,8 @@ def quarantined_coordinator(tmp_path: Path) -> tuple[HardwareCoordinator, str, s
     """A bench left standing, which since #216 means one whose audit broke.
 
     The reason moved and nothing else did. Every test below is about
-    `recover`'s transition — marker consistency, the evidence-first ledger
-    write, two recoveries racing — and that transition is the one an operator
+    `recover`'s transition: marker consistency, the evidence-first ledger
+    write, two recoveries racing. That transition is the one an operator
     still performs, on the one family a later contact cannot re-establish. A
     reason outside it no longer produces a standing incident to recover, so
     building these on one would have been testing the mechanics through a state

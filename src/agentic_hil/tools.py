@@ -655,7 +655,7 @@ class AgenticHILToolService:
         one incident that still gates, while the recovery class must reach the
         board *through* it, and wrapping either in a run it cannot open would
         break both. An incident that is open and does not stand is not one of
-        those cases — `begin_run` lets it through, and the teardown below is
+        those cases: `begin_run` lets it through, and the teardown below is
         where its recovery action runs.
         """
         try:
