@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **Between releases a working tree shadowed the release it had moved past, and nothing downstream could tell them apart.** `src/agentic_hil` moves for a whole cycle while the version string stands still, so an install from such a tree reported the released number, `agentic-hil upgrade` called it `already_current`, and the install eval refused to run a local matrix at all rather than measure this tree and label it that release. The cycle now carries two versions: the release commit sets the final number, and the first commit after it moves the distribution version to `X.Y.Z.devN`. Only the two positions that identify the built artifact follow the tree, `pyproject.toml` and `src/agentic_hil/__init__.py`; every floor, install pin, published manifest and eval matrix keeps naming the release a reader can install. The version gate holds both shapes, refuses `--release-tag` on a development tree because a tag never carries a suffix, refuses a development version that does not follow the newest CHANGELOG heading, and refuses a tree whose package has moved past its release without saying so wherever the release tag is present to prove it, warning instead of failing in a fork or a shallow clone; the pre-merge job now fetches full history so the tag is there. The install eval expects the version an install actually produces, the tree's own for local and remote runs and the release for published ones. (#214)
+
 ## [0.13.0] - 2026-08-12
 
 ### Changed
