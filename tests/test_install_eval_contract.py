@@ -183,8 +183,9 @@ def test_the_guard_survives_a_login_shell() -> None:
         encoding="utf-8"
     )
 
-    assert "/usr/local/bin/$(basename \"$shim\")" in dockerfile
-    assert "/etc/profile.d/00-eval-guard.sh" in dockerfile
+    # Written, not merely mentioned: the redirect is what puts the drop-in there.
+    assert 'ln -s /opt/evals/install/guard.py "/usr/local/bin/$(basename "$shim")"' in dockerfile
+    assert "> /etc/profile.d/00-eval-guard.sh" in dockerfile
     assert 'PATH="/opt/eval-guard/bin:$PATH"' in dockerfile
 
 
