@@ -27,7 +27,7 @@ from .config import Case, CredentialFile, Job, Matrix, load_matrix
 from .credentials import authentication_failure, credential_health
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .refresh_login import apply_refreshed_login
-from .report import report_results, result_group, timings_results, unstable_groups
+from .report import group_counts, report_results, result_group, timings_results, unstable_groups
 from .routing import routing_results
 from .source import create_source_snapshot, source_digest
 
@@ -162,6 +162,54 @@ def committed_package_digest(repository: Path, commit: str) -> str:
             else:
                 bundle.extractall(extracted)
         return source_digest(extracted / "src" / "agentic_hil")
+
+
+def released_package_digest(repository: Path, version: str) -> str | None:
+    """What ``src/agentic_hil`` held at the tag this version names, if it is here.
+
+    None means the clone carries no such tag, so nothing offline can say what the
+    release shipped and the caller has no gate to apply.
+    """
+    tag = f"v{version}"
+    found = run_capture(["git", "-C", str(repository), "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"], 30)
+    if found.returncode != 0 or not found.stdout.strip():
+        return None
+    return committed_package_digest(repository, tag)
+
+
+def validate_source_matches_release(source_root: Path, expected_version: str) -> None:
+    """Refuse a local matrix whose package moved while its version stood still.
+
+    Local mode installs this tree and every artifact then reports it under
+    ``expected_version``. When the tree has moved past the tag that version names,
+    the whole matrix measures a build nobody released while labelling it a
+    release, and the digest the verifier compares against is the moved tree's
+    own: self-consistent, and about the wrong thing.
+
+    The released digest comes from the tag in this clone rather than from the
+    index, so the gate holds offline. A clone without the tag cannot answer, and
+    says so rather than passing silently. Comparing an archive against a working
+    tree needs the repository to pin its line endings, which this one does in
+    `.gitattributes`; without that pin the two differ on Windows for that reason
+    alone, and the digest the verifier compares against would already be wrong
+    for the same reason.
+    """
+    working = source_digest(source_root / "src" / "agentic_hil")
+    released = released_package_digest(source_root, expected_version)
+    if released is None:
+        print(
+            f"WARNING: this clone has no v{expected_version} tag, so the matrix cannot check that "
+            f"src/agentic_hil still holds what that version shipped",
+            file=sys.stderr,
+        )
+        return
+    if released != working:
+        raise ValueError(
+            f"src/agentic_hil has moved since v{expected_version} while the version stayed "
+            f"{expected_version}: working tree {working}, v{expected_version} {released}. Every run "
+            f"would install this tree and report it as the release. Give the working tree a "
+            f"development version suffix, or run the matrix in published mode against the release."
+        )
 
 
 def job_payload(
@@ -529,6 +577,79 @@ def reasoning_tokens_reported(text: str) -> int | None:
     if not found:
         return None
     return sum(int(value) for _, value in found)
+
+
+# Where each CLI reports what a turn consumed, and what it calls the field. codex
+# writes turn.completed with a usage object, opencode writes step_finish with a
+# tokens object; Claude Code reports total_cost_usd in its own result line, which
+# keeps flowing through the transcript untouched. Nothing here prices anything:
+# a rate card belongs to whoever reads these counts, not to the harness that
+# records them, and a price baked in here would go stale silently.
+TOKEN_EVENTS = {
+    "turn.completed": "usage",
+    "step_finish": "tokens",
+    "step-finish": "tokens",
+}
+TOKEN_FIELDS = {
+    "input": ("input_tokens", "input"),
+    "cached_input": ("cached_input_tokens", "cached_input"),
+    "output": ("output_tokens", "output"),
+    "reasoning": ("reasoning_output_tokens", "reasoning_tokens", "reasoning"),
+}
+
+
+def _usage_payloads(node: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(node, list):
+        for item in node:
+            found.extend(_usage_payloads(item))
+        return found
+    if not isinstance(node, dict):
+        return found
+    field = TOKEN_EVENTS.get(str(node.get("type")))
+    if field is not None and isinstance(node.get(field), dict):
+        found.append(node[field])
+    for value in node.values():
+        found.extend(_usage_payloads(value))
+    return found
+
+
+def _token_counts(payload: dict[str, Any]) -> dict[str, int]:
+    flattened = dict(payload)
+    cache = payload.get("cache")
+    if isinstance(cache, dict) and isinstance(cache.get("read"), int):
+        # opencode reports the cached prefix as a read against its cache.
+        flattened.setdefault("cached_input", cache["read"])
+    counts: dict[str, int] = {}
+    for name, aliases in TOKEN_FIELDS.items():
+        for alias in aliases:
+            value = flattened.get(alias)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[name] = value
+                break
+    return counts
+
+
+def token_usage(log_path: Path) -> dict[str, int] | None:
+    """What the agent CLI counted for this run, summed over its turns.
+
+    A run is two or three sessions, so per-turn counts are added up: the question
+    a reader asks of this field is what the run consumed, not what one turn of it
+    did. None means this CLI reported no counts at all, which is not the same as
+    a run that consumed nothing.
+    """
+    if not log_path.is_file():
+        return None
+    totals: dict[str, int] = {}
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        for payload in _usage_payloads(document):
+            for name, value in _token_counts(payload).items():
+                totals[name] = totals.get(name, 0) + value
+    return totals or None
 
 
 def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bool, str]:
@@ -925,6 +1046,8 @@ def run_one(
             else None,
         },
         "case": {"id": case.id, "expected_outcome": case.expected_outcome},
+        # Raw counts as the CLI reported them, or null where it reports none.
+        "tokens": token_usage(run_directory / "agent.log"),
         "target": payload["target"],
         "environment": {
             "image": matrix.image,
@@ -1131,6 +1254,8 @@ def run_matrix(args: argparse.Namespace) -> int:
         raise RuntimeError("per-model concurrency must be at least 1")
     host_source_root = Path(args.source_root).resolve()
     validate_source_version(host_source_root, matrix.target.expected_version)
+    if matrix.target.mode == "local":
+        validate_source_matches_release(host_source_root, matrix.target.expected_version)
     if matrix.target.mode == "remote":
         assert matrix.target.expected_commit is not None
         validate_remote_checkout(host_source_root, matrix.target.expected_commit)
@@ -1284,6 +1409,19 @@ def run_matrix(args: argparse.Namespace) -> int:
             "unstable": [
                 {"case": case_id, "agent": agent, "model": model, "reasoning_effort": effort}
                 for case_id, agent, model, effort in unstable_groups(results)
+            ],
+            # Escalation reruns a disagreeing combination, so the cells are not
+            # all the same size. Carried here so a downstream table can weight
+            # them instead of averaging uneven cells into one number.
+            "repetitions": [
+                {
+                    "case": case_id,
+                    "agent": agent,
+                    "model": model,
+                    "reasoning_effort": effort,
+                    "runs": runs,
+                }
+                for (case_id, agent, model, effort), runs in sorted(group_counts(results).items())
             ],
             "results": [{"id": result["id"], "status": result["status"]} for result in results],
         }

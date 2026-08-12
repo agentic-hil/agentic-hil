@@ -410,9 +410,13 @@ interlocked against. The first two are available alone as
 
 Writing the agent's own skill directory and MCP registration is what a host's
 permission system is built to stop, so expect it to ask before `setup` runs.
-Say so before you call it and let the operator approve the prompt or add a
-standing rule for the command prefix, `Bash(agentic-hil setup:*)`. That
-refusal is the host's, not Agentic HIL's: it carries no `permission_denied`
-result and no report, and it stands until the operator lifts it. Never route
-around it with another shell or a permission-skipping flag, and never write the
-rule into the host's settings yourself.
+Say so before you call it, then call it in the same turn: the prompt is the
+operator's chance to approve and it never appears until something asks for it,
+a standing rule for the command prefix, `Bash(agentic-hil setup:*)`, is the
+other way to grant it, and a refusal is what tells you to run `agentic-hil init`
+and hand over `agentic-hil agent-install --agent claude`. Never end a turn with
+the question asked and nothing attempted. That refusal is the host's, not
+Agentic HIL's: it carries no `permission_denied` result and no report, and it
+stands until the operator lifts it. Never route around it with another shell or
+a permission-skipping flag, and never write the rule into the host's settings
+yourself.

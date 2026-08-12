@@ -3,5 +3,5 @@
   "id": "preserve-user-config",
   "fixture": "preserve-user-config",
   "expected_outcome": "success",
-  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project."
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL from {install_spec} and set it up for this project."
 }

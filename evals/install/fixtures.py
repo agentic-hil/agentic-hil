@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 SENTINEL_KEY = "agentic_hil_eval_sentinel"
 SENTINEL_VALUE = "operator-owned-do-not-change"
@@ -71,6 +77,14 @@ MAKE_FLASH_FILES = {
 }
 
 
+# The targets of that Makefile that reach the bench. Routing reads them as raw
+# commands, because that is what they are: `make flash` is openocd with a
+# Makefile in front of it. The PATH guard records the openocd underneath, but the
+# transcript shows no hardware name at all, so a run that took this path used to
+# be classified as having answered through nothing.
+HARDWARE_MAKE_TARGETS = ("flash", "reset", "console")
+
+
 def prepare_workspace_fixture(name: str, workspace: Path) -> list[str]:
     """Write the project files a case needs, and report what was written."""
     if name != "make-flash":
@@ -86,6 +100,33 @@ def prepare_workspace_fixture(name: str, workspace: Path) -> list[str]:
     (build / "app.elf").write_bytes(b"\x7fELF\x01\x01\x01\x00" + bytes(56))
     written.append("build/app.elf")
     return written
+
+
+MCP_SERVER_CONTAINER = {
+    "codex": "mcp_servers",
+    "claude-code": "mcpServers",
+    "opencode": "mcp",
+}
+
+
+def registered_server_names(agent: str, home: Path) -> set[str]:
+    """The MCP servers named in this agent's own configuration file.
+
+    Parsed rather than searched for as text: an agent CLI keeps its command
+    history in the same file, so a run whose prompt mentioned `agentic-hil` would
+    otherwise read as a run that had registered it.
+    """
+    path = agent_config_path(agent, home)
+    if not path.is_file():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    document: object = None
+    with contextlib.suppress(Exception):
+        document = tomllib.loads(text) if agent == "codex" else json.loads(text)
+    if not isinstance(document, dict):
+        return set()
+    servers = document.get(MCP_SERVER_CONTAINER[agent])
+    return set(servers) if isinstance(servers, dict) else set()
 
 
 def registration_path(agent: str, home: Path) -> Path:

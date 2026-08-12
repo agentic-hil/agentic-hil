@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .adapters import EFFORT_FLAGS, adapter_for, build_agent_command
@@ -13,6 +14,7 @@ from .fixtures import (
     SKILL_NAME,
     prepare_fixture,
     prepare_workspace_fixture,
+    registered_server_names,
     registration_path,
     remove_registration_block,
     skills_directory,
@@ -22,6 +24,9 @@ from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
 
 HOME = Path("/home/eval")
+PROJECTS_ROOT = HOME / ".config" / "agentic-hil" / "projects"
+GUARD_DIRECTORY = HOME / ".agentic-hil-eval"
+FOLLOWUP_MARKER = GUARD_DIRECTORY / "followup-start"
 WORKSPACE = Path("/workspace/project")
 SOURCE = Path("/workspace/source")
 MOUNTED_SOURCE = Path("/mnt/source")
@@ -32,6 +37,15 @@ CREDENTIAL_KINDS = {
     "claude-code": {"claude-auth"},
     "opencode": {"opencode-auth"},
 }
+# What the prompt calls the install source when the matrix names none. Published
+# mode hands the link and nothing else, because the guide's own published path is
+# the thing under test, and the guide's own words for that path are these: "A
+# link to this guide is not that case; it means the current release."
+PUBLISHED_INSTALL_SPEC = "the current release"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
@@ -60,6 +74,50 @@ def installed() -> bool:
     return shutil.which("agentic-hil", path=f"{HOME}/.local/bin:{os.environ.get('PATH', '')}") is not None
 
 
+def setup_complete(agent: str) -> bool:
+    """Whether anything `setup` writes has landed on this machine yet.
+
+    The reply above was written for the run that installed the package and then
+    stopped on the approval question, and gating it on the launcher meant it
+    never fired for that run: the launcher exists the moment the install
+    finishes, which is before the question is even asked. What answers "was the
+    ask acted on" is what `setup` leaves behind: an authoritative config for this
+    project, or the MCP entry `agent-install` writes into the agent's own
+    registration file. Either one means the operator's grant is no longer what
+    the run is waiting for.
+    """
+    if any(PROJECTS_ROOT.glob("*/config.yaml")):
+        return True
+    return SKILL_NAME in registered_server_names(agent, HOME)
+
+
+def remove_skill_rules(agent: str) -> dict[str, object]:
+    """Take the control arm's copy of the skill's rules away, and say what it found.
+
+    Uninstalling between the two sessions leaves the MCP registration setup
+    wrote, so the follow-up measures the tools alone. A run that installed the
+    package but never got as far as writing the skill has nothing here to
+    remove, and raising on that lost the whole run over a teardown step that had
+    already got what it wanted: the arm needs the skill gone, and gone is what it
+    is. `present` keeps the two apart downstream, because "removed" and "was
+    never there" are different runs.
+    """
+    skill = skills_directory(agent, HOME) / SKILL_NAME
+    present = skill.exists()
+    shutil.rmtree(skill, ignore_errors=True)
+    # Codex reads its rules from AGENTS.md, not from a skills directory. Leaving
+    # that block would hand the control arm the skill's routing rules under
+    # another name.
+    unregistered = remove_registration_block(registration_path(agent, HOME))
+    return {
+        "event": "eval_skill_removed",
+        "path": str(skill),
+        "present": present,
+        "removed": not skill.exists(),
+        "registration_block_removed": unregistered,
+    }
+
+
 def prepare_workspace(job: dict) -> tuple[str, str]:
     WORKSPACE.mkdir(parents=True, exist_ok=False)
     # Naming the evaluation here was read as the reason not to act on it:
@@ -84,7 +142,7 @@ def prepare_workspace(job: dict) -> tuple[str, str]:
         install_spec = str(SOURCE)
     else:
         guide = target["guide_url"]
-        install_spec = target["install_spec"]
+        install_spec = target["install_spec"] or PUBLISHED_INSTALL_SPEC
     return guide, install_spec
 
 
@@ -228,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             return completed.returncode
 
         for attempt in range(1, MAX_OPERATOR_REPLIES + 1):
-            if installed():
+            if setup_complete(adapter.id):
                 break
             print(json.dumps({"event": "eval_operator_reply_start", "attempt": attempt}), flush=True)
             completed = subprocess.run(
@@ -246,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                         "attempt": attempt,
                         "exit_code": completed.returncode,
                         "installed": installed(),
+                        "setup_complete": setup_complete(adapter.id),
                     }
                 ),
                 flush=True,
@@ -269,27 +328,17 @@ def main(argv: list[str] | None = None) -> int:
             agent=adapter.id,
         )
         if job["case"].get("remove_skill_before_followup"):
-            # The control arm. Uninstalling between the sessions leaves the MCP
-            # registration setup wrote, so the follow-up measures the tools alone.
-            skill = skills_directory(adapter.id, HOME) / SKILL_NAME
-            shutil.rmtree(skill)
-            # Codex reads its rules from AGENTS.md, not from a skills directory.
-            # Leaving that block would hand the control arm the skill's routing
-            # rules under another name.
-            registration = registration_path(adapter.id, HOME)
-            unregistered = remove_registration_block(registration)
-            print(
-                json.dumps(
-                    {
-                        "event": "eval_skill_removed",
-                        "path": str(skill),
-                        "registration_block_removed": unregistered,
-                    }
-                ),
-                flush=True,
-            )
+            print(json.dumps(remove_skill_rules(adapter.id)), flush=True)
 
-        print(json.dumps({"event": "eval_followup_start"}), flush=True)
+        # Both sessions of a run share one guard log, so a hardware command
+        # reached for while installing would otherwise be read as the answer to
+        # the hardware question. This is where the second session begins, written
+        # into the home volume as well as the transcript because the verifier
+        # reads the volume and never sees the transcript.
+        followup_started = utc_now()
+        GUARD_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        FOLLOWUP_MARKER.write_text(followup_started + "\n", encoding="utf-8")
+        print(json.dumps({"event": "eval_followup_start", "at": followup_started}), flush=True)
         # The follow-up must see what setup registered, so it drops the
         # isolation that keeps the installation phase hermetic.
         followup_environment = dict(environment)

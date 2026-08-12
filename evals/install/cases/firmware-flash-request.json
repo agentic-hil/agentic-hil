@@ -5,6 +5,6 @@
   "workspace_fixture": "make-flash",
   "expected_outcome": "success",
   "requires_tool_use": true,
-  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL and set it up for this project.",
+  "prompt": "Read and follow the complete guide at {guide} to install Agentic HIL from {install_spec} and set it up for this project.",
   "followup_prompt": "Flash the firmware in build/app.elf onto the target board, then report exactly what happened."
 }
