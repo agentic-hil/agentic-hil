@@ -1749,12 +1749,19 @@ def quarantine_reason_details(reasons: list[str]) -> list[JsonObject]:
 
 
 def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
-    """Attach the per-reason signer guidance to a quarantined result.
+    """Attach the per-reason guidance to a result that names a cleanup reason.
 
     Applied at reporting time, never persisted: records and audit reports keep
     only the reason strings, so catalogue text can improve between versions
-    without stale copies surviving in state files."""
-    if result.get("quarantined") is not True and result.get("cleanup_required") is not True:
+    without stale copies surviving in state files.
+
+    Keyed off the reason rather than off the gate. Since the quarantine narrowed
+    to the audit families, most reasons name something a call could not confirm
+    without the bench being held for it, and what was attempted, what still
+    holds, what stays unknown and what to check on the board is exactly as
+    useful then as it was when a person had to sign for it. So a result that
+    carries a cleanup reason carries its guidance, blocked or not."""
+    if result.get("quarantined") is not True and result.get("cleanup_required") is not True and not result.get("cleanup_reasons"):
         return result
     listed = result.get("cleanup_reasons")
     reasons = [reason for reason in listed if isinstance(reason, str) and reason] if isinstance(listed, list) else []

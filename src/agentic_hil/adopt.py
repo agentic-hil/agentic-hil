@@ -971,7 +971,7 @@ def discover_under_hardware_lease(
         ensure_audit_ready(existing)
     except (ConfigError, OSError) as error:
         return {}, {**audit_unavailable(tool, error), **NOT_STARTED, "retry_safe": False}
-    if coordinator.blocked:
+    if coordinator.incident_stands:
         return {}, _quarantined_refusal(coordinator, tool)
 
     held: list[HardwareLease] = []
