@@ -361,10 +361,11 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         if args.command == "lease-status":
             return status
         # The signature is owed for one thing: an evidence chain that cannot be
-        # rebuilt. Everything else stood down when the call that raised it ended,
-        # or stands down in the read above, and an operator who typed this over a
-        # bench with nothing on it is told exactly that rather than handed an
-        # error for a bench that is fine.
+        # rebuilt. Everything else ended with the call that raised it, or is an
+        # incident waiting for the next hardware call to answer it, and neither
+        # is a thing an operator can sign for. So somebody who typed this over a
+        # bench with nothing standing is told exactly that, rather than handed an
+        # error about a bench that is fine.
         if not status.get("incident_stands"):
             return nothing_standing_result(status)
         return coordinator.recover(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id, accept_config_change=args.accept_config_change)
