@@ -2058,9 +2058,6 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     }
     if reasons:
         result["cleanup_reasons"] = reasons
-    stood_down = status.get("stood_down_incident")
-    if isinstance(stood_down, dict):
-        result["incident_stood_down"] = stood_down
     return result
 
 
