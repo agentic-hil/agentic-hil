@@ -1149,6 +1149,69 @@ def test_a_clone_without_the_release_tag_says_it_cannot_check(
     assert "no v0.9.9 tag" in capsys.readouterr().err
 
 
+def _states_version(root: Path, version: str) -> None:
+    """The minimum of a source tree, as far as the version gates read one."""
+    (root / "pyproject.toml").write_text(f'[project]\nname = "agentic-hil"\nversion = "{version}"\n', encoding="utf-8")
+
+
+def test_a_development_tree_is_expected_at_the_version_it_installs_as(tmp_path: Path) -> None:
+    """The honest contract: expect what the install produces, not what it names.
+
+    `target.expected_version` names the release, because the same field is what
+    a published-mode run pins and what the version gate holds both committed
+    matrices to. A local install from a tree that has moved past that release
+    yields the development version, and every artifact of the run reports it, so
+    that is what the verifier is given. The moved-tree refusal does not fire:
+    nothing here is being reported as the release.
+    """
+    from evals.install.config import Target
+    from evals.install.runner import installed_version, source_gates
+
+    _tagged_package_repository(tmp_path, "0.4.0", b"version = 1\n")
+    (tmp_path / "src" / "agentic_hil" / "__init__.py").write_bytes(b"version = 2\n")
+    _states_version(tmp_path, "0.4.1.dev0")
+    target = Target(mode="local", expected_version="0.4.0")
+
+    assert source_gates(tmp_path, target) == "0.4.1.dev0"
+    assert installed_version(target, tmp_path) == "0.4.1.dev0"
+
+
+def test_a_moved_tree_still_claiming_the_release_is_still_refused(tmp_path: Path) -> None:
+    """The other half: without the suffix, the run would report a lie."""
+    from evals.install.config import Target
+    from evals.install.runner import source_gates
+
+    _tagged_package_repository(tmp_path, "0.4.0", b"version = 1\n")
+    (tmp_path / "src" / "agentic_hil" / "__init__.py").write_bytes(b"version = 2\n")
+    _states_version(tmp_path, "0.4.0")
+
+    with pytest.raises(ValueError, match="has moved since v0.4.0"):
+        source_gates(tmp_path, Target(mode="local", expected_version="0.4.0"))
+
+
+def test_a_published_run_stays_pinned_to_the_release(tmp_path: Path) -> None:
+    """Nothing of this tree reaches a published run; the index answers it."""
+    from evals.install.config import Target
+    from evals.install.runner import installed_version
+
+    _states_version(tmp_path, "0.4.1.dev0")
+    target = Target(mode="published", expected_version="0.4.0", guide_url="https://example.invalid/guide")
+
+    assert installed_version(target, tmp_path) == "0.4.0"
+
+
+def test_a_tree_that_is_neither_the_release_nor_a_development_version_is_refused(tmp_path: Path) -> None:
+    """The refusal that stays: a matrix this tree cannot answer for at all."""
+    from evals.install.config import Target
+    from evals.install.runner import source_gates
+
+    _tagged_package_repository(tmp_path, "0.4.0", b"version = 1\n")
+    _states_version(tmp_path, "0.9.9")
+
+    with pytest.raises(ValueError, match="does not match target.expected_version"):
+        source_gates(tmp_path, Target(mode="local", expected_version="0.4.0"))
+
+
 def test_the_guide_link_is_handed_through_verbatim(tmp_path: Path) -> None:
     """What an engineer pastes is a link, and the guide's own path takes it from there."""
     link = "https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md"

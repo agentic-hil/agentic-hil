@@ -181,6 +181,15 @@ The remedy is a development version suffix on the working tree, or published
 mode against the release itself. A clone without that tag cannot answer the
 question, and says so on stderr rather than passing quietly.
 
+`expected_version` names the release in both matrices, because the same field is
+what a published-mode run pins and what the version gate holds every matrix to.
+Between releases the tree carries a development version, and an install from it
+reports that version, so local and remote runs expect the tree's own: what the
+verifier compares every artifact against is what the install produces. Published
+mode installs the release from the index and stays pinned to the release. It is
+also why the refusal above does not fire on a tree that carries a suffix, since
+nothing is being reported as the release any more.
+
 ## What decides a verdict
 
 Every job is one agent CLI, one model, one case, and one repetition. Each run
