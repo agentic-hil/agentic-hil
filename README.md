@@ -32,7 +32,7 @@ One YAML plan drives the whole bench: flash, reset, write, read with a comparato
 
 ## Security by construction
 
-Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Quarantine presupposes contact: a failure that provably never reached the board answers with a named refusal and a safe retry instead of freezing your bench. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
+Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
 
 ## Install
 
