@@ -51,7 +51,7 @@ def _in_image(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_a_login_shell_cannot_reach_a_shadowed_hardware_command() -> None:
-    """The 57 codex runs of the 0.12.0 matrix were blind to exactly this."""
+    """The 57 codex runs of the last full matrix were blind to exactly this."""
     result = _in_image("-lc", "openocd --version")
 
     assert result.returncode == 126, _evidence(result)

@@ -1541,7 +1541,7 @@ def test_the_report_says_how_many_runs_each_cell_holds() -> None:
 
 
 def test_token_counts_are_read_from_each_cli_own_report(tmp_path: Path) -> None:
-    """Only claude-code carried cost data through the 0.12.0 matrix.
+    """Only claude-code carried cost data through the last full matrix.
 
     The other two report counts and nobody was reading them. Raw counts only: a
     rate card belongs to whoever reads these, not to the harness recording them.

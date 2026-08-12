@@ -160,7 +160,7 @@ def test_every_case_prompt_names_where_the_package_comes_from() -> None:
     The guide's own sentence is "A link to this guide is not that case; it means
     the current release", so in local mode an agent following it installs the
     released package instead of the tree under test. That was 117 of the 147
-    failures in the 0.12.0 matrix.
+    failures in the last full matrix.
     """
     cases = sorted((REPOSITORY_ROOT / "evals" / "install" / "cases").glob("*.json"))
 
@@ -174,7 +174,7 @@ def test_every_case_prompt_names_where_the_package_comes_from() -> None:
 def test_the_guard_survives_a_login_shell() -> None:
     """`bash -lc` was blind to it: /etc/profile rewrites PATH from scratch.
 
-    codex wraps its commands that way, and all 57 codex runs of the 0.12.0
+    codex wraps its commands that way, and all 57 codex runs of the last full
     matrix could have reached the bench without the guard recording anything.
     Two answers, because either alone can be undone by the next thing that sets
     PATH.
