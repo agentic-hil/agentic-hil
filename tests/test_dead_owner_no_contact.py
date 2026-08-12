@@ -26,7 +26,6 @@ from agentic_hil.config import load_config
 from agentic_hil.configwrite import ACTOR_AGENT, ACTOR_HUMAN
 from agentic_hil.coordination import (
     ATTESTATION_NO_CONTACT_CLASS,
-    ATTESTATION_NO_STANDING_STATE,
     DEAD_OWNER_NO_CONTACT_REASON,
     NO_CONTACT_RECOVERABLE_REASONS,
     RECOVERY_ACTOR_AGENT,
@@ -217,9 +216,13 @@ def test_a_second_status_call_finds_nothing_left_to_do(tmp_path: Path) -> None:
 
 def assert_no_contact_release_was_refused(status, config, why: str = "") -> None:
     assert "released_dead_owner" not in status, why
-    assert status["stood_down_incident"]["reasons"] == ["owner_process_exited_without_release"], why
-    assert [line["recovery"] for line in recovery_ledger(config)] == ["incident_stood_down"], why
-    assert all(line["attestation"] == ATTESTATION_NO_STANDING_STATE for line in recovery_ledger(config)), why
+    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"], why
+    # Adopted, not released: nothing here vouched for the bench, and no ledger
+    # line claims anything did. A status read runs no recovery action, so the
+    # incident it inherits is left for the call that can, and the seam at the
+    # end of that call is where it ends if the recovery could not settle it.
+    assert status["incident_stands"] is False, why
+    assert recovery_ledger(config) == [], why
 
 
 def test_an_owner_that_died_with_a_committed_effect_is_not_released_as_no_contact(tmp_path: Path) -> None:
@@ -231,10 +234,10 @@ def test_an_owner_that_died_with_a_committed_effect_is_not_released_as_no_contac
     status = observer.status()
 
     assert_no_contact_release_was_refused(status, config)
-    # The marker the incident wrote is rewritten by the stand-down that follows
-    # it, and the difference from the release above is the ledger line: this one
-    # attests nothing, that one attests an absence of contact.
-    assert observer._read_record(RESOURCE)["released_reason"] == "incident_stood_down"
+    # And the marker says so: quarantined under this incident, never released
+    # with the `released_reason` the evidence-backed path writes.
+    assert observer._read_record(RESOURCE)["state"] == "quarantined"
+    assert "released_reason" not in observer._read_record(RESOURCE)
 
 
 def test_an_owner_that_left_no_readable_record_at_all_is_not_released_as_no_contact(tmp_path: Path) -> None:
