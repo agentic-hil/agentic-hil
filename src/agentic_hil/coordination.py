@@ -298,10 +298,10 @@ class HardwareLease:
     def record_cleanup_event(self, reason: str, error: object | None = None) -> None:
         """Record what went wrong on the way out, without holding the bench for it.
 
-        The evidence half of ``quarantine`` and nothing else: the same detail
-        lands in ``errors``, the same reason travels into ``cleanup_reasons`` and
-        from there into every result and record this lease writes, and the
-        catalogue keys its remediation off it exactly as before. What does not
+        The evidence half of ``quarantine`` and nothing else: the same detail is
+        recorded, the same reason travels into ``cleanup_reasons`` and from there
+        into every result and record this lease writes, and the catalogue keys
+        its remediation off it exactly as before. What does not
         happen is the incident: no ``cleanup_required`` state, no quarantine id and
         no gate, because the proof this reason is missing comes back by itself
         at the next open."""
