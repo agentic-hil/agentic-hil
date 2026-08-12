@@ -972,7 +972,10 @@ def test_unknown_hardware_exception_contains_the_lease_then_stands_it_down(
             # probe are for.
             assert result["quarantined"] is False
             assert result["incident_stood_down"]["reasons"] == ["unknown_hardware_exception"]
-            assert lease.state == "active"
+            # And the device goes back with it. The call that took the lease is
+            # over, no session owns it, and a lease the incident used to keep
+            # would otherwise sit registered for the rest of the process.
+            assert lease.state == "released"
             assert service.coordinator.blocked is False
         else:
             with pytest.raises(type(error)):
