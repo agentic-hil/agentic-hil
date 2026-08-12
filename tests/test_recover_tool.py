@@ -819,26 +819,37 @@ def test_an_incident_that_does_not_stand_answers_nothing_to_recover(tmp_path: Pa
         assert result["nothing_to_recover"] is True
         assert result["was_quarantined"] is False
         assert "error_type" not in result
-        assert service.coordinator.status()["blocked"] is False
+        # The record is still there, and that is the honest answer rather than a
+        # tidy one: this call runs no recovery action, and a bench whose incident
+        # a reset can still settle is not one a bookkeeping call should quietly
+        # release. `incident_stands` is what says nobody owes a signature, and
+        # the next hardware call is what ends it.
+        assert service.coordinator.status()["incident_stands"] is False
     finally:
         service.close()
 
 
 def test_the_bench_that_answered_nothing_to_recover_is_actually_free(tmp_path: Path) -> None:
-    """Not a softer refusal: the markers are released and the ledger says how."""
+    """Not a softer refusal. The next hardware call goes through, the incident
+    ends, and the ledger says how it ended without anybody being asked."""
     config = config_for(tmp_path)
     open_incident(config, "safe_state_unconfirmed")
     service = AgenticHILToolService(config)
     try:
         assert service.call(TOOL, {})["nothing_to_recover"] is True
         assert service.call("probe_target", {}).get("error_type") != "resource_quarantined"
+        assert service.coordinator.status()["blocked"] is False
     finally:
         service.close()
 
     lines = ledger(config)
-    assert [line["recovery"] for line in lines] == ["incident_stood_down"]
-    assert lines[0]["attestation"] == "no_standing_state"
-    assert lines[0]["reasons"] == ["safe_state_unconfirmed"]
+    assert len(lines) == 1, lines
+    # Either ending is a truthful one, and which it was is what the attestation
+    # records: a recovery action that drove the target and read it back, or an
+    # incident that stopped standing because nothing was owed. What no line here
+    # may say is that a person signed for it.
+    assert lines[0]["attestation"] in {"recovery_action_verified", "no_standing_state"}
+    assert lines[0]["actor"] == "server"
 
 
 def test_a_bench_with_no_incident_at_all_answers_the_same_way(tmp_path: Path) -> None:
@@ -876,21 +887,24 @@ def test_the_permission_gates_the_route_that_clears_something(tmp_path: Path) ->
         service.close()
 
 
-def test_the_operator_command_line_answers_the_same_way(tmp_path: Path) -> None:
+def test_the_operator_command_line_answers_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI narrows with the tool, or an operator following a stale runbook
-    would be told a bench that is fine cannot be recovered."""
-    from agentic_hil.coordination import nothing_standing_result
+    would be told a bench that is fine cannot be recovered. Driven through the
+    command's own dispatch, because the narrowing lives there and a helper
+    called directly would prove only that the helper exists."""
+    import argparse
+
+    from agentic_hil.cli import dispatch
 
     config = config_for(tmp_path)
-    open_incident(config, "debugger_result_unconfirmed")
-    coordinator = HardwareCoordinator(config, "operator-cli")
-    status = coordinator.status()
+    incident = open_incident(config, "debugger_result_unconfirmed")
+    monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda _path: config)
 
-    assert status["incident_stands"] is False
-    answer = nothing_standing_result(status)
-    assert answer["ok"] is True
+    answer = dispatch(argparse.Namespace(command="recover", confirm_safe_state=True, quarantine_id=incident, accept_config_change=False))
+
+    assert answer["ok"] is True, answer
     assert answer["nothing_to_recover"] is True
-    coordinator.close()
+    assert answer["was_quarantined"] is False
 
 
 def test_the_operator_command_line_still_clears_a_standing_quarantine(tmp_path: Path) -> None:

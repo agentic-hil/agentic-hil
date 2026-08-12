@@ -491,6 +491,29 @@ def test_a_dead_owner_whose_recovery_cannot_run_leaves_no_hold(tmp_path: Path) -
     assert [line["attestation"] for line in stood_down] == [ATTESTATION_NO_STANDING_STATE]
 
 
+def test_the_seam_runs_the_recovery_action_before_it_ends_an_incident(tmp_path: Path) -> None:
+    """The order the whole design turns on. An incident is not ended and then
+    recovered from: the recovery action gets its turn first, and only what it
+    could not settle stands down. Held on a call with no run teardown behind it,
+    so the attempt this asserts is the seam's own."""
+    config = leave_dead_owner(tmp_path, auto_recover="reset_halt")
+    backend = FakeBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        assert service.coordinator.status()["cleanup_reasons"] == [DEAD_OWNER_REASON]
+
+        service.call("bench_run_status")
+
+        assert backend.calls == ["reset_target:halt", "probe_target"]
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+
+    lines = ledger(config)
+    assert [line["attestation"] for line in lines] == [ATTESTATION_RECOVERY_ACTION]
+    assert lines[0]["reason"] == DEAD_OWNER_REASON
+
+
 # ---------------------------------------------------------------------------
 # E. Ledger fidelity.
 
