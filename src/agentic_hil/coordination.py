@@ -2005,6 +2005,39 @@ class HardwareCoordinator:
                 lock.release()
 
 
+def nothing_standing_result(status: JsonObject) -> JsonObject:
+    """What both recovery routes answer when no incident stands.
+
+    An `ok` answer and not an error, because nothing went wrong: the caller
+    asked to clear a quarantine and there is no quarantine, which since #216 is
+    the ordinary state of a bench that had a bad run. Shaped like the
+    already-idempotent "nothing needed clearing" answer so a caller that
+    recovers twice, or recovers a bench a recovery action already settled, reads
+    one thing in all three cases.
+
+    ``cleanup_reasons`` travels with it when the bench has any, because a call
+    that could not confirm its effect is still worth reading about; what is gone
+    is the claim that somebody has to sign for it."""
+    reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
+    result: JsonObject = {
+        "ok": True,
+        "tool": "hardware_recover",
+        "was_quarantined": False,
+        "nothing_to_recover": True,
+        "resources": [],
+        "summary": (
+            "Nothing on this bench is standing. A quarantine is the audit halt, where a report that was never "
+            "written cannot be written by a reset; every other incident proves itself at the next contact."
+        ),
+    }
+    if reasons:
+        result["cleanup_reasons"] = reasons
+    stood_down = status.get("stood_down_incident")
+    if isinstance(stood_down, dict):
+        result["incident_stood_down"] = stood_down
+    return result
+
+
 def lease_config_sha256(config: AgenticHILConfig) -> str:
     """The configuration fingerprint a lease record is stamped with.
 

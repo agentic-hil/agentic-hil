@@ -63,6 +63,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
     debugger_effect_resources,
+    nothing_standing_result,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
@@ -845,6 +846,14 @@ class AgenticHILToolService:
         status = self.coordinator.status()
         quarantine_id = status.get("quarantine_id")
         reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
+        # Asked before the grant, because `allow_recover` gates the operator
+        # route and this is not it: being told there is nothing to clear needs no
+        # permission, and refusing the answer would send an agent hunting for a
+        # shell to run a command that would do nothing. The read above has
+        # already stood down whatever no longer stands, so this is the state of
+        # the bench and not a guess about it.
+        if not status.get("incident_stands"):
+            return nothing_standing_result(status)
         if not self.config.permissions.allow_recover:
             return {
                 "ok": False,
@@ -858,14 +867,6 @@ class AgenticHILToolService:
                 "side_effect_committed": False,
                 "retry_safe": False,
                 **remediation_fields("permission_denied", "allow_recover"),
-            }
-        if not status.get("blocked"):
-            return {
-                "ok": True,
-                "tool": "hardware_recover",
-                "was_quarantined": False,
-                "resources": [],
-                "summary": "This bench has no unresolved incident; nothing needed clearing.",
             }
         allowed = self.coordinator.agent_recoverable_reasons()
         # An incident with no named reason is not a reason class this can judge.
