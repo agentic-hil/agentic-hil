@@ -166,6 +166,21 @@ CLI, one explicit model, and explicit authentication sources:
 All listed environment variables are required for that job. No adapter
 automatically receives every provider key found on the host.
 
+Every case prompt names both the guide and the install source, `{install_spec}`:
+`/workspace/source` in local mode, the pinned `git+` reference in remote mode,
+and "the current release" in published mode, which is what the guide's own
+sentence about a link already means. A prompt naming only the guide sent every
+obedient agent to the package index, which in local mode is a different package
+from the one under test, and that was 117 of the 147 failures in the 0.12.0
+matrix.
+
+A local matrix is refused before it starts when `src/agentic_hil` has moved past
+the tag its `expected_version` names while the version stayed where it was. Such
+a matrix installs this tree into every container and reports it as that release.
+The remedy is a development version suffix on the working tree, or published
+mode against the release itself. A clone without that tag cannot answer the
+question, and says so on stderr rather than passing quietly.
+
 ## What decides a verdict
 
 Every job is one agent CLI, one model, one case, and one repetition. Each run
@@ -185,10 +200,37 @@ The criteria come from three places, none of them inside the container:
    launcher, no source vendored into the firmware project, no authority files in
    the repository, and an untriggered PATH guard.
 
+The guard has two checks, not one, because both sessions of a run write into one
+guard log. `forbidden PATH guard not triggered` reads the whole log and keeps its
+meaning: nothing may reach for a shadowed command at any point. `hardware
+answered without raw commands` reads only the part written after the entrypoint
+recorded the start of the second session, which is the session the hardware
+question was asked in, and that window is the only one a routing verdict may be
+built on. A record the guard did not timestamp counts as inside the window: a run
+that damaged its own guard log does not earn a clean verdict on the session that
+matters.
+
+`matching agent skill installed` compares the installed file against
+`/workspace/source`, the read-only mount whose contents the `source snapshot is
+unchanged` check has already proved. The trusted package staging is the
+reference only in published mode, where there is no source mount. When neither
+is reachable the check answers `not checked: <why>` and fails, rather than
+answering with the exception of a file the verifier had itself decided not to
+write.
+
 A run passes only when it did not time out, the agent exit matches the expected
 outcome, the verifier exits zero, and **every** check passed. A failure to
 remove the container or its volumes afterwards raises the run to `error` even
 when all checks passed.
+
+The two containers of a run share this image and the two volumes the run
+preserved, and nothing else: the agent container's `/tmp` is gone by the time the
+verifier starts. A configuration naming a debugger script under a path outside
+the preserved volumes is therefore not judged as broken; the probe checks answer
+`not judged: config references <path>, outside the preserved volumes`. The image
+carries a minimal OpenOCD script tree at `/usr/share/openocd/scripts` so that the
+paths a generated configuration usually names resolve in both containers and the
+question rarely arises.
 
 ## Repetitions and escalation
 
@@ -198,6 +240,12 @@ case/agent/model combination disagree — one passed, another failed — the run
 keeps repeating that combination until it agrees with itself or reaches
 `max_repetitions`. Combinations that still disagree at the ceiling are listed
 under `unstable` in `summary.json` and in the report.
+
+Escalation leaves the cells uneven, so `summary.json` also carries
+`repetitions`: how many runs each case/agent/model/effort combination actually
+holds. The report prints the same numbers, and every rate the report and the
+routing report aggregate carries its own n. A table that averages a five-run cell
+and a two-run cell without those numbers treats them as one measurement each.
 
 Common environment credentials:
 
@@ -379,7 +427,11 @@ Artifacts per run:
 - `job.json`: immutable test input and local source digest/Git state;
 - `agent.log`: redacted raw agent CLI stream;
 - `verification.json`: independent checks;
-- `result.json`: common result envelope;
+- `result.json`: common result envelope, including `tokens` where the agent CLI
+  counted any: codex reports them on `turn.completed`, opencode on
+  `step_finish`, and Claude Code reports a cost rather than counts, which stays
+  in the transcript as it is. Raw counts only, summed over the run's sessions;
+  a rate card belongs to whoever reads them, not to the harness recording them;
 - `verifier.stderr.log`: verifier diagnostics.
 
 Matrix root contains `summary.json`. Any failed verification, timeout, missing
@@ -410,8 +462,16 @@ exits non-zero while any measured run did not use the MCP server.
 
 It classifies the agent's own tool invocations, never the documents it read: the
 skill lists the raw commands it replaces, so counting text would mark every run
-as reaching for `openocd`. The Windows script runs this automatically whenever
-the `firmware-routing` case is part of the selection.
+as reaching for `openocd`. A `make` target the workspace fixture drives the
+debugger from counts as a raw command, because that is what it is: `make flash`
+is `openocd` with a Makefile in front of it. The Windows script runs this
+automatically whenever the `firmware-routing` case is part of the selection.
+
+Runs whose `MCP registration uses trusted launcher` check did not pass are left
+out of the with-and-without comparison and reported on their own line with their
+own n: they had no server to route through, so counting them as runs that chose
+another way measures the installation rather than the routing. The tools-per-run
+figure is averaged over the runs that routed through MCP, for the same reason.
 
 ## One command on Windows
 
