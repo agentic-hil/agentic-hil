@@ -27,9 +27,23 @@ TROUBLESHOOTING.md drifted by hand through four releases that way. Tag pins are
 now an entry of their own, and `unclaimed_pins` refuses a covered file whose
 project-tied `@v` pins its entries do not state.
 
+A tree carries two versions, not one. Between releases `src/agentic_hil` moves
+while the version string stands still, so for that whole window a working tree
+shadows a published release: an install from it reports the released number, and
+nothing downstream can tell the two apart. The first commit after each release
+therefore moves the *distribution* version, which is what a build of this tree
+calls itself, to a `.devN` development version, while every position that states
+a FLOOR or an install pin for users keeps naming the release they can actually
+install. `Location.tracks` says which of the two each position carries, and that
+field is the whole of the rule: on a tree without a suffix the two versions are
+the same string and everything behaves exactly as it did.
+
 tomllib is deliberately absent: it is stdlib only from 3.11 and this project
 still supports 3.10, so importing it would make the gate itself the thing that
-fails on a matrix leg the developer machine never runs.
+fails on a matrix leg the developer machine never runs. `packaging` is absent for
+a stronger version of the same reason, being no part of the standard library at
+all, so the two version shapes this project uses are ordered here, in
+`_ordering_key`.
 """
 
 from __future__ import annotations
@@ -37,13 +51,20 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
+PACKAGE = "src/agentic_hil"
+
 RELEASE_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+# The distribution version between releases. PEP 440 spells a development
+# release `X.Y.Z.devN`, which sorts after every earlier release and before the
+# `X.Y.Z` it anticipates.
+DEVELOPMENT_VERSION = re.compile(r"^(?P<release>\d+\.\d+\.\d+)\.dev(?P<serial>\d+)$")
 # An optional leading "v" so a tag pin is seen, and no word character or dot on
 # either side so "1.2.3" is not read out of "11.2.3" or "1.2.30".
 SEMVER = re.compile(r"(?<![\w.])v?(\d+\.\d+\.\d+)(?![\w.])")
@@ -138,13 +159,22 @@ UNTRACKED_MENTIONS: dict[str, str] = {
 }
 
 
+# Which of the two versions a position states. RELEASE is the release users can
+# install: a floor, an install pin, a manifest a registry serves, the version an
+# eval installs from the index. DISTRIBUTION is what a build of *this tree*
+# calls itself, which between releases is ahead of the release and says so.
+RELEASE = "release"
+DISTRIBUTION = "distribution"
+
+
 @dataclass(frozen=True)
 class Location:
-    """One place that carries the release version."""
+    """One place that carries a version, and which of the two it carries."""
 
     path: str
     carries: str
     versions: tuple[str, ...] = ()
+    tracks: str = RELEASE
 
 
 def _read(root: Path, relative: str) -> str:
@@ -172,10 +202,45 @@ def _project_table(root: Path) -> dict[str, str]:
 
 
 def package_version(root: Path) -> str:
+    """The distribution version: what a build of this tree calls itself.
+
+    Either a strict SemVer release, on a release commit, or the `X.Y.Z.devN`
+    that every commit between two releases carries.
+    """
     version = _project_table(root).get("version")
-    if version is None or not RELEASE_VERSION.match(version):
-        raise SystemExit("pyproject.toml [project] declares no strict SemVer version")
+    if version is None or not (RELEASE_VERSION.match(version) or DEVELOPMENT_VERSION.match(version)):
+        raise SystemExit("pyproject.toml [project] declares no strict SemVer or X.Y.Z.devN version")
     return version
+
+
+def is_development(version: str) -> bool:
+    return DEVELOPMENT_VERSION.match(version) is not None
+
+
+def _ordering_key(version: str) -> tuple[int, int, int, int, int]:
+    """PEP 440 ordering for the two shapes this project uses.
+
+    A development release sorts after every earlier release and before the
+    release it anticipates: 1.2.3 < 1.2.4.dev0 < 1.2.4. That single ordering
+    is what makes the development suffix safe to ship in a version string:
+    every installer, resolver and `>=` floor already reads it this way.
+    """
+    development = DEVELOPMENT_VERSION.match(version)
+    if development is not None:
+        major, minor, patch = (int(part) for part in development.group("release").split("."))
+        return (major, minor, patch, 0, int(development.group("serial")))
+    major, minor, patch = (int(part) for part in version.split("."))
+    return (major, minor, patch, 1, 0)
+
+
+def is_newer(version: str, other: str) -> bool:
+    return _ordering_key(version) > _ordering_key(other)
+
+
+def next_development_version(release: str) -> str:
+    """What the first commit after `release` moves the distribution version to."""
+    major, minor, patch = (int(part) for part in release.split("."))
+    return f"{major}.{minor}.{patch + 1}.dev0"
 
 
 def _init_version(root: Path) -> str:
@@ -233,6 +298,21 @@ def _changelog_release(root: Path) -> str:
     return match.group(1)
 
 
+def release_version(root: Path) -> str:
+    """The released version every user-facing position states.
+
+    On a release commit that is the distribution version itself, and nothing
+    below can tell this tree from the one that shipped. On a tree that has moved
+    on it is the newest CHANGELOG heading: the release a reader can still
+    install, which every floor, pin, manifest and eval matrix keeps naming
+    because they describe what an install gets and not what this tree builds.
+    """
+    version = package_version(root)
+    if not is_development(version):
+        return version
+    return _changelog_release(root)
+
+
 def _json_document(root: Path, relative: str) -> dict:
     return json.loads(_read(root, relative))
 
@@ -251,8 +331,18 @@ def locations(root: Path) -> list[Location]:
     full_matrix = _json_document(root, "evals/install/matrix.full.json")
 
     return [
-        Location("pyproject.toml", "[project] version: the distribution version", (package_version(root),)),
-        Location("src/agentic_hil/__init__.py", "__version__: what the CLI and MCP server report", (_init_version(root),)),
+        Location(
+            "pyproject.toml",
+            "[project] version: the distribution version",
+            (package_version(root),),
+            tracks=DISTRIBUTION,
+        ),
+        Location(
+            "src/agentic_hil/__init__.py",
+            "__version__: what the CLI and MCP server report",
+            (_init_version(root),),
+            tracks=DISTRIBUTION,
+        ),
         Location(
             "server.json",
             "version and packages[0].version: the MCP Registry entry",
@@ -316,20 +406,43 @@ def locations(root: Path) -> list[Location]:
 
 
 def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
-    """Every version source that disagrees with pyproject.toml."""
-    version = package_version(root)
+    """Every version source that disagrees with the version it is supposed to state.
+
+    Two comparisons where there used to be one, against the same list: a
+    distribution position is held to what this tree builds, a release position
+    to the release it describes. On a tree without a development suffix those
+    are one string and this is the check it always was.
+    """
+    distribution = package_version(root)
+    release = release_version(root)
     found = []
+    if is_development(distribution) and not is_newer(distribution, release):
+        found.append(
+            f"CHANGELOG.md names {release} as the newest release, but pyproject.toml states development version "
+            f"{distribution}, which does not follow it"
+        )
     for location in locations(root):
+        expected = distribution if location.tracks == DISTRIBUTION else release
         if not location.versions:
             found.append(f"{location.path} carries no version, but {location.carries} was expected")
             continue
+        subject = "this tree builds" if location.tracks == DISTRIBUTION else "this release is"
         for stated in location.versions:
-            if stated != version:
-                found.append(f"{location.path} states {stated}, but this release is {version} ({location.carries})")
+            if stated != expected:
+                found.append(f"{location.path} states {stated}, but {subject} {expected} ({location.carries})")
     if release_tag:
         tagged = release_tag[1:] if release_tag.startswith("v") else release_tag
-        if tagged != version:
-            found.append(f"release tag {release_tag} does not match pyproject.toml {version}")
+        if is_development(distribution):
+            # A tag is cut from a release commit, and a release commit is the one
+            # that sets the final number. A development version reaching this
+            # path means the release was cut from a tree that never stopped
+            # being between releases.
+            found.append(
+                f"release tag {release_tag} cannot be cut from a development tree: "
+                f"pyproject.toml states {distribution}, and a tag never carries a development suffix"
+            )
+        elif tagged != distribution:
+            found.append(f"release tag {release_tag} does not match pyproject.toml {distribution}")
     return found
 
 
@@ -365,8 +478,8 @@ def uncovered_files(root: Path, version: str | None = None) -> list[str]:
     home for the version without adding it here turns the build red, and the
     message says where.
     """
-    version = version or package_version(root)
-    carries = re.compile(rf"(?<![\w.])v?{re.escape(version)}(?![\w.])")
+    swept = (version,) if version else tuple(dict.fromkeys((release_version(root), package_version(root))))
+    carries = [(one, re.compile(rf"(?<![\w.])v?{re.escape(one)}(?![\w.])")) for one in swept]
     covered = {location.path for location in locations(root)}
     found = []
     for path in _swept_files(root):
@@ -377,12 +490,14 @@ def uncovered_files(root: Path, version: str | None = None) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if carries.search(text):
-            found.append(
-                f"{relative} carries version {version} but no check covers it: "
-                f"add it to locations() in tools/check_version_consistency.py, "
-                f"or to UNTRACKED_MENTIONS with the reason it must not track the release"
-            )
+        for one, pattern in carries:
+            if pattern.search(text):
+                found.append(
+                    f"{relative} carries version {one} but no check covers it: "
+                    f"add it to locations() in tools/check_version_consistency.py, "
+                    f"or to UNTRACKED_MENTIONS with the reason it must not track the release"
+                )
+                break
     return found
 
 
@@ -424,8 +539,12 @@ def contract_problems(root: Path) -> list[str]:
     A version that agrees with itself is not enough: these documents are read by
     registries and plugin hosts, and a field that silently changes shape is a
     published mistake nobody can withdraw.
+
+    Every version here is the release: a registry entry, a marketplace listing
+    and an install command a reader copies all describe the release they can
+    install, never the tree that is being worked on.
     """
-    version = package_version(root)
+    version = release_version(root)
     found = []
 
     if (root / "plugins/agentic-hil/.mcp.json").exists():
@@ -511,27 +630,128 @@ def contract_problems(root: Path) -> list[str]:
     return found
 
 
+def _git(root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """Ask git, or answer that git could not be asked."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _package_moved_since(root: Path, tag: str) -> bool | None:
+    """Whether `src/agentic_hil` differs from what `tag` shipped. None: cannot say.
+
+    `git diff` rather than a digest, so the answer comes through the line-ending
+    normalisation `.gitattributes` pins; a raw comparison of an archive against a
+    checkout reports every file as changed on a machine with core.autocrlf=true.
+    A new file nothing has added yet is invisible to `git diff`, so it is asked
+    for separately.
+    """
+    changed = _git(root, ["diff", "--quiet", tag, "--", PACKAGE])
+    if changed is None or changed.returncode not in (0, 1):
+        return None
+    if changed.returncode == 1:
+        return True
+    untracked = _git(root, ["ls-files", "--others", "--exclude-standard", "--", PACKAGE])
+    if untracked is None or untracked.returncode != 0:
+        return None
+    return bool(untracked.stdout.strip())
+
+
+def moved_tree_findings(root: Path) -> tuple[list[str], list[str]]:
+    """Refuse a tree that has moved past its release and does not say so.
+
+    This is the other half of the two-version world, and the one that keeps it
+    from being optional. A tree whose package has moved while its version stands
+    still is indistinguishable from the release it shadows: an install from it
+    reports the released number, `agentic-hil upgrade` calls it `already_current`,
+    and the install eval refuses to run a local matrix at all. The remedy is the
+    development suffix, so where the suffix is absent and the package has moved,
+    this says so.
+
+    Problems and warnings, because the question needs the release tag and not
+    every checkout has one. A fork, a shallow clone and an unpacked sdist get the
+    warning: an answer nothing here can give must not become a red build for
+    people who did nothing wrong. Everything else in this module reads files;
+    only this asks git, and a git that cannot answer is treated as an absent tag.
+    """
+    version = package_version(root)
+    if is_development(version):
+        return [], []
+    tag = f"v{_changelog_release(root)}"
+    top = _git(root, ["rev-parse", "--show-toplevel"])
+    unchecked = [
+        f"{tag} is not reachable here, so nothing checked whether {PACKAGE} still holds what that release "
+        f"shipped; a tree that has moved past its release must carry a development version"
+    ]
+    if top is None or top.returncode != 0 or not top.stdout.strip():
+        return [], unchecked
+    # The top of a checkout, or the pathspec below is resolved against a
+    # repository this tree merely sits inside, where it matches nothing and a
+    # moved package would read as an unmoved one. samefile rather than a string
+    # comparison: git answers with its own spelling of the path.
+    try:
+        inside = Path(top.stdout.strip()).samefile(root)
+    except OSError:
+        inside = False
+    if not inside:
+        return [], unchecked
+    found = _git(root, ["rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"])
+    if found is None or found.returncode != 0 or not found.stdout.strip():
+        return [], unchecked
+    moved = _package_moved_since(root, tag)
+    if moved is None:
+        return [], unchecked
+    if not moved:
+        return [], []
+    return [
+        f"{PACKAGE} has moved since {tag} while the distribution version is still {version}, so this tree "
+        f"shadows a published release: an install from it reports {version}, and nothing downstream can tell "
+        f"the two apart. Move pyproject.toml and src/agentic_hil/__init__.py to a development version such as "
+        f"{next_development_version(version)}; every other position keeps stating {version}"
+    ], []
+
+
 def problems(root: Path, release_tag: str | None = None) -> list[str]:
     return [
         *version_problems(root, release_tag),
         *uncovered_files(root),
         *unclaimed_pins(root),
         *contract_problems(root),
+        *moved_tree_findings(root)[0],
     ]
+
+
+def warnings(root: Path) -> list[str]:
+    """What the gate could not establish here, as opposed to what it refuses."""
+    return moved_tree_findings(root)[1]
 
 
 def render_list(root: Path) -> str:
     """The checklist, printed from the check that enforces it."""
-    version = package_version(root)
+    distribution = package_version(root)
+    release = release_version(root)
     carried = locations(root)
     occurrences = sum(len(location.versions) for location in carried)
     # Distinct paths, not entries: a file may hold several claims — TROUBLESHOOTING.md
     # carries requirement pins and a git-tag pin as two entries.
     files = len({location.path for location in carried})
-    lines = [f"Release version {version} is carried in {files} files, {occurrences} occurrences:", ""]
+    built = f", built as {distribution}" if distribution != release else ""
+    lines = [f"Release version {release}{built} is carried in {files} files, {occurrences} occurrences:", ""]
     for location in carried:
         count = len(location.versions)
-        suffix = "" if count == 1 else f"  [{count} occurrences]"
+        marks = []
+        if count != 1:
+            marks.append(f"{count} occurrences")
+        if location.tracks == DISTRIBUTION:
+            marks.append("the distribution version")
+        suffix = f"  [{', '.join(marks)}]" if marks else ""
         lines.append(f"  {location.path}{suffix}")
         lines.append(f"      {location.carries}")
     lines.append("")
@@ -563,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
         print(render_list(root))
         return 0
     found = problems(root, release_tag)
+    for note in warnings(root):
+        print(f"WARNING: {note}", file=sys.stderr)
     for problem in found:
         print(problem, file=sys.stderr)
     return 1 if found else 0
