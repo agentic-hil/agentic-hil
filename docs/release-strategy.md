@@ -18,6 +18,8 @@ major  breaking CLI, config, MCP, or report schema changes
 
 Keep releases small enough that each one has a clear theme and an obvious rollback path.
 
+A cycle carries two versions. The release commit sets the final number, and the first commit after it moves the distribution version to the next patch with a `.dev0` suffix, so a released `1.2.3` becomes `1.2.4.dev0` on the next commit. Only the two positions that identify the built artifact move with it: `pyproject.toml` and `src/agentic_hil/__init__.py`. Every other position `python tools/check_version_consistency.py --list` prints states a floor, an install pin or a published manifest, so it keeps naming the release a reader can actually install. Without the suffix, `src/agentic_hil` moves for a whole cycle while the version string stands still and a working tree becomes indistinguishable from the release it shadows: an install from it reports the released number, `agentic-hil upgrade` calls it `already_current`, and the install eval refuses to run a local matrix at all rather than report this tree as that release. The gate holds both shapes. On a release commit the two versions are one string and every check is the one it always was; between releases each position is compared against the version it is supposed to carry, `--release-tag` is refused outright because a tag never carries a suffix, and a tree whose package has moved past its release without saying so is refused where the release tag is present to prove it.
+
 ## Release Notes
 
 Each GitHub Release should include:
@@ -57,6 +59,7 @@ Before creating a release:
 8. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
 9. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
 10. Start from GitHub auto-generated release notes, then edit for clarity.
+11. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
 ```
 
 ## What the Release Gate Checks, and When
@@ -95,6 +98,13 @@ byte for byte against their contracts, and the sweep that refuses a file
 carrying the version that no check covers) is now settled before the merge.
 That matters because publishing is the point of no return: a PyPI version
 cannot be re-uploaded.
+
+One check reads git rather than files: the rule that a tree whose
+`src/agentic_hil` has moved past its release must carry a development version
+needs the release tag to compare against. The pre-merge job therefore checks out
+full history, and where the tag is genuinely absent (a fork, a shallow clone, an
+unpacked sdist) the check reports that it could not establish this and does not
+fail.
 
 ## Repository Protection
 
