@@ -1183,6 +1183,10 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
     discovery that raised escaped the service instead of producing the standard
     structured refusal — and nothing shut the bench behind it."""
     workspace, path = _regenerable_bench(tmp_path, monkeypatch)
+    # A regeneration writes the same deterministic document the fixture wrote,
+    # so equal bytes would be a correct outcome and prove nothing about a
+    # rewrite. The marker is what a rewrite cannot preserve.
+    path.write_bytes(path.read_bytes() + b"# an operator's note a regeneration does not carry over\n")
     before = path.read_bytes()
 
     def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: object = None) -> dict:
