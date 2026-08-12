@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_shipped_references import main, shipped_documents, violations  # noqa: E402
+from check_shipped_references import main, package_version, shipped_documents, violations  # noqa: E402
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,11 +30,34 @@ def test_the_gate_runs_on_every_python_this_project_supports() -> None:
             modules.add(node.module.split(".")[0])
 
     assert "tomllib" not in modules
-    assert modules <= {"__future__", "ast", "re", "sys", "pathlib"}, sorted(modules)
+    # check_version_consistency is the other half of the same gate and imports
+    # nothing outside the standard library either. It is here because it owns
+    # the one question this file must not answer twice: which version a pin
+    # names when the tree it is read from carries a development suffix.
+    assert modules <= {"__future__", "check_version_consistency", "re", "sys", "pathlib"}, sorted(modules)
 
 
 def test_the_repository_ships_no_reference_a_reader_must_not_copy() -> None:
     assert main([str(REPOSITORY_ROOT)]) == 0
+
+
+def test_a_pin_is_compared_against_the_release_and_never_against_this_tree(tmp_path: Path) -> None:
+    """Between releases the tree is ahead of everything a reader can install.
+
+    The tag pin in TROUBLESHOOTING.md is the documented route while PyPI is
+    unreachable, so it names the release. Comparing it against the development
+    version this tree builds would call the one correct pin in the repository
+    wrong, on every commit of every cycle.
+    """
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "agentic-hil"\nversion = "1.2.4.dev0"\n', encoding="utf-8"
+    )
+    (tmp_path / "CHANGELOG.md").write_text("## [1.2.3] - 2020-01-01\n\nThe release.\n", encoding="utf-8")
+
+    version = package_version(tmp_path)
+
+    assert version == "1.2.3"
+    assert violations(Path("doc.md"), 'uv tool install "git+https://github.com/agentic-hil/agentic-hil@v1.2.3"', version) == []
 
 
 def test_every_document_a_reader_receives_is_covered() -> None:

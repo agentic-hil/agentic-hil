@@ -1945,9 +1945,13 @@ def test_skill_frontmatter_survives_a_windows_checkout() -> None:
     crlf = _packaged_skill_text().replace("\n", "\r\n")
 
     assert is_agentic_hil_setup_skill(crlf)
-    # Against the package version, not against the same function's own output:
-    # comparing two computed values passes when both are None.
-    assert skill_version(crlf) == __version__
+    # Not against `__version__`: that is the distribution version, which runs
+    # ahead of the release for a whole cycle, while a skill states the release
+    # it belongs to. Pinned as not-None first, because comparing two computed
+    # values passes when both are None.
+    stated = skill_version(_packaged_skill_text())
+    assert stated is not None
+    assert skill_version(crlf) == stated
 
 
 def test_plugin_skill_carries_the_packaged_guidance() -> None:

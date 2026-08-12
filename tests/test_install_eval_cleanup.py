@@ -14,6 +14,9 @@ def _source_tree(root: Path) -> Path:
     package = root / "src" / "agentic_hil"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
+    # What an install from this tree would call itself, and so what the runner
+    # tells the verifier to expect. A source tree without it installs as nothing.
+    (root / "pyproject.toml").write_text('[project]\nname = "agentic-hil"\nversion = "0.4.0"\n', encoding="utf-8")
     contract = root / "evals" / "install" / "tools.list.expected"
     contract.parent.mkdir(parents=True)
     contract.write_text("probe_target\n", encoding="utf-8")

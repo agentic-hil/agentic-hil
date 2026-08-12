@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import re
 from dataclasses import fields
@@ -20,7 +21,7 @@ from agentic_hil.types import (
 from evals.install import verifier
 from evals.install.config import load_case, load_matrix
 from evals.install.fixtures import HARDWARE_MAKE_TARGETS, MAKE_FLASH_FILES
-from evals.install.runner import expected_mcp_tools, job_payload
+from evals.install.runner import expected_mcp_tools, job_payload, source_version
 from evals.install.verifier import target_mcp_tools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +109,23 @@ def test_every_agent_session_receives_the_reasoning_effort() -> None:
     assert len(calls) == 3, "one call per agent session: install, confirmation, follow-up"
     for call in calls:
         assert any(keyword.arg == "reasoning_effort" for keyword in call.keywords)
+
+
+def test_the_payload_expects_what_the_install_produces_not_what_the_matrix_names() -> None:
+    """The one field the runner overrides on its way into the container.
+
+    A local run installs this tree, so the version every artifact reports is the
+    tree's own. Between releases that is a development version while the matrix
+    still names the release, and handing the matrix's number to the verifier
+    would fail every check that reads a version, in every run, for a whole cycle.
+    """
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    misnamed = dataclasses.replace(matrix, target=dataclasses.replace(matrix.target, expected_version="0.0.1"))
+
+    payload = job_payload(misnamed, misnamed.cases[0], misnamed.jobs[0], REPOSITORY_ROOT, REPOSITORY_ROOT)
+
+    assert payload["target"]["expected_version"] == source_version(REPOSITORY_ROOT)
+    assert payload["target"]["expected_version"] != "0.0.1"
 
 
 def test_job_binds_mcp_contract_from_target_source() -> None:

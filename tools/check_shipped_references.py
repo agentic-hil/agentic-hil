@@ -13,10 +13,11 @@ merging. It runs in CI on every push and pull request, and again at release.
 
 from __future__ import annotations
 
-import ast
 import re
 import sys
 from pathlib import Path
+
+from check_version_consistency import release_version
 
 IMMUTABLE_REFERENCE = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
 # Anchored at the repository URL: "agentic-hil@agentic-hil" is the
@@ -29,19 +30,19 @@ INSTALLS_FROM_SOURCE = re.compile(r"git\+https://github\.com/agentic-hil/agentic
 
 
 def package_version(root: Path) -> str:
-    """Read __version__ rather than pyproject.
+    """The release a pin must name, which is not the version this tree builds.
 
-    tomllib is stdlib only from 3.11 and this project still supports 3.10, so a
-    TOML parse would make the gate itself the thing that fails. The release job
-    already refuses a build where the two disagree.
+    Between releases the distribution version carries a development suffix while
+    every pin a reader copies keeps naming the release they can actually install,
+    so a tag pin here must be compared against the release and never against the
+    tree. That distinction has exactly one owner, `check_version_consistency`,
+    which the release strategy already names as the single enforcement point for
+    version agreement; a second answer to the same question in this file is how
+    the enumeration it replaced drifted in the first place. It imports nothing
+    outside the standard library either, so this gate still runs on the oldest
+    Python the project supports.
     """
-    tree = ast.parse((root / "src" / "agentic_hil" / "__init__.py").read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
-        ):
-            return str(ast.literal_eval(node.value))
-    raise SystemExit("src/agentic_hil/__init__.py declares no __version__")
+    return release_version(root)
 
 
 def shipped_documents(root: Path) -> list[Path]:

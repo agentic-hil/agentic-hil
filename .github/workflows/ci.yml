@@ -21,7 +21,10 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # The Windows legs of the grown suite take about fourteen minutes of
+    # pytest alone; fifteen ended runs seconds after a green summary and
+    # reported the cancellation as a failure.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -74,8 +77,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Full history, which is what brings the tags. The check refuses a tree
+      # whose src/agentic_hil has moved past the release its version still
+      # claims, and the release tag is the only thing that can answer that
+      # offline. A tag it cannot reach is a warning rather than a failure, so
+      # with the default shallow fetch this job would report that it could not
+      # establish the thing it exists to establish, on every pull request, and
+      # pass.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

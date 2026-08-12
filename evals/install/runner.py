@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import Case, CredentialFile, Job, Matrix, load_matrix
+from .config import Case, CredentialFile, Job, Matrix, Target, load_matrix
 from .credentials import authentication_failure, credential_health
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .refresh_login import apply_refreshed_login
@@ -40,6 +40,10 @@ AGENT_CLI_PACKAGES = {
     "opencode": "opencode-ai",
 }
 TOOL_CONTRACT = Path("evals") / "install" / "tools.list.expected"
+# PEP 440's development release, which is what this tree carries between two
+# releases. `tools/check_version_consistency.py` owns the rule; here it is only
+# the shape that matters, because the question is what an install reports.
+DEVELOPMENT_VERSION = re.compile(r"^\d+\.\d+\.\d+\.dev\d+$")
 
 
 def utc_now() -> str:
@@ -77,7 +81,13 @@ def git_metadata(source_root: Path) -> dict[str, Any]:
         return {"revision": None, "dirty": None}
 
 
-def validate_source_version(source_root: Path, expected_version: str) -> None:
+def source_version(source_root: Path) -> str:
+    """What an install from this tree calls itself.
+
+    Not necessarily `target.expected_version`: between releases the tree carries
+    a development version while the matrix keeps naming the release, and this is
+    the number every artifact of a local install will actually report.
+    """
     try:
         import tomllib
     except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
@@ -85,8 +95,42 @@ def validate_source_version(source_root: Path, expected_version: str) -> None:
 
     data = tomllib.loads((source_root / "pyproject.toml").read_text(encoding="utf-8"))
     version = data.get("project", {}).get("version")
-    if version != expected_version:
+    if not isinstance(version, str) or not version:
+        raise ValueError("source pyproject.toml declares no [project] version")
+    return version
+
+
+def validate_source_version(source_root: Path, expected_version: str) -> str:
+    """Refuse a matrix this tree cannot answer for, and say what it installs as.
+
+    `target.expected_version` names the release, because the same field is what
+    a published-mode run pins and what the version gate holds every matrix to.
+    Between releases the tree is ahead of that release and says so with a
+    development suffix, so the two legitimately differ; which development
+    version follows which release is settled by
+    `tools/check_version_consistency.py` on every push, and the only thing worth
+    refusing here is a tree that is neither the release nor a development
+    version of anything.
+    """
+    version = source_version(source_root)
+    if version != expected_version and DEVELOPMENT_VERSION.match(version) is None:
         raise ValueError(f"source version {version!r} does not match target.expected_version {expected_version!r}")
+    return version
+
+
+def installed_version(target: Target, host_source_root: Path) -> str:
+    """The version an install for this target will report, and so what to expect.
+
+    Published mode installs the release from the index, and the release is what
+    the matrix names. Every other mode installs this tree: local from a snapshot
+    of it, remote from the commit `validate_remote_checkout` has already pinned
+    it to. What such an install reports is the tree's own version, development
+    suffix and all, and expecting anything else would fail every run in a cycle
+    or, worse, pass a tree off as the release it is not.
+    """
+    if target.mode == "published":
+        return target.expected_version
+    return source_version(host_source_root)
 
 
 def validate_remote_checkout(source_root: Path, expected_commit: str) -> None:
@@ -186,6 +230,11 @@ def validate_source_matches_release(source_root: Path, expected_version: str) ->
     release, and the digest the verifier compares against is the moved tree's
     own: self-consistent, and about the wrong thing.
 
+    Only for a tree that still claims the release. A tree carrying a development
+    version reports that version, from the wheel to the MCP server banner, so
+    there is no longer a release for it to be mistaken for and the caller does
+    not ask.
+
     The released digest comes from the tag in this clone rather than from the
     index, so the gate holds offline. A clone without the tag cannot answer, and
     says so rather than passing silently. Comparing an archive against a working
@@ -212,6 +261,24 @@ def validate_source_matches_release(source_root: Path, expected_version: str) ->
         )
 
 
+def source_gates(host_source_root: Path, target: Target) -> str:
+    """Everything the source tree must satisfy before the first container starts.
+
+    One place, because these three refusals are one question asked of one tree,
+    and the answer to the first decides whether the second applies: a tree
+    carrying a development version reports itself rather than the release, which
+    is the entire defect `validate_source_matches_release` exists to refuse. Left
+    in, it would refuse the ordinary state of every commit between two releases.
+    """
+    version = validate_source_version(host_source_root, target.expected_version)
+    if target.mode == "local" and version == target.expected_version:
+        validate_source_matches_release(host_source_root, target.expected_version)
+    if target.mode == "remote":
+        assert target.expected_commit is not None
+        validate_remote_checkout(host_source_root, target.expected_commit)
+    return version
+
+
 def job_payload(
     matrix: Matrix,
     case: Case,
@@ -220,6 +287,10 @@ def job_payload(
     host_source_root: Path,
 ) -> dict[str, Any]:
     target = dataclasses.asdict(matrix.target)
+    # What the verifier compares every artifact against: the version this
+    # target's install actually produces, which for anything but published mode
+    # is the tree's own and not the release the matrix names.
+    target["expected_version"] = installed_version(matrix.target, host_source_root)
     if matrix.target.mode == "local":
         if source_root is None:
             raise ValueError("target requires trusted source evidence")
@@ -1253,12 +1324,7 @@ def run_matrix(args: argparse.Namespace) -> int:
     if args.per_model_concurrency < 1:
         raise RuntimeError("per-model concurrency must be at least 1")
     host_source_root = Path(args.source_root).resolve()
-    validate_source_version(host_source_root, matrix.target.expected_version)
-    if matrix.target.mode == "local":
-        validate_source_matches_release(host_source_root, matrix.target.expected_version)
-    if matrix.target.mode == "remote":
-        assert matrix.target.expected_commit is not None
-        validate_remote_checkout(host_source_root, matrix.target.expected_commit)
+    source_gates(host_source_root, matrix.target)
     docker = shutil.which(args.docker) or args.docker
 
     with contextlib.ExitStack() as stack:
