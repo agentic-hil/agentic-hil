@@ -2482,7 +2482,7 @@ def _documented_tools(text: str, header: str) -> list[str]:
 
     Verbatim because a token that is not a tool name has to be visible to the
     caller. Matching the shape of a name here would drop `debug_*` on the floor
-    and report a table that names 26 of 39 tools as complete.
+    and report a table that names 26 of 42 tools as complete.
     """
     return [token for cell in _table_column(text, header) for token in re.findall(r"`([^`]+)`", cell)]
 
@@ -3890,8 +3890,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 39
-    assert len(set(MCP_TOOL_NAMES)) == 39
+    assert len(MCP_TOOL_NAMES) == 42
+    assert len(set(MCP_TOOL_NAMES)) == 42
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a

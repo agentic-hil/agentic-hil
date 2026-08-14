@@ -84,6 +84,7 @@ from agentic_hil.report import (
     read_last_report,
     write_report,
 )
+from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.types import AgenticHILConfig, DebuggerPermissions, JsonObject, fold_hardware_id
 from agentic_hil.upgrade import SERVER_UPGRADE, server_upgrade
 
@@ -542,6 +543,17 @@ class AgenticHILToolService:
             "bench_run_start": lambda: self.bench_run_start(args),
             "bench_run_stop": lambda: self.bench_run_stop(),
             "bench_run_status": lambda: self.bench_run_status(),
+            # Deliberately outside every set above this dispatch. A plan run is
+            # not one hardware call: it declares its own run over its own
+            # service, and each of its steps passes through this gate on that
+            # service under the permissions of the device the step names. Putting
+            # the wrapper in `audited_hardware_tools` or `implicit_run_tools`
+            # would wrap a run in a run and add a refusal the command line does
+            # not have; putting it in `probe_addressing_tools` would demand one
+            # configured probe of a plan that addresses boards by name.
+            "test_reactor_run": lambda: self.test_reactor_run(args),
+            "test_reactor_status": lambda: self.test_reactor_status(args),
+            "test_reactor_stop": lambda: self.test_reactor_stop(args),
             # Deliberately not in `audited_hardware_tools`: it is the one call
             # that exists to answer a blocked bench, so the gate above — which
             # refuses every hardware tool while an incident is open — must not
@@ -1094,6 +1106,56 @@ class AgenticHILToolService:
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
+
+    def test_reactor_run(self, payload: JsonObject) -> JsonObject:
+        """Run a plan, or start one detached, on the configuration this server holds.
+
+        The whole of what this adds to the command line is the binding: the CLI
+        runs the plan against the configuration it discovers from the working
+        directory a person is standing in, and this runs it against the one this
+        server was started on. Everything after that is the same code: the same
+        plan loader, the same workspace check on the path, the same lock
+        declaration, the same per-step permissions, the same report. So there is
+        no capability here that `agentic-hil test-reactor` did not already have,
+        and nothing an agent can reach through this that it could not reach by
+        shelling out. The point is that it no longer has to.
+
+        The two refusals the command line prints and exits non-zero on are
+        returned rather than raised, and unchanged: a plan that does not load, or
+        resolves outside `workspace_root`, and a coordination failure the run
+        could not answer for itself.
+        """
+        # Deferred, and it has to be: `reactorrun` reaches the reactor, which
+        # imports this module, so the import cannot stand at the top of this file.
+        # Nothing is paid for it at startup either, since a server that is never
+        # asked to run a plan never loads the reactor.
+        from agentic_hil.reactorrun import run_plan, start_plan_detached
+
+        path = payload.get("test_config_path")
+        test_config_path = path if isinstance(path, str) else None
+        try:
+            if payload.get("detach") is True:
+                return start_plan_detached(self.config, test_config_path)
+            return run_plan(self.config, test_config_path)
+        except ConfigError as error:
+            return {"tool": "test_reactor_run", "side_effect_committed": False, **error.to_dict()}
+        except CoordinationError as error:
+            return {"tool": "test_reactor_run", "side_effect_committed": False, **error.result}
+
+    def test_reactor_status(self, payload: JsonObject) -> JsonObject:
+        """What a run handle is doing, or what handles this bench knows."""
+        handle = payload.get("run")
+        try:
+            return run_status(self.config, handle if isinstance(handle, str) else None)
+        except ConfigError as error:
+            return {"tool": "test_reactor_status", "side_effect_committed": False, **error.to_dict()}
+
+    def test_reactor_stop(self, payload: JsonObject) -> JsonObject:
+        """Ask a run to end after the step it is in."""
+        try:
+            return request_run_stop(self.config, str(payload.get("run", "")))
+        except ConfigError as error:
+            return {"tool": "test_reactor_stop", "side_effect_committed": False, **error.to_dict()}
 
     def _poison_quietly(self, reason: str, error: object | None = None, *, audit_broken: bool = False) -> Exception | None:
         """Quarantine the coordinator without letting a coordination failure mask the primary hardware error."""
