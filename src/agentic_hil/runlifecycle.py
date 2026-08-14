@@ -640,18 +640,28 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
     state = str(record.get("state"))
     requested_at = stop_requested_at(config, handle)
     if state not in TERMINAL_RUN_STATES and worker_is_gone(config, handle):
-        return {
-            **public_run_fields(record),
-            "ok": True,
-            "tool": "test_reactor_status",
-            "state": RUN_WORKER_GONE,
-            "stop_requested_at": requested_at,
-            "summary": "The process that was running this plan is gone, so this run has no orderly end and no report of its own.",
-            "next_step": (
-                "The bench is the dead-owner case the coordinator already handles: `agentic-hil lease-status` reads and heals it, "
-                "and names a quarantine id for `agentic-hil recover --confirm-safe-state --quarantine-id <id>` if the run had reached the board."
-            ),
-        }
+        # The gone answer and the record were read in two moments, and a worker
+        # that finished between them published its terminal record BEFORE it
+        # released the lock the probe just took. So a takeable lock does not
+        # decide anything by itself: the record is re-read on the far side of
+        # it, and a terminal record found there is the truth of a worker that
+        # published and left. Only a still-running record behind a takeable
+        # lock is a worker that died with no orderly end.
+        record = read_run_record(config, handle) or record
+        state = str(record.get("state"))
+        if state not in TERMINAL_RUN_STATES:
+            return {
+                **public_run_fields(record),
+                "ok": True,
+                "tool": "test_reactor_status",
+                "state": RUN_WORKER_GONE,
+                "stop_requested_at": requested_at,
+                "summary": "The process that was running this plan is gone, so this run has no orderly end and no report of its own.",
+                "next_step": (
+                    "The bench is the dead-owner case the coordinator already handles: `agentic-hil lease-status` reads and heals it, "
+                    "and names a quarantine id for `agentic-hil recover --confirm-safe-state --quarantine-id <id>` if the run had reached the board."
+                ),
+            }
     return {
         **public_run_fields(record),
         "ok": True,
