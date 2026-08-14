@@ -32,6 +32,7 @@ directly.
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
+| Run this project's written test plan on the board | `test_reactor_run`, `test_reactor_status`, `test_reactor_stop` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
 | The bench is quarantined on a broken audit trail | `hardware_recover` |
 | Update Agentic HIL itself to the newest release | `server_upgrade` |
@@ -363,6 +364,14 @@ unresolved (`resource_quarantined`), and on a file that is missing, unreadable
 or will not load. Report the refusal and stop. Ask the operator once for the
 restart when a permission is what moved, and do not try to make the server pick
 a change up by editing the file again or by calling a configuration write tool.
+
+Run a written test plan with `test_reactor_run`, not by shelling out to
+`agentic-hil test-reactor`. Both drive the same reactor, so the plan is validated,
+locked, permitted and reported identically either way; only the tool is coordinated
+with the rest of the bench and visible to the operator as a hardware action.
+`test_config_path` is `--test-config` and is held to the workspace the same way,
+`detach: true` is `--detach`, and `test_reactor_status` and `test_reactor_stop`
+answer for the handle it returns. The command line stays the operator's own route.
 
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through

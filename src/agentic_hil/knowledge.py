@@ -2647,6 +2647,8 @@ A single call needs no declaration. A *sequence* does: without one, `flash_firmw
 
 `kind` is one of `debugger`, `uart`, `can`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
 
+A written test plan needs no declaration around it. `test_reactor_run` drives the same reactor `agentic-hil test-reactor` drives, and there the plan *is* the declaration: every device it names is taken before its first step and held past its last, and a step reaching for one the plan did not name is refused with `undeclared_device` exactly as a call inside a `bench_run_start` would be.
+
 What the declaration buys, and what it costs:
 
 - **Held for the run.** Every call inside the run borrows the run's hold instead of taking its own, so no gap opens between two steps.
