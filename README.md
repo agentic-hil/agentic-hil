@@ -44,7 +44,7 @@ Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil
 
 Here is that prompt doing the whole thing, unscripted:
 
-<!-- demo-video: drop the recorded install demo here (drag the .mp4 into this file in GitHub's web editor; the uploaded attachment renders as an inline player) -->
+https://github.com/user-attachments/assets/ba9d58b2-6cd7-457b-ac74-d5cecdebe9d2
 
 One step stays yours after `setup` finishes: **restart your agent once** (or open a new session). The agent CLI reads MCP registrations when a session starts, so the freshly registered `agentic-hil` server and its tools appear at the next start, not in the session that installed them.
 
