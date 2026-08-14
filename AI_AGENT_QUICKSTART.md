@@ -89,6 +89,8 @@ Agent names: `claude-code`/`claude`, `codex`, `opencode`. For another skill-capa
 
 One command instead of `agent-install`, `init` and `doctor` separately. It returns one JSON result with a per-step breakdown under `steps`, and each half's own outcome under `scopes.user` and `scopes.project`; healthy is `ok: true` throughout. It registers the server in the agent's **user-level** config, outside the repository, so an untrusted repo cannot control how the agent launches tools. It writes no project `.mcp.json`.
 
+The registration lands at the next session start, not in this one. An agent CLI reads its MCP configuration when a session begins, so the session that ran `setup` will not see the `agentic-hil` tools however long it waits. End your report by telling the operator to restart the agent (or open a new session); do not poll for tools that cannot appear yet, and do not read their absence as a failed install: `doctor` is the health check that works right now.
+
 ## The two halves
 
 | | `agentic-hil agent-install --agent <agent>` | `agentic-hil init [--agent <agent>]` |
