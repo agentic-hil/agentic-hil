@@ -400,6 +400,33 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The reinstall replaces what it needs to, and a hand-cleared PATH entry is one more thing to put back.",
         ),
     ),
+    "installation_changed_after_failed_upgrade": ErrorRemedy(
+        meaning=(
+            "An upgrade stopped part way, and it had already changed the files on disk before it stopped. The check "
+            "that produced this ran the same import the `agentic-hil` console script runs, through the same "
+            "interpreter, after the package manager had failed, and it loaded a version that is neither gone nor the "
+            "one this process is running: the run replaced part of the installation and then exited non-zero. The "
+            "server in memory is still the previous release named in `previous_version`; the disk is the other one in "
+            "`version`. Because a failed run produced it, the on-disk version is not one to adopt by restarting onto "
+            "it, even though it loads."
+        ),
+        remediation=(
+            "Run the line in `reinstall_command` on this result. It restores a whole installation of a known version "
+            "with the extras `installed_extras` recorded before the upgrade started, which is the way out of a "
+            "half-changed tree rather than trusting whichever files the failed run happened to leave.",
+            "Run it with the agent host closed. It replaces the installation an MCP server would be running out of, "
+            "and on Windows a file mapped as a running image cannot be replaced.",
+            "Then run `agentic-hil --version` to confirm which release answers, and start the agent host, which loads "
+            "the server from the repaired installation.",
+        ),
+        do_not=(
+            "Do not restart the agent host to pick up the version now on disk. It came from a run that reported "
+            "failure, so the installation may be incomplete in ways a version number does not show, and a restart "
+            "would put that half-changed tree into service.",
+            "Do not report this as an upgrade that succeeded, or as one that failed and left the previous release "
+            "working. Neither is true: the manager failed, and the previous release is no longer what is on disk.",
+        ),
+    ),
     "upgrade_blocked_by_pin": ErrorRemedy(
         meaning=(
             "The package manager holds this installation at one exact version, so the upgrade command it was given "

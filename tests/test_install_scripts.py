@@ -324,6 +324,120 @@ def test_the_scripts_are_reachable_from_the_repository_root() -> None:
     assert POWERSHELL_SCRIPT.is_file()
 
 
+def test_the_shell_installer_never_invokes_a_bare_agentic_hil_for_agent_install() -> None:
+    """Step 4 calls the copy step 3 resolved, never a bare name PATH decides.
+
+    A bare `agentic-hil agent-install` resolves through PATH, where an older copy
+    earlier than the user bin answers for the install that just happened. The
+    fix routes the machine half through the exact executable this run installed;
+    the printed suggestion for a machine with no agent CLI is a different line and
+    starts with `printf`, so a bare invocation is the only thing this catches.
+    """
+    code = _code_only(_shell_source())
+    for line in code.splitlines():
+        assert not line.strip().startswith("agentic-hil agent-install"), line
+    assert '"$AGENTIC_HIL_CMD" agent-install' in code
+
+
+def test_the_powershell_installer_never_invokes_a_bare_agentic_hil_for_agent_install() -> None:
+    """The same promise on the PowerShell side, where the call is an -File.
+
+    Step 1 still probes a bare `agentic-hil --version` through `Invoke-Captured`
+    to read what is already on PATH, which is correct. Only the checked call that
+    runs the machine half must go through the resolved copy, so this targets
+    `Invoke-Checked` and leaves the probe alone.
+    """
+    code = _code_only(_powershell_source())
+    assert "agent-install" in code
+    assert "Invoke-Checked -File 'agentic-hil'" not in code
+    assert 'Invoke-Checked -File "agentic-hil"' not in code
+    assert "-File $AgenticHilCmd" in code
+
+
+def _stub_executable(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_path(tmp_path: Path) -> None:
+    """The old-copy-before-user-bin case, run end to end through a POSIX shell.
+
+    An older agentic-hil sits in a directory earlier on PATH than the user bin uv
+    installs into. Before this fix step 3 saw *some* agentic-hil resolve and step
+    4 ran the bare name, so the stale 0.3.0 copy handled `agent-install` while the
+    script reported success and told the operator to restart. The stubs record
+    which copy the machine half actually called; the fix makes it the fresh one.
+
+    Driven end to end, so it runs on the POSIX half where these mechanics live;
+    a Windows Git Bash would translate the stub paths and executability by its
+    own rules, which is not what this pins.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"
+    user_bin = home / ".local" / "bin"
+    for directory in (project, early_bin, user_bin):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # The stale copy, earlier on PATH: an old version, and a record if it is ever
+    # the one asked to do the machine half.
+    _stub_executable(
+        early_bin / "agentic-hil",
+        'case "$1" in\n'
+        '  --version) echo "0.3.0" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(early_bin / "claude", "exit 0\n")
+    # A fake uv whose `tool install` writes the fresh copy into the user bin, the
+    # way the real one lands a console script there.
+    _stub_executable(
+        early_bin / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  cat > "{user_bin}/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "9.9.9" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        f'  chmod +x "{user_bin}/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{early_bin}:{user_bin}:/usr/bin:/bin",
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--version", "9.9.9", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
 # The container run, end to end: a machine with nothing on it, the real package
 # from the index, a stub `claude` on PATH so agent detection has something to
 # find, and then the four questions that decide whether the line did its job.

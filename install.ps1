@@ -257,9 +257,17 @@ if (-not $needsPackage) {
     }
 }
 
+# The exact agentic-hil the machine half calls. It stays the bare name only when
+# step 1 found a new-enough copy already here and installed nothing; once this
+# run installs a copy, it becomes that copy's own path, so an older agentic-hil
+# earlier on PATH cannot answer for the install that just happened.
+$AgenticHilCmd = 'agentic-hil'
+
 # Step 3: say where it landed, and edit nobody's profile script.
-if (Test-Executable 'agentic-hil') {
-    Write-Step 3 'PATH: agentic-hil resolves on this PATH already, nothing to add'
+if (-not $needsPackage) {
+    # Nothing was installed: the copy step 1 probed and accepted on this PATH is
+    # the one the machine half uses, and it already resolves here.
+    Write-Step 3 "PATH: agentic-hil $installed is already here and was kept, nothing to add"
 } else {
     $found = ''
     foreach ($directory in (Get-CandidateBinDirectories -PythonCommand $pythonCommand)) {
@@ -267,12 +275,25 @@ if (Test-Executable 'agentic-hil') {
         if ((Test-Path (Join-Path $directory 'agentic-hil.exe')) -and -not $found) { $found = $directory }
     }
     if ($found) {
-        Write-Step 3 "PATH: agentic-hil landed in $found, which is not on your PATH"
-        Write-Say 'PATH: run this line yourself once, then open a new terminal:'
-        Write-Host ''
-        Write-Host "    [Environment]::SetEnvironmentVariable('Path', '$found;' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
-        Write-Host ''
+        # Call this exact copy for the machine half, and put its directory first
+        # for the rest of the run: it, not an older agentic-hil earlier on PATH,
+        # is what registers the skill and the MCP server.
+        $AgenticHilCmd = Join-Path $found 'agentic-hil.exe'
+        if (($env:Path -split ';') -contains $found) {
+            Write-Step 3 "PATH: agentic-hil is installed in $found, already on your PATH"
+        } else {
+            Write-Step 3 "PATH: agentic-hil landed in $found, which is not on your PATH"
+            Write-Say 'PATH: run this line yourself once, then open a new terminal:'
+            Write-Host ''
+            Write-Host "    [Environment]::SetEnvironmentVariable('Path', '$found;' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+            Write-Host ''
+        }
         $env:Path = "$found;$env:Path"
+    } elseif (Test-Executable 'agentic-hil') {
+        # Installed, but not into any directory this script installs into:
+        # whatever put it elsewhere owns where it resolves, and if it resolves at
+        # all that is the copy the machine half will use.
+        Write-Step 3 'PATH: agentic-hil resolves on this PATH already, nothing to add'
     } else {
         Write-Step 3 'PATH: agentic-hil is installed but does not resolve here; TROUBLESHOOTING.md section 1 has the fix'
     }
@@ -284,7 +305,7 @@ if (-not $WithAgentInstall) {
     Write-Step 4 'agent: --no-agent-install was given, so nothing of any agent''s was written'
 } elseif ($Agent) {
     Write-Step 4 "agent: registering the skill and the MCP server for $Agent"
-    Invoke-Checked -File 'agentic-hil' -Arguments @('agent-install', '--agent', $Agent) -Failure "agent-install failed for $Agent"
+    Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $Agent) -Failure "agent-install failed for $Agent"
     $configured = @($Agent)
 } else {
     $detected = @()
@@ -300,7 +321,7 @@ if (-not $WithAgentInstall) {
     } else {
         foreach ($agentId in $detected) {
             Write-Step 4 "agent: registering the skill and the MCP server for $agentId"
-            Invoke-Checked -File 'agentic-hil' -Arguments @('agent-install', '--agent', $agentId) -Failure "agent-install failed for $agentId"
+            Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $agentId) -Failure "agent-install failed for $agentId"
             $configured += $agentId
         }
     }

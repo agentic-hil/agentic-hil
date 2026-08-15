@@ -1268,6 +1268,24 @@ def references_outside_preserved_volumes(config: Path) -> list[str]:
     return sorted(dict.fromkeys(unseen))
 
 
+def unseen_references_blamed_by(detail: str, unseen_references: list[str]) -> list[str]:
+    """The unseen references a failed probe's own diagnostic pins as the cause.
+
+    A probe fails, and its detail is all this container has to go on. When that
+    detail names a path the run left outside the preserved volumes, the failure
+    is this container's blindness rather than a broken bench, and the probe is
+    not this container's to judge. When it does not — a `config_invalid` for an
+    unrelated field, a schema error that stands whatever the unseen path is —
+    nothing ties the failure to something out of sight, so it keeps its teeth.
+
+    Attribution is the whole of the rule: a configuration that happens to carry
+    an unseen path elsewhere does not launder an unrelated failure into a waiver,
+    because ``valid_authoritative_config`` is not the runtime's full check and a
+    config can be refused for a reason this verifier can see perfectly well.
+    """
+    return [path for path in unseen_references if path in detail]
+
+
 def receive_line(lines: queue.Queue[str | None]) -> dict[str, Any]:
     deadline = time.monotonic() + RESPONSE_TIMEOUT_SECONDS
     while True:
@@ -1682,18 +1700,25 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
         that from: a script the install wrote to the agent container's own tmpfs
         is gone here whatever the install did. So a refusal that names a path
         outside the preserved volumes is answered with what is actually known,
-        rather than with a verdict about a bench nobody can see. Every other
-        failure of these probes keeps its teeth.
+        rather than with a verdict about a bench nobody can see.
+
+        The waiver turns on attribution, not on the mere presence of an unseen
+        path somewhere in the configuration. A failure keeps its teeth unless its
+        own diagnostic names one of those paths as the cause: a `config_invalid`
+        for an unrelated field, or any other defect that stands whatever the
+        unseen path is, is not this container's blindness and is not excused by
+        it. Every failure this container can actually account for keeps its teeth.
         """
         try:
             ok, detail = operation()
         except Exception as error:
             ok, detail = False, f"{type(error).__name__}: {error}"
-        named = [path for path in unseen_references if path in detail]
-        if not ok and unseen_references and (named or "config_invalid" in detail):
-            references = ", ".join(named or unseen_references)
-            checks.append(Check(name, True, f"not judged: config references {references}, outside the preserved volumes"))
-            return
+        if not ok:
+            named = unseen_references_blamed_by(detail, unseen_references)
+            if named:
+                references = ", ".join(named)
+                checks.append(Check(name, True, f"not judged: config references {references}, outside the preserved volumes"))
+                return
         checks.append(Check(name, ok, detail))
 
     def probe_configuration_path() -> Path:

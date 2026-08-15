@@ -390,6 +390,45 @@ def test_a_config_path_outside_the_preserved_volumes_is_not_this_container_to_ju
     assert unseen == ["/gone/with/the/tmpfs/interface/stlink.cfg"]
 
 
+def test_a_refusal_that_names_the_unseen_path_is_waived() -> None:
+    """The one case the waiver is for: the runtime blamed a path out of sight.
+
+    The config named a debugger file the agent wrote to its own tmpfs, the
+    runtime refused because that file is not here, and it named the file in
+    doing so. That attribution is what makes the failure this container's
+    blindness rather than a broken bench.
+    """
+    unseen = ["/gone/with/the/tmpfs/interface/stlink.cfg"]
+    detail = (
+        '{"ok": false, "error_type": "config_invalid", '
+        '"summary": "Configured debugger file must be an existing single-link regular file.", '
+        '"path": "/gone/with/the/tmpfs/interface/stlink.cfg"}'
+    )
+
+    assert verifier.unseen_references_blamed_by(detail, unseen) == unseen
+
+
+def test_an_unrelated_config_invalid_is_not_waived_by_an_unseen_path() -> None:
+    """A config_invalid the verifier can account for keeps its teeth.
+
+    The configuration also carries a debugger script outside the preserved
+    volumes, but the refusal is about something else the verifier can read as
+    wrong from right here -- a permission with the wrong type -- and it never
+    names the unseen path. `valid_authoritative_config` does not run the
+    runtime's full schema check, so a config can be independently invalid and
+    also carry an unseen path; waiving on the mere presence of one would certify
+    a broken installation as a `not judged` pass.
+    """
+    unseen = ["/gone/with/the/tmpfs/interface/stlink.cfg"]
+    detail = (
+        '{"ok": false, "error_type": "config_invalid", '
+        '"summary": "permissions.allow_flash has the wrong type.", '
+        '"field": "permissions.allow_flash", "value": "yes"}'
+    )
+
+    assert verifier.unseen_references_blamed_by(detail, unseen) == []
+
+
 def test_a_repository_authority_file_is_named_when_one_is_found(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

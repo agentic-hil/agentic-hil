@@ -230,25 +230,58 @@ candidate_bin_dirs() {
     fi
 }
 
-report_path() {
-    if have agentic-hil; then
-        step 3 "PATH: agentic-hil resolves on this PATH already, nothing to add"
-        return 0
-    fi
-    found_dir=""
+# The exact agentic-hil the machine half calls. It stays the bare name only when
+# step 1 found a new-enough copy already here and installed nothing; once this
+# run installs a copy, it becomes that copy's own path, so an older agentic-hil
+# earlier on PATH cannot answer for the install that just happened.
+AGENTIC_HIL_CMD="agentic-hil"
+
+installed_executable_dir() {
+    # The first candidate bin directory that now holds an executable agentic-hil.
+    # These are the directories uv and pip --user write console scripts into, so
+    # the copy this run installed is one of them whatever else is on PATH.
     while IFS= read -r directory; do
-        if [ -n "$directory" ] && [ -x "$directory/agentic-hil" ] && [ -z "$found_dir" ]; then
-            found_dir="$directory"
+        if [ -n "$directory" ] && [ -x "$directory/agentic-hil" ]; then
+            printf '%s\n' "$directory"
+            return 0
         fi
     done <<EOF
 $(candidate_bin_dirs)
 EOF
-    if [ -n "$found_dir" ]; then
-        step 3 "PATH: agentic-hil landed in $found_dir, which is not on your PATH"
-        say "PATH: add this line to your shell profile yourself, then open a new shell:"
-        printf '\n    export PATH="%s:$PATH"\n\n' "$found_dir"
+    return 1
+}
+
+report_path() {
+    if [ "$NEEDS_PACKAGE" -eq 0 ]; then
+        # Nothing was installed: the copy step 1 probed and accepted on this PATH
+        # is the one the machine half uses, and it already resolves here.
+        step 3 "PATH: agentic-hil ${installed:-} is already here and was kept, nothing to add"
+        return 0
+    fi
+    if found_dir=$(installed_executable_dir); then
+        # Call this exact copy for the machine half, and put its directory first
+        # for the rest of the run: it, not an older agentic-hil earlier on PATH,
+        # is what registers the skill and the MCP server.
+        AGENTIC_HIL_CMD="$found_dir/agentic-hil"
+        case ":$PATH:" in
+            *":$found_dir:"*)
+                step 3 "PATH: agentic-hil is installed in $found_dir, already on your PATH"
+                ;;
+            *)
+                step 3 "PATH: agentic-hil landed in $found_dir, which is not on your PATH"
+                say "PATH: add this line to your shell profile yourself, then open a new shell:"
+                printf '\n    export PATH="%s:$PATH"\n\n' "$found_dir"
+                ;;
+        esac
         PATH="$found_dir:$PATH"
         export PATH
+        return 0
+    fi
+    # Installed, but not into any directory this script installs into: whatever
+    # put it elsewhere owns where it resolves, and if it resolves at all that is
+    # the copy the machine half will use.
+    if have agentic-hil; then
+        step 3 "PATH: agentic-hil resolves on this PATH already, nothing to add"
         return 0
     fi
     step 3 "PATH: agentic-hil is installed but does not resolve here; TROUBLESHOOTING.md section 1 has the fix"
@@ -334,7 +367,7 @@ if [ "$WITH_AGENT_INSTALL" -eq 0 ]; then
     step 4 "agent: --no-agent-install was given, so nothing of any agent's was written"
 elif [ -n "$AGENT" ]; then
     step 4 "agent: registering the skill and the MCP server for $AGENT"
-    agentic-hil agent-install --agent "$AGENT"
+    "$AGENTIC_HIL_CMD" agent-install --agent "$AGENT"
     CONFIGURED="$AGENT"
 else
     DETECTED=$(detect_agents)
@@ -345,7 +378,7 @@ else
     else
         for agent_id in $DETECTED; do
             step 4 "agent: registering the skill and the MCP server for $agent_id"
-            agentic-hil agent-install --agent "$agent_id"
+            "$AGENTIC_HIL_CMD" agent-install --agent "$agent_id"
             CONFIGURED="$CONFIGURED $agent_id"
         done
     fi

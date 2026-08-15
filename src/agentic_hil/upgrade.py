@@ -583,11 +583,15 @@ def _failed_upgrade(
     failure leaves the previous installation working. Whether it did is not a
     thing to assume in either direction, so it is measured: the same import the
     console script does, through the same interpreter, after the manager has
-    stopped. A machine that still answers gets the plain failure it always got,
-    with the version it is still running stated rather than implied. A machine
-    that does not is the reported end state, and the one thing it must never
-    receive is a failure notice with no mention that the installation behind it
-    is gone.
+    stopped. There are three ends to tell apart, and the version this loads is
+    what tells them apart. A machine that still answers `previous_version` gets
+    the plain failure it always got, intact and unreplaced. A machine that
+    answers a *different* version was changed on disk before the run stopped, and
+    is neither intact nor gone: the report says so, with both numbers, because
+    calling that unreplaced would state the opposite of what the probe found. A
+    machine that answers nothing is the reported end state, and the one thing it
+    must never receive is a failure notice with no mention that the installation
+    behind it is gone.
     """
     base: JsonObject = {
         "ok": False,
@@ -599,16 +603,62 @@ def _failed_upgrade(
         **failure,
     }
     verification, loaded = _loaded_version()
-    if loaded is not None:
+    if loaded == previous_version:
         return {
             **base,
             "error_type": "upgrade_failed",
             "summary": f"{summary} This installation still runs {loaded} and was not replaced.",
             "installation_intact": True,
             "version": loaded,
+            "restart_required": False,
             "verification": verification,
         }
+    if loaded is not None:
+        return _upgrade_changed_on_disk(base, previous_version, loaded, installed_extras, reinstall_command, verification, summary)
     return _installation_broken(base, installed_extras, reinstall_command, verification, summary)
+
+
+def _upgrade_changed_on_disk(
+    base: JsonObject,
+    previous_version: str,
+    loaded: str,
+    installed_extras: tuple[str, ...],
+    reinstall_command: str,
+    verification: JsonObject,
+    summary: str,
+) -> JsonObject:
+    """The manager failed, yet the files on disk load a different version now.
+
+    The one end of a failed upgrade that is neither intact nor gone. The manager
+    exited non-zero, but the package its interpreter now imports answers a
+    version other than the one this process runs, so the run replaced files
+    before it stopped and left a half-changed tree. Reporting that as intact and
+    `was not replaced` would state the opposite of what the probe just found. The
+    two numbers are named as they are — the release still running in this
+    process, and the one the half-finished run left on disk — and the repair is
+    the same known-good reinstall a broken installation gets, because a version a
+    failed run left behind is not one to trust into service by restarting onto
+    it. `restart_required` is false for that reason: a restart would adopt the
+    half-changed tree, which is the outcome the reinstall exists to avoid.
+    """
+    return {
+        **base,
+        "error_type": "installation_changed_after_failed_upgrade",
+        "installation_intact": False,
+        "changed_on_disk": True,
+        "summary": (
+            f"{summary} The manager reported failure, but this installation's Python now loads {loaded}, not the "
+            f"{previous_version} this process is running: the run replaced files on disk before it stopped, so the "
+            f"installation is in a half-changed state. The running server is still {previous_version} while the disk "
+            f"is {loaded}. Do not restart onto it. Run `reinstall_command` to restore a known installation: {reinstall_command}"
+        ),
+        "version": loaded,
+        "installed_extras": list(installed_extras),
+        "reinstall_command": reinstall_command,
+        "verification": verification,
+        "restart_required": False,
+        **remediation_fields("installation_changed_after_failed_upgrade"),
+    }
 
 
 def _installation_broken(

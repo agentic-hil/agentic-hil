@@ -427,6 +427,54 @@ def test_upgrade_stops_before_the_agent_refresh_when_the_package_manager_fails(
     assert result["install"]["stderr"] == "network failed"
     assert result["installation_intact"] is True
     assert result["version"] == __version__
+    assert result["restart_required"] is False
+    assert "refreshed" not in result
+
+
+def test_a_manager_failure_that_changed_the_version_on_disk_is_reported_as_half_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed run that replaced files before it stopped is neither of the two it used to be.
+
+    `_failed_upgrade` measures what the installation loads after the manager
+    stops. The reported defect was reading any loadable version as intact and
+    `was not replaced`: with the manager failed and the on-disk package now a
+    different release, that states the opposite of what the probe found. Here the
+    post-failure import answers a version other than the running one, so the
+    result names both numbers, refuses the restart, and points at the same
+    known-good reinstall a broken installation gets.
+    """
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "post-install step failed"),
+            "version": _version_answer("9.9.9"),
+        },
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "installation_changed_after_failed_upgrade"
+    assert result["installation_intact"] is False
+    assert result["changed_on_disk"] is True
+    assert result["previous_version"] == __version__
+    assert result["version"] == "9.9.9"
+    assert result["previous_version"] != result["version"]
+    assert result["restart_required"] is False
+    assert result["installed_extras"] == ["can"]
+    assert "agentic-hil[can]" in result["reinstall_command"]
+    assert result["reinstall_command"] in result["summary"]
+    assert "9.9.9" in result["summary"] and __version__ in result["summary"]
+    assert "was not replaced" not in result["summary"]
+    assert result["remediation"] == list(ERROR_CATALOGUE["installation_changed_after_failed_upgrade"].remediation)
+    # The refresh is never reached: there is no trustworthy new package to
+    # refresh out of, only a half-changed tree the reinstall has to replace.
     assert "refreshed" not in result
 
 
