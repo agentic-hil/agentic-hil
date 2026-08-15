@@ -744,15 +744,57 @@ def test_a_per_user_pip_installation_is_upgraded_inside_its_own_scheme(
     assert reinstall_command_with_extras(("can",)) == '"PYTHON" -m pip install --upgrade --user "agentic-hil[can]"'
 
 
-def test_a_virtual_environment_is_never_called_a_per_user_installation() -> None:
-    """pip refuses `--user` inside a virtual environment, so the check does too.
+def _installation_located_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at: Path, user_site: Path) -> None:
+    """One per-user site, and one place the distribution sits, both stated.
 
-    The suite runs inside one, which is what makes this readable here: the
-    answer has to be False on the machine this is running on, whatever the
-    distribution metadata says about where it lives."""
+    Stated rather than read off whichever interpreter the suite happens to be
+    running under. The first version of this asked the running one and asserted
+    that it was a virtual environment, which is true under `.venv` and false in
+    the Linux CI container, where the suite runs against the system Python at
+    `/usr/local`: an assertion about the test host rather than about the code,
+    and the container is where it was caught.
+    """
+    monkeypatch.setattr("sysconfig.get_path", lambda name, scheme=None, *_args, **_kwargs: str(user_site) if name == "purelib" else "")
+    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: SimpleNamespace(locate_file=lambda _relative: distribution_at))
+
+
+def test_a_distribution_in_the_per_user_site_is_the_one_that_keeps_its_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--user` is earned by the location, and by nothing else.
+
+    Adding it to a system-wide installation would scatter the package into a
+    per-user directory nothing on PATH points at, which is the same class of
+    damage from the other side, so the flag follows where the distribution
+    actually is."""
     from agentic_hil.upgrade import _user_site_installation
 
-    assert sys.prefix != sys.base_prefix
+    user_site = tmp_path / "user-site"
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "python"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
+
+    _installation_located_at(monkeypatch, distribution_at=user_site, user_site=user_site)
+    assert _user_site_installation() is True
+
+    _installation_located_at(monkeypatch, distribution_at=tmp_path / "python" / "site-packages", user_site=user_site)
+    assert _user_site_installation() is False
+
+
+def test_a_virtual_environment_is_never_called_a_per_user_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pip refuses `--user` inside a virtual environment, so the check does too.
+
+    Decided by the two prefixes differing and nothing else: a distribution
+    sitting exactly where the per-user site is still answers False here,
+    because the command the flag would be added to fails outright there."""
+    from agentic_hil.upgrade import _user_site_installation
+
+    user_site = tmp_path / "user-site"
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
+    _installation_located_at(monkeypatch, distribution_at=user_site, user_site=user_site)
+
     assert _user_site_installation() is False
 
 
