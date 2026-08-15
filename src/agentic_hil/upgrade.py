@@ -4,10 +4,11 @@
 of the same machine: which package manager owns this installation, what does it
 answer, and did the version actually move.
 Everything that decides those three lives here and nowhere else. The two callers
-add only what is theirs — the CLI refreshes agent skills afterwards, the MCP tool
-checks a permission, a bench hold and the platform first — and neither of them
-owns a second copy of the manager logic. A fork here is how one surface learns
-about a pin the other still reports as success.
+add only what is theirs (the CLI refreshes the agent skills and MCP
+registrations afterwards, the MCP tool checks a permission, a bench hold and the
+platform first) and neither of them owns a second copy of the manager logic. A
+fork here is how one surface learns about a pin the other still reports as
+success.
 
 What the two front ends may do also differs, and the difference is the whole of
 the MCP tool's design:
@@ -24,10 +25,27 @@ process is running, so a result that reports the new number as this server's
 would be a lie a host cannot check. The vocabulary is the one the staleness block
 already uses: `upgraded_on_disk`, `previous_version`, `version`,
 `running_version`, `restart_required`.
+
+Two rules are the whole of what both front ends owe an installation, and both
+were learned from one report on a pip `--user` machine that was already at the
+newest release:
+
+**Nothing is replaced that did not need replacing.** The resolver is asked what
+it would do, as the same install with `--dry-run`, before it is allowed to do
+anything. An installation that is already current answers `already_current` with
+`install_skipped`, and no command capable of removing a file has run.
+
+**A failure leaves the previous installation working, or says that it did not.**
+Whether it did is measured, not assumed: after a manager stops, the same import
+the console script performs is run through the same interpreter. Still loading
+is `upgrade_failed` with `installation_intact`; not loading is
+`installation_broken`, with the one command that repairs it and the extras it
+must carry, both read before the manager ran.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -181,6 +199,52 @@ def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
     return None
 
 
+def _user_site_installation() -> bool:
+    """Whether the distribution about to be replaced lives in this user's own site.
+
+    `pip install --upgrade` uninstalls the distribution wherever it finds it and
+    writes the replacement into the *default* scheme for the interpreter it runs
+    under. On a `pip install --user` installation those are two different
+    directories: the old copy is removed from the per-user site and the new one
+    is written to the system site, so a failure in between leaves the machine
+    with the console script that was never in the package's own directory and no
+    package behind it. That is exactly the reported end state, a live
+    `agentic-hil` shim over a missing `agentic_hil`, and it is reached without
+    anything here asking for `--force-reinstall` or an uninstall of its own.
+
+    Passing `--user` keeps both halves in one scheme, which is the in-place
+    replacement pip is safe at: the new files are unpacked first and the old
+    ones are only released once they are.
+
+    False inside a virtual environment whatever else is true, because pip
+    refuses `--user` there outright, and false whenever the location cannot be
+    read, because a guess that adds the flag on a system installation would
+    scatter the package into a per-user directory nothing on PATH points at.
+    """
+    if sys.prefix != sys.base_prefix:
+        return False
+    try:
+        from importlib.metadata import distribution
+
+        located = distribution("agentic-hil").locate_file("")
+    except Exception:
+        return False
+    try:
+        user_site = sysconfig.get_path("purelib", f"{os.name}_user")
+    except (KeyError, OSError):
+        return False
+    if located is None or not user_site:
+        return False
+    return _normalized_location(located) == _normalized_location(user_site)
+
+
+def _pip_upgrade_command() -> list[str]:
+    command = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    if _user_site_installation():
+        command.append("--user")
+    return [*command, _upgrade_requirement()]
+
+
 def _upgrade_command() -> tuple[str, list[str]]:
     """Select the manager that owns the running installation, never another PATH copy."""
     prefix = _normalized_location(sys.prefix)
@@ -200,7 +264,7 @@ def _upgrade_command() -> tuple[str, list[str]]:
         if uv is None:
             raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
         return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", _upgrade_requirement()]
-    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade", _upgrade_requirement()]
+    return "pip", _pip_upgrade_command()
 
 
 def reinstall_command_with_extras(extras: tuple[str, ...]) -> str:
@@ -224,7 +288,8 @@ def reinstall_command_with_extras(extras: tuple[str, ...]) -> str:
         return f'pipx install --force "{requirement}"'
     if _distribution_installer() == "uv":
         return f'uv pip install --python "{sys.executable}" --upgrade "{requirement}"'
-    return f'"{sys.executable}" -m pip install --upgrade "{requirement}"'
+    scope = " --user" if _user_site_installation() else ""
+    return f'"{sys.executable}" -m pip install --upgrade{scope} "{requirement}"'
 
 
 # Which declared extra a configured capability needs, and which entries need it.
@@ -377,6 +442,208 @@ def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
     return result
 
 
+# ---------------------------------------------------------------------------
+# What the manager would do, asked before it is allowed to do anything.
+#
+# `uv tool upgrade` and `pipx upgrade` answer this inside the manager: each
+# reads the requirement it recorded for this installation, finds nothing to
+# move, and exits without touching the environment. The two pip-shaped routes
+# hand a bare `install --upgrade` to a resolver instead, and that resolver
+# decides while it is already replacing files, so "there was nothing to do"
+# arrives here as an outcome rather than as a decision. An installation that
+# needed nothing has then already been uninstalled, and a failure anywhere in
+# that stretch is a failure that had no reason to be risked at all.
+#
+# The question is asked as the same install with `--dry-run`, not as a separate
+# version lookup, because a second opinion that disagrees with the resolver is
+# worth nothing: it is the resolver's own answer, on the same requirement, with
+# the same index configuration, that decides whether the mutating run happens.
+
+
+def _resolution_query(manager: str, command: list[str]) -> list[str] | None:
+    """The upgrade command turned into a question, or None where there is none."""
+    if manager == "pip" and command[1:4] == ["-m", "pip", "install"]:
+        # `--report -` puts pip's own resolution on stdout as JSON and `--quiet`
+        # leaves nothing else there, so `install: []` is pip stating that it
+        # would install nothing. Older pips reject the flag and exit non-zero,
+        # which reads as "cannot tell" below and changes nothing.
+        return [*command, "--dry-run", "--quiet", "--report", "-"]
+    if manager == "uv" and command[1:3] == ["pip", "install"]:
+        return [*command, "--dry-run"]
+    return None
+
+
+# What `uv pip install --dry-run` prints when the environment already satisfies
+# the requirement: "Resolved N packages ... Checked N packages ... Would make no
+# changes". uv publishes no machine-readable report for `uv pip`, so this one is
+# read out of the prose the way the exact-pin hint above is. A future wording
+# that matches neither this nor pip's report falls through to "cannot tell",
+# which runs the upgrade exactly as it ran before rather than calling an
+# installation current on a guess.
+_UV_PIP_NO_CHANGES = "would make no changes"
+
+
+def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, JsonObject | None]:
+    """Whether this upgrade would install nothing, decided without installing anything.
+
+    The pair is (answer, what the manager said). A False answer means either
+    that there is something to install or that the question could not be put to
+    this manager at all, and the two are deliberately not distinguished: both
+    lead to the same place, which is running the upgrade as before.
+    """
+    query = _resolution_query(manager, command)
+    if query is None:
+        return False, None
+    try:
+        answered = _run_upgrade_process(query)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None
+    resolution = _process_result(answered)
+    if answered.returncode != 0:
+        return False, resolution
+    if manager == "pip":
+        try:
+            report = json.loads(answered.stdout)
+        except (json.JSONDecodeError, TypeError):
+            return False, resolution
+        planned = report.get("install") if isinstance(report, dict) else None
+        return isinstance(planned, list) and not planned, resolution
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution
+
+
+def _nothing_to_install(
+    tool: str,
+    manager: str,
+    command: list[str],
+    current_version: str,
+    resolution: JsonObject | None,
+) -> JsonObject:
+    """Already current, answered before the installation could be put at risk.
+
+    The same `already_current` a manager that ran and moved nothing produces, so
+    a caller reads one field for one fact, plus `install_skipped` for the part
+    that is new: no command capable of replacing this installation was run. Its
+    absence on the other outcomes is the signal that one was.
+    """
+    return {
+        "ok": True,
+        "tool": tool,
+        "already_current": True,
+        "summary": (
+            f"Agentic HIL is already at {current_version}, which is the newest release {manager} resolves for this "
+            f"installation, so nothing was installed and no command that could replace it was run. No restart is needed."
+        ),
+        "manager": manager,
+        "command": command,
+        "install_skipped": True,
+        "python": sys.executable,
+        "previous_version": current_version,
+        "version": current_version,
+        **({"resolution": resolution} if resolution is not None else {}),
+        "restart_required": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Whether an upgrade that did not finish left an installation behind.
+
+
+def _loaded_version() -> tuple[JsonObject, str | None]:
+    """What this installation's Python still answers, and None when it answers nothing.
+
+    The same import the console script performs, through the same interpreter
+    the script's shim runs: a package whose files a half-finished manager run
+    removed fails here exactly as the shim fails, which is the difference
+    between an upgrade that failed and an installation that is gone.
+    """
+    command = [sys.executable, "-m", "agentic_hil", "--version"]
+    try:
+        probed = _run_upgrade_process(command)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"command": command, "exception_type": type(error).__name__, "detail": str(error)}, None
+    verification = _process_result(probed)
+    reported = probed.stdout.strip() if probed.returncode == 0 else ""
+    return verification, reported or None
+
+
+def _failed_upgrade(
+    tool: str,
+    manager: str,
+    command: list[str],
+    previous_version: str,
+    installed_extras: tuple[str, ...],
+    reinstall_command: str,
+    *,
+    summary: str,
+    **failure: object,
+) -> JsonObject:
+    """A manager run that did not finish, and what it left standing.
+
+    An upgrade is allowed to fail; the house rule it may not break is that a
+    failure leaves the previous installation working. Whether it did is not a
+    thing to assume in either direction, so it is measured: the same import the
+    console script does, through the same interpreter, after the manager has
+    stopped. A machine that still answers gets the plain failure it always got,
+    with the version it is still running stated rather than implied. A machine
+    that does not is the reported end state, and the one thing it must never
+    receive is a failure notice with no mention that the installation behind it
+    is gone.
+    """
+    base: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "manager": manager,
+        "command": command,
+        "python": sys.executable,
+        "previous_version": previous_version,
+        **failure,
+    }
+    verification, loaded = _loaded_version()
+    if loaded is not None:
+        return {
+            **base,
+            "error_type": "upgrade_failed",
+            "summary": f"{summary} This installation still runs {loaded} and was not replaced.",
+            "installation_intact": True,
+            "version": loaded,
+            "verification": verification,
+        }
+    return _installation_broken(base, installed_extras, reinstall_command, verification, summary)
+
+
+def _installation_broken(
+    base: JsonObject,
+    installed_extras: tuple[str, ...],
+    reinstall_command: str,
+    verification: JsonObject,
+    summary: str,
+) -> JsonObject:
+    """The package is gone and the console script is not: name the repair, exactly.
+
+    Reached from a manager that failed and from one that reported success, since
+    the fact is the same either way and so is the fix. `reinstall_command` and
+    `installed_extras` are read before the manager runs, because the metadata
+    they come from is part of what is missing by the time this is written, and a
+    command rebuilt from what is left names the bare distribution and silently
+    drops the extras the bench was created with.
+    """
+    return {
+        **base,
+        "error_type": "installation_broken",
+        "installation_broken": True,
+        "summary": (
+            f"{summary} This installation is now broken: its Python can no longer load `agentic_hil`, while the "
+            f"`agentic-hil` console script is still on PATH and will fail with a ModuleNotFoundError on the next call. "
+            f"Nothing will work again until `reinstall_command` is run: {reinstall_command}"
+        ),
+        "installed_extras": list(installed_extras),
+        "reinstall_command": reinstall_command,
+        "verification": verification,
+        "restart_required": False,
+        **remediation_fields("installation_broken"),
+    }
+
+
 def _upgrade_changed_nothing(
     tool: str,
     manager: str,
@@ -470,20 +737,59 @@ def replace_installation(*, tool: str) -> JsonObject:
 
     manager, command = _upgrade_command()
     previous_version = __version__
+    # Both read before anything runs. They describe the installation as it is
+    # now, and the one result that needs them is the one where it is not there
+    # any more: rebuilt afterwards from metadata a half-finished manager run
+    # removed, the repair command names the bare distribution and takes `[can]`
+    # off a bench that had it.
+    installed_extras = _installed_extras()
+    reinstall_command = reinstall_command_with_extras(installed_extras)
+
+    skipped, resolution = _would_install_nothing(manager, command)
+    if skipped:
+        return _nothing_to_install(tool, manager, command, previous_version, resolution)
+
     try:
         installed = _run_upgrade_process(command)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return {"ok": False, "tool": tool, "error_type": "upgrade_failed", "summary": "Agentic HIL package upgrade could not run.", "manager": manager, "command": command, "previous_version": previous_version, "exception_type": type(error).__name__, "detail": str(error)}
+        return _failed_upgrade(
+            tool,
+            manager,
+            command,
+            previous_version,
+            installed_extras,
+            reinstall_command,
+            summary="Agentic HIL package upgrade could not run.",
+            exception_type=type(error).__name__,
+            detail=str(error),
+        )
     install_result = _process_result(installed)
     if installed.returncode != 0:
-        return {"ok": False, "tool": tool, "error_type": "upgrade_failed", "summary": "Agentic HIL package manager reported an upgrade failure.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result}
+        return _failed_upgrade(
+            tool,
+            manager,
+            command,
+            previous_version,
+            installed_extras,
+            reinstall_command,
+            summary="Agentic HIL package manager reported an upgrade failure.",
+            install=install_result,
+        )
 
-    version_command = [sys.executable, "-m", "agentic_hil", "--version"]
-    verified = _run_upgrade_process(version_command)
-    verification = _process_result(verified)
-    current_version = verified.stdout.strip() if verified.returncode == 0 else None
-    if verified.returncode != 0 or not current_version:
-        return {"ok": False, "tool": tool, "error_type": "upgrade_verification_failed", "summary": "Package manager completed, but updated Agentic HIL could not be loaded by this installation's Python.", "manager": manager, "command": command, "previous_version": previous_version, "install": install_result, "verification": verification}
+    verification, current_version = _loaded_version()
+    if current_version is None:
+        # A manager that exited zero and left nothing that loads is the same end
+        # state as one that failed, reported the same way: the previous outcome
+        # here named the verification step and stopped, which told an operator
+        # that something could not be loaded without telling them their
+        # installation was gone or what single command brings it back.
+        return _installation_broken(
+            {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
+            installed_extras,
+            reinstall_command,
+            verification,
+            "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+        )
 
     if current_version == previous_version:
         return _upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result)

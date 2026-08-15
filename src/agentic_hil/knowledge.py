@@ -370,6 +370,36 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "an installation destroyed around a live process is the outcome being refused.",
         ),
     ),
+    "installation_broken": ErrorRemedy(
+        meaning=(
+            "An upgrade stopped part way and this installation did not survive it. The check that produced this ran "
+            "the same import the `agentic-hil` console script runs, through the same interpreter, after the package "
+            "manager had stopped, and it failed: the package is gone. The console script itself usually is not, "
+            "because it lives in a scripts directory rather than in the package's own, so `agentic-hil` still starts "
+            "and dies with `ModuleNotFoundError: No module named 'agentic_hil'`. Nothing about the bench, the "
+            "configuration or any board changed; what is missing is the software that talks to them."
+        ),
+        remediation=(
+            "Run the line in `reinstall_command` on this result. It is the whole repair, and it is written for this "
+            "machine: the interpreter that owns the installation and the extras `installed_extras` found before the "
+            "upgrade started, because those were read while the metadata naming them still existed.",
+            "Run it with the agent host closed. It reinstalls the same installation an MCP server would be running "
+            "out of, and on Windows a file mapped as a running image cannot be replaced.",
+            "Then run `agentic-hil --version` to confirm the console script answers again, and start the agent host, "
+            "which loads the server from the repaired installation.",
+            "If the reinstall reports that it cannot write where the old installation was, run it with the same "
+            "scope the installation was created with, which for a per-user installation is `--user`.",
+        ),
+        do_not=(
+            "Do not report this as an upgrade that failed and leave it there. The distinction this result draws is "
+            "the whole of its content: an upgrade that fails normally leaves the previous release working, and this "
+            "one did not.",
+            "Do not retry the upgrade to get out of this. There is no installation left for an upgrade to move, and "
+            "the manager will resolve against an environment that no longer has the package in it.",
+            "Do not delete the scripts directory, the environment or the leftover console script to clean up first. "
+            "The reinstall replaces what it needs to, and a hand-cleared PATH entry is one more thing to put back.",
+        ),
+    ),
     "upgrade_blocked_by_pin": ErrorRemedy(
         meaning=(
             "The package manager holds this installation at one exact version, so the upgrade command it was given "
