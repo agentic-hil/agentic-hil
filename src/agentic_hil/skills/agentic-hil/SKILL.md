@@ -56,7 +56,11 @@ you what the hardware is doing, so it does not answer the question. Call the
 tool that matches the question (`probe_target`, `debugger_probes_list`,
 `com_ports_list`, `get_last_report`) and report what it returns.
 
-A refusal is an answer, and it is not the end of the job. When the authoritative
+A refusal is an answer, and it is not the end of the job. A refusal also belongs
+to the turn it happened in and to no later one: on a new operator request, attempt
+the command again before concluding anything, because the machine, the host's
+settings and its classifier all move between turns, and only an attempt reads
+today's answer. When the authoritative
 configuration denies an action the tool returns `permission_denied`. Reading a
 device needs no permission, so a refusal is about writing or changing state.
 A busy-device refusal is different again: the board is held by another run for
