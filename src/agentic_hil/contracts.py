@@ -130,6 +130,44 @@ MCP_TOOLS: list[JsonObject] = [
         "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
+    # The plan is the declaration, so this tool takes no devices and no steps:
+    # what a run touches is what its reviewed file says it touches, and an
+    # argument that could add to that would put the plan and the run out of step.
+    # `test_config_path` therefore selects a plan and nothing else, and is held to
+    # the workspace exactly as the command line holds it.
+    {
+        "name": "test_reactor_run",
+        "description": (
+            "Run this project's declarative test plan against the bench. Use this instead of `agentic-hil test-reactor` "
+            "at a shell. The plan is a reviewed file of ordered steps: it is validated in full before the first hardware "
+            "action, the run holds every device the plan names from before its first step to after its last, each step is "
+            "judged by the same permission the matching tool is judged by, and a step reaching for a device the plan did "
+            "not declare is refused. test_config_path selects another plan, workspace-relative or absolute, and must "
+            "resolve inside workspace_root; without it the project's default plan runs. detach: true runs the plan in its "
+            "own process and answers at once with a run handle to ask test_reactor_status about and test_reactor_stop to "
+            "end, which is what an hours-long endurance plan wants; the default runs the plan to its end and answers with "
+            "the whole result and the path of the report it wrote."
+        ),
+        "inputSchema": object_schema({"test_config_path": NONEMPTY_STRING, "detach": {"type": "boolean", "default": False}}),
+    },
+    {
+        "name": "test_reactor_status",
+        "description": (
+            "Say what a test run handle is doing: running and which step it is on, finished or stopped with its verdict "
+            "and its report path, or its worker gone. Without run, list the runs this bench still has records of."
+        ),
+        "inputSchema": object_schema({"run": NONEMPTY_STRING}),
+    },
+    {
+        "name": "test_reactor_stop",
+        "description": (
+            "Ask a test run to end after the step it is in, close its devices in the usual order and write its report. "
+            "Cooperative and nothing else: this leaves a request the run reads between its steps, so a run cannot be left "
+            "half way through a step by whoever asked it to stop. A run that had already ended is answered as such and "
+            "nothing is asked of it."
+        ),
+        "inputSchema": object_schema({"run": NONEMPTY_STRING}, required=["run"]),
+    },
     # Two optional arguments, and their types are the contract. There is no
     # `confirm_safe_state` boolean here and there will not be: that flag attests
     # that a physical board is still and holds the expected firmware, and a flag
@@ -517,6 +555,26 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     "bench_run_stop": {"title": "End the bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # In-memory only; it does not even read the holder files.
     "bench_run_status": {"title": "Bench run status", "readOnlyHint": True, "openWorldHint": False},
+    # Annotated for what the plan it runs may do, the same rule
+    # `debug_start_session` is annotated by: a hint cannot be conditional on the
+    # file a caller names, and a plan is free to contain a `flash` step, which is
+    # the irreversible write flash_firmware carries `destructiveHint: true` for.
+    # A plan that only reads is not the one the hint has to be safe for. Not
+    # idempotent for the same reason: a second run flashes, resets and stimulates
+    # again, and a plan bounded by wall time does not even run the same length.
+    "test_reactor_run": {"title": "Run a test plan", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    # Reads the run records under `state_root` and asks the operating system
+    # whether the lock behind a handle is still held. It writes nothing and
+    # reaches no device.
+    "test_reactor_status": {"title": "Test run status", "readOnlyHint": True, "openWorldHint": False},
+    # Not read-only: it leaves a stop request under the handle, and what that
+    # changes is when the run ends. Not destructive to anything: the run it ends
+    # closes its devices in the same order and writes the same report a passing
+    # run does, so nothing is left half done and nothing on the target is erased
+    # that the plan had not already written. Idempotent: a second request on a
+    # still-running run asks for the end that is already coming, and one on a run
+    # that has ended answers `ok` with `stop_requested: false` and writes nothing.
+    "test_reactor_stop": {"title": "Stop a test run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # Not read-only: it rewrites this project's lease records and appends to the
     # recovery ledger, and what that changes is which calls the bench will accept
     # next. Not destructive, and that is a claim about what it reaches rather
