@@ -18,8 +18,10 @@ from agentic_hil import __version__, upgrade
 from agentic_hil.adopt import project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
+    BOOTSTRAP_BACKEND,
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
+    enumerate_attached_probes,
     load_project_profile,
 )
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
@@ -250,7 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_reload_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
-    subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
+    subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend; on a project that has no configuration yet, through the same read-only discovery setup's bootstrap runs, labelled source: bootstrap")
 
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
@@ -2462,14 +2464,60 @@ def _doctor_mcp_report() -> JsonObject:
     }
 
 
+def bootstrap_probe_listing() -> JsonObject:
+    """The probe listing a project with no configuration can still be given.
+
+    `setup`'s bootstrap already enumerates probes before any configuration
+    exists, with the fixed read-only command package code owns, so this reuses
+    that discovery rather than growing a second one beside it. The answer says
+    what it is: `source: bootstrap` and the backend that ran, so nobody reads it
+    as the configured bench speaking.
+
+    Refusing here was the wrong answer to the right question. The one moment an
+    operator genuinely wants a probe listing with nothing else in place is right
+    before the first `setup`: is the board visible, is there one of it, which
+    serial. `config_file_not_found` withheld an answer this tool could already
+    give, for a configuration the question does not need."""
+    listed = enumerate_attached_probes()
+    result: JsonObject = {
+        "ok": listed["ok"],
+        "tool": "debugger_probes_list",
+        "source": "bootstrap",
+        "backend": BOOTSTRAP_BACKEND,
+        **{key: value for key, value in listed.items() if key not in {"ok", "tool", "backend"}},
+    }
+    if listed["ok"]:
+        result["summary"] = (
+            f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
+            "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
+            "debugger backend was involved."
+        )
+    result["next_step"] = (
+        "Write this project's configuration with `agentic-hil setup --agent <agent>` from its root. After that this "
+        "command answers through the configured backend instead."
+    )
+    return result
+
+
 def debugger_probes() -> JsonObject:
     """Enumerate connected probes for every configured debugger that may probe.
 
     Probe discovery is how an operator finds the serial numbers a multi-board
     config needs, so it has to work in exactly the multi-probe project where no
     single debugger is bound. Each backend enumerates all attached probes, so
-    binding one entry at a time is only about which toolchain to invoke."""
-    config = load_authoritative_config(Path.cwd())
+    binding one entry at a time is only about which toolchain to invoke.
+
+    With no configuration at all, the answer comes from `setup`'s own bootstrap
+    instead of a refusal; see `bootstrap_probe_listing`. Only the missing file
+    takes that route. A configuration that is there and will not load is a
+    different fact about a bench somebody has already set up, and it still
+    refuses with what is wrong with it."""
+    try:
+        config = load_authoritative_config(Path.cwd())
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        return bootstrap_probe_listing()
     if config.debugger is not None:
         service = AgenticHILToolService(config)
         try:

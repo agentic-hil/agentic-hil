@@ -32,7 +32,7 @@ from agentic_hil import __version__
 from agentic_hil import process as process_module
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends import openocd as openocd_backend
-from agentic_hil.backends.common import command_for_log
+from agentic_hil.backends.common import CompletedCommand, command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
@@ -3288,6 +3288,49 @@ def test_debugger_probes_cli_uses_authoritative_config(
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+    # A configured bench answers through its own backend and says so by not
+    # claiming otherwise: the bootstrap fallback labels every answer it gives,
+    # so this label appearing here would mean the configured path had been
+    # rerouted through discovery that knows nothing about this file.
+    assert "source" not in result
+
+
+def test_debugger_probes_answers_through_bootstrap_without_a_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The listing is wanted exactly where the configuration is not there yet.
+
+    Before the first `setup` an operator wants to know whether the board is
+    visible and whether there is one of it, and `setup`'s own bootstrap already
+    enumerates without a configuration. So this answers, out of that same fixed
+    read-only command, and labels where the answer came from rather than
+    letting it pass for the configured bench.
+    """
+    workspace = tmp_path / "unconfigured"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands: list[list[str]] = []
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(command)
+        return CompletedCommand("ST-LINK SN : STLINK123\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+
+    exit_code = entrypoint(["debugger-probes"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0, result
+    assert result["ok"] is True
+    assert result["probes"] == [{"probe_id": "STLINK123"}]
+    assert result["source"] == "bootstrap"
+    assert result["backend"] == "stlink"
+    # One command, the read-only enumeration and nothing else: no HOTPLUG
+    # connect follows it here, because nothing is being adopted.
+    assert [command[-3:] for command in commands] == [["-q", "-l", "st-link-only"]]
 
 
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
