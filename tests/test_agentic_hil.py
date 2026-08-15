@@ -52,6 +52,7 @@ from agentic_hil.cli import (
     mcp_config,
     mcp_server_command,
     register_agent_mcp,
+    resolve_skill_agent,
     restrict_agent_write_access,
     schema,
     setup_project,
@@ -306,7 +307,7 @@ PIP_WOULD_INSTALL_NOTHING = subprocess.CompletedProcess[str]([], 0, json.dumps({
 PIP_WOULD_INSTALL_A_RELEASE = subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1", "install": [{"metadata": {"name": "agentic-hil", "version": "9.9.9"}}]}), "")
 UV_PIP_WOULD_CHANGE_NOTHING = subprocess.CompletedProcess[str]([], 0, "Resolved 8 packages in 12ms\nChecked 8 packages in 1ms\nWould make no changes\n", "")
 MANAGER_INSTALLED = subprocess.CompletedProcess[str]([], 0, "installed\n", "")
-SKILL_INSTALL_DONE = subprocess.CompletedProcess[str]([], 0, '{"ok": true}\n', "")
+AGENT_INSTALL_DONE = subprocess.CompletedProcess[str]([], 0, json.dumps({"ok": True, "steps": {"skill_install": {"ok": True}, "mcp_config": {"ok": True}}}), "")
 
 
 def _version_answer(version: str) -> subprocess.CompletedProcess[str]:
@@ -324,8 +325,8 @@ def _recording_manager(
 
     The kinds are `resolution` (the non-mutating `--dry-run` query),
     `install` (the one command that can replace this installation),
-    `version` (the import check) and `skill-install` (the skill refresh). A kind
-    with no answer fails the test where it is run rather than defaulting to
+    `version` (the import check) and `agent-install` (the refresh). A kind with
+    no answer fails the test where it is run rather than defaulting to
     something, which is what lets a test assert that a mutating command was
     never reached by simply not offering an answer for it.
     """
@@ -336,8 +337,8 @@ def _recording_manager(
             return "resolution"
         if invoked[-1] == "--version":
             return "version"
-        if "skill-install" in invoked:
-            return "skill-install"
+        if "agent-install" in invoked:
+            return "agent-install"
         return "install"
 
     def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -353,16 +354,29 @@ def _recording_manager(
     return calls
 
 
-def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
+def _place_agent_skill(agent_id: str) -> Path:
+    """The skill file a previous `agentic-hil agent-install` left for this agent."""
+    from agentic_hil.cli import _agent_skill_target
+
+    agent = resolve_skill_agent(agent_id)
+    assert agent is not None
+    target = _agent_skill_target(agent)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# installed by an earlier release\n", encoding="utf-8")
+    return target
+
+
+def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _place_agent_skill("opencode")
     calls = _recording_manager(
         monkeypatch,
         answers={
             "resolution": PIP_WOULD_INSTALL_A_RELEASE,
             "install": MANAGER_INSTALLED,
             "version": _version_answer("9.9.9"),
-            "skill-install": SKILL_INSTALL_DONE,
+            "agent-install": AGENT_INSTALL_DONE,
         },
     )
 
@@ -373,18 +387,18 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
     assert result["restart_required"] is True
     # The one outcome that may claim an upgrade, and it says which two numbers
     # it moved between rather than asserting movement in the abstract.
-    assert result["summary"] == f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server."
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
     assert "error_type" not in result
     # The resolution query comes first and is not a command that could replace
     # anything; only then the manager, the import check, and the refresh.
     assert calls[0][0][:3] == [sys.executable, "-m", "pip"] and "--dry-run" in calls[0][0]
     assert calls[1][0] == PIP_UPGRADE_COMMAND
     assert calls[2] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
-    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", "opencode"]
+    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
     assert calls[3][1] is not None
 
 
-def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
+def test_upgrade_stops_before_the_agent_refresh_when_the_package_manager_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A manager that failed on the network, over an installation that survived it.
@@ -392,6 +406,7 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
     The refresh is not reached, because there is no new package to refresh out
     of, and the result says the installation is intact rather than leaving a
     reader to assume it either way."""
+    _place_agent_skill("opencode")
     _recording_manager(
         monkeypatch,
         answers={
@@ -408,7 +423,7 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
     assert result["install"]["stderr"] == "network failed"
     assert result["installation_intact"] is True
     assert result["version"] == __version__
-    assert "skills" not in result
+    assert "refreshed" not in result
 
 
 # The line `uv tool upgrade` wrote on the reporter's Linux box, beside the exit
@@ -546,6 +561,7 @@ def test_an_already_current_pip_installation_runs_no_command_that_could_replace_
     by its absence from the answers rather than by counting calls afterwards.
     The refresh is absent for the same reason: nothing moved, so there is
     nothing to rewrite anybody's skill file out of."""
+    _place_agent_skill("opencode")
     calls = _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
 
     result = upgrade_installation(["opencode"])
@@ -556,7 +572,7 @@ def test_an_already_current_pip_installation_runs_no_command_that_could_replace_
     assert result["restart_required"] is False
     assert result["previous_version"] == result["version"] == __version__
     assert "upgraded_on_disk" not in result
-    assert "skills" not in result
+    assert "refreshed" not in result
     assert "error_type" not in result
     # One subprocess, and it is a question rather than an install.
     assert len(calls) == 1
@@ -738,6 +754,142 @@ def test_a_virtual_environment_is_never_called_a_per_user_installation() -> None
 
     assert sys.prefix != sys.base_prefix
     assert _user_site_installation() is False
+
+
+# ---------------------------------------------------------------------------
+# What an upgrade leaves behind outside the package: the agent skills and the
+# MCP registrations this installation wrote. Neither is inside the package, so
+# replacing the package leaves both describing a release that is gone, and the
+# registration names a launcher an upgrade is entitled to move.
+
+
+def _upgrade_with_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agent_install: subprocess.CompletedProcess[str] = AGENT_INSTALL_DONE,
+) -> list[tuple[list[str], str | None]]:
+    return _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": agent_install,
+        },
+    )
+
+
+def test_a_successful_upgrade_refreshes_only_the_agents_this_installation_had_set_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule that keeps a maintenance command from registering MCP servers.
+
+    An agent with a skill or a registration already there had this installation
+    set up for it, and both files describe a release that has just been
+    replaced. An agent with neither was never set up, and an upgrade that
+    installed for it would be adding a server to somebody's machine on the
+    strength of `agentic-hil upgrade`."""
+    _place_agent_skill("opencode")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    refreshed = {entry["agent"]: entry for entry in result["refreshed"]}
+    assert set(refreshed) == {"opencode", "claude-code", "codex"}
+    assert refreshed["opencode"]["skill"] is True
+    assert refreshed["opencode"]["registration"] is True
+    for untouched in ("claude-code", "codex"):
+        assert refreshed[untouched]["skill"] is False
+        assert refreshed[untouched]["registration"] is False
+        assert "Nothing to refresh" in refreshed[untouched]["summary"]
+    # Exactly one refresh, run out of the new package rather than in this
+    # process, which still holds the release that was just replaced.
+    invocations = [command for command, _cwd in calls if "agent-install" in command]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]]
+
+
+def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Either half being present is what marks an agent as one of ours.
+
+    A registration alone is the state an operator reaches by removing a skill
+    file, and it is the half that names the launcher, so it is the one an
+    upgrade most has to rewrite."""
+    registration = Path.home() / ".claude.json"
+    registration.write_text(json.dumps({"mcpServers": {"agentic-hil": {"type": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]}}}), encoding="utf-8")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation([])
+
+    invocations = [command for command, _cwd in calls if "agent-install" in command]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force"]]
+    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
+
+
+def test_naming_an_agent_narrows_the_refresh_and_never_widens_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--agent` selects among the agents that are set up, and adds none.
+
+    Naming an agent that has neither half still installs nothing for it and
+    says so, which is the same rule the unnamed case follows: an upgrade does
+    not decide that somebody wants a new agent integration."""
+    _place_agent_skill("opencode")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation(["codex"])
+
+    assert [entry["agent"] for entry in result["refreshed"]] == ["codex"]
+    assert result["refreshed"][0]["registration"] is False
+    assert not [command for command, _cwd in calls if "agent-install" in command]
+
+
+def test_a_refresh_that_failed_is_reported_and_does_not_fail_the_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package moved, which is what this command promises.
+
+    What did not is a file maintained for somebody else's program, so it is
+    reported per agent with the exact line that finishes it, and the upgrade
+    that did succeed is not turned into a failure by it."""
+    _place_agent_skill("opencode")
+    _upgrade_with_refresh(monkeypatch, agent_install=subprocess.CompletedProcess([], 1, "", "could not write the skill"))
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    entry = result["refreshed"][0]
+    assert entry["agent"] == "opencode"
+    assert entry["ok"] is False
+    assert entry["skill"] is False
+    assert entry["registration"] is False
+    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert "could not be refreshed for opencode" in result["summary"]
+
+
+def test_a_registration_that_was_already_current_asks_for_no_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a rewrite is something an agent host has to be restarted to pick up.
+
+    `agent-install` reports an entry that already named this launcher as
+    skipped. It is in place and current, so the refresh succeeded; nothing
+    changed in the file, so naming the agent in a restart sentence would send
+    an operator to close a host for no reason."""
+    _place_agent_skill("opencode")
+    already = subprocess.CompletedProcess[str]([], 0, json.dumps({"ok": True, "steps": {"skill_install": {"ok": True}, "mcp_config": {"ok": True, "skipped": True}}}), "")
+    _upgrade_with_refresh(monkeypatch, agent_install=already)
+
+    result = upgrade_installation([])
+
+    entry = result["refreshed"][0]
+    assert entry["ok"] is True
+    assert entry["registration"] is True
+    assert entry["registration_rewritten"] is False
+    assert "restart opencode" not in result["summary"]
 
 
 @pytest.mark.parametrize(

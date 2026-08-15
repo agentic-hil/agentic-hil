@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack, suppress
@@ -320,8 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--agent", default="claude-code")
     setup_parser.add_argument("--force", action="store_true")
 
-    upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh agent skills")
-    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh this agent's skill after upgrading; repeat for multiple agents")
+    upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
+    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
     return parser
 
@@ -402,48 +403,175 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
 
     result = replace_installation(tool=CLI_UPGRADE_TOOL)
     if not result.get("upgraded_on_disk"):
-        # Nothing was replaced, so refreshing the skills out of it would be work
+        # Nothing was replaced, so refreshing anything out of it would be work
         # with no effect, and reporting it would put a list of things that
-        # happened under a result whose whole content is that nothing did.
+        # happened under a result whose whole content is that nothing did. This
+        # covers the already-current answer as well, which now comes back
+        # without a package manager having run at all.
         return result
 
     previous_version = str(result["previous_version"])
     current_version = str(result["version"])
-    skill_results: JsonObject = {}
-    with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
-        for agent in requested_agents:
-            skill_command = [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", agent]
-            # Through the module rather than a name imported above: `upgrade` is
-            # the one place a test replaces the subprocess runner, and a second
-            # binding here would be the copy that kept running the real thing.
-            refreshed = upgrade._run_upgrade_process(skill_command, cwd=maintenance_cwd)
-            child = upgrade._process_result(refreshed)
-            if refreshed.stdout.strip():
-                with suppress(json.JSONDecodeError):
-                    child["result"] = json.loads(refreshed.stdout)
-            skill_results[agent] = child
-
-    skills_ok = all(child.get("returncode") == 0 for child in skill_results.values())
+    refreshed = _refresh_agent_integrations(requested_agents)
+    rewritten = [entry["agent"] for entry in refreshed if entry["registration_rewritten"]]
+    failed = [entry["agent"] for entry in refreshed if not entry["ok"]]
     # One more way an installation stops matching its own configuration, on the
     # path the release notes actually send an operator down: an upgrade that
     # came back without the extra this bench's configuration needs. Best effort
-    # by design — `upgrade` has to work on a machine that has no project
+    # by design, since `upgrade` has to work on a machine that has no project
     # configured yet, so a configuration that will not load is a reason to say
     # nothing here rather than to fail the upgrade that just succeeded.
     extras_warning = None
     with suppress(ConfigError, OSError):
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
+    summary = f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
+    if rewritten:
+        summary += f" The MCP registration was rewritten for {_named_agents(rewritten)}, so restart {_named_agents(rewritten)} to load it."
+    if failed:
+        # Not a failed upgrade. The package moved; what did not is a file this
+        # command maintains for somebody else's program, and each entry carries
+        # the one line that finishes it by hand.
+        summary += f" The agent integration could not be refreshed for {_named_agents(failed)}; `refreshed` names the command that does it."
     return {
         **result,
-        "ok": skills_ok,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),
-        "summary": (
-            f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
-            if skills_ok
-            else f"Agentic HIL package upgraded from {previous_version} to {current_version}, but one or more agent skills could not be refreshed."
-        ),
-        "skills": skill_results,
+        "summary": summary,
+        "refreshed": refreshed,
     }
+
+
+def _named_agents(agent_ids: list[str]) -> str:
+    display = {agent.id: agent.display_name for agent in skill_agents()}
+    return ", ".join(display.get(agent_id, agent_id) for agent_id in agent_ids)
+
+
+def _installed_agent_integration(agent: SkillAgent) -> tuple[bool, bool]:
+    """What this installation has already written for one agent: skill, registration.
+
+    Read only, and forgiving of everything: a home directory that refuses the
+    ancestor trust check, a configuration file that is no longer JSON, a path
+    component that is not a directory any more. None of those is a reason to
+    fail an upgrade that has already succeeded, and each of them answers the
+    question the same way, which is that there is nothing here to refresh.
+    """
+    skill = False
+    with suppress(ConfigError, OSError, ValueError):
+        skill = _path_entry_exists(_agent_skill_target(agent))
+    registration = False
+    with suppress(ConfigError, OSError, ValueError):
+        path = _agent_mcp_config_path(agent.id)
+        if agent.id == "codex":
+            registration = AGENTIC_HIL_MCP_START in (secure_optional_read_text(path) or "")
+        else:
+            data = _load_json_object(path) or {}
+            servers = data.get("mcpServers" if agent.id == "claude-code" else "mcp")
+            registration = isinstance(servers, dict) and "agentic-hil" in servers
+    return skill, registration
+
+
+def _refresh_agent_integrations(requested_agents: list[str]) -> list[JsonObject]:
+    """Rewrite, out of the new package, the two things the old one had written.
+
+    The skill file carries the release's own text, and the MCP registration
+    names the launcher this installation resolves, which an upgrade is entitled
+    to move. Neither is inside the package, so replacing the package leaves both
+    behind, describing a release that is no longer installed.
+
+    Only for an agent that already has one of the two. An upgrade that
+    registered an agent nobody had set up would be adding an MCP server to a
+    machine on the strength of a maintenance command, and `--agent` narrows this
+    set rather than widening it: naming an agent that has nothing still installs
+    nothing, and says so.
+
+    Through a subprocess and never in process. This interpreter imported the
+    release that was just replaced and goes on executing it, so a refresh run
+    here would write the old package's skill text and resolve the old launcher,
+    which is the exact opposite of the point.
+    """
+    wanted = {resolved.id for name in requested_agents if (resolved := resolve_skill_agent(name)) is not None}
+    outcomes: list[JsonObject] = []
+    with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
+        for agent in skill_agents():
+            if wanted and agent.id not in wanted:
+                continue
+            skill, registration = _installed_agent_integration(agent)
+            if not (skill or registration):
+                outcomes.append(
+                    {
+                        "agent": agent.id,
+                        "ok": True,
+                        "skill": False,
+                        "registration": False,
+                        "registration_rewritten": False,
+                        "summary": f"Nothing to refresh for {agent.display_name}: this installation had written neither its skill nor its MCP registration.",
+                    }
+                )
+                continue
+            outcomes.append(_refresh_one_agent(agent, maintenance_cwd))
+    return outcomes
+
+
+def _refresh_one_agent(agent: SkillAgent, maintenance_cwd: str) -> JsonObject:
+    """One `agent-install --force`, run out of the new package, reported per half.
+
+    `--force` because that is the documented repair route for a managed skill or
+    MCP entry: it rewrites what this program wrote and still refuses an entry an
+    operator wrote, which is the distinction that has to survive an upgrade.
+
+    A failure here is reported and never raised. The package moved, which is
+    what `agentic-hil upgrade` promises; a skill file that could not be written
+    is one command away and that command is on the result.
+    """
+    # Through the module rather than a name imported above: `upgrade` is the one
+    # place a test replaces the subprocess runner, and a second binding here
+    # would be the copy that kept running the real thing.
+    command = [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", agent.id, "--force"]
+    outcome: JsonObject = {"agent": agent.id, "command": command}
+    try:
+        completed = upgrade._run_upgrade_process(command, cwd=maintenance_cwd)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            **outcome,
+            "ok": False,
+            "skill": False,
+            "registration": False,
+            "registration_rewritten": False,
+            "exception_type": type(error).__name__,
+            "detail": str(error),
+            "summary": f"The agent integration for {agent.display_name} could not be refreshed; run `command` by hand to finish it.",
+        }
+    child = upgrade._process_result(completed)
+    if completed.stdout.strip():
+        with suppress(json.JSONDecodeError):
+            child["result"] = json.loads(completed.stdout)
+    reported = child.get("result")
+    steps = reported.get("steps", {}) if isinstance(reported, dict) else {}
+    steps = steps if isinstance(steps, dict) else {}
+    skill_step = steps.get("skill_install")
+    mcp_step = steps.get("mcp_config")
+    skill = completed.returncode == 0 and _step_succeeded(skill_step)
+    registration = completed.returncode == 0 and _step_succeeded(mcp_step)
+    ok = completed.returncode == 0 and skill and registration
+    return {
+        **outcome,
+        "ok": ok,
+        "skill": skill,
+        # An entry that already named this launcher is in place and current, so
+        # it counts as refreshed; it was not rewritten, and only a rewrite is
+        # something an agent host has to be restarted to pick up.
+        "registration": registration,
+        "registration_rewritten": registration and not (isinstance(mcp_step, dict) and mcp_step.get("skipped") is True),
+        "install": child,
+        "summary": (
+            f"Agentic HIL's skill and MCP registration for {agent.display_name} were refreshed from the new release."
+            if ok
+            else f"The agent integration for {agent.display_name} was not fully refreshed; run `command` by hand to finish it."
+        ),
+    }
+
+
+def _step_succeeded(step: object) -> bool:
+    return isinstance(step, dict) and overall_success(step)
 
 
 def _agent_mcp_config_path(agent_id: str) -> Path:
