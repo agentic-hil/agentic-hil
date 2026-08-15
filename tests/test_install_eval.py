@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.install import guard, scrub_credentials
+from evals.install import bench_openocd, guard, scrub_credentials
 from evals.install import runner as install_runner
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
@@ -1517,6 +1517,7 @@ def test_only_the_hardware_cases_demand_tool_evidence() -> None:
 def test_guard_refuses_hardware_commands_and_records_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(guard, "PROC_ROOT", tmp_path / "no-process-table-here")
     monkeypatch.setattr(guard.sys, "argv", ["/opt/eval-guard/bin/openocd", "-f", "board.cfg"])
 
     assert guard.main() == 126
@@ -1525,6 +1526,254 @@ def test_guard_refuses_hardware_commands_and_records_them(tmp_path: Path, monkey
     recorded = json.loads(events.splitlines()[0])
     assert recorded["command"] == "openocd"
     assert "Agentic HIL" in recorded["reason"]
+    assert "spawned_by" not in recorded
+
+
+def write_process(root: Path, pid: int, argv: list[str], ppid: int = 1) -> None:
+    """One entry of a process table the guard can walk on any platform."""
+    entry = root / str(pid)
+    entry.mkdir(parents=True, exist_ok=True)
+    (entry / "cmdline").write_bytes(("\0".join(argv) + "\0").encode("utf-8"))
+    (entry / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["/usr/bin/python3", "/home/eval/.local/bin/agentic-hil", "mcp-stdio"], True),
+        (["/usr/bin/python3", "-m", "agentic_hil", "doctor"], True),
+        (["python", "-I", "-c", 'runpy.run_module("agentic_hil", run_name="__main__")', "/opt/pkg", "doctor"], True),
+        (["/bin/bash", "-lc", "openocd --version"], False),
+        (["node", "/opt/agent-clis/node_modules/.bin/claude"], False),
+        (["/bin/sh", "-c", "make flash # agentic-hil is installed"], False),
+    ],
+)
+def test_the_guard_knows_which_command_lines_are_the_runtime(argv: list[str], expected: bool) -> None:
+    """The window 222 asks for is only as good as what it recognises."""
+    assert guard.names_agentic_hil_runtime(argv) is expected
+
+
+def test_the_guard_serves_the_runtimes_own_call_and_refuses_the_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published mode adopts the shim as the bench's debugger; it must work.
+
+    The product's own doctor and flash paths then execute it, and failing the
+    run for those is failing it for routing hardware access through the product.
+    A direct call keeps the refusal it always had.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    proc = tmp_path / "proc"
+    monkeypatch.setattr(guard, "PROC_ROOT", proc)
+    monkeypatch.setattr(guard.os, "getpid", lambda: 100)
+
+    write_process(proc, 100, ["/usr/bin/python3", "/opt/evals/install/bench_openocd.py"], ppid=50)
+    write_process(proc, 50, ["/bin/bash", "-lc", "openocd --version"])
+    assert guard.runtime_parent() is None
+
+    write_process(proc, 50, ["/usr/bin/python3", "/home/eval/.local/bin/agentic-hil", "mcp-stdio"])
+    assert guard.runtime_parent() == "/usr/bin/python3 /home/eval/.local/bin/agentic-hil mcp-stdio"
+
+
+def test_a_guard_shim_hands_the_runtimes_own_call_to_the_bench_stand_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Belt and braces for whichever copy of `openocd` a PATH resolves to.
+
+    The stand-in is first on PATH, so a bootstrap adopts it; a shell whose
+    profile put the guard directory in front resolves a shim instead, and that
+    shim has to reach the same answer rather than the old refusal.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    proc = tmp_path / "proc"
+    monkeypatch.setattr(guard, "PROC_ROOT", proc)
+    monkeypatch.setattr(guard.os, "getpid", lambda: 100)
+    write_process(proc, 100, ["/usr/bin/python3", "/opt/eval-guard/bin/openocd"], ppid=50)
+    write_process(proc, 50, ["/usr/bin/python3", "/home/eval/.local/bin/agentic-hil", "mcp-stdio"])
+    started: list[list[str]] = []
+    monkeypatch.setattr(guard.os, "execv", lambda program, argv: started.append([program, *argv[1:]]))
+    monkeypatch.setattr(guard.sys, "argv", ["/opt/eval-guard/bin/openocd", "--version"])
+
+    with pytest.raises(RuntimeError, match="bench stand-in"):
+        guard.main()
+
+    assert started
+    assert started[0][1].endswith("bench_openocd.py")
+    assert started[0][2:] == ["--version"]
+    # Nothing was recorded here: the stand-in it hands over to writes the one
+    # record for this invocation, and `execv` keeps the parent it asked about.
+    assert not (tmp_path / ".agentic-hil-eval").exists()
+
+
+def test_the_bench_stand_in_answers_the_version_call_doctor_makes() -> None:
+    """The whole of what `doctor succeeds through trusted verifier runtime` needs.
+
+    Published mode failed that check because the program it adopted answered
+    `--version` with exit 126 and a recorded gate breach.
+    """
+    assert bench_openocd.serve(["--version"]) == 0
+
+
+def _bench_scripts(tmp_path: Path) -> tuple[Path, Path]:
+    interface = tmp_path / "interface" / "stlink.cfg"
+    target = tmp_path / "target" / "stm32f4x.cfg"
+    for script in (interface, target):
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# stand-in\n", encoding="utf-8")
+    return interface, target
+
+
+PROBE_COMMAND = 'init; echo "AGENTIC_HIL_STAGE:init:ok"; targets; echo "AGENTIC_HIL_RESULT:probe_target:ok"; shutdown'
+
+
+def test_the_bench_stand_in_reports_an_unattached_probe_the_way_openocd_does(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """No board is attached to this container, and every case is written on that.
+
+    The words matter twice: they classify as `adapter_not_found`, and they land
+    before the init-stage marker, which is what tells the runtime the bench was
+    never contacted so that it refuses rather than quarantines.
+    """
+    interface, target = _bench_scripts(tmp_path)
+
+    code = bench_openocd.serve(["-f", str(interface), "-f", str(target), "-c", PROBE_COMMAND])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "open failed" in captured.err
+    assert "AGENTIC_HIL_STAGE:init:ok" not in captured.out
+    assert "AGENTIC_HIL_RESULT:probe_target:ok" not in captured.out
+
+
+def test_the_bench_stand_in_prints_the_markers_the_backend_reads(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(bench_openocd.BENCH_ENVIRONMENT, bench_openocd.BENCH_ATTACHED)
+    interface, target = _bench_scripts(tmp_path)
+
+    code = bench_openocd.serve(
+        ["-f", str(interface), "-f", str(target), "-c", "telnet_port disabled", "-c", PROBE_COMMAND]
+    )
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    assert "AGENTIC_HIL_STAGE:init:ok" in printed
+    assert "AGENTIC_HIL_RESULT:probe_target:ok" in printed
+    # The backend reads any of these as a failure even on a zero exit.
+    assert not any(word in printed.lower() for word in ("error:", "failed", "failure", "mismatch", "not found"))
+
+
+def test_the_bench_stand_in_flashes_an_artifact_that_is_there_and_refuses_one_that_is_not(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(bench_openocd.BENCH_ENVIRONMENT, bench_openocd.BENCH_ATTACHED)
+    script = tmp_path / "board.cfg"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    image = tmp_path / "app.elf"
+    image.write_bytes(b"\x7fELF" + bytes(60))
+    marker = 'echo "AGENTIC_HIL_RESULT:flash_firmware:ok"'
+
+    code = bench_openocd.serve(["-f", str(script), "-c", f'program "{image}" verify reset; {marker}; shutdown'])
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    assert "** Verified OK **" in printed
+    assert "AGENTIC_HIL_RESULT:flash_firmware:ok" in printed
+
+    code = bench_openocd.serve(["-f", str(script), "-c", f'program "{tmp_path / "missing.elf"}" verify; {marker}'])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "couldn't open" in captured.err
+    assert "AGENTIC_HIL_RESULT" not in captured.out
+
+
+def test_the_bench_stand_in_reports_a_missing_script_the_way_openocd_does(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The phrasing is what tells a missing interface script from a dead bench."""
+    code = bench_openocd.serve(["-f", str(tmp_path / "interface" / "stlink.cfg"), "-c", "init; shutdown"])
+
+    assert code == 1
+    assert "Can't find" in capsys.readouterr().err
+
+
+def test_the_bench_stand_in_reports_a_command_it_cannot_read_without_a_traceback(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Two of this branch's neighbours are exactly that defect."""
+    script = tmp_path / "board.cfg"
+    script.write_text("# stand-in\n", encoding="utf-8")
+
+    code = bench_openocd.serve(["-f", str(script), "-c", 'echo "unbalanced'])
+
+    assert code == 1
+    assert "unterminated quoted string" in capsys.readouterr().err
+
+
+def test_the_bench_stand_in_refuses_a_call_the_runtime_did_not_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is first on PATH, so it is also what an agent's own `openocd` finds."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(guard, "PROC_ROOT", tmp_path / "no-process-table-here")
+
+    assert bench_openocd.main(["--version"]) == 126
+
+    recorded = json.loads((tmp_path / ".agentic-hil-eval" / "guard-events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert recorded["command"] == "openocd"
+    assert recorded["reason"] == guard.HARDWARE_REFUSAL
+    assert "spawned_by" not in recorded
+
+
+def test_the_bench_stand_in_records_the_runtime_that_spawned_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    proc = tmp_path / "proc"
+    monkeypatch.setattr(guard, "PROC_ROOT", proc)
+    monkeypatch.setattr(guard.os, "getpid", lambda: 100)
+    write_process(proc, 100, ["/usr/bin/python3", "/opt/evals/install/bench_openocd.py"], ppid=50)
+    write_process(proc, 50, ["/usr/bin/python3", "-m", "agentic_hil", "doctor"])
+
+    assert bench_openocd.main(["--version"]) == 0
+
+    recorded = json.loads((tmp_path / ".agentic-hil-eval" / "guard-events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert recorded["reason"] == guard.RUNTIME_REASON
+    assert recorded["spawned_by"] == "/usr/bin/python3 -m agentic_hil doctor"
+
+
+def test_a_guard_log_that_cannot_be_written_still_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verifier mounts the agent's home read-only, and doctor runs there."""
+    monkeypatch.setenv("HOME", str(tmp_path / "missing" / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "missing" / "home"))
+    monkeypatch.setattr(guard, "PROC_ROOT", tmp_path / "no-process-table-here")
+    monkeypatch.setattr(Path, "mkdir", _refuse_mkdir)
+
+    assert guard.refuse_hardware_command("openocd", ["--version"]) == 126
+
+
+def _refuse_mkdir(self: Path, *arguments: object, **keywords: object) -> None:
+    raise PermissionError(13, "Read-only file system")
 
 
 @pytest.mark.parametrize("field", ["repetitions", "max_repetitions"])

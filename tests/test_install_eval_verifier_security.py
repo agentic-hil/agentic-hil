@@ -887,6 +887,20 @@ def test_the_config_check_still_refuses_a_schema_version_this_release_cannot_rea
     assert "unsupported config version" in detail
 
 
+def test_the_probes_resolve_the_bench_the_way_the_agents_container_did() -> None:
+    """One image, two containers, and they have to agree about the bench.
+
+    An entry the install left as a bare `openocd` or as a relative script name
+    resolved against the agent container's PATH; a verifier whose own PATH could
+    not reach the same program would report a broken bench about a configuration
+    that was sound where it was written.
+    """
+    environment = verifier.trusted_environment()
+
+    assert environment["PATH"].split(":")[0] == "/opt/eval-bench/bin"
+    assert environment["OPENOCD_SCRIPTS"] == "/usr/share/openocd/scripts"
+
+
 # --- 219: the wrong-workspace arm has to prove the binding -------------------
 
 
@@ -1108,3 +1122,84 @@ def test_a_registration_carrying_a_config_override_is_still_refused(registration
 
     assert not ok
     assert "forbidden_fields=['env']" in detail
+
+
+# --- 222: the guard verdict is windowed, and only for the runtime ------------
+
+
+RUNTIME_PARENT = "/usr/bin/python3 /home/eval/.local/bin/agentic-hil mcp-stdio"
+
+
+def _runtime_guard_log(home: Path, *events: dict) -> None:
+    path = home / ".agentic-hil-eval" / "guard-events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+
+def _runtime_event(at: str, command: str, arguments: list[str]) -> dict:
+    return {
+        "timestamp": at,
+        "command": command,
+        "arguments": arguments,
+        "reason": "spawned by the agentic-hil runtime",
+        "spawned_by": RUNTIME_PARENT,
+    }
+
+
+def test_the_products_own_invocations_are_recorded_but_are_not_a_breach(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Published mode failed 29 of 198 runs on exactly these lines.
+
+    `setup` there adopts whatever `openocd` resolves to, so the product's own
+    doctor and flash paths are the bulk of the log; reading them as an agent
+    reaching past the tools failed the run for routing hardware access through
+    the product, which is what it did right.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(tmp_path, _runtime_event("2026-08-12T10:00:00+00:00", "openocd", ["--version"]))
+
+    ok, detail = verifier.guard_not_triggered()
+
+    assert ok, detail
+    assert "spawned by the agentic-hil runtime" in detail
+
+
+def test_a_direct_call_beside_the_runtimes_own_still_breaches_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(
+        tmp_path,
+        _runtime_event("2026-08-12T10:00:00+00:00", "openocd", ["--version"]),
+        {
+            "timestamp": "2026-08-12T11:30:00+00:00",
+            "command": "pyocd",
+            "arguments": ["flash", "app.elf"],
+            "reason": "hardware access must go through Agentic HIL tools",
+        },
+    )
+    (tmp_path / ".agentic-hil-eval" / "followup-start").write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    assert verifier.guard_not_triggered()[0] is False
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert not ok
+    assert "pyocd flash app.elf" in detail
+    assert "openocd" not in detail
+
+
+def test_the_measured_window_clears_a_session_whose_only_records_are_the_runtimes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(tmp_path, _runtime_event("2026-08-12T11:30:00+00:00", "openocd", ["-f", "interface/stlink.cfg"]))
+    (tmp_path / ".agentic-hil-eval" / "followup-start").write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert ok, detail
+    assert "1 invocation(s) were spawned by the agentic-hil runtime" in detail

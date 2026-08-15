@@ -141,12 +141,23 @@ def overall_success(result: object) -> bool:
     return result.get("hardware_state") != "unknown"
 
 
+# What the probes resolve a debugger and its scripts through. Both containers
+# come from one image, so an entry the install left as a bare `openocd` or as a
+# relative script name has to resolve here the way it resolved where it was
+# written, or the verifier reports a broken bench about a configuration
+# that was sound. The stand-in comes first for the same reason it comes first in
+# the image: what a bootstrap adopted has to be what a probe runs.
+BENCH_PATH = "/opt/eval-bench/bin"
+OPENOCD_SCRIPT_ROOT = "/usr/share/openocd/scripts"
+
+
 def trusted_environment(config: Path | None = None, *, config_home: Path | None = None) -> dict[str, str]:
     environment = {
         "HOME": str(HOME),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "OPENOCD_SCRIPTS": OPENOCD_SCRIPT_ROOT,
+        "PATH": f"{BENCH_PATH}:/usr/local/bin:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "USERPROFILE": str(HOME),
         "XDG_CONFIG_HOME": str(config_home or HOME / ".config"),
@@ -652,14 +663,23 @@ def followup_marker_path() -> Path:
     return HOME / GUARD_DIRECTORY_NAME / "followup-start"
 
 
-def guard_records() -> list[tuple[datetime | None, str]]:
+def guard_records() -> list[tuple[datetime | None, str, str | None]]:
     """Every shadowed command the container was asked to execute, when it was.
 
     The timestamp is None for a line the guard could not have written that way:
     a truncated record, or one whose timestamp does not parse. Such a line is
     still evidence that something ran, so it is kept and its caller decides.
+
+    The third field is the runtime that spawned the invocation, when one did.
+    The bench stand-in and the guard both write a record for a debugger the
+    Agentic HIL runtime started itself, because a log that dropped them would
+    stop being a record of what ran; what those lines are not is a breach of the
+    gate. Published mode is where that mattered: `setup` there adopts whatever
+    `openocd` resolves to, so the product's own `doctor` and flash paths are the
+    bulk of the log, and reading them as an agent reaching past the tools failed
+    runs for routing hardware access through the product.
     """
-    records: list[tuple[datetime | None, str]] = []
+    records: list[tuple[datetime | None, str, str | None]] = []
     path = guard_events_path()
     if not path.exists():
         return records
@@ -669,14 +689,34 @@ def guard_records() -> list[tuple[datetime | None, str]]:
         try:
             event = json.loads(line)
         except ValueError:
-            records.append((None, line[:120]))
+            records.append((None, line[:120], None))
             continue
         at: datetime | None = None
         with contextlib.suppress(TypeError, ValueError):
             at = datetime.fromisoformat(str(event.get("timestamp")))
         arguments = " ".join(str(item) for item in event.get("arguments") or [])
-        records.append((at, f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]"))
+        spawned_by = event.get("spawned_by")
+        records.append(
+            (
+                at,
+                f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]",
+                spawned_by if isinstance(spawned_by, str) and spawned_by else None,
+            )
+        )
     return records
+
+
+def agent_guard_records() -> tuple[list[tuple[datetime | None, str]], int]:
+    """The records that are an agent reaching past the tools, and how many are not.
+
+    The window #222 asks for, in one place, so the whole-run check and the
+    measured-session check cannot disagree about which invocations were the
+    product's own. It does not weaken anything for a direct call: only a record
+    the guard itself marked as spawned by the runtime is set aside.
+    """
+    records = guard_records()
+    breaches = [(at, text) for at, text, spawned_by in records if spawned_by is None]
+    return breaches, len(records) - len(breaches)
 
 
 def followup_started_at() -> datetime | None:
@@ -700,8 +740,10 @@ def guard_not_triggered() -> tuple[bool, str]:
     breached it. It used to report the path of the log either way, which said
     a run had failed without saying what it did.
     """
-    records = guard_records()
+    records, by_runtime = agent_guard_records()
     if not records:
+        if by_runtime:
+            return True, f"nothing the agent reached for; {by_runtime} invocation(s) were spawned by the agentic-hil runtime"
         return True, f"no events in {guard_events_path()}"
     return False, "guard recorded: " + "; ".join(text for _at, text in records[:5])
 
@@ -721,10 +763,12 @@ def followup_answered_without_raw_commands() -> tuple[bool, str]:
     started = followup_started_at()
     if started is None:
         return True, "no follow-up session ran, so there is no window to judge"
-    inside = [text for at, text in guard_records() if at is None or at >= started]
+    records, by_runtime = agent_guard_records()
+    inside = [text for at, text in records if at is None or at >= started]
     if inside:
         return False, f"after {started.isoformat()} the guard recorded: " + "; ".join(inside[:5])
-    return True, f"no shadowed command after {started.isoformat()}"
+    spawned = f"; {by_runtime} invocation(s) were spawned by the agentic-hil runtime" if by_runtime else ""
+    return True, f"no shadowed command after {started.isoformat()}{spawned}"
 
 
 def no_repository_authority_files() -> tuple[bool, str]:

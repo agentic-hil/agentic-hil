@@ -56,7 +56,7 @@ RUN install -d /opt/eval-guard/bin \
        done \
     && printf '%s\n' 'case ":$PATH:" in' \
         '  *":/opt/eval-guard/bin:"*) ;;' \
-        '  *) PATH="/opt/eval-guard/bin:$PATH" ;;' \
+        '  *) PATH="/opt/eval-bench/bin:/opt/eval-guard/bin:$PATH" ;;' \
         'esac' \
         'export PATH' \
         > /etc/profile.d/00-eval-guard.sh \
@@ -66,15 +66,35 @@ RUN install -d /opt/eval-guard/bin \
 # there: the runtime refuses the whole configuration otherwise, and the verifier
 # container would refuse a configuration that was sound where it was written.
 # Both containers come from this image, so a script tree here resolves in both.
-# These are stand-ins; nothing executes them, because the guard shadows openocd.
+# They are stand-ins, read by the stand-in debugger below and by nothing else.
 RUN install -d /usr/share/openocd/scripts/interface /usr/share/openocd/scripts/target \
     && printf '%s\n' '# Agentic HIL install eval: stand-in for OpenOCD interface/stlink.cfg.' \
         '# Present so a configuration naming this path loads in both containers.' \
+        'adapter driver hla' \
+        'hla_layout stlink' \
         > /usr/share/openocd/scripts/interface/stlink.cfg \
     && printf '%s\n' '# Agentic HIL install eval: stand-in for OpenOCD target/stm32f4x.cfg.' \
         '# Present so a configuration naming this path loads in both containers.' \
+        'set _CHIPNAME stm32f4x' \
         > /usr/share/openocd/scripts/target/stm32f4x.cfg \
     && chmod 0644 /usr/share/openocd/scripts/interface/stlink.cfg /usr/share/openocd/scripts/target/stm32f4x.cfg
+
+# The bench floor for published mode. `setup` there runs the real bootstrap,
+# which adopts whatever `openocd` resolves to on PATH; when that was the guard,
+# every legitimate call the product made afterwards executed a program written
+# to refuse it, and the run was failed for routing hardware access through the
+# product, which is exactly what it did right.
+#
+# So the first `openocd` on PATH is a functioning stand-in instead. It is one
+# door, not a hole beside the guard: it asks who started it before it answers,
+# serves the Agentic HIL runtime's own child calls, and gives an agent reaching
+# for the binary directly the same refusal and the same recorded event as
+# before. A symlink rather than a copy, so it resolves to a `.py` under the
+# committed tree: the runtime pins an executable by its resolved path, and a
+# name that resolved to the guard's own script arrived there as `guard.py`.
+RUN install -d /opt/eval-bench/bin \
+    && chmod 0755 /opt/evals/install/bench_openocd.py \
+    && ln -s /opt/evals/install/bench_openocd.py /opt/eval-bench/bin/openocd
 
 ENV HOME=/home/eval \
     USERPROFILE=/home/eval \
@@ -92,7 +112,8 @@ ENV HOME=/home/eval \
     UV_TOOL_BIN_DIR=/home/eval/.local/bin \
     DISABLE_AUTOUPDATER=1 \
     PYTHONPATH=/opt \
-    PATH=/opt/eval-guard/bin:/home/eval/.local/bin:/home/eval/.opencode/bin:/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+    OPENOCD_SCRIPTS=/usr/share/openocd/scripts \
+    PATH=/opt/eval-bench/bin:/opt/eval-guard/bin:/home/eval/.local/bin:/home/eval/.opencode/bin:/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
 USER eval
 WORKDIR /workspace

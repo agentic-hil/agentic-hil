@@ -31,14 +31,23 @@ def _evidence(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def _built_at(docker: str) -> datetime | None:
-    """When this image was built, or None if it is not on this machine."""
-    result = subprocess.run(
-        [docker, "image", "inspect", "--format", "{{.Created}}", IMAGE],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    """When this image was built, or None if it is not on this machine.
+
+    A daemon that does not answer is the same "not here" as an image that was
+    never built. The binary can be installed while the engine behind it is down,
+    and a probe that waited two minutes for that to become clear would stall a
+    unit test run rather than skip it.
+    """
+    try:
+        result = subprocess.run(
+            [docker, "image", "inspect", "--format", "{{.Created}}", IMAGE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode != 0:
         return None
     try:
@@ -76,19 +85,29 @@ def test_a_login_shell_cannot_reach_a_shadowed_hardware_command() -> None:
     assert "forbidden in the Agentic HIL install eval" in result.stderr
 
 
-def test_a_login_shell_resolves_the_hardware_command_to_the_guard() -> None:
+def test_a_login_shell_resolves_the_hardware_command_to_a_guarded_program() -> None:
+    """Whichever of them a shell finds, all three answer through the same guard.
+
+    The bench stand-in is first from #222 on, so that the bootstrap adopts a
+    program that behaves like OpenOCD for the product; it refuses a direct call
+    exactly as the shims do, which is what the test above measures.
+    """
     result = _in_image("-lc", "command -v openocd")
 
     assert result.returncode == 0, _evidence(result)
-    assert result.stdout.strip() in {"/opt/eval-guard/bin/openocd", "/usr/local/bin/openocd"}
+    assert result.stdout.strip() in {
+        "/opt/eval-bench/bin/openocd",
+        "/opt/eval-guard/bin/openocd",
+        "/usr/local/bin/openocd",
+    }
 
 
-def test_a_login_shell_keeps_the_guard_directory_in_front_of_its_path() -> None:
+def test_a_login_shell_keeps_the_guarded_directories_in_front_of_its_path() -> None:
     """Belt and braces: the shims are also reachable without the profile drop-in."""
     result = _in_image("-lc", "echo $PATH")
 
     assert result.returncode == 0, _evidence(result)
-    assert result.stdout.split(":")[0].strip() == "/opt/eval-guard/bin"
+    assert result.stdout.split(":")[:2] == ["/opt/eval-bench/bin", "/opt/eval-guard/bin"]
 
 
 def test_the_image_resolves_the_openocd_scripts_a_generated_config_names() -> None:
@@ -100,3 +119,29 @@ def test_the_image_resolves_the_openocd_scripts_a_generated_config_names() -> No
     )
 
     assert result.returncode == 0, _evidence(result)
+
+
+def test_the_bench_stand_in_answers_the_runtimes_own_version_call() -> None:
+    """The published-mode floor #222 asks for, measured in the image itself.
+
+    A parent whose command line names the runtime is what tells the product's
+    own child invocation from an agent reaching for the binary, and only the
+    running image can answer whether the stand-in is really reachable that way.
+    """
+    result = _in_image(
+        "-lc",
+        "install -d /tmp/bench && "
+        "printf '%s\\n' '#!/usr/bin/python3' 'import subprocess, sys' "
+        "'sys.exit(subprocess.run([\"openocd\", \"--version\"]).returncode)' > /tmp/bench/agentic-hil && "
+        "chmod 0755 /tmp/bench/agentic-hil && /tmp/bench/agentic-hil",
+    )
+
+    assert result.returncode == 0, _evidence(result)
+    assert "Open On-Chip Debugger" in result.stdout
+
+
+def test_the_bench_stand_in_still_refuses_a_direct_call() -> None:
+    result = _in_image("-lc", "/opt/eval-bench/bin/openocd --version")
+
+    assert result.returncode == 126, _evidence(result)
+    assert "forbidden in the Agentic HIL install eval" in result.stderr
