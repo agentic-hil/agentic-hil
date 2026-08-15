@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -23,11 +24,12 @@ from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
 from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CAN_DRAIN_TIMEOUT_S, CanBusService, CanBusSession, parse_can_id, payload_frame
-from agentic_hil.cli import debugger_probes
+from agentic_hil.cli import debugger_probes, doctor, init_config
 from agentic_hil.comports import ComPortService, ComPortSession
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     _PATH_LOCKS,
+    OPENOCD_SCRIPT_SEARCH_NAME,
     ConfigError,
     _close_windows_handles,
     _windows_hold_directory_chain,
@@ -39,8 +41,10 @@ from agentic_hil.config import (
     executable_is_disabled,
     load_authoritative_config,
     load_config,
+    openocd_script_kind,
     project_config_path,
     project_state_directory,
+    temporary_roots,
 )
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.gdbmi import GdbMiClient
@@ -1405,9 +1409,15 @@ def test_authoritative_config_rejects_debuggers_that_pin_onto_one_probe(
     assert rejected.value.details["other_debugger"] == "dut_a"
 
 
-def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_enabled(
+def test_authoritative_config_rejects_a_relative_openocd_script_path_when_debugger_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A value that navigates is a path, and a path has to say where it is.
+
+    `./interface/stlink.cfg` is not what OpenOCD resolves out of its script
+    tree; it is this configuration claiming a file, relative to a working
+    directory nothing here names. The search-name spelling is the one exempted
+    from the file rule, and it is exempt by being a name, not by being short."""
     workspace = tmp_path / "workspace"
     config_path = write_authoritative_config(
         workspace,
@@ -1417,7 +1427,7 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
     )
     text = config_path.read_text(encoding="utf-8")
     config_path.write_text(
-        text.replace((config_path.parent / "interface.cfg").as_posix(), "interface/stlink.cfg"), encoding="utf-8"
+        text.replace((config_path.parent / "interface.cfg").as_posix(), "./interface/stlink.cfg"), encoding="utf-8"
     )
 
     with pytest.raises(ConfigError) as rejected:
@@ -1425,6 +1435,243 @@ def test_authoritative_config_rejects_relative_openocd_scripts_when_debugger_ena
 
     assert rejected.value.error_type == "config_invalid"
     assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+    assert "absolute" in rejected.value.summary
+
+
+def test_an_openocd_search_name_loads_on_a_host_with_no_script_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generated value, on the machine the install eval actually ran on.
+
+    `interface/stlink.cfg` is what OpenOCD resolves against its own script path,
+    and which tree that is belongs to the OpenOCD that runs. Held to the file
+    rule it was refused on every host without a script tree, and the first
+    answer an install found for that was to write `/tmp/openocd-scripts/...` and
+    point the authoritative configuration there. It is accepted as what it is,
+    and kept exactly as written: resolving it here would put this process's
+    guess about OpenOCD's script path into the config."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True, "allow_flash": True, "allow_reset": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+
+    config = load_authoritative_config(workspace)
+
+    entry = config.debuggers["dut"]
+    assert debugger_drives_hardware(config, entry), "the entry has a toolchain, so it is the checked kind"
+    assert entry.interface_cfg == "interface/stlink.cfg"
+    assert entry.target_cfg == "target/stm32f4x.cfg"
+    assert openocd_script_kind(entry.interface_cfg) == OPENOCD_SCRIPT_SEARCH_NAME
+
+
+def test_the_generated_configuration_adopts_a_probe_on_a_host_with_no_script_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole sequence the install eval ran, through the real writer and parser.
+
+    `agentic-hil init` writes the skeleton with the two search names in it, and
+    that file loads because the entry names no toolchain. Adoption then fills in
+    the executable and the probe serial, which is all `setup` and
+    `project_config_adopt_hardware` do to it, and the entry starts driving
+    hardware. That transition is where `doctor` used to turn red on a bench
+    nothing was wrong with, on any machine without an OpenOCD script tree, and
+    this host is one: neither script exists here."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    written = init_config()
+    assert written["ok"] is True, written
+    config_file = Path(written["path"])
+    document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert document["debuggers"]["dut"]["interface_cfg"] == "interface/stlink.cfg"
+    document["debuggers"]["dut"]["executable"] = FAKE_OPENOCD.as_posix()
+    document["debuggers"]["dut"]["probe_id"] = "066AFF495451885087171450"
+    config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    config = load_authoritative_config(workspace.resolve())
+
+    entry = config.debuggers["dut"]
+    assert debugger_drives_hardware(config, entry)
+    assert entry.interface_cfg == "interface/stlink.cfg"
+    assert entry.target_cfg == "target/stm32f4x.cfg"
+    assert not Path(entry.interface_cfg).exists(), "this host has no OpenOCD script tree, which is the point"
+    report = doctor(str(config_file))
+    assert report["ok"] is True, report
+    assert report["debuggers"]["dut"]["scripts"]["interface_cfg"]["kind"] == OPENOCD_SCRIPT_SEARCH_NAME
+
+
+def test_doctor_labels_a_search_name_rather_than_calling_it_a_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What `doctor` says about the two spellings, which is the whole difference.
+
+    A search name reported as an absent file reads as a broken bench and invites
+    somebody to manufacture the file; the report names the kind instead, and
+    asks whether the file is there only of a value that claims to be one."""
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+        interface_cfg="interface/stlink.cfg",
+    )
+    monkeypatch.chdir(workspace)
+
+    report = doctor(str(config_path))
+
+    assert report.get("debuggers") is not None, report
+    scripts = report["debuggers"]["dut"]["scripts"]
+    assert scripts["interface_cfg"] == {
+        "value": "interface/stlink.cfg",
+        "kind": OPENOCD_SCRIPT_SEARCH_NAME,
+        "resolved_by": "openocd",
+        "note": scripts["interface_cfg"]["note"],
+    }
+    assert "does not have to exist here" in scripts["interface_cfg"]["note"]
+    # The other field kept the conftest's absolute path, and a path is answered
+    # about as a path: it is one, and it is there.
+    assert scripts["target_cfg"]["kind"] == "path"
+    assert scripts["target_cfg"]["exists"] is True
+
+
+def test_an_openocd_script_under_temporary_storage_is_refused_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The answer the install eval invented, refused with its own sentence.
+
+    A fabricated `/tmp/openocd-scripts/interface/stlink.cfg` passes every check
+    the file rule makes (it exists, it is a single-link regular file, it is
+    outside the workspace) and describes the bench until the next reboot. So it
+    is refused for where it is, and the refusal says that rather than talking
+    about a missing file.
+
+    The temporary root is injected because the suite's own `tmp_path` is under
+    the real one; `test_temporary_roots_name_this_platforms_temporary_storage`
+    is what holds the real set."""
+    temporary_root = tmp_path / "system-temp"
+    fabricated = temporary_root / "openocd-scripts" / "interface" / "stlink.cfg"
+    fabricated.parent.mkdir(parents=True)
+    fabricated.write_text("# fabricated\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.config.temporary_roots", lambda: (temporary_root,))
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+        interface_cfg=fabricated.as_posix(),
+    )
+
+    with pytest.raises(ConfigError) as rejected:
+        load_authoritative_config(workspace)
+
+    assert rejected.value.error_type == "config_invalid"
+    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+    assert rejected.value.details["temporary_root"] == str(temporary_root)
+    assert "temporary storage" in rejected.value.summary
+    assert "single-link regular file" not in rejected.value.summary
+
+
+def test_a_configuration_in_temporary_storage_is_not_refused_for_its_own_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one case the temporary refusal has nothing true to say about.
+
+    The rule is about a configuration that outlives what it points at. A
+    configuration that lives in temporary storage itself is already exactly as
+    ephemeral as this field could make it, so refusing the field would name the
+    wrong thing about that bench. It is also the shape every test in this suite
+    has, since `tmp_path` is under the platform's temporary root, so it is
+    written down rather than left to be discovered."""
+    temporary_root = tmp_path / "system-temp"
+    config_root = temporary_root / "user-config"
+    monkeypatch.setattr("agentic_hil.config.temporary_roots", lambda: (temporary_root,))
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_root=config_root,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+    )
+    assert config_path.is_relative_to(temporary_root)
+
+    config = load_authoritative_config(workspace)
+
+    assert Path(config.debuggers["dut"].interface_cfg).is_relative_to(temporary_root)
+
+
+def test_a_windows_style_temporary_script_is_refused_in_either_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backslashes and forward slashes name one file, and one is not a way past this.
+
+    Windows accepts both separators for the same path, so a check that read the
+    string rather than the path would refuse `C:\\...\\Temp\\x.cfg` and let
+    `C:/.../Temp/x.cfg` through."""
+    if os.name != "nt":
+        pytest.skip("both separators name one path only on Windows")
+    temporary_root = tmp_path / "system-temp"
+    fabricated = temporary_root / "openocd-scripts" / "stlink.cfg"
+    fabricated.parent.mkdir(parents=True)
+    fabricated.write_text("# fabricated\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.config.temporary_roots", lambda: (temporary_root,))
+    for spelling in (fabricated.as_posix(), str(fabricated)):
+        workspace = tmp_path / f"workspace-{spelling.count(chr(92))}"
+        write_authoritative_config(
+            workspace,
+            monkeypatch,
+            debugger_executable=FAKE_OPENOCD,
+            permissions={"allow_probe": True},
+            interface_cfg=spelling,
+        )
+
+        with pytest.raises(ConfigError) as rejected:
+            load_authoritative_config(workspace)
+
+        assert "temporary storage" in rejected.value.summary, spelling
+
+
+def test_temporary_roots_name_this_platforms_temporary_storage() -> None:
+    """The set the refusal is measured against, per platform.
+
+    `tempfile.gettempdir()` alone is the process's inherited answer from
+    TMPDIR, TEMP or TMP, so a bench whose config was loaded under one
+    environment and written under another would be measured against a root it
+    never used. The
+    platform's own fixed locations are named beside it."""
+    roots = {Path(root) for root in temporary_roots()}
+
+    assert Path(tempfile.gettempdir()) in roots
+    if os.name == "nt":
+        assert Path(os.environ["LOCALAPPDATA"]) / "Temp" in roots
+        assert Path(os.environ.get("SYSTEMROOT") or "C:/Windows") / "Temp" in roots
+    else:
+        assert Path("/tmp") in roots
+        assert Path("/var/tmp") in roots
+
+
+def test_a_search_name_is_never_read_as_temporary_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The temporary check is asked of both spellings and answers no to this one.
+
+    A search name is resolved by OpenOCD against its script path and never
+    against a working directory, so it names nothing under the temporary root
+    even when the process that loads the config is running there. Reading it as
+    a relative path would have refused the shipped default on any bench started
+    from a temporary directory."""
+    temporary_root = tmp_path / "system-temp"
+    temporary_root.mkdir()
+    monkeypatch.setattr("agentic_hil.config.temporary_roots", lambda: (temporary_root,))
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+        interface_cfg="interface/stlink.cfg",
+        target_cfg="target/stm32f4x.cfg",
+    )
+    # Started inside the temporary root: a check that resolved the name against
+    # the process working directory would land squarely under it.
+    monkeypatch.chdir(temporary_root)
+
+    config = load_authoritative_config(workspace)
+
+    assert config.debuggers["dut"].interface_cfg == "interface/stlink.cfg"
 
 
 def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_scripts_say(
@@ -1435,9 +1682,9 @@ def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_script
     The placeholder exemption used to key on exactly this shape — an OpenOCD
     entry still holding `interface/stlink.cfg` and `target/stm32f4x.cfg` — and so
     let an entry with a real program behind it and every permission granted skip
-    script validation and `doctor` alike, while `backends/openocd.py` passed
-    those two relative names to that program. What the entry can drive is what
-    decides now, and this one can."""
+    script validation and `doctor` alike. What the entry can drive is what
+    decides now, and this one can: the two search names are fine, and the script
+    field that claims a path is held to the path rule in the same entry."""
     workspace = tmp_path / "workspace"
     config_path = write_authoritative_config(
         workspace,
@@ -1445,7 +1692,7 @@ def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_script
         debugger_executable=FAKE_OPENOCD,
         permissions={"allow_flash": True},
         interface_cfg="interface/stlink.cfg",
-        target_cfg="target/stm32f4x.cfg",
+        target_cfg=(tmp_path / "no-such-script-tree" / "stm32f4x.cfg").as_posix(),
     )
     assert "interface/stlink.cfg" in config_path.read_text(encoding="utf-8")
 
@@ -1453,7 +1700,7 @@ def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_script
         load_authoritative_config(workspace)
 
     assert rejected.value.error_type == "config_invalid"
-    assert rejected.value.details["field"] == "debuggers.dut.interface_cfg"
+    assert rejected.value.details["field"] == "debuggers.dut.target_cfg"
 
 
 def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1501,10 +1748,9 @@ def test_an_openocd_entry_with_no_mutation_grant_is_still_validated_under_versio
     `allow_probe`, `allow_flash` and `allow_reset` all false, and under version 2
     that stops nothing: reading needs no grant, so `probe_target` on this entry
     starts the real OpenOCD behind it. Validation used to be conditional on those
-    three, so this exact configuration loaded with two relative script names in
-    it and `doctor` skipped the entry — a debugger run on scripts resolved out of
-    OPENOCD_SCRIPTS and the per-user script directories, which no part of this
-    file states."""
+    three, so this exact configuration loaded with two unchecked script paths in
+    it and `doctor` skipped the entry: a debugger run on files no part of this
+    configuration had looked at."""
     workspace = tmp_path / "workspace"
     write_authoritative_config(
         workspace,
@@ -1512,8 +1758,7 @@ def test_an_openocd_entry_with_no_mutation_grant_is_still_validated_under_versio
         config_version=2,
         debugger_executable=FAKE_OPENOCD,
         permissions={"allow_probe": False, "allow_flash": False, "allow_reset": False, "allow_raw_debugger_commands": False, "allow_mass_erase": False},
-        interface_cfg="interface/stlink.cfg",
-        target_cfg="target/stm32f4x.cfg",
+        interface_cfg=(tmp_path / "no-such-script-tree" / "stlink.cfg").as_posix(),
     )
 
     with pytest.raises(ConfigError) as rejected:
@@ -1596,12 +1841,12 @@ def test_a_configured_openocd_entry_resolves_from_path_and_is_validated(tmp_path
     assert debugger_drives_hardware(config, entry)
 
 
-def test_a_configured_openocd_entry_from_path_keeps_no_relative_scripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_configured_openocd_entry_from_path_keeps_no_unchecked_script_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half of the same rule: resolved from PATH means validated too.
 
-    The identified entry above with the skeleton's relative script names still in
-    it. It is not the starter entry, so it acquires the toolchain — and having
-    one, it has to say where its scripts are."""
+    The identified entry above with a script path that is nowhere on this host.
+    It is not the starter entry, so it acquires the toolchain, and having one,
+    every path it states is checked."""
     workspace = tmp_path / "workspace"
     write_authoritative_config(
         workspace,
@@ -1609,8 +1854,7 @@ def test_a_configured_openocd_entry_from_path_keeps_no_relative_scripts(tmp_path
         config_version=2,
         debugger_executable=None,
         probe_id="066AFF495451885087171450",
-        interface_cfg="interface/stlink.cfg",
-        target_cfg="target/stm32f4x.cfg",
+        interface_cfg=(tmp_path / "no-such-script-tree" / "stlink.cfg").as_posix(),
     )
     config_file = project_config_path(workspace)
     document = yaml.safe_load(config_file.read_text(encoding="utf-8"))

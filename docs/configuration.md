@@ -38,8 +38,11 @@ debuggers:
     type: "openocd"          # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
     probe_id: "0668FF383036" # required once several probes are configured: it is
                              # the only field that selects a physical probe
-    interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
-    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
+    # OpenOCD search names: OpenOCD resolves them against its own script path,
+    # so they name no file on this host. Give an absolute path instead to pin
+    # the exact scripts, e.g. "/usr/share/openocd/scripts/target/stm32f4x.cfg"
+    interface_cfg: "interface/stlink.cfg"
+    target_cfg: "target/stm32f4x.cfg"
     timeout_s: 60
     permissions:
       allow_flash: true
@@ -50,7 +53,7 @@ debuggers:
     type: "openocd"
     probe_id: "0669FF505153" # pin the physical probe so boards cannot swap silently
     interface_cfg: "/absolute/path/to/openocd/scripts/interface/stlink.cfg"
-    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"
+    target_cfg: "/absolute/path/to/openocd/scripts/target/stm32f4x.cfg"  # the path spelling
     target:                  # optional per-probe override of the project target
       name: "sensor-node"
     permissions:
@@ -237,7 +240,7 @@ Version 3 requires every `com_ports` entry to say which hardware it is. A `seria
 
 Migrating is one edit again, in this order: run `agentic-hil adopt-hardware --apply` with the boards attached while the file still says `version: 2` (it fills in `serial_number`, `vid` and `pid` from each adapter, and records `identity_source` where the adapter turns out to publish no serial), then set `version: 3`. That order matters because the command loads this configuration, so it has to be able to. A bench that stays at `version: 2` keeps working exactly as it does today, with `agentic-hil doctor` reporting the same identity as a warning. `agentic-hil init` and `project_config_create` write version 3.
 
-The operator reviews this file and takes away the permissions this bench should not have; a generated one grants all of them except `allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, and adding a resource is still an operator's edit. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables and OpenOCD scripts must resolve to existing host-owned files outside the workspace. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. A `resource_id` names hardware rather than a file, so it is matched case-insensitively on every platform, and two entries that spell one id in two cases are refused rather than merged: make them identical if they are one unit, or different by more than case if they are two. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
+The operator reviews this file and takes away the permissions this bench should not have; a generated one grants all of them except `allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, and adding a resource is still an operator's edit. `workspace_root` is mandatory and must exactly match the project root used to launch Agentic HIL. `state_root` is also mandatory: it must be an absolute, operator-controlled directory outside and non-overlapping with the workspace. Every trusted launcher for the same host resources must use this pinned root; changing `LOCALAPPDATA` or `XDG_STATE_HOME` after initialization does not change a running service's coordination namespace. Configured debugger/GDB/process-bridge executables must resolve to existing host-owned files outside the workspace, and so must an OpenOCD script named by path. An OpenOCD script named the way OpenOCD names its own (`interface/stlink.cfg`, `target/stm32f4x.cfg`: forward slashes, no leading `.` or `~`) is a search name, resolved by the OpenOCD that runs and accepted here without a file on this host; `agentic-hil doctor` reports which of the two each value is. Either spelling is refused under the system temporary directory, which is cleared without warning. Empty symbol allowlists deny all symbols; unrestricted symbol access requires `allow_all_symbols: true`. Set optional `resource_id` on a debugger, COM, or CAN entry when different host paths/wrappers address the same physical resource; matching IDs share one cross-process lease. A `resource_id` names hardware rather than a file, so it is matched case-insensitively on every platform, and two entries that spell one id in two cases are refused rather than merged: make them identical if they are one unit, or different by more than case if they are two. Two `debuggers` entries that resolve to the same physical probe are rejected outright, so a plan naming one board can never drive another.
 
 All hardware entry points use this same file: `doctor`, `mcp-stdio`, `com-stdio`, the pytest plugin, and `test-reactor`. Deprecated configuration-path options remain parseable for patch-release compatibility but cannot redirect authority away from the discovered external file.
 

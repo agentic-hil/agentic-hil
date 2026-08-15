@@ -852,13 +852,17 @@ def legacy_openocd_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwar
     return workspace, path
 
 
-def close_the_entry_and_relativize_its_scripts(document: dict) -> None:
+def close_the_entry_and_break_its_script_paths(document: dict) -> None:
     """The file an MCP caller can write: every access grant narrowed to false,
-    and then script paths nothing in that file can run."""
+    and then script paths nothing in that file can run.
+
+    Paths, not OpenOCD search names: a search name is valid on any host, because
+    the OpenOCD that runs resolves it. What may not survive unchecked is this
+    configuration's own claim about where a file is."""
     entry = document["debuggers"]["dut"]
     entry["permissions"] = dict.fromkeys(entry["permissions"], False)
-    entry["interface_cfg"] = "interface/stlink.cfg"
-    entry["target_cfg"] = "target/stm32f4x.cfg"
+    entry["interface_cfg"] = "./interface/stlink.cfg"
+    entry["target_cfg"] = "./target/stm32f4x.cfg"
 
 
 def test_a_reload_refuses_a_description_that_was_only_valid_while_narrowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -866,20 +870,20 @@ def test_a_reload_refuses_a_description_that_was_only_valid_while_narrowed(tmp_p
 
     Pinning skips an OpenOCD entry's script check when nothing the file permits
     can drive it, so a version 1 document whose grants are all `false` loads with
-    relative, unvalidated script names in it. A reload keeps that description and
-    puts this server's startup grants — probe, flash and reset — behind it, and
-    that pairing was validated by neither load. The composition is re-checked, so
-    the reload refuses instead of arming an OpenOCD nothing had looked at."""
+    unvalidated script paths in it. A reload keeps that description and puts this
+    server's startup grants (probe, flash and reset) behind it, and that
+    pairing was validated by neither load. The composition is re-checked, so the
+    reload refuses instead of arming an OpenOCD nothing had looked at."""
     workspace, path = legacy_openocd_bench(tmp_path, monkeypatch)
     tools = service(workspace)
     try:
         validated = tools.config.debuggers["dut"].interface_cfg
         assert Path(validated).is_absolute()
 
-        rewrite(path, close_the_entry_and_relativize_its_scripts)
+        rewrite(path, close_the_entry_and_break_its_script_paths)
         # The premise: that file loads on its own terms, because under its own
         # grants the entry drives nothing and its scripts are never looked at.
-        assert load_authoritative_config(workspace).debuggers["dut"].interface_cfg == "interface/stlink.cfg"
+        assert load_authoritative_config(workspace).debuggers["dut"].interface_cfg == "./interface/stlink.cfg"
 
         refused = tools.call(PROJECT_CONFIG_RELOAD)
 
